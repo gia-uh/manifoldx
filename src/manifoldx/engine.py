@@ -216,6 +216,9 @@ class _Loading:
         return self.__exit__(*exc)
 
 
+_PASSES = ("beauty", "ids", "normals", "depth", "light")
+
+
 def _block_mode(labels: np.ndarray, ss: int) -> np.ndarray:
     """Reduce (h*ss, w*ss) labels to (h, w), each pixel the most frequent label of its block.
 
@@ -1450,16 +1453,44 @@ class Engine:
         """Render one still frame headless and return it as a numpy array.
 
         beauty: (h, w, 3) uint8, sRGB, area-downsampled from (h*ss, w*ss).
+        ids: (h, w) int32, i + 1 where `groups[i]` covers the pixel, else 0.
+        normals: (h, w, 3) float32 unit world normals, zero on background.
+        depth: (h, w) float32 view distance in scene units, inf on background,
+            16-bit steps of camera.far / 65535.
+        light: (h, w) float32 0..1, every mesh drawn white under the scene's
+            sun and shadows: the shading alone, without the materials' colours.
         Systems run once per beauty frame with a fixed `dt` (unless the engine
         already has a fixed timestep), so an animated scene renders the same
         whatever the wall clock does. The first call replaces the engine's
         canvas with an offscreen one.
         """
-        if pass_ not in ("beauty", "ids"):
-            raise ValueError(f"pass_ must be 'beauty' or 'ids', got {pass_!r}")
+        if pass_ not in _PASSES:
+            raise ValueError(f"pass_ must be one of {', '.join(_PASSES)}, got {pass_!r}")
         self._ensure_offscreen(supersample)
+        ss = supersample
         if pass_ == "ids":
-            return _block_mode(self._render_ids(groups or []), supersample)
+            return _block_mode(self._render_ids(groups or []), ss)
+        if pass_ == "normals":
+            from manifoldx.resources import NormalPassMaterial
+
+            rgb = self._render_with(NormalPassMaterial()).astype(np.float32)
+            n = np.where(rgb.any(-1, keepdims=True), rgb / 255 * 2 - 1, 0.0)  # black is background
+            n = n.reshape(self.h, ss, self.w, ss, 3).mean(axis=(1, 3))
+            length = np.linalg.norm(n, axis=-1, keepdims=True)
+            return np.where(length > 0.5, n / np.maximum(length, 1e-6), 0.0).astype(np.float32)
+        if pass_ == "depth":
+            from manifoldx.resources import DepthPassMaterial
+
+            far = float(self.camera.far)
+            rgb = self._render_with(DepthPassMaterial(far)).astype(np.float64)
+            d = (rgb[..., 0] * 256 + rgb[..., 1]) / 65535 * far
+            d[rgb.sum(-1) == 0] = np.inf  # background: the shader writes blue 0 too, so test all three
+            return d.reshape(self.h, ss, self.w, ss).min(axis=(1, 3)).astype(np.float32)
+        if pass_ == "light":
+            from manifoldx.resources import StandardMaterial
+
+            rgb = self._render_with(StandardMaterial("#ffffff", roughness=1.0)).astype(np.float32)
+            return (rgb.mean(-1) / 255).reshape(self.h, ss, self.w, ss).mean(axis=(1, 3))
         if not self._use_fixed_dt:
             self.set_fixed_timestep(dt)
         self._settle()
@@ -1467,7 +1498,6 @@ class Engine:
         self.elapsed += self._fixed_dt_value
         if supersample == 1:
             return rgb
-        ss = supersample
         small = rgb.reshape(self.h, ss, self.w, ss, 3).mean(axis=(1, 3))
         return np.round(small).astype(np.uint8)
 
@@ -1540,10 +1570,33 @@ class Engine:
         """Draw every mesh flat in its group's label colour; restore afterwards.
 
         Returns (h*ss, w*ss) int32 labels: 0 for background and entities in no
-        group, i + 1 for groups[i]; render_frame reduces them to (h, w). Non-mesh
-        entities (point clouds, labels, axes, volumes) and the GUI are hidden,
-        and no systems run: the labels describe the same state as the last
-        beauty frame.
+        group, i + 1 for groups[i]; render_frame reduces them to (h, w).
+        """
+
+        def assign(mats, meshes):
+            mats[meshes, 0] = self._material_registry.register(self._flat_for_label(0))
+            for label, indices in enumerate(groups, start=1):
+                idx = np.intersect1d(np.asarray(list(indices), dtype=np.int64), meshes)
+                mats[idx, 0] = self._material_registry.register(self._flat_for_label(label))
+
+        rgb = self._draw_override(assign).astype(np.int32)
+        return rgb[..., 0] | (rgb[..., 1] << 8) | (rgb[..., 2] << 16)
+
+    def _render_with(self, material):
+        """Draw every mesh with one material; (h*ss, w*ss, 3) uint8."""
+        mat_id = self._material_registry.register(material)
+
+        def assign(mats, meshes):
+            mats[meshes, 0] = mat_id
+
+        return self._draw_override(assign)
+
+    def _draw_override(self, assign):
+        """Draw a still with materials set by `assign(mats, meshes)`; restore afterwards.
+
+        Non-mesh entities (point clouds, labels, axes, volumes) and the GUI are
+        hidden, the background is black, and no systems run: the pass describes
+        the same state as the last beauty frame.
         """
         from manifoldx.gui.widgets import _GuiRoot
 
@@ -1555,21 +1608,17 @@ class Engine:
         saved_mats = mats[alive].copy()
         saved_view = (self.background_color, self._environment, self.fog_enabled, self.gui)
         try:
-            mats[meshes, 0] = self._material_registry.register(self._flat_for_label(0))
-            for label, indices in enumerate(groups, start=1):
-                idx = np.intersect1d(np.asarray(list(indices), dtype=np.int64), meshes)
-                mats[idx, 0] = self._material_registry.register(self._flat_for_label(label))
+            assign(mats, meshes)
             self.store._alive[others] = False  # not drawn by any pass
             self.background_color = (0.0, 0.0, 0.0)
             self._environment = None
             self.fog_enabled = False
             self.gui = _GuiRoot()
-            rgb = self._draw_still(simulate=False).astype(np.int32)
+            return self._draw_still(simulate=False)
         finally:
             mats[alive] = saved_mats
             self.store._alive[others] = True
             self.background_color, self._environment, self.fog_enabled, self.gui = saved_view
-        return rgb[..., 0] | (rgb[..., 1] << 8) | (rgb[..., 2] << 16)
 
     def _pump_aio_loop(self) -> None:
         """Drive the engine's asyncio loop until quiescent (when applicable).

@@ -158,6 +158,63 @@ class FlatMaterial(BasicMaterial):
         return _FLATMATERIAL_SHADER
 
 
+# The sRGB target encodes what a shader writes, so the data passes decode first
+# and the 8-bit texel holds the raw value.
+_SRGB_DECODE = """fn srgb_decode(c: f32) -> f32 {
+    if (c <= 0.04045) { return c / 12.92; }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+@fragment"""
+
+
+def _data_pass_shader(name: str, body: str) -> str:
+    src = _FLATMATERIAL_SHADER.replace("    return material.color;", body)
+    return src.replace("@fragment", _SRGB_DECODE, 1).replace("FlatMaterialUniforms", name)
+
+
+_NORMALPASS_SHADER = _data_pass_shader(
+    "NormalPassUniforms",
+    """    let n = normalize(in.world_normal) * 0.5 + 0.5;
+    return vec4<f32>(srgb_decode(n.x), srgb_decode(n.y), srgb_decode(n.z), 1.0);""",
+)
+
+# View distance / far as 16 bits split over red (high byte) and green (low byte).
+_DEPTHPASS_SHADER = _data_pass_shader(
+    "DepthPassUniforms",
+    """    let d = clamp(-(globals.view * vec4<f32>(in.world_pos, 1.0)).z / material.color.r, 0.0, 1.0) * 65535.0;
+    let hi = floor(d / 256.0);
+    let lo = floor(d - hi * 256.0);
+    return vec4<f32>(srgb_decode(hi / 255.0), srgb_decode(lo / 255.0), 0.0, 1.0);""",
+)
+
+
+class NormalPassMaterial(BasicMaterial):
+    """Writes the world normal as n * 0.5 + 0.5, for `render_frame(pass_="normals")`."""
+
+    def __init__(self):
+        super().__init__((1.0, 1.0, 1.0))
+
+    @classmethod
+    def _compile(cls) -> str:
+        return _NORMALPASS_SHADER
+
+
+class DepthPassMaterial(BasicMaterial):
+    """Writes view distance / `far` in 16 bits, for `render_frame(pass_="depth")`."""
+
+    def __init__(self, far: float):
+        super().__init__((1.0, 1.0, 1.0))
+        self.far = float(far)
+
+    @classmethod
+    def _compile(cls) -> str:
+        return _DEPTHPASS_SHADER
+
+    def get_data(self, n: int, registry) -> np.ndarray:
+        return np.tile(np.array([self.far, 0, 0, 1], np.float32), (n, 1))
+
+
 _ATMOSPHERE_SHADER = """
 struct Globals {
     vp: mat4x4<f32>, view: mat4x4<f32>, proj: mat4x4<f32>,
