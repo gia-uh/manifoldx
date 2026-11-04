@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Engine.render_frame(pass_=...)` takes `"normals"` (unit world normals), `"depth"` (view distance, `inf` on background) and `"light"` (shading of every mesh drawn white under the scene's sun and shadows), next to `"beauty"` and `"ids"` (#138).
+- `manifoldx.stylize.ink_and_wash`: a deterministic ink-and-watercolour pass from those buffers, behind the new `ink` extra (scipy) (#138).
+
+### Added
+
 - **`engine.set_joints(indices, matrices)`: pose a crowd of skinned entities in one
   call.** `matrices` is (N, J, 4, 4), one pose per index, with the same rule and checks as
   `EntityHandle.set_joints`. It allocates every missing joint block at once, writes the

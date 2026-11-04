@@ -33,7 +33,8 @@ offline = [
 ]
 viz = ["pillow>=10.0"]
 svg = ["thorvg-python>=1.1.3"]
-all = ["manifold-gfx[desktop,offline,viz,svg]"]
+ink = ["scipy>=1.13", "pillow>=10.0"]
+all = ["manifold-gfx[desktop,offline,viz,svg,ink]"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/manifoldx"]
@@ -56,7 +57,7 @@ dev = [
     "pytest-async>=0.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.9",
-    "manifold-gfx[offline]",
+    "manifold-gfx[offline,ink]",
     "pygltflib>=1.16.5",
 ]
 
