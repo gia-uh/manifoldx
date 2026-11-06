@@ -549,3 +549,12 @@ def test_a_global_s_object_crosses_when_reached_code_only_passes_it(app_dir, tmp
     out = tmp_path / "out"
     assert _export(app_dir, out, HELD) == 0
     assert "__main__.Item" in json.loads((out / "report.json").read_text())["classes"]
+
+
+def test_startup_handlers_run_without_the_offline_extra(app_dir, tmp_path, monkeypatch):
+    """The export needs a wgpu device for startup, not video: plain manifold-gfx, without
+    imageio-ffmpeg, exports an app with a startup handler."""
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", None)  # `import imageio_ffmpeg` fails
+    out = tmp_path / "out"
+    assert _export(app_dir, out, ASYNC) == 0
+    assert _node(out)["state"] == {"loaded": "yes"}
