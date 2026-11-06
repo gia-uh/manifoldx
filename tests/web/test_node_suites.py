@@ -118,8 +118,13 @@ def sourcemap_export(tmp_path_factory) -> Path:
 
 
 def _run(suites: list[str], env: dict[str, str]) -> None:
+    # TAP, which prints "# skipped N": newer Node defaults to the spec reporter even off a TTY.
     done = subprocess.run(
-        ["node", "--test", *suites], capture_output=True, text=True, timeout=120, env=env
+        ["node", "--test", "--test-reporter=tap", *suites],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
     )
     assert done.returncode == 0, done.stdout + done.stderr
     # A suite that skips for want of the export would pass without checking anything.
