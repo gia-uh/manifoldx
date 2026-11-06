@@ -14,10 +14,11 @@ from manifoldx.web import transpile_app
 
 PYRT = Path(__file__).parents[2] / "src" / "manifoldx" / "web" / "js" / "pyrt.js"
 
-# Typed arrays and Sets become arrays; a Set's items are sorted by their JSON text on both
-# sides, because Python and JS iterate sets in different orders.
+# Typed arrays and Sets become arrays, a Map (a dict) an object; a Set's items are sorted by
+# their JSON text on both sides, because Python and JS iterate sets in different orders.
 _REPLACER = """(k, v) => {
   if (ArrayBuffer.isView(v)) return Array.from(v);
+  if (v instanceof Map) return Object.fromEntries(v);
   if (v instanceof Set) return [...v].sort((a, b) => {
     const x = JSON.stringify(a), y = JSON.stringify(b);
     return x < y ? -1 : x > y ? 1 : 0;

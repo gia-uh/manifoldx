@@ -18,7 +18,7 @@ import math
 import re
 from dataclasses import dataclass
 
-from .reach import Reach
+from .reach import Reach, closure_site
 from .types import (
     LIB_CONSTANTS,
     MATH_FUNCTIONS,
@@ -26,6 +26,7 @@ from .types import (
     ClassInfo,
     Ctx,
     FuncInfo,
+    FunctionKey,
     LiveTypes,
     Ty,
     TypeEnv,
@@ -195,6 +196,7 @@ class _Module:
     def write(self) -> JsModule:
         body: Lines = []
         imports: list[str] = []
+        from_state: list[str] = []
         for n in self.env.modules[self.name].body:
             self.root = None
             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant):
@@ -215,7 +217,13 @@ class _Module:
                 targets = n.targets if isinstance(n, ast.Assign) else [n.target]
                 names = [x for t in targets for x in target_names(t)]
                 reached = [x for x in names if self.reach.global_(self.name, x)]
-                if reached and n.value is not None:
+                if reached and not self.reach.everything:
+                    # Setup's value arrives with the snapshot (__set_globals).
+                    for x in reached:
+                        if x not in from_state:
+                            from_state.append(x)
+                            body.append((f"export let {js_name(x)} = null;", n.lineno))
+                elif reached and n.value is not None:
                     self.root = self.reach.root(("global", self.name, reached[0]))
                     if len(targets) != 1:
                         self.fail(n, "a chained assignment at module level")
@@ -229,11 +237,43 @@ class _Module:
                     body += self.klass(n, self.env.classes[qual]) + [("", n.end_lineno)]
             elif self.reach.everything:
                 self.fail(n, FRIENDLY.get(type(n).__name__, type(n).__name__))
+        for key in self.reach.closures(self.name):
+            body += self.closure_factory(key) + [("", 0)]
+        if from_state:
+            sets = " ".join(
+                f'if (Object.hasOwn($g, "{x}")) {js_name(x)} = $g["{x}"];' for x in from_state
+            )
+            body.append((f"export function __set_globals($g) {{ {sets} }}", 0))
         head = [f"// Generated from {self.path} by manifoldx.web; do not edit."]
         if self.uses_rt:
             head.append('import * as $rt from "./pyrt.js";')
         lines = [(h, 0) for h in head + imports] + [("", 0)] + body
         return JsModule(self.name, "\n".join(text for text, _ in lines) + "\n")
+
+    def closure_factory(self, key: FunctionKey) -> Lines:
+        """A lambda or inner def that setup made, as `__closure_<line>_<col>(cells,
+        defaults)`: it returns the function, its free variables read from `cells` and its
+        defaults from `defaults`, as the snapshot's {"__closure": ...} entry gives them."""
+        info = self.env.function(key)
+        line, col = closure_site(self.env, key)
+        self.root = self.reach.root(key)
+        # Its free variables: the cells setup left, and for an inner def reached without
+        # being a root, every name of the functions around it (the snapshot sends the cells).
+        cells = list(self.env.cells.get(key, {}))
+        up = info.parent
+        while up is not None:
+            outer = self.env.function(up)
+            cells += [x for x in [*outer.param_types, *outer.locals] if x not in cells]
+            up = outer.parent
+        parent = self.env.ctx_of(self.env.function(info.parent)) if info.parent else None
+        ctx = Ctx(self.name, info, tuple(self.env.cells.get(key, {}).items()), parent)
+        out: Lines = [(f"export function __closure_{line}_{col}($cells, $defaults) {{", line)]
+        if cells:
+            reads = ", ".join(f'{js_name(c)} = $cells["{c}"]' for c in cells)
+            out.append((f"  let {reads};", line))
+        out.append(("  let $f;", line))
+        out += self.function(info.node, info, "closure", 1, factory=ctx)
+        return out + [("  return $f;", line), ("}", info.node.end_lineno)]
 
     def exported(self, module: str, name: str) -> bool:
         sym = self.env.symbols[module].get(name)
@@ -272,12 +312,22 @@ class _Module:
 
     # ---------------------------------------------------------- functions
     def function(
-        self, n: ast.FunctionDef, info: FuncInfo, kind: str = "function", ind: int = 0, tail=()
+        self,
+        n: ast.FunctionDef,
+        info: FuncInfo,
+        kind: str = "function",
+        ind: int = 0,
+        tail=(),
+        factory: Ctx | None = None,
     ) -> Lines:
         """n as JS. kind: "function" (a module function, exported), "method", "getter" (a
         @property), "constructor", or "closure" (a def inside a function: an arrow bound to
         its name, its non-constant defaults evaluated once, where the def runs). A method's
-        first parameter is not written: it is `this`. `tail` closes the body."""
+        first parameter is not written: it is `this`. `tail` closes the body.
+
+        With `factory` (the closure's Ctx as setup left it, its cells bound), a closure is
+        the arrow `$f` and its positional defaults are read from `$defaults`, the values
+        the snapshot carries."""
         a = n.args
         if a.vararg or a.kwarg:
             self.fail(n, "*args or **kwargs")
@@ -290,10 +340,16 @@ class _Module:
         if kind == "getter" and len(info.params) > 1:
             self.fail(n, f"the property {n.name} with parameters")
         params, captured = [], []
+        positional = {x.arg for x in a.posonlyargs + a.args}
         for p in info.params[1:] if method else info.params:
             d = info.defaults.get(p)
             if d is None:
                 params.append(js_name(p))
+            elif factory is not None:
+                if p not in positional:
+                    self.fail(d, "a keyword-only default of a closure setup made")
+                params.append(f"{js_name(p)} = $defaults[{len(captured)}]")
+                captured.append(None)
             elif _constant(d):
                 params.append(f"{js_name(p)} = {self.e(d)}")
             elif kind == "closure":
@@ -303,8 +359,8 @@ class _Module:
                 self.fail(d, f"the default `{ast.unparse(d)}`, which is not a constant,")
         sig = ", ".join(params)
         p = "  " * ind
-        name = js_name(n.name)
-        if kind == "closure" and captured:
+        name = "$f" if factory is not None else js_name(n.name)
+        if kind == "closure" and captured and factory is None:
             ds = ", ".join(f"$d{i}" for i in range(len(captured)))
             head = f"{name} = (({ds}) => ({sig}) => {{"
             close = f"}})({', '.join(captured)});"
@@ -318,7 +374,10 @@ class _Module:
             }[kind]
             close = "};" if kind == "closure" else "}"
         outer = self.ctx
-        self.ctx = Ctx(self.name, info, (), outer if kind == "closure" else None)
+        if factory is not None:
+            self.ctx = factory
+        else:
+            self.ctx = Ctx(self.name, info, (), outer if kind == "closure" else None)
         try:
             local = [js_name(v) for v in info.locals if v not in info.param_types]
             out = [(f"{p}{head}", n.lineno)]
@@ -578,7 +637,9 @@ class _Module:
             self.fail(t, "assignment to a slice")
         c = self.ty(t.value)
         obj, key = self.e(t.value), self.e(t.slice)
-        if c.all("dict") or (
+        if c.all("dict"):
+            return f"{obj}.set({key}, {value})"
+        if (
             c.all("list", "vec")
             and (_const_int(t.slice) or 0) >= 0
             and _const_int(t.slice) is not None
@@ -592,7 +653,7 @@ class _Module:
         if t.all("list", "tuple", "set", "str", "vec"):
             return self.e(it)
         if t.all("dict"):
-            return f"Object.keys({self.e(it)})"
+            return f"{self.e(it)}.keys()"
         return f"{self.rt('iter')}({self.e(it)})"
 
     def is_builtin_call(self, n: ast.expr, name: str) -> bool:
@@ -936,8 +997,8 @@ class _Module:
             hi = f", {self.e(s.upper)}" if s.upper else ""
             return f"{self.e(n.value)}.slice({lo}{hi})"
         obj = self.e(n.value)
-        if t.all("dict"):
-            return f"{obj}[{self.e(s)}]"
+        if t.all("dict"):  # a missing key raises KeyError, as in Python
+            return f"{self.rt('getitem')}({obj}, {self.e(s)})"
         if t.all("list", "tuple", "vec"):
             k = _const_int(s)
             return f"{obj}[{k}]" if k is not None and k >= 0 else f"{obj}.at({self.e(s)})"
@@ -1118,9 +1179,9 @@ class _Module:
         if t.all("dict"):
             if f.attr == "get" and len(args) in (1, 2):
                 return f"{self.rt('dget')}({obj}, {', '.join(args)})"
-            js = {"keys": "Object.keys", "values": "Object.values", "items": "Object.entries"}
-            if f.attr in js and not args:
-                return f"{js[f.attr]}({obj})"
+            if f.attr in ("keys", "values", "items") and not args:
+                js = "entries" if f.attr == "items" else f.attr
+                return f"Array.from({obj}.{js}())"
         if t.all("str") and f.attr in STR_METHODS:
             if f.attr in ("lower", "upper") and not args:
                 return f"{obj}.to{f.attr.capitalize()}Case()"

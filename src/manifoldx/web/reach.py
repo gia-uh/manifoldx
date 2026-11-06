@@ -119,8 +119,10 @@ class Reach:
             env.live = LiveTypes(env.modules)
         self._order: list[FunctionKey] = []
         self._kinds: dict[FunctionKey, Root | str] = {}
+        self.root_keys: list[FunctionKey] = []  # each root's key, in the order of roots
         for r in self.roots:
             key = self._root_key(r)
+            self.root_keys.append(key)
             self._root[key] = r if isinstance(r, str) else r.label
             self._kinds[key] = r
             self._add(key, None)
@@ -166,7 +168,15 @@ class Reach:
         return (module, name)
 
     def _lambda(self, module: str, qualname: str, f, label: str) -> FunctionKey:
-        """Find f's lambda in its module by line, and among several on that line by where
+        n = self._lambda_node(module, f)
+        if n is None:
+            raise TranspileError(
+                module_path(module), f.__code__.co_firstlineno, f"the root {label}, not found,"
+            )
+        return self.env.register_lambda(module, qualname, n).key
+
+    def _lambda_node(self, module: str, f) -> ast.Lambda | None:
+        """f's lambda in its module, found by line, and among several on that line by where
         its code's instructions sit."""
         code = f.__code__
         line = code.co_firstlineno
@@ -176,7 +186,7 @@ class Reach:
             if isinstance(n, ast.Lambda) and n.lineno == line
         ]
         if not found:
-            raise TranspileError(module_path(module), line, f"the root {label}, not found,")
+            return None
         spots = [(a, c) for a, _, c, _ in code.co_positions() if a is not None and c is not None]
 
         def inside(n: ast.Lambda) -> int:
@@ -184,8 +194,19 @@ class Reach:
             lo, hi = (b.lineno, b.col_offset), (b.end_lineno, b.end_col_offset)
             return sum(lo <= s <= hi for s in spots)
 
-        n = max(found, key=inside)
-        return self.env.register_lambda(module, qualname, n).key
+        return max(found, key=inside)
+
+    def key_of(self, f) -> FunctionKey | None:
+        """The key of a live plain function or lambda of the app's modules, None for any
+        other callable; reached or not (ask `function`)."""
+        f = getattr(f, "__func__", f)
+        module, qualname = getattr(f, "__module__", None), getattr(f, "__qualname__", None)
+        if module not in self.env.modules or qualname is None or not hasattr(f, "__code__"):
+            return None
+        if f.__name__ != "<lambda>":
+            return (module, qualname)
+        n = self._lambda_node(module, f)
+        return None if n is None else (module, f"{qualname}@{n.lineno}:{n.col_offset}")
 
     def _observe(self, r: Root, key: FunctionKey) -> None:
         """Type a root from what it holds: its owner's fields, its cells, its defaults; a
@@ -363,6 +384,16 @@ class Reach:
             return None
         return " -> ".join(self.chain(key)) or None
 
+    def closures(self, module: str) -> list[FunctionKey]:
+        """The reached lambdas and functions defined inside another function, of module:
+        setup made them, so the browser gets them from the snapshot through a factory."""
+        if self.everything:
+            return []
+        return sorted(
+            (k for k in self.functions if k[0] == module and is_closure(k)),
+            key=lambda k: closure_site(self.env, k),
+        )
+
     # What the emitter asks.
     def function(self, key: FunctionKey) -> bool:
         return self.everything or key in self.functions
@@ -372,3 +403,15 @@ class Reach:
 
     def class_(self, qualname: str) -> bool:
         return self.everything or qualname in self.classes
+
+
+def is_closure(key: FunctionKey) -> bool:
+    """A lambda (keyed "qualname@line:col") or a function defined inside another."""
+    return "@" in key[1] or "<locals>" in key[1]
+
+
+def closure_site(env: TypeEnv, key: FunctionKey) -> tuple[int, int]:
+    """Where a closure's def or lambda starts: its line and column, which name its factory
+    (__closure_<line>_<col>) and its snapshot entry ("module:line:col")."""
+    n = env.function(key).node
+    return n.lineno, n.col_offset

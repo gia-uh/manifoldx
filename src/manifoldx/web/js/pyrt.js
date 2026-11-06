@@ -1,15 +1,11 @@
 // The runtime the transpiled modules import as $rt: the Python semantics JavaScript lacks.
 
 const isArr = (x) => Array.isArray(x) || ArrayBuffer.isView(x);
-// A dict is an object with a null prototype (or a plain literal): prototype names are plain keys.
-const isDict = (x) => typeof x === "object" && x !== null
-  && [Object.prototype, null].includes(Object.getPrototypeOf(x));
+// A dict is a Map: it keeps Python's insertion order (an object puts "2" and "10" before
+// "a"), and a key named like a prototype member ("constructor", "__proto__") is a plain key.
+const isDict = (x) => x instanceof Map;
 
-export function dict(pairs) {
-  const d = Object.create(null);
-  for (const [k, v] of pairs) d[k] = v;
-  return d;
-}
+export const dict = (pairs) => new Map(pairs);
 
 // Python's truth: empty containers and strings are false, NaN is true.
 export function truthy(x) {
@@ -18,7 +14,6 @@ export function truthy(x) {
   if (typeof x === "boolean") return x;
   if (typeof x === "string" || isArr(x)) return x.length > 0;
   if (x instanceof Set || x instanceof Map) return x.size > 0;
-  if (isDict(x)) return Object.keys(x).length > 0;
   return true;
 }
 
@@ -60,8 +55,7 @@ export function eq(a, b) {
   if (isArr(a) && isArr(b)) return a.length === b.length && Array.prototype.every.call(a, (x, i) => eq(x, b[i]));
   if (a instanceof Set && b instanceof Set) return a.size === b.size && [...a].every((x) => b.has(x));
   if (isDict(a) && isDict(b)) {
-    const ka = Object.keys(a);
-    return ka.length === Object.keys(b).length && ka.every((k) => Object.hasOwn(b, k) && eq(a[k], b[k]));
+    return a.size === b.size && [...a].every(([k, v]) => b.has(k) && eq(v, b.get(k)));
   }
   return false;
 }
@@ -70,7 +64,7 @@ export function contains(c, x) {
   if (c instanceof Set) return c.has(x);
   if (isArr(c)) return Array.prototype.some.call(c, (y) => eq(x, y));
   if (typeof c === "string") return c.includes(x);
-  if (isDict(c)) return Object.hasOwn(c, x);
+  if (isDict(c)) return c.has(x);
   throw new TypeError("argument of type is not iterable");
 }
 
@@ -79,7 +73,6 @@ export function len(x) {
   if (typeof x === "string") return cplen(x);
   if (isArr(x)) return x.length;
   if (x instanceof Set || x instanceof Map) return x.size;
-  if (isDict(x)) return Object.keys(x).length;
   throw new TypeError("object has no len()");
 }
 
@@ -92,7 +85,7 @@ export function range(start, stop, step = 1) {
 }
 
 // What a for loop walks: a dict's keys, anything else as it is.
-export const iter = (x) => (isDict(x) ? Object.keys(x) : x);
+export const iter = (x) => (isDict(x) ? x.keys() : x);
 export const list = (x) => Array.from(iter(x));
 export const any_ = (xs) => { for (const x of iter(xs)) if (truthy(x)) return true; return false; };
 export const all_ = (xs) => { for (const x of iter(xs)) if (!truthy(x)) return false; return true; };
@@ -123,15 +116,15 @@ export function getitem(c, k) {
   if (isArr(c)) return c[index(c, k)];
   if (typeof c === "string") return [...c][index(c, k)];
   if (isDict(c)) {
-    if (!Object.hasOwn(c, k)) throw new Error(`KeyError: ${k}`);
-    return c[k];
+    if (!c.has(k)) throw new Error(`KeyError: '${k}'`);
+    return c.get(k);
   }
   throw new TypeError("object is not subscriptable");
 }
 
 export function setitem(c, k, v) {
   if (isArr(c)) c[index(c, k)] = v;
-  else if (isDict(c)) c[k] = v;
+  else if (isDict(c)) c.set(k, v);
   else throw new TypeError("object does not support item assignment");
 }
 
@@ -237,7 +230,7 @@ export function hasattr_(x, name) {
 
 export const isinstance_ = (x, classes) => classes.some((c) => x instanceof c);
 
-export const dget = (d, k, dflt = null) => (Object.hasOwn(d, k) ? d[k] : dflt);
+export const dget = (d, k, dflt = null) => (d.has(k) ? d.get(k) : dflt);
 
 // What next() of an exhausted generator gives: its default, or StopIteration.
 export function next_(...dflt) {
