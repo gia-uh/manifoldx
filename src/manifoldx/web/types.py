@@ -1,0 +1,667 @@
+"""The web transpiler's type model.
+
+A `Ty` is what the transpiler knows about a value; it decides how an operator, a test or a
+call becomes JavaScript (`[] or x` needs `or_`, `a + b` on lists concatenates, `len` of a
+str counts code points). `TypeEnv` holds the app's modules and types every function's
+locals and returns, from annotations first, then by inference over assignments.
+Types come only from those sources, never from a name.
+
+Later steps feed it more: live types from the objects setup built, and argument types
+joined at call sites (`solve`).
+"""
+
+from __future__ import annotations
+
+import ast
+from dataclasses import dataclass, field
+
+KINDS = frozenset(
+    {
+        "num",
+        "int",
+        "bool",
+        "str",
+        "none",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "vec",
+        "obj",
+        "fn",
+        "union",
+        "unknown",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Ty:
+    """A type. `args` holds the element types: list[elem], set[elem], tuple[*items],
+    dict[key, value], union[*members], fn[return] (empty when the return is unknown).
+    `dtype` is a vec's "f64" or "f32"; `name` is an obj's class ("module.Qualname") or a
+    fn's function ("module.qualname"), None for a lambda.
+
+    A union with no members is the empty type: the elements of `[]`, or a variable before
+    its first assignment. Joining it with anything gives the other side.
+    """
+
+    kind: str
+    args: tuple[Ty, ...] = ()
+    dtype: str | None = None
+    name: str | None = None
+
+    def __post_init__(self):
+        if self.kind not in KINDS:
+            raise ValueError(f"unknown type kind {self.kind!r}")
+        if self.kind == "vec" and self.dtype not in ("f64", "f32"):
+            raise ValueError(f"a vec's dtype is f64 or f32, not {self.dtype!r}")
+
+    def __str__(self) -> str:
+        k, a = self.kind, self.args
+        if k == "union":
+            return " | ".join(map(str, a)) if a else "never"
+        if k in ("list", "set", "tuple", "dict"):
+            return f"{k}[{', '.join(map(str, a))}]"
+        if k == "vec":
+            return f"vec[{self.dtype}]"
+        if k in ("obj", "fn") and self.name:
+            return f"{k} {self.name}"
+        return k
+
+    @property
+    def members(self) -> tuple[Ty, ...]:
+        """The members of a union, or the type itself."""
+        return self.args if self.kind == "union" else (self,)
+
+    def all(self, *kinds: str) -> bool:
+        """Every member has one of `kinds` (False for the empty type)."""
+        return bool(self.members) and all(m.kind in kinds for m in self.members)
+
+    @property
+    def known(self) -> bool:
+        return self.kind != "unknown"
+
+    @property
+    def is_bool(self) -> bool:
+        return self.all("bool")
+
+    @property
+    def is_numeric(self) -> bool:
+        return self.all("num", "int", "bool")
+
+    @property
+    def is_scalar(self) -> bool:
+        return self.all("num", "int", "bool", "str", "none")
+
+
+NUM, INT, BOOL, STR, NONE = Ty("num"), Ty("int"), Ty("bool"), Ty("str"), Ty("none")
+UNKNOWN = Ty("unknown")
+NEVER = Ty("union")
+
+
+def list_of(elem: Ty) -> Ty:
+    return Ty("list", (elem,))
+
+
+def set_of(elem: Ty) -> Ty:
+    return Ty("set", (elem,))
+
+
+def tuple_of(*items: Ty) -> Ty:
+    return Ty("tuple", tuple(items))
+
+
+def dict_of(key: Ty, value: Ty) -> Ty:
+    return Ty("dict", (key, value))
+
+
+def vec(dtype: str = "f64") -> Ty:
+    return Ty("vec", dtype=dtype)
+
+
+def obj(name: str) -> Ty:
+    return Ty("obj", name=name)
+
+
+def fn(name: str | None = None, returns: Ty | None = None) -> Ty:
+    return Ty("fn", (returns,) if returns is not None else (), name=name)
+
+
+def union(*tys: Ty) -> Ty:
+    """The join of `tys`: flattened, without repeats; unknown absorbs everything.
+    Two lists (sets, dicts) join their element types; tuples of one length join item-wise."""
+    out: list[Ty] = []
+    for t in tys:
+        for m in t.members:
+            if m.kind == "unknown":
+                return UNKNOWN
+            for i, o in enumerate(out):
+                merged = _merge(o, m)
+                if merged is not None:
+                    out[i] = merged
+                    break
+            else:
+                out.append(m)
+    return out[0] if len(out) == 1 else Ty("union", tuple(out))
+
+
+def _merge(a: Ty, b: Ty) -> Ty | None:
+    """a and b as one type when they have the same shape, else None."""
+    if a == b:
+        return a
+    if a.kind != b.kind or a.kind in ("vec", "obj"):
+        return None
+    if a.kind in ("list", "set", "dict") or (a.kind == "tuple" and len(a.args) == len(b.args)):
+        return Ty(a.kind, tuple(union(x, y) for x, y in zip(a.args, b.args)))
+    if a.kind == "fn" and a.name == b.name:
+        return fn(a.name, union(*a.args, *b.args) if a.args or b.args else None)
+    return None
+
+
+def join(a: Ty, b: Ty) -> Ty:
+    return union(a, b)
+
+
+def elem(t: Ty) -> Ty:
+    """The type of the items iterating a value of type t yields."""
+    out = []
+    for m in t.members:
+        if m.kind in ("list", "set"):
+            out.append(m.args[0])
+        elif m.kind == "tuple":
+            out.append(union(*m.args))
+        elif m.kind == "dict":
+            out.append(m.args[0])
+        elif m.kind == "str":
+            out.append(STR)
+        elif m.kind == "vec":
+            out.append(NUM)
+        else:
+            return UNKNOWN
+    return union(*out)
+
+
+# ---------------------------------------------------------------- the environment
+
+FunctionKey = tuple[str, str]  # (module, qualname)
+
+
+def key_label(key: FunctionKey) -> str:
+    return f"{key[0]}.{key[1]}"
+
+
+@dataclass(frozen=True)
+class Symbol:
+    """What a module-level name means.
+
+    kind: "func" (target is a FunctionKey), "module" (an app module, target its name),
+    "const" (a module global, target (module, name)), "import" (a name imported from an app
+    module, target (module, name), resolved through that module), "lib" (math, numpy,
+    textwrap: target the library), "setup" (a name bound by any other import: setup-only,
+    an error when reached code names it; target the import's text), "class" (target
+    "module.Qualname").
+    """
+
+    kind: str
+    target: object
+
+
+@dataclass
+class FuncInfo:
+    """A function's signature and what inference knows about its body."""
+
+    key: FunctionKey
+    node: ast.FunctionDef
+    params: list[str]
+    defaults: dict[str, ast.expr]
+    param_types: dict[str, Ty]
+    locals: dict[str, Ty] = field(default_factory=dict)
+    returns: Ty = NEVER
+    annotated: set[str] = field(default_factory=set)  # locals whose annotation fixes them
+
+
+@dataclass(frozen=True)
+class Ctx:
+    """Where an expression is: its module, its function (None at module level) and the
+    names an enclosing comprehension or lambda binds."""
+
+    module: str
+    func: FuncInfo | None = None
+    extra: tuple[tuple[str, Ty], ...] = ()
+
+    def bind(self, names: dict[str, Ty]) -> Ctx:
+        return Ctx(self.module, self.func, self.extra + tuple(names.items()))
+
+
+BUILTIN_RETURNS = {
+    "len": INT,
+    "bool": BOOL,
+    "int": INT,
+    "float": NUM,
+    "any": BOOL,
+    "all": BOOL,
+    "hasattr": BOOL,
+    "isinstance": BOOL,
+    "str": STR,
+    "range": list_of(INT),
+}
+
+LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
+
+
+class TypeEnv:
+    """The app's modules, their symbols and functions, and the types inference found.
+
+    expr(node, ctx) -> Ty         the type of an expression
+    resolve(module, name) -> Symbol | None
+    function(key) -> FuncInfo
+    local(key, name) -> Ty
+    solve(functions=None) -> None  type locals and returns to a fixed point
+    """
+
+    MAX_PASSES = 20
+
+    def __init__(self, modules: dict[str, ast.Module], live=None):
+        self.modules = modules
+        self.live = live
+        self.symbols: dict[str, dict[str, Symbol]] = {}
+        self.globals: dict[tuple[str, str], Ty] = {}
+        self.functions: dict[FunctionKey, FuncInfo] = {}
+        for name, tree in modules.items():
+            self.symbols[name] = self._scan(name, tree)
+
+    # ---------------------------------------------------------- module scan
+    def resolve_module(self, module: str, target: str | None, level: int) -> str | None:
+        """The app module an import names, relative to `module`, or None."""
+        if level:
+            parts = module.split(".")[:-level] if level <= module.count(".") + 1 else None
+            if parts is None:
+                return None
+            target = ".".join(parts + ([target] if target else []))
+        return target if target in self.modules else None
+
+    def _scan(self, module: str, tree: ast.Module) -> dict[str, Symbol]:
+        syms: dict[str, Symbol] = {}
+        for n in tree.body:
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    bound = a.asname or a.name.split(".")[0]
+                    if a.name in LIBS:
+                        syms[bound] = Symbol("lib", a.name)
+                    elif a.name in self.modules and (a.asname or "." not in a.name):
+                        syms[bound] = Symbol("module", a.name)
+                    else:
+                        syms[bound] = Symbol("setup", f"import {a.name}")
+            elif isinstance(n, ast.ImportFrom):
+                src = self.resolve_module(module, n.module, n.level)
+                for a in n.names:
+                    bound = a.asname or a.name
+                    sub = self.resolve_module(
+                        module, f"{n.module}.{a.name}" if n.module else a.name, n.level
+                    )
+                    if src is not None:
+                        syms[bound] = Symbol("import", (src, a.name))
+                    elif sub is not None:
+                        syms[bound] = Symbol("module", sub)
+                    else:
+                        syms[bound] = Symbol("setup", f"from {n.module} import {a.name}")
+            elif isinstance(n, ast.FunctionDef):
+                key = (module, n.name)
+                self.functions[key] = self._func_info(key, n, module)
+                syms[n.name] = Symbol("func", key)
+            elif isinstance(n, ast.ClassDef):
+                syms[n.name] = Symbol("class", f"{module}.{n.name}")
+            elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in targets:
+                    for name in target_names(t):
+                        syms[name] = Symbol("const", (module, name))
+        return syms
+
+    def _func_info(self, key: FunctionKey, n: ast.FunctionDef, module: str) -> FuncInfo:
+        a = n.args
+        params = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs]
+        positional = a.posonlyargs + a.args
+        defaults = {
+            p.arg: d for p, d in zip(positional[len(positional) - len(a.defaults) :], a.defaults)
+        }
+        defaults |= {p.arg: d for p, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None}
+        types = {}
+        for p in a.posonlyargs + a.args + a.kwonlyargs:
+            types[p.arg] = self.annotation(p.annotation, module) if p.annotation else UNKNOWN
+        return FuncInfo(key, n, params, defaults, types)
+
+    def annotation(self, node: ast.expr, module: str) -> Ty:
+        """The type an annotation names; unknown for what the model has no kind for."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return self.annotation(ast.parse(node.value, mode="eval").body, module)
+        if isinstance(node, ast.Constant) and node.value is None:
+            return NONE
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return union(self.annotation(node.left, module), self.annotation(node.right, module))
+        if isinstance(node, ast.Name):
+            simple = {"int": INT, "float": NUM, "bool": BOOL, "str": STR}
+            if node.id in simple:
+                return simple[node.id]
+            sym = self.resolve(module, node.id)
+            if sym is not None and sym.kind == "class":
+                return obj(sym.target)
+            return UNKNOWN
+        if isinstance(node, ast.Attribute) and ast.unparse(node) in ("np.ndarray", "numpy.ndarray"):
+            return vec("f64")
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            args = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            ts = [self.annotation(x, module) for x in args]
+            head = node.value.id
+            if head == "list" and len(ts) == 1:
+                return list_of(ts[0])
+            if head == "set" and len(ts) == 1:
+                return set_of(ts[0])
+            if head == "dict" and len(ts) == 2:
+                return dict_of(*ts)
+            if head == "tuple":
+                return tuple_of(*ts)
+            if head == "Optional" and len(ts) == 1:
+                return union(ts[0], NONE)
+        return UNKNOWN
+
+    # ---------------------------------------------------------- lookups
+    def resolve(self, module: str, name: str) -> Symbol | None:
+        """The module-level symbol `name` in `module`, following imports from app modules."""
+        seen = set()
+        sym = self.symbols.get(module, {}).get(name)
+        while sym is not None and sym.kind == "import" and sym.target not in seen:
+            seen.add(sym.target)
+            src, attr = sym.target
+            sym = self.symbols[src].get(attr)
+            if sym is None and self.resolve_module(src, attr, 0) is None:
+                sub = f"{src}.{attr}"
+                sym = Symbol("module", sub) if sub in self.modules else None
+        return sym
+
+    def function(self, key: FunctionKey) -> FuncInfo:
+        return self.functions[key]
+
+    def local(self, key: FunctionKey, name: str) -> Ty:
+        info = self.functions[key]
+        return info.locals.get(name, info.param_types.get(name, UNKNOWN))
+
+    def name(self, name: str, ctx: Ctx) -> Ty:
+        for k, t in reversed(ctx.extra):
+            if k == name:
+                return t
+        f = ctx.func
+        if f is not None and (name in f.locals or name in f.param_types):
+            return self.local(f.key, name)
+        sym = self.resolve(ctx.module, name)
+        if sym is None:
+            return UNKNOWN
+        if sym.kind == "const":
+            return self.globals.get(sym.target, UNKNOWN)
+        if sym.kind == "func":
+            return fn(key_label(sym.target), self.functions[sym.target].returns)
+        return UNKNOWN
+
+    # ---------------------------------------------------------- expressions
+    def expr(self, n: ast.expr, ctx: Ctx) -> Ty:
+        """The type of expression n in ctx."""
+        if isinstance(n, ast.Constant):
+            v = n.value
+            if v is None:
+                return NONE
+            return {bool: BOOL, int: INT, float: NUM, str: STR}.get(type(v), UNKNOWN)
+        if isinstance(n, ast.Name):
+            return self.name(n.id, ctx)
+        if isinstance(n, ast.List):
+            return list_of(union(*(self.expr(e, ctx) for e in n.elts)))
+        if isinstance(n, ast.Set):
+            return set_of(union(*(self.expr(e, ctx) for e in n.elts)))
+        if isinstance(n, ast.Tuple):
+            return tuple_of(*(self.expr(e, ctx) for e in n.elts))
+        if isinstance(n, ast.Dict):
+            return dict_of(
+                union(*(self.expr(k, ctx) for k in n.keys if k is not None)),
+                union(*(self.expr(v, ctx) for v in n.values)),
+            )
+        if isinstance(n, (ast.ListComp, ast.GeneratorExp)):
+            return list_of(self.expr(n.elt, self.comprehension(n.generators, ctx)))
+        if isinstance(n, ast.SetComp):
+            return set_of(self.expr(n.elt, self.comprehension(n.generators, ctx)))
+        if isinstance(n, ast.BinOp):
+            return self.binop(n.op, self.expr(n.left, ctx), self.expr(n.right, ctx))
+        if isinstance(n, ast.UnaryOp):
+            t = self.expr(n.operand, ctx)
+            if isinstance(n.op, ast.Not):
+                return BOOL
+            if t.is_bool:
+                return INT
+            return t
+        if isinstance(n, ast.Compare):
+            return BOOL
+        if isinstance(n, ast.BoolOp):
+            return union(*(self.expr(v, ctx) for v in n.values))
+        if isinstance(n, ast.IfExp):
+            return union(self.expr(n.body, ctx), self.expr(n.orelse, ctx))
+        if isinstance(n, ast.Subscript):
+            return self.subscript(n, ctx)
+        if isinstance(n, ast.Call):
+            return self.call(n, ctx)
+        if isinstance(n, ast.Lambda):
+            return fn(None)
+        return UNKNOWN
+
+    def comprehension(self, generators: list[ast.comprehension], ctx: Ctx) -> Ctx:
+        """ctx with the names the generators bind."""
+        for g in generators:
+            names: dict[str, Ty] = {}
+            bind_target(g.target, elem(self.expr(g.iter, ctx)), names)
+            ctx = ctx.bind(names)
+        return ctx
+
+    @staticmethod
+    def binop(op: ast.operator, a: Ty, b: Ty) -> Ty:
+        if not (a.known and b.known):
+            return UNKNOWN
+        if a.is_numeric and b.is_numeric:
+            if isinstance(op, ast.Div):
+                return NUM
+            if a.all("int", "bool") and b.all("int", "bool"):
+                return union(INT, NUM) if isinstance(op, ast.Pow) else INT  # 2 ** -1 is 0.5
+            return NUM
+        if isinstance(op, ast.Add) and a.all("str") and b.all("str"):
+            return STR
+        if isinstance(op, ast.Add) and a.all("list") and b.all("list"):
+            return union(a, b)
+        if isinstance(op, ast.Add) and a.all("tuple") and b.all("tuple"):
+            return (
+                union(*a.members, *b.members)
+                if len(a.members) > 1 or len(b.members) > 1
+                else tuple_of(*a.args, *b.args)
+            )
+        if isinstance(op, ast.Mult):
+            for s, k in ((a, b), (b, a)):
+                if s.all("list", "str", "tuple") and k.all("int", "bool"):
+                    return s
+        if a.kind == "vec" or b.kind == "vec":
+            return a if a.kind == "vec" else b
+        return UNKNOWN
+
+    def subscript(self, n: ast.Subscript, ctx: Ctx) -> Ty:
+        t = self.expr(n.value, ctx)
+        if isinstance(n.slice, ast.Slice):
+            return t
+        out = []
+        for m in t.members:
+            if (
+                m.kind == "tuple"
+                and isinstance(n.slice, ast.Constant)
+                and isinstance(n.slice.value, int)
+                and -len(m.args) <= n.slice.value < len(m.args)
+            ):
+                out.append(m.args[n.slice.value])
+            elif m.kind == "dict":
+                out.append(m.args[1])
+            elif m.kind in ("list", "tuple", "str", "vec"):
+                out.append(elem(m))
+            else:
+                return UNKNOWN
+        return union(*out)
+
+    def call(self, n: ast.Call, ctx: Ctx) -> Ty:
+        f = n.func
+        if isinstance(f, ast.Name):
+            local = (
+                ctx.func is not None
+                and f.id in ctx.func.locals
+                or any(k == f.id for k, _ in ctx.extra)
+            )
+            sym = None if local else self.resolve(ctx.module, f.id)
+            if sym is not None and sym.kind == "func":
+                return self.functions[sym.target].returns
+            if sym is None and not local:
+                return self.builtin_call(f.id, n, ctx)
+            return UNKNOWN
+        if isinstance(f, ast.Attribute):
+            if isinstance(f.value, ast.Name):
+                sym = self.resolve(ctx.module, f.value.id)
+                if sym is not None and sym.kind == "module":
+                    target = self.resolve(sym.target, f.attr)
+                    if target is not None and target.kind == "func":
+                        return self.functions[target.target].returns
+                    return UNKNOWN
+            recv = self.expr(f.value, ctx)
+            if recv.all("list") and f.attr == "pop":
+                return elem(recv)
+            if recv.all("list") and f.attr in ("append", "extend", "insert"):
+                return NONE
+        return UNKNOWN
+
+    def builtin_call(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
+        args = [self.expr(a, ctx) for a in n.args]
+        if name in ("min", "max"):
+            return elem(args[0]) if len(args) == 1 else union(*args)
+        if name == "abs" and args:
+            return INT if args[0].is_bool else args[0]
+        if name in ("list", "tuple"):  # a tuple of unknown length types as a list
+            return list_of(elem(args[0]) if args else NEVER)
+        if name == "set":
+            return set_of(elem(args[0]) if args else NEVER)
+        return BUILTIN_RETURNS.get(name, UNKNOWN)
+
+    # ---------------------------------------------------------- inference
+    def solve(self, functions=None) -> None:
+        """Type the locals and returns of `functions` (every function when None) and the
+        module globals, joining over every assignment until no type changes."""
+        keys = list(self.functions) if functions is None else list(functions)
+        for _ in range(self.MAX_PASSES):
+            changed = self._globals_pass()
+            for key in keys:
+                changed |= self._function_pass(self.functions[key])
+            if not changed:
+                return
+
+    def _globals_pass(self) -> bool:
+        changed = False
+        for module, tree in self.modules.items():
+            ctx = Ctx(module)
+            for n in tree.body:
+                if isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None:
+                    found: dict[str, Ty] = {}
+                    if isinstance(n, ast.AnnAssign):
+                        bind_target(n.target, self.annotation(n.annotation, module), found)
+                    else:
+                        for t in n.targets:
+                            bind_target(t, self.expr(n.value, ctx), found)
+                    for name, t in found.items():
+                        new = join(self.globals.get((module, name), NEVER), t)
+                        if new != self.globals.get((module, name)):
+                            self.globals[(module, name)] = new
+                            changed = True
+        return changed
+
+    def _function_pass(self, info: FuncInfo) -> bool:
+        before = (dict(info.locals), info.returns)
+        ctx = Ctx(info.key[0], info)
+
+        def assign(names: dict[str, Ty]):
+            for k, t in names.items():
+                if k in info.annotated or k in info.param_types:
+                    continue
+                info.locals[k] = join(info.locals.get(k, NEVER), t)
+
+        for st in own_statements(info.node.body):
+            if isinstance(st, ast.Assign):
+                t = self.expr(st.value, ctx)
+                for target in st.targets:
+                    found: dict[str, Ty] = {}
+                    bind_target(target, t, found)
+                    assign(found)
+            elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                info.locals[st.target.id] = self.annotation(st.annotation, info.key[0])
+                info.annotated.add(st.target.id)
+            elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Name):
+                t = self.binop(st.op, self.expr(st.target, ctx), self.expr(st.value, ctx))
+                assign({st.target.id: t})
+            elif isinstance(st, ast.For):
+                found = {}
+                bind_target(st.target, elem(self.expr(st.iter, ctx)), found)
+                assign(found)
+            elif isinstance(st, ast.Return):
+                t = self.expr(st.value, ctx) if st.value is not None else NONE
+                info.returns = join(info.returns, t)
+            elif isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
+                self._mutation(st.value, ctx, assign)
+        if not ends_in_return(info.node.body):
+            info.returns = join(info.returns, NONE)
+        return (info.locals, info.returns) != before
+
+    def _mutation(self, call: ast.Call, ctx: Ctx, assign) -> None:
+        """`xs.append(v)` widens a local list's element type to v's."""
+        f = call.func
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and call.args:
+            name = f.value.id
+            recv = self.expr(f.value, ctx)
+            if recv.all("list") and f.attr in ("append", "insert"):
+                assign({name: list_of(self.expr(call.args[-1], ctx))})
+            elif recv.all("list") and f.attr == "extend":
+                assign({name: list_of(elem(self.expr(call.args[0], ctx)))})
+
+
+def target_names(t: ast.expr) -> list[str]:
+    if isinstance(t, ast.Name):
+        return [t.id]
+    if isinstance(t, (ast.Tuple, ast.List)):
+        return [n for e in t.elts for n in target_names(e)]
+    if isinstance(t, ast.Starred):
+        return target_names(t.value)
+    return []
+
+
+def bind_target(t: ast.expr, ty: Ty, out: dict[str, Ty]) -> None:
+    """The names an assignment target binds, with the types it gives them."""
+    if isinstance(t, ast.Name):
+        out[t.id] = join(out.get(t.id, NEVER), ty)
+    elif isinstance(t, (ast.Tuple, ast.List)):
+        for i, e in enumerate(t.elts):
+            items = [
+                m.args[i] if m.kind == "tuple" and len(m.args) == len(t.elts) else elem(m)
+                for m in ty.members
+            ]
+            bind_target(e, union(*items) if items else UNKNOWN, out)
+
+
+def own_statements(body: list[ast.stmt]):
+    """Every statement in body, entering blocks but not nested functions or classes."""
+    for st in body:
+        yield st
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for name in ("body", "orelse", "finalbody"):
+            yield from own_statements(getattr(st, name, None) or [])
+        for h in getattr(st, "handlers", None) or []:
+            yield from own_statements(h.body)
+
+
+def ends_in_return(body: list[ast.stmt]) -> bool:
+    return bool(body) and isinstance(body[-1], ast.Return)
