@@ -358,7 +358,7 @@ assert.deepEqual(b.take(vp).keys, []);
 </details>
 
 <!-- ============================================================ TASK 6 -->
-<details class="task" id="task-6" data-state="pending">
+<details class="task" id="task-6" data-state="done">
 <summary><span class="num">6</span><span><span class="ttl">The GUI as HTML</span><span class="files">web/gui.py · web/export.py · js/gui.js · tests/web/test_gui_spec.py · tests/web/js/gui.test.mjs</span></span><span class="state"></span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -522,6 +522,8 @@ Also assert the frames the page built hold what the script did: the tick after <
 <li><b>FrameBuilder holds the device pixel ratio and the last pointer type</b> (task 4). Pixel wheel deltas divide by it, so the builder takes <code>{devicePixelRatio}</code> and <code>attachDom</code> refreshes it at each wheel event; <code>PointerLock</code> refuses after a touch by reading <code>builder.lastPointerType</code> (<code>src/manifoldx/web/js/input.js:31-33</code>).</li>
 <li><b>buildScene switches the shadow map on</b> (task 5). The scene's extras say whether there are shadows, so <code>buildScene</code> sets <code>renderer.shadowMap.enabled</code> when they are on (<code>src/manifoldx/web/js/scene.js:100</code>); browser.js still sets the type, the colour space and the tone mapping. Every glTF material other than StandardMaterial gets <code>fog: false</code>, FlatMaterial's unlit one included (<code>src/manifoldx/web/js/scene.js:40</code>).</li>
 <li><b>Node resolves the vendored <code>three</code> with a loader hook</b> (task 5). The vendored GLTFLoader imports the bare <code>"three"</code>, so <code>tests/web/js/scene.test.mjs:21</code> registers a resolve hook mapping <code>"three"</code> and <code>"three/addons/"</code> to the vendor folder, as the page's importmap will (<code>module.register</code>, Node 20.6+). The glb parses in Node, so the fallback to task 9 was not taken. web_walk has no fog, sun, shadows or environment, so those paths are tested on a lit scene built from three.js objects in the test, and the environment through its pure <code>equirectTexture</code> step; the PMREM step and the GLSL of the basic material compile only in a browser (tasks 9 and 10).</li>
+<li><b>Offsets of the other anchors, and an unsized root panel</b> (task 6). The desktop applies the offset only from the top-left (<code>src/manifoldx/render/passes/gui.py:398</code>), so the page defines the rest: an offset is measured inward from the anchored edges, and on a centred axis it moves right or down (<code>src/manifoldx/web/js/gui.js:57-69</code>). A root panel with no width or height sizes to its content, as the task says; the desktop gives it the whole viewport as its slot and paints its background over all of it, a difference only an unsized panel with a visible bg shows.</li>
+<li><b>Leaves paint no background and do not shrink</b> (task 6). As the desktop's painter, a Text or ValueDisplay draws only its text (<code>src/manifoldx/gui/painter.py:165-215</code>); every child without flex keeps its size on the main axis (<code>flex-shrink: 0</code>, <code>src/manifoldx/web/js/gui.js:38</code>), and a sized panel clips the overflow, as the desktop layout gives intrinsic sizes and never shrinks them.</li>
 </ul>
 
 <h2>Self-review</h2>

@@ -4,7 +4,7 @@ out/
   app/<module>.js(.map)   the transpiled modules; the script (or -m module) is __main__
   pyrt.js, manifoldx.js   the runtime
   replay.mjs              loads the folder in Node
-  state.json              the snapshot, engine.state, the engine's size and camera
+  state.json              the snapshot, engine.state, the engine's size and camera, the GUI
   scene.glb               the scene (and scene.export-report.json, the glTF export's report)
   report.json             the roots, what was transpiled, what stayed setup, what was left out
 """
@@ -60,6 +60,7 @@ def export_web(module: str | None, script: str | None, out: Path, app_args: list
     (nothing written), 2 when the app never called engine.run()."""
     from manifoldx.gltf.engine_export import export_engine
 
+    from .gui import GuiUnsupported, gui_spec
     from .reach import find_roots
     from .snapshot import SnapshotError, snapshot
     from .transpile import reach_app, transpile_app
@@ -89,9 +90,15 @@ def export_web(module: str | None, script: str | None, out: Path, app_args: list
         except SnapshotError as e:
             _say(str(e))
             return 1
+        try:
+            gui = gui_spec(engine)
+        except GuiUnsupported as e:
+            _say(str(e))
+            return 1
 
     names = sorted(sources, key=lambda n: (n != "__main__", n))
     state["modules"] = names
+    state["gui"] = gui
     env = reach.env
     report = {
         "app": f"-m {module}" if module else paths["__main__"],
