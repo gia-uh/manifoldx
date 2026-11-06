@@ -9,8 +9,12 @@ from manifoldx.resources import BasicMaterial, cube
 
 
 def _engine_with_box():
-    engine = Engine("t", width=64, height=64)  # no device needed: spawn and the registry are CPU-side
-    h = engine.spawn(Mesh(cube(1, 1, 1)), Material(BasicMaterial("#ff0000")), Transform(pos=(0, 0, 0)))
+    engine = Engine(
+        "t", width=64, height=64
+    )  # no device needed: spawn and the registry are CPU-side
+    h = engine.spawn(
+        Mesh(cube(1, 1, 1)), Material(BasicMaterial("#ff0000")), Transform(pos=(0, 0, 0))
+    )
     return engine, h
 
 
@@ -18,7 +22,9 @@ def test_set_material_writes_the_registered_id():
     engine, h = _engine_with_box()
     green = BasicMaterial("#00ff00")
     engine.set_material(h, green)
-    assert engine.store._components["Material"][h.index, 0] == engine._material_registry.register(green)
+    assert engine.store._components["Material"][h.index, 0] == engine._material_registry.register(
+        green
+    )
 
 
 def test_set_material_takes_an_entity_index():
