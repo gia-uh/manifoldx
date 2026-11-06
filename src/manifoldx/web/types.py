@@ -615,8 +615,10 @@ class TypeEnv:
             if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
                 if is_classvar(st.annotation):
                     continue
-                info.fields[st.target.id] = self.annotation(st.annotation, module)
-                info.annotated.add(st.target.id)
+                t = self.annotation(st.annotation, module)
+                if t.known:  # one the model cannot read (a bare `tuple`) leaves the live type
+                    info.fields[st.target.id] = t
+                    info.annotated.add(st.target.id)
                 if info.dataclass:
                     info.init_fields.append(st)
             elif isinstance(st, ast.FunctionDef):

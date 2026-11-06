@@ -826,7 +826,13 @@ class _Module:
             if n.attr in DICT_ATTRS:
                 self.fail(n, f"`{ast.unparse(n)}`, a dict method used as a value,")
             return f"{self.rt('getitem')}({self.e(n.value)}, {json.dumps(n.attr)})"
-        if t.known and not t.all("obj", "none"):
+        if not t.known:  # reach could not tell which class's field to snapshot
+            self.fail(
+                n,
+                f"`{ast.unparse(n)}`, an attribute of a value of unknown type "
+                f"(annotate `{ast.unparse(n.value)}`),",
+            )
+        if not t.all("obj", "none"):
             self.fail(n, f"the attribute .{n.attr} of a {t}")
         if self.env.methods(t, n.attr):  # a bound method keeps its object, as in Python
             return f"{self.rt('bound')}({self.e(n.value)}, {json.dumps(n.attr)})"

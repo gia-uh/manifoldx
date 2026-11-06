@@ -14,6 +14,7 @@ import pytest
 import manifoldx as mx
 from manifoldx.cli import main
 from manifoldx.web.export import VENDOR, export_web
+from manifoldx.web.replay import compare
 
 WEB_WALK = Path(__file__).parents[2] / "examples" / "web_walk.py"
 
@@ -356,3 +357,92 @@ def test_the_url_check_bites():
         "https://cdn.example/three.js"
     ]
     assert _urls_outside_comments("/* https://ok */ <!-- http://ok -->") == []
+
+
+FRAME = {"keys": [], "just": [], "d": [0.0, 0.0], "buttons": [], "clicks": [], "vp": [320, 200]}
+
+
+def _replay_both(folder: Path, out: Path, src: str, paths=(), **modules):
+    """Export the app, then replay one frame in Python and in Node: (python, node)."""
+    from manifoldx.web.replay import replay_node, replay_python
+
+    assert _export(folder, out, src, **modules) == 0
+    return replay_python(None, str(folder / "app.py"), [FRAME], list(paths)), replay_node(
+        out, [FRAME], list(paths)
+    )
+
+
+SHELF = """
+from dataclasses import dataclass
+import manifoldx as mx
+
+engine = mx.Engine("shelf", width=320, height=200)
+
+
+@dataclass
+class Item:
+    name: str
+    size: float
+
+
+@dataclass
+class Shelf:
+    items: tuple
+
+
+shelf = Shelf((Item("a", 1.0), Item("b", 2.0)))
+
+
+def tick(query, dt: float):
+    engine.state["names"] = [it.name for it in shelf.items]
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_items_of_an_unannotated_tuple_field_type_from_live_values(app_dir, tmp_path):
+    """gia-uh/manifoldx#142: a bare `tuple` annotation gives way to the live items' types, so
+    the field Item.name is in the snapshot and the browser reads what Python reads."""
+    py, node = _replay_both(app_dir, tmp_path / "out", SHELF)
+    assert py[0]["state"]["names"] == ["a", "b"]
+    assert compare(py, node) is None, str(compare(py, node))
+
+
+UNKNOWN_READ = """
+import manifoldx as mx
+
+engine = mx.Engine("unknown", width=320, height=200)
+
+
+class Item:
+    def __init__(self, name):
+        self.name = name
+
+
+engine.state["item"] = Item("a")
+
+
+def tick(query, dt: float):
+    it = engine.state["item"]
+    engine.state["name"] = it.name
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_an_attribute_read_on_an_unknown_type_fails_naming_what_to_annotate(
+    app_dir, tmp_path, capsys
+):
+    """gia-uh/manifoldx#142: a read whose receiver has no type cannot know which field to
+    snapshot, so the export stops at its line instead of leaving the field out."""
+    out = tmp_path / "out"
+    assert _export(app_dir, out, UNKNOWN_READ) == 1
+    line = UNKNOWN_READ.splitlines().index('    engine.state["name"] = it.name') + 1
+    err = capsys.readouterr().err
+    assert f"app.py:{line}: `it.name`" in err
+    assert "annotate `it`" in err
+    assert not out.exists()
