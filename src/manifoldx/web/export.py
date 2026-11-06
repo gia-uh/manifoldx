@@ -22,6 +22,9 @@ from pathlib import Path
 
 JS = Path(__file__).parent / "js"
 RUNTIME = ("pyrt.js", "manifoldx.js", "replay.mjs")
+# three.js for the browser page, vendored as its SOURCE file says.
+THREE_VERSION = "0.186.1"
+VENDOR = Path(__file__).parent / "vendor" / "three"
 _MANIFOLDX = str(Path(__file__).parents[1]) + os.sep
 
 
