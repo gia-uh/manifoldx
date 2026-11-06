@@ -137,6 +137,35 @@ def transpile_app(
     return {name: _Module(env, name, reach).write() for name in trees}
 
 
+_B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+
+def _vlq(n: int) -> str:
+    """n as a source map's base64 VLQ: the sign in the lowest bit, then 5 bits per digit."""
+    n = (-n << 1) | 1 if n < 0 else n << 1
+    out = ""
+    while True:
+        digit, n = n & 31, n >> 5
+        out += _B64[digit | (32 if n else 0)]
+        if not n:
+            return out
+
+
+def source_map(file: str, source: str, lines: list[int]) -> str:
+    """A source map v3 at line granularity: generated line i maps from its column 0 to the
+    start of the Python line lines[i] (1-based); a 0 maps nothing."""
+    groups, prev = [], 0
+    for line in lines:
+        if line <= 0:
+            groups.append("")
+            continue
+        groups.append("A" + "A" + _vlq(line - 1 - prev) + "A")
+        prev = line - 1
+    return json.dumps(
+        {"version": 3, "file": file, "sources": [source], "names": [], "mappings": ";".join(groups)}
+    )
+
+
 # ---------------------------------------------------------------- one module
 
 Lines = list[tuple[str, int]]
@@ -248,7 +277,12 @@ class _Module:
         if self.uses_rt:
             head.append('import * as $rt from "./pyrt.js";')
         lines = [(h, 0) for h in head + imports] + [("", 0)] + body
-        return JsModule(self.name, "\n".join(text for text, _ in lines) + "\n")
+        # One generated line per entry: an entry whose text holds newlines maps each.
+        lines = [(t, line) for text, line in lines for t in text.split("\n")]
+        js = f"{self.name}.js"
+        lines.append((f"//# sourceMappingURL={js}.map", 0))
+        code = "\n".join(text for text, _ in lines) + "\n"
+        return JsModule(self.name, code, source_map(js, self.path, [line for _, line in lines]))
 
     def closure_factory(self, key: FunctionKey) -> Lines:
         """A lambda or inner def that setup made, as `__closure_<line>_<col>(cells,
