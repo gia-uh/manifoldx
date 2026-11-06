@@ -125,8 +125,12 @@ export function loadApp(state, modules, options = {}) {
 const keyName = (k) => (k === " " ? "Space" : k.length === 1 ? k.toLowerCase() : k);
 
 // engine.input, fed one frame at a time: setFrame({keys, just, d: [dx, dy], buttons,
-// clicks, vp: [w, h]}) replaces what the last frame said. keys and just are key names
-// (pressed, and pressed this frame), buttons and clicks mouse buttons the same way.
+// clicks, vp: [w, h], up, released, pos: [x, y], wheel: [dx, dy], mods}) replaces what the
+// last frame said. keys and just are key names (pressed, and pressed this frame), buttons and
+// clicks mouse buttons the same way. The last five are optional and read as empty when
+// absent: up and released are the keys and buttons released this frame, pos the pointer
+// position in CSS pixels from the canvas's top-left, wheel the wheel's motion, mods the held
+// modifiers among Alt, Control, Meta and Shift, sorted.
 export class ScriptInput {
   constructor(onResize = null) {
     this._keys = new Set();
@@ -134,6 +138,11 @@ export class ScriptInput {
     this._buttons = new Set();
     this._clicks = new Set();
     this._delta = [0, 0];
+    this._up = new Set();
+    this._released = new Set();
+    this._pos = [0, 0];
+    this._wheel = [0, 0];
+    this._mods = [];
     this._viewport = [0, 0];
     this._captured = false;
     this._onResize = onResize;
@@ -146,6 +155,12 @@ export class ScriptInput {
     this._buttons = new Set(frame.buttons);
     this._clicks = new Set(frame.clicks);
     this._delta = [frame.d[0], frame.d[1]];
+    this._up = new Set((frame.up ?? []).map(keyName));
+    this._released = new Set(frame.released ?? []);
+    const pos = frame.pos ?? [0, 0], wheel = frame.wheel ?? [0, 0];
+    this._pos = [pos[0], pos[1]];
+    this._wheel = [wheel[0], wheel[1]];
+    this._mods = [...(frame.mods ?? [])];
     const [w, h] = frame.vp;
     if (w !== this._viewport[0] || h !== this._viewport[1]) {
       this._viewport = [w, h];
@@ -160,12 +175,11 @@ export class ScriptInput {
   is_mouse_pressed(button) { return this._buttons.has(button); }
   just_mouse_pressed(button) { return this._clicks.has(button); }
   get pressed_buttons() { return [...this._buttons].sort((a, b) => a - b); }
-  // What a frame does not hold answers as nothing happened, as manifoldx.web.replay's does.
-  just_released(key) { return false; }
-  just_mouse_released(button) { return false; }
-  get modifiers() { return []; }
-  get mouse_pos() { return [0, 0]; }
-  get wheel_delta() { return [0, 0]; }
+  just_released(key) { return this._up.has(keyName(key)); }
+  just_mouse_released(button) { return this._released.has(button); }
+  get modifiers() { return this._mods; }
+  get mouse_pos() { return this._pos; }
+  get wheel_delta() { return this._wheel; }
   get viewport_size() { return this._viewport; }
   get pointer_captured() { return this._captured; }
 
@@ -177,11 +191,14 @@ export class ScriptInput {
   }
 }
 
-// engine.camera: position and target are float32, as manifoldx.camera.Camera holds them.
+// engine.camera: position, target and up are float32, as manifoldx.camera.Camera holds
+// them; fov is the vertical field of view in degrees.
 export class Camera {
-  constructor({ position, target, near = 0.1, far = 1000.0 }) {
+  constructor({ position, target, fov = 60, up = [0, 1, 0], near = 0.1, far = 1000.0 }) {
     this.position = Float32Array.from(position);
     this.target = Float32Array.from(target);
+    this.fov = fov;
+    this.up = Float32Array.from(up);
     this.near = near;
     this.far = far;
   }
@@ -196,7 +213,7 @@ export class Camera {
   }
 }
 
-// createEngine({w, h, camera: {position, target, near, far}, materials, log, state}):
+// createEngine({w, h, camera: {position, target, fov, up, near, far}, materials, log, state}):
 // the engine object transpiled code reaches. materials maps a material id to the
 // renderer's material (none, headless); log receives ["material", entity, material_id] and
 // ["capture", on] as reached code asks for them; state is engine.state, a Map as every dict.

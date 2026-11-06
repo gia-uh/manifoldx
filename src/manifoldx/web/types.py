@@ -449,10 +449,12 @@ LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
 # attribute's type, a method's as fn(name, return), by the names class_name gives the
 # classes. What is not here types as unknown.
 _INPUT, _CAMERA = "manifoldx.input.InputState", "manifoldx.Camera"
+_GUI = "manifoldx.gui.widgets._GuiRoot"
 RUNTIME_SURFACE = {
     "manifoldx.Engine": {
         "input": obj(_INPUT),
         "camera": obj(_CAMERA),
+        "gui": obj(_GUI),
         "w": INT,
         "h": INT,
         "state": STATE,
@@ -483,10 +485,12 @@ RUNTIME_SURFACE = {
     _CAMERA: {
         "position": vec("f32"),
         "target": vec("f32"),
+        "fov": NUM,
         "near": NUM,
         "far": NUM,
         "get_forward": fn(f"{_CAMERA}.get_forward", vec("f32")),
     },
+    _GUI: {"pointer_over_gui": BOOL},
 }
 
 # math's functions the subset has, and its constants.

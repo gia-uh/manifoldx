@@ -67,6 +67,60 @@ test("what a frame does not hold answers as nothing happened", () => {
   assert.deepEqual(input.wheel_delta, [0, 0]);
 });
 
+const RELEASE = { keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [800, 600] };
+
+test("up drives just_released", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, up: ["W", " "] });
+  assert.equal(input.just_released("w"), true);
+  assert.equal(input.just_released("Space"), true);
+  assert.equal(input.just_released("a"), false);
+});
+
+test("released drives just_mouse_released", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, released: [2] });
+  assert.equal(input.just_mouse_released(2), true);
+  assert.equal(input.just_mouse_released(1), false);
+});
+
+test("pos drives mouse_pos", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, pos: [12.5, 30] });
+  assert.deepEqual(input.mouse_pos, [12.5, 30]);
+});
+
+test("wheel drives wheel_delta", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, wheel: [0, -3] });
+  assert.deepEqual(input.wheel_delta, [0, -3]);
+});
+
+test("mods drives modifiers", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, mods: ["Control", "Shift"] });
+  assert.deepEqual(input.modifiers, ["Control", "Shift"]);
+  input.setFrame(RELEASE);
+  assert.deepEqual(input.modifiers, []);
+});
+
+test("the camera holds fov and a float32 up", () => {
+  const e = engine({ camera: { position: [0, 1, 2], target: [0, 0, 0], fov: 50, up: [0, 0, 1] } });
+  assert.equal(e.camera.fov, 50);
+  assert.ok(e.camera.up instanceof Float32Array);
+  assert.deepEqual(Array.from(e.camera.up), [0, 0, 1]);
+  const d = engine().camera;
+  assert.equal(d.fov, 60);
+  assert.deepEqual(Array.from(d.up), [0, 1, 0]);
+});
+
+test("engine.gui.pointer_over_gui is the flag the state's gui handle resolves to", () => {
+  const e = engine();
+  assert.equal(e.resolve("engine", "gui").pointer_over_gui, false);
+  e.gui.pointer_over_gui = true;
+  assert.equal(e.resolve("engine", "gui").pointer_over_gui, true);
+});
+
 test("set_material and capture_pointer append to the log", () => {
   const log = [];
   const e = engine({ log });

@@ -205,6 +205,8 @@ def test_the_folder_loads_in_node_with_the_state_python_left(app_dir, tmp_path):
         "camera": {
             "position": [0.0, 1.0, 2.0],
             "target": [0.0, 0.0, 0.0],
+            "fov": 60.0,
+            "up": [0.0, 1.0, 0.0],
             "near": 0.1,
             "far": 1000.0,
         },

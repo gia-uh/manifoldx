@@ -4,7 +4,7 @@ snapshot(roots, reach, engine) walks from engine.state, the roots (a bound metho
 closure's cells and defaults) and the module globals reached code reads, and writes JSON:
 
     {"table": [entry, ...], "roots": [root, ...], "globals": {module: {name: value}},
-     "state": value, "engine": {"w", "h", "camera": {"position", "target", "near", "far"}}}
+     "state": value, "engine": {"w", "h", "camera": {"position", "target", "fov", "up", "near", "far"}}}
 
 A root is {"kind", "label", "event", "fn": value}, in the order find_roots gave them.
 "state" is engine.state as a dict entry; "engine" is what the runtime's createEngine takes.
@@ -106,6 +106,8 @@ class _Writer:
             "camera": {
                 "position": [float(x) for x in cam.position],
                 "target": [float(x) for x in cam.target],
+                "fov": float(cam.fov),
+                "up": [float(x) for x in cam.up],
                 "near": float(cam.near),
                 "far": float(cam.far),
             },
