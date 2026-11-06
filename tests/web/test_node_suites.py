@@ -2,15 +2,19 @@
 covers them, and the numpy values they compare against."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from manifoldx.camera import Camera
+from manifoldx.web.export import export_web
 
 HERE = Path(__file__).parent / "js"
 FORWARD = HERE / "forward.json"
+WEB_WALK = Path(__file__).parents[2] / "examples" / "web_walk.py"
 
 # Position/target pairs whose float32 arithmetic differs from float64's.
 PAIRS = [
@@ -46,9 +50,22 @@ def test_the_forward_fixture_is_numpys():
     assert json.loads(FORWARD.read_text()) == values
 
 
-def test_node_suites_pass():
+@pytest.fixture(scope="session")
+def web_walk_export(tmp_path_factory) -> Path:
+    """examples/web_walk.py exported once per session, for the suites that load a real folder."""
+    out = tmp_path_factory.mktemp("web_walk_export") / "out"
+    assert export_web(None, str(WEB_WALK), out, []) == 0
+    return out
+
+
+def test_node_suites_pass(web_walk_export):
     # Node 22's --test takes files or globs, not a folder.
     suites = sorted(str(f) for f in HERE.glob("*.test.mjs"))
     assert suites
-    done = subprocess.run(["node", "--test", *suites], capture_output=True, text=True, timeout=120)
+    env = {**os.environ, "MX_WEB_WALK_EXPORT": str(web_walk_export)}
+    done = subprocess.run(
+        ["node", "--test", *suites], capture_output=True, text=True, timeout=120, env=env
+    )
     assert done.returncode == 0, done.stdout + done.stderr
+    # A suite that skips for want of the export would pass without checking anything.
+    assert "# skipped 0" in done.stdout, done.stdout
