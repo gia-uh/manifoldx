@@ -224,3 +224,20 @@ def test_extra_materials_are_written_and_mapped(tmp_path):
     assert g.scenes[0].extras["manifoldx"]["mx_materials"] == {"1": 0, "7": 1}
     assert len(g.materials) == 2 and len(report) == 0
     assert b"mx_materials" not in build_glb([Node(tri(), used)])[0]  # only asked for
+
+
+def test_standard_opacity_writes_alpha_and_blend(tmp_path):
+    """The desktop blends a StandardMaterial with opacity < 1; glTF carries that as the base
+    colour's alpha (colour alpha times opacity) and BLEND, textured or not."""
+    png = tmp_path / "t.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")  # the writer embeds the bytes; only the magic matters
+    tex = TextureHandle(id=3, texture=None, view=None, sampler=None, size=(4, 4), source=png)
+    out = tmp_path / "a.glb"
+    export_gltf(out, [Node(tri(), StandardMaterial("#ffffff", opacity=0.0)),
+                      Node(tri(), StandardMaterial((1, 1, 1, 0.5), opacity=0.5)),
+                      Node(tri(), StandardMaterial("#ffffff", opacity=0.25, albedo_map=tex)),
+                      Node(tri(), StandardMaterial("#ffffff"))])
+    g = load(out)
+    alphas = [m.pbrMetallicRoughness.baseColorFactor[3] for m in g.materials]
+    assert alphas == [0.0, 0.25, 0.25, 1.0]
+    assert [m.alphaMode for m in g.materials] == ["BLEND", "BLEND", "BLEND", "OPAQUE"]
