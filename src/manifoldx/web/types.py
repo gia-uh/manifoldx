@@ -47,7 +47,8 @@ class Ty:
     numpy keeps at its precision ("f32": np.float32, float32 arithmetic; "f64":
     np.float64); a Python float or int has none and takes the other operand's precision
     (NEP 50). `name` is an obj's class ("module.Qualname") or a
-    fn's function ("module.qualname"), None for a lambda.
+    fn's function ("module.qualname"), None for a lambda, or "manifoldx.hot.State" for
+    engine.state's dict (STATE).
 
     A union with no members is the empty type: the elements of `[]`, or a variable before
     its first assignment. Joining it with anything gives the other side.
@@ -110,6 +111,9 @@ NUM, INT, BOOL, STR, NONE = Ty("num"), Ty("int"), Ty("bool"), Ty("str"), Ty("non
 UNKNOWN = Ty("unknown")
 NEVER = Ty("union")
 NUM32, NUM64 = Ty("num", dtype="f32"), Ty("num", dtype="f64")
+# engine.state, a hot.State: a dict with str keys whose keys also read and write as
+# attributes (`engine.state.cam`), which the transpiler turns into getitem and setitem.
+STATE = Ty("dict", (STR, UNKNOWN), name="manifoldx.hot.State")
 
 
 def list_of(elem: Ty) -> Ty:
@@ -451,6 +455,7 @@ RUNTIME_SURFACE = {
         "camera": obj(_CAMERA),
         "w": INT,
         "h": INT,
+        "state": STATE,
         "set_material": fn("manifoldx.Engine.set_material", NONE),
     },
     _INPUT: {
@@ -1039,7 +1044,7 @@ class TypeEnv:
                 return NONE
             if recv.all("dict"):
                 k, v = (union(*(m.args[i] for m in recv.members)) for i in (0, 1))
-                if f.attr == "get":
+                if f.attr in ("get", "setdefault"):
                     other = self.expr(n.args[1], ctx) if len(n.args) > 1 else NONE
                     return union(v, other)
                 return {

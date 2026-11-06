@@ -231,6 +231,7 @@ export function hasattr_(x, name) {
 export const isinstance_ = (x, classes) => classes.some((c) => x instanceof c);
 
 export const dget = (d, k, dflt = null) => (d.has(k) ? d.get(k) : dflt);
+export const dsetdefault = (d, k, dflt = null) => (d.has(k) ? d.get(k) : (d.set(k, dflt), dflt));
 
 // What next() of an exhausted generator gives: its default, or StopIteration.
 export function next_(...dflt) {

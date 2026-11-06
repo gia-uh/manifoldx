@@ -76,7 +76,16 @@ What is out, among others: `try`, `raise`, `with`, `global`, `nonlocal`, `del`, 
 
 There is no `global`: state that frame code reassigns lives in an object's attribute (`rig.mode = "fly"`) or in `engine.state` (`engine.state["selected"] = box.name`), never in a module-level name. Module globals are fine to read and to mutate in place.
 
-Read and write `engine.state` with subscripts, as `examples/web_walk.py` does. `engine.state.key` exports without an error but does not work in the browser: the runtime's engine.state is a JS Map, and the attribute reads nothing.
+`engine.state` works in both of its desktop forms: subscripts (`engine.state["selected"]`, as `examples/web_walk.py` does) and attributes (`engine.state.level`, `engine.state.cam = {...}`, `engine.state.cam["yaw"]`), plus `in`, `not in`, `.get(key[, default])`, `.setdefault(key[, default])`, `.keys()`, `.values()` and `.items()`. The transpiler types `engine.state` as a State and turns its attributes into reads and writes of the runtime's Map; a missing key throws in the browser as it raises in Python. A value read from it is still of unknown type, so `engine.state.n += 1` fails as `engine.state['n'] += 1` does: read it into an annotated local (`n: int = engine.state.n`), then write `engine.state.n = n + 1`. These fail the export with the file and line:
+
+```text
+app.py:7: `engine.state.i` as a loop or unpacking target is outside the subset (reached from system tick)
+app.py:7: unpacking into `engine.state.a` is outside the subset (reached from system tick)
+app.py:7: `engine.state.keys`, a dict method used as a value, is outside the subset (reached from system tick)
+app.py:7: hasattr() of a dict[str, unknown] is outside the subset (reached from system tick)
+```
+
+As in Python, a dict's own attribute wins over a key of the same name: keep keys like `keys` or `get` behind subscripts.
 
 ## Annotating
 
@@ -98,7 +107,7 @@ The annotations understood are `int`, `float`, `bool`, `str`, `None`, app classe
 
 Reached code may use exactly what `RUNTIME_SURFACE` in `src/manifoldx/web/types.py` lists; anything else of a manifoldx object types as unknown:
 
-- `engine.input`, `engine.camera`, `engine.w`, `engine.h`, `engine.set_material(entity, material)`, and `engine.state` (subscripts, see above);
+- `engine.input`, `engine.camera`, `engine.w`, `engine.h`, `engine.set_material(entity, material)`, and `engine.state` (subscripts or attributes, see above);
 - `engine.input`: `pressed_keys`, `modifiers`, `mouse_pos`, `mouse_delta`, `wheel_delta`, `pressed_buttons`, `viewport_size`, `pointer_captured`, `is_pressed(key)`, `just_pressed(key)`, `just_released(key)`, `is_mouse_pressed(button)`, `just_mouse_pressed(button)`, `just_mouse_released(button)`, `capture_pointer(on)`;
 - `engine.camera`: `position` and `target` (float32 vectors), `near`, `far`, `get_forward()`.
 

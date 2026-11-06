@@ -22,6 +22,7 @@ from .reach import Reach, closure_site
 from .types import (
     LIB_CONSTANTS,
     MATH_FUNCTIONS,
+    STATE,
     STR_METHODS,
     ClassInfo,
     Ctx,
@@ -97,6 +98,10 @@ def js_name(name: str) -> str:
 VECTOR_OPS = {ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div"}
 SCALAR_OPS = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
 MATH_JS = {"fabs": "Math.abs", "radians": "$rt.radians", "degrees": "$rt.degrees"}
+
+
+# What a dict's attributes name; on engine.state these win over its keys, as in Python.
+DICT_ATTRS = frozenset(dir(dict))
 
 
 def _simple(n: ast.expr) -> bool:
@@ -655,6 +660,8 @@ class _Module:
         t = targets[0]
         if isinstance(t, ast.Subscript):
             return self.setitem(t, self.e(value))
+        if isinstance(t, ast.Attribute) and self.ty(t.value) == STATE:
+            return f"{self.e(t.value)}.set({json.dumps(t.attr)}, {self.e(value)})"
         if isinstance(t, (ast.Tuple, ast.List)):
             return f"{self.target(t)} = {self.iterable(value, destructure=True)}"
         return f"{self.target(t)} = {self.e(value)}"
@@ -675,6 +682,8 @@ class _Module:
                     self.fail(e, f"unpacking into `{ast.unparse(e)}`")
             return "[" + ", ".join(parts) + "]"
         if isinstance(t, ast.Attribute):
+            if self.ty(t.value) == STATE:
+                self.fail(t, f"`{ast.unparse(t)}` as a loop or unpacking target")
             return self.e(t)
         self.fail(t, f"assignment to `{ast.unparse(t)}`")
 
@@ -813,6 +822,10 @@ class _Module:
             if sym is not None and sym.kind == "lib":
                 self.fail(n, f"{ast.unparse(n)}")
         t = self.ty(n.value)
+        if t == STATE:  # a key, as hot.State reads it; a dict's own attributes come first
+            if n.attr in DICT_ATTRS:
+                self.fail(n, f"`{ast.unparse(n)}`, a dict method used as a value,")
+            return f"{self.rt('getitem')}({self.e(n.value)}, {json.dumps(n.attr)})"
         if t.known and not t.all("obj", "none"):
             self.fail(n, f"the attribute .{n.attr} of a {t}")
         if self.env.methods(t, n.attr):  # a bound method keeps its object, as in Python
@@ -1197,8 +1210,8 @@ class _Module:
     def method(self, n: ast.Call, f: ast.Attribute) -> str | None:
         """A method call on a typed builtin value; None for an app object's method."""
         t = self.ty(f.value)
-        if t.all("obj"):
-            return None
+        if t.all("obj") or (t == STATE and f.attr not in DICT_ATTRS):
+            return None  # an app object's method, or a call of the value under a State key
         if (
             isinstance(f.value, ast.Name)
             and self.env.symbols[self.ctx.module].get(f.value.id, None) is not None
@@ -1225,6 +1238,8 @@ class _Module:
         if t.all("dict"):
             if f.attr == "get" and len(args) in (1, 2):
                 return f"{self.rt('dget')}({obj}, {', '.join(args)})"
+            if f.attr == "setdefault" and len(args) in (1, 2):
+                return f"{self.rt('dsetdefault')}({obj}, {', '.join(args)})"
             if f.attr in ("keys", "values", "items") and not args:
                 js = "entries" if f.attr == "items" else f.attr
                 return f"Array.from({obj}.{js}())"
