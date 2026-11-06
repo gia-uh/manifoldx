@@ -1,8 +1,7 @@
 """Classes, closures and collections: each snippet's main() gives the same JSON value in
 Python and in Node.
 
-Parameters are annotated where nothing else types them yet; call-site types (task 6) will
-let most of these annotations go."""
+Parameters take their types from the arguments their call sites pass."""
 
 import re
 
@@ -24,7 +23,7 @@ class Bag:
     def total(self) -> float:
         return sum_(self.items) * self.scale
 
-def sum_(xs: list[int]) -> int:
+def sum_(xs):
     t = 0
     for x in xs:
         t += x
@@ -41,7 +40,7 @@ def main():
 
 PROPERTY = """
 class Rect:
-    def __init__(self, w: float, h: float):
+    def __init__(self, w, h):
         self.w = w
         self.h = h
 
@@ -49,7 +48,7 @@ class Rect:
     def area(self) -> float:
         return self.w * self.h
 
-    def grow(self, by: float):
+    def grow(self, by):
         self.w = self.w + by
 
 def main():
@@ -61,14 +60,14 @@ def main():
 
 CALLABLE = """
 class Scale:
-    def __init__(self, k: float):
+    def __init__(self, k):
         self.k = k
         self.name = "scale"
 
-    def __call__(self, x: float) -> float:
+    def __call__(self, x):
         return x * self.k
 
-def apply(f, x: float):
+def apply(f, x):
     return f(x)
 
 def main():
@@ -89,10 +88,10 @@ def main():
 """
 
 NESTED_DEF = """
-def make_counter(start: int):
+def make_counter(start):
     count = start
 
-    def step(by: int = 1) -> int:
+    def step(by=1):
         return count + by
 
     return step
@@ -101,7 +100,7 @@ def main():
     f = make_counter(10)
     adders = []
     for i in range(3):
-        def add(x: int, i: int = i) -> int:
+        def add(x, i=i):
             return x + i
         adders.append(add)
     return [f(), f(5), [a(100) for a in adders]]
@@ -109,15 +108,15 @@ def main():
 
 TWO_CLASSES = """
 class Building:
-    def __init__(self, name: str, floors: int):
+    def __init__(self, name, floors):
         self.name = name
         self.floors = floors
 
 class Landmark:
-    def __init__(self, name: str):
+    def __init__(self, name):
         self.name = name
 
-def describe(x: Building | Landmark) -> str:
+def describe(x):
     if isinstance(x, Building):
         return x.name + " " + str(x.floors)
     if hasattr(x, "name"):
@@ -196,11 +195,11 @@ def test_method_self_is_this():
 
 
 GEOM = """
-def scale(v: list[float], k: float = 1.0, offset: float = 0.0) -> list[float]:
+def scale(v, k=1.0, offset=0.0):
     return [x * k + offset for x in v]
 
 class Box:
-    def __init__(self, w: float, h: float = 1.0):
+    def __init__(self, w, h=1.0):
         self.w = w
         self.h = h
 """

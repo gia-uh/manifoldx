@@ -29,25 +29,15 @@ from .types import (
     Ty,
     TypeEnv,
     UNKNOWN,
+    TranspileError,
     arith_dtype,
     elem,
     key_label,
+    module_path,
     own_statements,
     precision,
     target_names,
 )
-
-
-class TranspileError(Exception):
-    """A reached construct outside the subset, at path:line, and the root that reached it."""
-
-    def __init__(self, path: str, line: int, what: str, root: str | None = None):
-        super().__init__(path, line, what, root)
-        self.path, self.line, self.what, self.root = path, line, what, root
-
-    def __str__(self) -> str:
-        where = f" (reached from {self.root})" if self.root else ""
-        return f"{self.path}:{self.line}: {self.what} is outside the subset{where}"
 
 
 @dataclass(frozen=True)
@@ -100,10 +90,6 @@ BUILTINS = frozenset(dir(builtins))
 
 def js_name(name: str) -> str:
     return name + "_$" if name in RESERVED else name
-
-
-def module_path(name: str) -> str:
-    return name.replace(".", "/") + ".py"
 
 
 # numpy's arithmetic as runtime helpers; a "32" suffix gives a Float32Array.
