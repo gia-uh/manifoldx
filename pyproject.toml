@@ -51,6 +51,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
+browser = [
+    "playwright>=1.55",
+]
 dev = [
     "pytest>=9.0.2",
     "pytest-async>=0.1.1",
