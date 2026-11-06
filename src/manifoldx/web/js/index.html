@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<!-- scene.glb's size and its gzipped size, written by manifoldx export --web, for the progress line -->
+<meta name="scene-bytes" content="{{scene_bytes}}">
+<meta name="scene-gzip-bytes" content="{{scene_gzip_bytes}}">
+<style>
+  @font-face { font-family: "mx-gui"; src: url("fonts/DejaVuSansMono.ttf") format("truetype"); }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  #mx-canvas { display: block; width: 100vw; height: 100vh; touch-action: none; outline: none; }
+  #mx-gui { position: fixed; inset: 0; pointer-events: none; overflow: hidden; font-family: "mx-gui", monospace; }
+  #mx-progress { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); box-sizing: border-box;
+                 width: min(380px, calc(100vw - 32px)); padding: 12px 14px; border-radius: 4px;
+                 background: #1a1a1ae0; color: #eee; font: 13px/1.4 system-ui, sans-serif; }
+  #mx-progress .track { height: 6px; margin-bottom: 8px; background: #ffffff26; border-radius: 3px; overflow: hidden; }
+  #mx-progress .bar { height: 100%; width: 0; background: #e9d4a0; transition: width 0.2s; }
+  #mx-error { position: fixed; left: 16px; right: 16px; bottom: 16px; max-height: 50vh; overflow: auto; margin: 0;
+              padding: 10px 12px; border-radius: 4px; background: #2a1512f0; color: #ffb4a3;
+              font: 13px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
+  [hidden] { display: none !important; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<canvas id="mx-canvas" tabindex="0"></canvas>
+<div id="mx-gui"></div>
+<div id="mx-progress">
+  <div class="track"><div class="bar"></div></div>
+  <div class="text">Loading. If this stays, serve this folder over HTTP (python -m http.server) and open
+  it from there: a page opened as a file cannot load its modules.</div>
+</div>
+<pre id="mx-error" hidden></pre>
+<script type="module" src="browser.js"></script>
+</body>
+</html>

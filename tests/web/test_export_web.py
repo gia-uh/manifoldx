@@ -1,7 +1,10 @@
 """manifoldx export --web: the app runs its setup in Python, then the folder holds the
 transpiled code, the state it starts from, the scene and a report, and loads in Node."""
 
+import gzip
+import html
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +13,9 @@ import pytest
 
 import manifoldx as mx
 from manifoldx.cli import main
+from manifoldx.web.export import VENDOR, export_web
+
+WEB_WALK = Path(__file__).parents[2] / "examples" / "web_walk.py"
 
 RIG = """
 class Rig:
@@ -135,6 +141,16 @@ EXPECTED_FILES = {
     "scene.glb",
     "scene.export-report.json",
     "report.json",
+    # The browser page.
+    "index.html",
+    "browser.js",
+    "input.js",
+    "scene.js",
+    "gui.js",
+    "sourcemap.js",
+    "progress.js",
+    "fonts/DejaVuSansMono.ttf",
+    *(f"vendor/three/{p.relative_to(VENDOR)}" for p in VENDOR.rglob("*") if p.is_file()),
 }
 
 
@@ -274,3 +290,69 @@ def test_the_scene_report_does_not_call_transpiled_code_dropped(app_dir, tmp_pat
     err = capsys.readouterr().err
     assert "custom Python that runs every frame" not in err
     assert "ValueDisplay.getter = label" not in err  # transpiled too
+
+
+# XML namespaces three.js passes to createElementNS: names, not requests.
+NAMESPACES = {"http://www.w3.org/1999/xhtml"}
+
+
+def _urls_outside_comments(text: str) -> list[str]:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    text = re.sub(r"(^|[^:\\])//.*$", r"\1", text, flags=re.M)
+    found = re.findall(r"https?://[^\s'\"`)]*", text)
+    return [u for u in found if u not in NAMESPACES]
+
+
+@pytest.fixture(scope="module")
+def walk_page(tmp_path_factory) -> Path:
+    out = tmp_path_factory.mktemp("walk_page") / "out"
+    assert export_web(None, str(WEB_WALK), out, []) == 0
+    return out
+
+
+def test_the_page_has_every_file(walk_page):
+    files = _files(walk_page)
+    assert {"index.html", "browser.js", "input.js", "scene.js", "gui.js"} <= files
+    assert {"sourcemap.js", "progress.js", "fonts/DejaVuSansMono.ttf"} <= files
+    vendored = {f"vendor/three/{p.relative_to(VENDOR)}" for p in VENDOR.rglob("*") if p.is_file()}
+    assert len(vendored) == 8 and vendored <= files
+
+
+def test_index_html_names_the_title_and_the_scene_sizes(walk_page):
+    page = (walk_page / "index.html").read_text()
+    assert "<title>Web walk</title>" in page
+    glb = (walk_page / "scene.glb").read_bytes()
+    meta = dict(re.findall(r'<meta name="(scene-[a-z-]+)" content="(\d+)">', page))
+    assert int(meta["scene-bytes"]) == len(glb)
+    assert int(meta["scene-gzip-bytes"]) == len(gzip.compress(glb, 9))
+    imports = json.loads(
+        re.search(r'<script type="importmap">(.*?)</script>', page, re.S).group(1)
+    )["imports"]
+    assert imports == {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/addons/",
+    }
+    assert "serve this folder over HTTP (python -m http.server)" in page
+    assert '<script type="module" src="browser.js"></script>' in page
+
+
+def test_the_title_is_escaped(app_dir, tmp_path):
+    out = tmp_path / "out"
+    assert _export(app_dir, out, BARE.replace('"bare"', '"a <b> & c"')) == 0
+    page = (out / "index.html").read_text()
+    assert f"<title>{html.escape('a <b> & c')}</title>" in page
+
+
+def test_no_file_requests_anything_outside_the_folder(walk_page):
+    for f in walk_page.rglob("*"):
+        if f.suffix not in {".js", ".mjs", ".html", ".json"}:
+            continue  # the license, the font, the glb and the maps hold no code
+        assert _urls_outside_comments(f.read_text()) == [], f
+
+
+def test_the_url_check_bites():
+    assert _urls_outside_comments('fetch("https://cdn.example/three.js") // https://ok') == [
+        "https://cdn.example/three.js"
+    ]
+    assert _urls_outside_comments("/* https://ok */ <!-- http://ok -->") == []

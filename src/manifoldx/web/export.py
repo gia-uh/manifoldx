@@ -7,10 +7,16 @@ out/
   state.json              the snapshot, engine.state, the engine's size and camera, the GUI
   scene.glb               the scene (and scene.export-report.json, the glTF export's report)
   report.json             the roots, what was transpiled, what stayed setup, what was left out
+  index.html              the page: serve the folder (python -m http.server) and open it
+  browser.js, input.js, scene.js, gui.js, sourcemap.js, progress.js   the page's modules
+  vendor/three/           three.js, as its SOURCE file says
+  fonts/                  the GUI's font, DejaVu Sans Mono, as the desktop draws it
 """
 
 from __future__ import annotations
 
+import gzip
+import html
 import json
 import os
 import runpy
@@ -22,6 +28,8 @@ from pathlib import Path
 
 JS = Path(__file__).parent / "js"
 RUNTIME = ("pyrt.js", "manifoldx.js", "replay.mjs")
+PAGE = ("browser.js", "input.js", "scene.js", "gui.js", "sourcemap.js", "progress.js")
+FONT = Path(__file__).parents[1] / "viz" / "assets" / "DejaVuSansMono.ttf"
 # three.js for the browser page, vendored as its SOURCE file says.
 THREE_VERSION = "0.186.1"
 VENDOR = Path(__file__).parent / "vendor" / "three"
@@ -119,11 +127,24 @@ def export_web(module: str | None, script: str | None, out: Path, app_args: list
         smap["sources"] = [paths[name]]
         (out / "app" / f"{name}.js").write_text(mod.code)
         (out / "app" / f"{name}.js.map").write_text(json.dumps(smap))
-    for f in RUNTIME:
+    for f in RUNTIME + PAGE:
         shutil.copy(JS / f, out / f)
+    shutil.rmtree(out / "vendor" / "three", ignore_errors=True)
+    shutil.copytree(VENDOR, out / "vendor" / "three")
+    (out / "fonts").mkdir(exist_ok=True)
+    shutil.copy(FONT, out / "fonts" / FONT.name)
     (out / "state.json").write_text(json.dumps(state, allow_nan=False))
     # Not engine.export_gltf: its report would call the transpiled roots dropped.
     export_engine(engine, out / "scene.glb", transpiled=[r.func for r in roots])
+    glb = (out / "scene.glb").read_bytes()
+    page = (JS / "index.html").read_text()
+    for key, value in {
+        "title": html.escape(str(engine.title)),
+        "scene_bytes": str(len(glb)),
+        "scene_gzip_bytes": str(len(gzip.compress(glb, 9))),
+    }.items():
+        page = page.replace("{{" + key + "}}", value)
+    (out / "index.html").write_text(page)
     (out / "report.json").write_text(json.dumps(report, indent=1) + "\n")
     for e in left_out:
         _say(f"left out of the state: {e}")

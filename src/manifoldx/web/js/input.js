@@ -154,8 +154,9 @@ export function attachDom(canvas, builder, { devicePixelRatio } = {}) {
     [win, "keyup", (ev) => builder.keyUp(ev)],
     [win, "blur", () => builder.blur()],
     [canvas, "pointerdown", (ev) => {
-      canvas.setPointerCapture(ev.pointerId);
       builder.pointerDown({ ...pick(ev), button: ev.button, pointerType: ev.pointerType, ...at(ev) });
+      // A locked pointer cannot be captured (Chromium throws InvalidStateError), nor needs to be.
+      if (!canvas.ownerDocument.pointerLockElement) canvas.setPointerCapture(ev.pointerId);
     }],
     [win, "pointermove", (ev) => {
       builder.pointerMove({ ...pick(ev), movementX: ev.movementX, movementY: ev.movementY, pointerType: ev.pointerType, ...at(ev) });

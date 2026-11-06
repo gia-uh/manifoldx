@@ -330,3 +330,14 @@ test("detach removes every listener", () => {
   detach();
   assert.deepEqual([Object.keys(win.on), Object.keys(canvas.on)], [[], []]);
 });
+
+test("a click while the pointer is locked reaches the builder; no capture is tried", () => {
+  // Chromium throws InvalidStateError from setPointerCapture while the pointer is locked.
+  const { win, canvas } = domFakes();
+  canvas.ownerDocument.pointerLockElement = canvas;
+  canvas.setPointerCapture = () => { throw new Error("InvalidStateError"); };
+  const b = new FrameBuilder();
+  attachDom(canvas, b);
+  canvas.fire("pointerdown", { button: 0, clientX: 410, clientY: 290, pointerType: "mouse", pointerId: 1 });
+  assert.deepEqual(b.take(vp).clicks, [1]);
+});
