@@ -23,15 +23,25 @@ class Node:
     extras: dict | None = None
 
 
-def build_glb(nodes, *, camera=None, lights=(), environment=None, scene_extras=None):
+def build_glb(nodes, *, camera=None, lights=(), environment=None, scene_extras=None, extra_materials=None):
+    """extra_materials: (id, material) pairs written even when no node uses them; the
+    scene's extras map each id to its glTF material index under "mx_materials"
+    (a material glTF cannot express is left out)."""
     w = _Writer()
     for i, node in enumerate(nodes):
         w.node(node, i)
+    mx_materials = {}
+    for mid, mat in extra_materials or ():
+        index, _note = w.material(mat)  # a note only matters for drawn materials, reported by node()
+        if index is not None:
+            mx_materials[str(mid)] = index
     if camera is not None:
         w.camera(camera)
     for light in lights:
         w.light(light)
     extras = dict(scene_extras or {})
+    if extra_materials is not None:
+        extras["mx_materials"] = mx_materials
     if environment is not None:
         extras["environment"] = w.environment(environment)
     return w.finish(extras), w.report

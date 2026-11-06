@@ -98,7 +98,8 @@ def nodes(engine, names, extras, report):
         t = comps["Transform"][i]
         out.append(Node(engine._geometry_registry.get(gid), material,
                         pos=tuple(t[0:3]), rot=tuple(t[3:7]), scale=tuple(t[7:10]),
-                        name=name_of(i) or f"entity_{i}", extras=extras_of(i)))
+                        name=name_of(i) or f"entity_{i}",
+                        extras={**(extras_of(i) or {}), "mx": {"entity": i, "material": mid}}))
     return out
 
 
@@ -108,7 +109,8 @@ def export_engine(engine, path, *, names=None, extras=None, strict=False):
     report = code_report(engine)
     lights = [light for light in (engine._sun, engine._spot) if light is not None] + list(engine._lights)
     data, written = build_glb(nodes(engine, names, extras, report), camera=engine.camera, lights=lights,
-                              environment=engine._environment, scene_extras=scene_extras(engine))
+                              environment=engine._environment, scene_extras=scene_extras(engine),
+                              extra_materials=list(engine._material_registry._materials.items()))
     report.extend(written)
     report.print()
     if strict and len(report):
