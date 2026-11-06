@@ -1,7 +1,8 @@
 """The manifoldx command.
 
 `manifoldx run` runs an app and reloads it in the same window whenever its source changes.
-`manifoldx export` runs an app and writes its scene to glTF instead of a window.
+`manifoldx export` runs an app and writes its scene to glTF instead of a window; with --web, a
+folder the browser runs (manifoldx.web.export).
 `manifoldx look`, `state`, `set`, `emit`, `events` and `log` talk to the dev server of the app
 running under `manifoldx run` in this folder (see manifoldx.devchannel).
 
@@ -9,6 +10,7 @@ running under `manifoldx run` in this folder (see manifoldx.devchannel).
     manifoldx run -m package.module [-- <app args>]
     manifoldx export app.py scene.glb [--strict] [-- <app args>]
     manifoldx export -m package.module scene.glb [--strict] [-- <app args>]
+    manifoldx export --web [-m package.module | app.py] OUTDIR [-- <app args>]
     manifoldx look | events | state [key.path] | set '<merge patch>' | emit <event> ['<payload>']
     manifoldx log [-n N] [--after SEQ] [--match REGEX] [--wait S]
     manifoldx metrics [-n N]
@@ -16,7 +18,6 @@ running under `manifoldx run` in this folder (see manifoldx.devchannel).
 
 import argparse
 import os
-import runpy
 import sys
 
 
@@ -30,8 +31,10 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     ex = sub.add_parser("export", help="run an app and write its scene to a .glb instead of opening a window")
     ex.add_argument("-m", dest="module", help="run this module as __main__, like python -m")
-    ex.add_argument("paths", nargs="+", metavar="[app.py] out.glb")
+    ex.add_argument("paths", nargs="+", metavar="[app.py] out.glb|OUTDIR")
     ex.add_argument("--strict", action="store_true", help="exit with code 1 and write nothing if anything is left out")
+    ex.add_argument("--web", action="store_true",
+                    help="write a folder the browser runs: the transpiled app, its state and its scene")
     run = sub.add_parser("run", help="run an app and reload it in the same window when its source changes")
     run.add_argument("-m", dest="module", help="run this module as __main__, like python -m")
     run.add_argument("script", nargs="?", metavar="app.py")
@@ -65,8 +68,15 @@ def main(argv=None):
         port = {} if args.port is None else {"port": args.port}
         HotReloader(script=args.script, module=args.module, argv=app_args, debug=args.debug, **port).run()
         return 0
+    out = "OUTDIR" if args.web else "out.glb"
     if len(args.paths) != (1 if args.module else 2):
-        parser.error("give app.py and out.glb, or -m module and out.glb")
+        parser.error(f"give app.py and {out}, or -m module and {out}")
+    if args.web:
+        if args.strict:
+            parser.error("--strict is for the .glb export; --web always fails on what cannot cross")
+        from manifoldx.web.export import export_web
+
+        return export_web(args.module, None if args.module else args.paths[0], args.paths[-1], app_args)
     return export(args.module, None if args.module else args.paths[0], args.paths[-1], args.strict, app_args)
 
 
@@ -140,31 +150,16 @@ def dev_command(args):
 
 
 def export(module, script, output, strict, app_args):
-    from manifoldx.engine import Engine
     from manifoldx.gltf import ExportIncomplete
+    from manifoldx.web.export import capture_engine
 
-    exported = []
-
-    def run(engine):
-        exported.append(engine.export_gltf(output, strict=strict))
-
-    original, saved_argv, saved_path = Engine.run, sys.argv, list(sys.path)
-    Engine.run = run
-    sys.argv = [module or script, *app_args]
-    # What python itself puts first on sys.path: the script's folder, or the working directory for -m.
-    sys.path.insert(0, os.getcwd() if module else os.path.dirname(os.path.abspath(script)))
-    try:
-        if module:
-            runpy.run_module(module, run_name="__main__", alter_sys=True)
-        else:
-            runpy.run_path(script, run_name="__main__")
-    except ExportIncomplete:
-        return 1
-    finally:
-        Engine.run, sys.argv = original, saved_argv
-        sys.path[:] = saved_path
-    if not exported:
+    engine, _ = capture_engine(module, script, app_args)
+    if engine is None:
         print(f"manifoldx export: {module or script} finished without calling engine.run(); nothing written",
               file=sys.stderr)
         return 2
+    try:
+        engine.export_gltf(output, strict=strict)
+    except ExportIncomplete:
+        return 1
     return 0

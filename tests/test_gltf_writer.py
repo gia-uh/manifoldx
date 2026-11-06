@@ -211,3 +211,16 @@ def test_texture_is_not_tinted_by_the_colour(tmp_path):
     g = load(out)
     assert g.materials[0].pbrMetallicRoughness.baseColorFactor == [1, 1, 1, 1]
     assert g.meshes[0].primitives[0].attributes.COLOR_0 is None
+
+
+def test_extra_materials_are_written_and_mapped(tmp_path):
+    from manifoldx.gltf.writer import build_glb
+
+    used, unused = StandardMaterial("#ffffff"), StandardMaterial("#ff0000")
+    data, report = build_glb([Node(tri(), used)], extra_materials=[(1, used), (7, unused)])
+    out = tmp_path / "a.glb"
+    out.write_bytes(data)
+    g = load(out)
+    assert g.scenes[0].extras["manifoldx"]["mx_materials"] == {"1": 0, "7": 1}
+    assert len(g.materials) == 2 and len(report) == 0
+    assert b"mx_materials" not in build_glb([Node(tri(), used)])[0]  # only asked for

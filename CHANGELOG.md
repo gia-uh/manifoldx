@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`manifoldx export --web [-m module | app.py] OUTDIR`: the app's per-frame Python,
+  transpiled to JavaScript, with the state its setup left.** The app runs its setup in
+  Python (startup handlers included); its systems, event handlers and ValueDisplay getters,
+  and what they reach through types, become ES modules with source maps to the `.py` lines.
+  The folder also holds the runtime, `state.json` (the reached objects and `engine.state`),
+  `scene.glb` and `report.json` (roots, transpiled and setup functions, state left out).
+  Code outside the subset fails with its file, line and root, and nothing is written. No
+  browser page yet: the folder runs in Node. `know-how/web-export.md` says how (#140).
+
+- **`manifoldx.web`: transpiler, snapshot, headless runtime and replay.** `transpile_app`
+  and its typing from annotations, live objects and call sites; `snapshot` of reached
+  state; `js/pyrt.js` and `js/manifoldx.js` (input, camera, `set_material` and
+  `capture_pointer` without a renderer); and `manifoldx.web.replay`, which runs one script
+  of input frames through the app in Python and through its export in Node and reports the
+  first frame where they differ (`replay_python`, `replay_node`, `compare`) (#140).
+
+- **`examples/web_walk.py`: walk, pick boxes and name them in a GUI panel.** The app the
+  replay test exports and replays for 600 scripted frames (#140).
+
+- **`engine.set_material(entity, material)`: switch an entity's material by handle or
+  index.** Raises ValueError for a dead entity. With `engine.input.capture_pointer`, it is
+  the engine API the web runtime implements for picking and mouse look (#140).
+
+- **glTF export: entity and material ids, and unused materials.** Each node's extras carry
+  `"mx": {"entity", "material"}` next to the app's own extras; the scene's extras map every
+  registered material id to its glTF material under `"mx_materials"`, and materials no
+  entity uses yet (a selection highlight) are written too (#140).
+
 - **`engine.set_joints(indices, matrices)`: pose a crowd of skinned entities in one
   call.** `matrices` is (N, J, 4, 4), one pose per index, with the same rule and checks as
   `EntityHandle.set_joints`. It allocates every missing joint block at once, writes the

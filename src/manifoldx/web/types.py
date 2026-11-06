@@ -1,0 +1,1430 @@
+"""The web transpiler's type model.
+
+A `Ty` is what the transpiler knows about a value; it decides how an operator, a test or a
+call becomes JavaScript (`[] or x` needs `or_`, `a + b` on lists concatenates, `len` of a
+str counts code points). `TypeEnv` holds the app's modules and types every function's
+locals and returns, from annotations first, then by inference over assignments.
+Types come only from those sources, never from a name.
+
+Later steps feed it more: live types from the objects setup built, and argument types
+joined at call sites (`solve`).
+"""
+
+from __future__ import annotations
+
+import ast
+import sys
+import types
+from dataclasses import dataclass, field
+
+import numpy as np
+
+KINDS = frozenset(
+    {
+        "num",
+        "int",
+        "bool",
+        "str",
+        "none",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "vec",
+        "obj",
+        "fn",
+        "union",
+        "unknown",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Ty:
+    """A type. `args` holds the element types: list[elem], set[elem], tuple[*items],
+    dict[key, value], union[*members], fn[return] (empty when the return is unknown).
+    `dtype` is a vec's "f64" or "f32". A num carries one when it is a numpy scalar, which
+    numpy keeps at its precision ("f32": np.float32, float32 arithmetic; "f64":
+    np.float64); a Python float or int has none and takes the other operand's precision
+    (NEP 50). `name` is an obj's class ("module.Qualname") or a
+    fn's function ("module.qualname"), None for a lambda, or "manifoldx.hot.State" for
+    engine.state's dict (STATE).
+
+    A union with no members is the empty type: the elements of `[]`, or a variable before
+    its first assignment. Joining it with anything gives the other side.
+    """
+
+    kind: str
+    args: tuple[Ty, ...] = ()
+    dtype: str | None = None
+    name: str | None = None
+
+    def __post_init__(self):
+        if self.kind not in KINDS:
+            raise ValueError(f"unknown type kind {self.kind!r}")
+        if self.kind == "vec" and self.dtype not in ("f64", "f32"):
+            raise ValueError(f"a vec's dtype is f64 or f32, not {self.dtype!r}")
+        if self.kind == "num" and self.dtype not in (None, "f64", "f32"):
+            raise ValueError(f"a num's dtype is None, f64 or f32, not {self.dtype!r}")
+        if self.kind not in ("vec", "num") and self.dtype is not None:
+            raise ValueError(f"a {self.kind} has no dtype")
+
+    def __str__(self) -> str:
+        k, a = self.kind, self.args
+        if k == "union":
+            return " | ".join(map(str, a)) if a else "never"
+        if k in ("list", "set", "tuple", "dict"):
+            return f"{k}[{', '.join(map(str, a))}]"
+        if k == "vec" or (k == "num" and self.dtype):
+            return f"{k}[{self.dtype}]"
+        if k in ("obj", "fn") and self.name:
+            return f"{k} {self.name}"
+        return k
+
+    @property
+    def members(self) -> tuple[Ty, ...]:
+        """The members of a union, or the type itself."""
+        return self.args if self.kind == "union" else (self,)
+
+    def all(self, *kinds: str) -> bool:
+        """Every member has one of `kinds` (False for the empty type)."""
+        return bool(self.members) and all(m.kind in kinds for m in self.members)
+
+    @property
+    def known(self) -> bool:
+        return self.kind != "unknown"
+
+    @property
+    def is_bool(self) -> bool:
+        return self.all("bool")
+
+    @property
+    def is_numeric(self) -> bool:
+        return self.all("num", "int", "bool")
+
+    @property
+    def is_scalar(self) -> bool:
+        return self.all("num", "int", "bool", "str", "none")
+
+
+NUM, INT, BOOL, STR, NONE = Ty("num"), Ty("int"), Ty("bool"), Ty("str"), Ty("none")
+UNKNOWN = Ty("unknown")
+NEVER = Ty("union")
+NUM32, NUM64 = Ty("num", dtype="f32"), Ty("num", dtype="f64")
+# engine.state, a hot.State: a dict with str keys whose keys also read and write as
+# attributes (`engine.state.cam`), which the transpiler turns into getitem and setitem.
+STATE = Ty("dict", (STR, UNKNOWN), name="manifoldx.hot.State")
+
+
+def list_of(elem: Ty) -> Ty:
+    return Ty("list", (elem,))
+
+
+def set_of(elem: Ty) -> Ty:
+    return Ty("set", (elem,))
+
+
+def tuple_of(*items: Ty) -> Ty:
+    return Ty("tuple", tuple(items))
+
+
+def dict_of(key: Ty, value: Ty) -> Ty:
+    return Ty("dict", (key, value))
+
+
+def vec(dtype: str = "f64") -> Ty:
+    return Ty("vec", dtype=dtype)
+
+
+def obj(name: str) -> Ty:
+    return Ty("obj", name=name)
+
+
+def fn(name: str | None = None, returns: Ty | None = None) -> Ty:
+    return Ty("fn", (returns,) if returns is not None else (), name=name)
+
+
+def union(*tys: Ty) -> Ty:
+    """The join of `tys`: flattened, without repeats; unknown absorbs everything.
+    Two lists (sets, dicts) join their element types; tuples of one length join item-wise."""
+    out: list[Ty] = []
+    for t in tys:
+        for m in t.members:
+            if m.kind == "unknown":
+                return UNKNOWN
+            for i, o in enumerate(out):
+                merged = _merge(o, m)
+                if merged is not None:
+                    out[i] = merged
+                    break
+            else:
+                out.append(m)
+    return out[0] if len(out) == 1 else Ty("union", tuple(out))
+
+
+def _merge(a: Ty, b: Ty) -> Ty | None:
+    """a and b as one type when they have the same shape, else None."""
+    if a == b:
+        return a
+    if a.kind != b.kind or a.kind in ("vec", "obj"):
+        return None
+    if a.kind in ("list", "set", "dict") or (a.kind == "tuple" and len(a.args) == len(b.args)):
+        return Ty(a.kind, tuple(union(x, y) for x, y in zip(a.args, b.args)))
+    if a.kind == "fn" and a.name == b.name:
+        return fn(a.name, union(*a.args, *b.args) if a.args or b.args else None)
+    return None
+
+
+def join(a: Ty, b: Ty) -> Ty:
+    return union(a, b)
+
+
+def precision(t: Ty) -> str | None:
+    """The numpy precision arithmetic on t's numbers runs at: "f32" when some member is
+    float32 and none float64, "f64" when some is float64 and none float32, None for Python
+    numbers only, "mixed" when a member is each (the result depends on the value)."""
+    found = {m.dtype for m in t.members if m.kind in ("num", "vec") and m.dtype}
+    return "mixed" if len(found) > 1 else (found.pop() if found else None)
+
+
+def arith_dtype(a: Ty, b: Ty) -> str | None:
+    """The precision of a + b (or -, *, /) on numbers or vecs, numpy 2's rules: two float32
+    sides or float32 against a Python number stay float32; float64 anywhere wins."""
+    pa, pb = precision(a), precision(b)
+    if "mixed" in (pa, pb):
+        return "mixed"
+    if "f64" in (pa, pb):
+        return "f64"
+    return "f32" if "f32" in (pa, pb) else None
+
+
+def elem(t: Ty) -> Ty:
+    """The type of the items iterating a value of type t yields."""
+    out = []
+    for m in t.members:
+        if m.kind in ("list", "set"):
+            out.append(m.args[0])
+        elif m.kind == "tuple":
+            out.append(union(*m.args))
+        elif m.kind == "dict":
+            out.append(m.args[0])
+        elif m.kind == "str":
+            out.append(STR)
+        elif m.kind == "vec":
+            out.append(Ty("num", dtype=m.dtype))
+        else:
+            return UNKNOWN
+    return union(*out)
+
+
+# ---------------------------------------------------------------- live types
+
+
+def _library(module: str) -> bool:
+    """A class from this module is a library's, not the app's: its fields are not walked."""
+    root = module.partition(".")[0]
+    if root in sys.stdlib_module_names or root in ("manifoldx", "numpy", "builtins"):
+        return True
+    path = getattr(sys.modules.get(module), "__file__", None) or ""
+    return "site-packages" in path or "dist-packages" in path
+
+
+def class_name(cls: type) -> str:
+    """ "module.Qualname", by the shortest module that exports the class: a Path made at
+    setup is a pathlib.PosixPath, not a pathlib._local.PosixPath."""
+    parts = cls.__module__.split(".")
+    for i in range(1, len(parts)):
+        if getattr(sys.modules.get(".".join(parts[:i])), cls.__qualname__, None) is cls:
+            return f"{'.'.join(parts[:i])}.{cls.__qualname__}"
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+class LiveTypes:
+    """The field types of the app's objects as setup left them: observe(obj) records the
+    type of each field of obj's class, joined over every instance observed, and walks into
+    the app objects the fields hold. `fields` maps "module.Qualname" to {field: Ty}.
+
+    An object of a library class types as obj("module.Qualname") without its fields;
+    `modules` (the app's module names) decides which classes are the app's, and without it
+    every class outside the standard library, numpy, manifoldx and site-packages is."""
+
+    def __init__(self, modules=None):
+        self.modules = set(modules) if modules is not None else None
+        self.fields: dict[str, dict[str, Ty]] = {}
+        self.globals: dict[tuple[str, str], Ty] = {}
+        self._seen: dict[int, object] = {}  # keeps what it saw alive, so ids stay unique
+
+    def is_app(self, cls: type) -> bool:
+        if self.modules is not None:
+            return cls.__module__ in self.modules
+        return not _library(cls.__module__)
+
+    def observe(self, value) -> Ty:
+        """value's type; for an app object, also record its class's fields."""
+        return self.of(value)
+
+    def observe_global(self, module: str, name: str, value) -> Ty:
+        """Record the module global module.name as holding value."""
+        t = self.of(value)
+        self.globals[(module, name)] = join(self.globals.get((module, name), NEVER), t)
+        return t
+
+    def of(self, v) -> Ty:
+        if v is None:
+            return NONE
+        if isinstance(v, (bool, np.bool_)):
+            return BOOL
+        if isinstance(v, np.floating):  # before float: np.float64 is a float
+            return NUM32 if v.dtype == np.float32 else NUM64
+        if isinstance(v, (int, np.integer)):
+            return INT
+        if isinstance(v, float):
+            return NUM
+        if isinstance(v, str):
+            return STR
+        if isinstance(v, np.ndarray):
+            if v.dtype == np.float32:
+                return vec("f32")
+            return vec("f64") if np.issubdtype(v.dtype, np.floating) else UNKNOWN
+        if isinstance(v, list):
+            return list_of(union(*map(self.of, v)))
+        if isinstance(v, tuple):
+            return tuple_of(*map(self.of, v))
+        if isinstance(v, (set, frozenset)):
+            return set_of(union(*map(self.of, v)))
+        if isinstance(v, dict):
+            return dict_of(union(*map(self.of, v)), union(*map(self.of, v.values())))
+        if isinstance(v, (types.FunctionType, types.MethodType)):
+            f = getattr(v, "__func__", v)
+            return fn(None if f.__name__ == "<lambda>" else f"{f.__module__}.{f.__qualname__}")
+        if isinstance(v, (type, types.ModuleType)) or callable(v) and not hasattr(v, "__dict__"):
+            return UNKNOWN
+        cls = type(v)
+        name = class_name(cls)
+        if self.is_app(cls) and id(v) not in self._seen:
+            self._seen[id(v)] = v
+            fields = self.fields.setdefault(name, {})
+            for k, x in vars(v).items() if hasattr(v, "__dict__") else ():
+                fields[k] = join(fields.get(k, NEVER), self.of(x))
+        return obj(name)
+
+
+# ---------------------------------------------------------------- the environment
+
+
+class TranspileError(Exception):
+    """A reached construct outside the subset, at path:line, and the root that reached it."""
+
+    def __init__(self, path: str, line: int, what: str, root: str | None = None):
+        super().__init__(path, line, what, root)
+        self.path, self.line, self.what, self.root = path, line, what, root
+
+    def __str__(self) -> str:
+        where = f" (reached from {self.root})" if self.root else ""
+        return f"{self.path}:{self.line}: {self.what} is outside the subset{where}"
+
+
+def module_path(name: str) -> str:
+    return name.replace(".", "/") + ".py"
+
+
+FunctionKey = tuple[str, str]  # (module, qualname)
+
+
+def key_label(key: FunctionKey) -> str:
+    return f"{key[0]}.{key[1]}"
+
+
+@dataclass(frozen=True)
+class Symbol:
+    """What a module-level name means.
+
+    kind: "func" (target is a FunctionKey), "module" (an app module, target its name),
+    "const" (a module global, target (module, name)), "import" (a name imported from an app
+    module, target (module, name), resolved through that module), "lib" (math, numpy,
+    textwrap: target the library), "setup" (a name bound by any other import: setup-only,
+    an error when reached code names it; target the import's text), "class" (target
+    "module.Qualname").
+    """
+
+    kind: str
+    target: object
+
+
+@dataclass
+class FuncInfo:
+    """A function's signature and what inference knows about its body.
+
+    A method's key is (module, "Class.method") and `cls` its class ("module.Class"); its
+    first parameter is typed as that class. A function defined inside another has the key
+    (module, "outer.<locals>.inner") and `parent` the outer one's key."""
+
+    key: FunctionKey
+    node: ast.FunctionDef
+    params: list[str]
+    defaults: dict[str, ast.expr]
+    param_types: dict[str, Ty]
+    locals: dict[str, Ty] = field(default_factory=dict)
+    returns: Ty = NEVER
+    annotated: set[str] = field(default_factory=set)  # locals whose annotation fixes them
+    cls: str | None = None
+    parent: FunctionKey | None = None
+    declared: dict[str, Ty] = field(default_factory=dict)  # param types before call sites
+
+    @property
+    def self_name(self) -> str | None:
+        """The name a method's instance goes by (its first parameter)."""
+        return self.params[0] if self.cls and self.params else None
+
+
+@dataclass
+class ClassInfo:
+    """An app class: its fields' types (from class-level annotations, then from every
+    `self.x = ...` in its methods), its methods and properties, and for a dataclass the
+    fields its generated __init__ takes, in order."""
+
+    name: str  # "module.Qualname"
+    node: ast.ClassDef
+    dataclass: bool
+    fields: dict[str, Ty] = field(default_factory=dict)
+    annotated: set[str] = field(default_factory=set)
+    init_fields: list[ast.AnnAssign] = field(default_factory=list)
+    methods: dict[str, FunctionKey] = field(default_factory=dict)
+    properties: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class Ctx:
+    """Where an expression is: its module, its function (None at module level), the names
+    an enclosing comprehension or lambda binds, and the enclosing function's Ctx for a
+    function defined inside another."""
+
+    module: str
+    func: FuncInfo | None = None
+    extra: tuple[tuple[str, Ty], ...] = ()
+    parent: Ctx | None = None
+
+    def bind(self, names: dict[str, Ty]) -> Ctx:
+        return Ctx(self.module, self.func, self.extra + tuple(names.items()), self.parent)
+
+    def binder(self, name: str) -> Ctx | None:
+        """The innermost Ctx whose function or bindings hold `name`, None for a global."""
+        c = self
+        while c is not None:
+            if any(k == name for k, _ in c.extra):
+                return c
+            f = c.func
+            if f is not None and (name in f.locals or name in f.param_types):
+                return c
+            c = c.parent
+        return None
+
+
+BUILTIN_RETURNS = {
+    "len": INT,
+    "bool": BOOL,
+    "int": INT,
+    "float": NUM,
+    "any": BOOL,
+    "all": BOOL,
+    "hasattr": BOOL,
+    "isinstance": BOOL,
+    "str": STR,
+    "range": list_of(INT),
+}
+
+# Methods of builtin values the subset has, and what they return.
+STR_METHODS = {
+    "lower": STR,
+    "upper": STR,
+    "strip": STR,
+    "startswith": BOOL,
+    "endswith": BOOL,
+    "join": STR,
+}
+
+LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
+
+# The manifoldx objects the headless runtime (js/manifoldx.js) implements, by class: each
+# attribute's type, a method's as fn(name, return), by the names class_name gives the
+# classes. What is not here types as unknown.
+_INPUT, _CAMERA = "manifoldx.input.InputState", "manifoldx.Camera"
+RUNTIME_SURFACE = {
+    "manifoldx.Engine": {
+        "input": obj(_INPUT),
+        "camera": obj(_CAMERA),
+        "w": INT,
+        "h": INT,
+        "state": STATE,
+        "set_material": fn("manifoldx.Engine.set_material", NONE),
+    },
+    _INPUT: {
+        "pressed_keys": set_of(STR),
+        "modifiers": list_of(STR),
+        "mouse_pos": tuple_of(NUM, NUM),
+        "mouse_delta": tuple_of(NUM, NUM),
+        "wheel_delta": tuple_of(NUM, NUM),
+        "pressed_buttons": list_of(INT),
+        "viewport_size": tuple_of(INT, INT),
+        "pointer_captured": BOOL,
+        **{
+            m: fn(f"{_INPUT}.{m}", BOOL)
+            for m in (
+                "is_pressed",
+                "just_pressed",
+                "just_released",
+                "is_mouse_pressed",
+                "just_mouse_pressed",
+                "just_mouse_released",
+                "capture_pointer",
+            )
+        },
+    },
+    _CAMERA: {
+        "position": vec("f32"),
+        "target": vec("f32"),
+        "near": NUM,
+        "far": NUM,
+        "get_forward": fn(f"{_CAMERA}.get_forward", vec("f32")),
+    },
+}
+
+# math's functions the subset has, and its constants.
+MATH_FUNCTIONS = frozenset(
+    "sin cos tan asin acos atan atan2 sqrt exp log floor ceil fabs hypot radians degrees".split()
+)
+LIB_CONSTANTS = {
+    "math.pi": "Math.PI",
+    "math.e": "Math.E",
+    "math.tau": "(2 * Math.PI)",
+    "math.inf": "Infinity",
+    "math.nan": "NaN",
+    "numpy.pi": "Math.PI",
+    "numpy.inf": "Infinity",
+}
+
+
+class TypeEnv:
+    """The app's modules, their symbols and functions, and the types inference found.
+
+    expr(node, ctx) -> Ty         the type of an expression
+    resolve(module, name) -> Symbol | None
+    function(key) -> FuncInfo
+    local(key, name) -> Ty
+    solve(functions=None) -> None  type locals and returns to a fixed point
+    """
+
+    MAX_PASSES = 20
+
+    def __init__(self, modules: dict[str, ast.Module], live=None):
+        self.modules = modules
+        self.live = live
+        self.symbols: dict[str, dict[str, Symbol]] = {}
+        self.globals: dict[tuple[str, str], Ty] = {}
+        self.functions: dict[FunctionKey, FuncInfo] = {}
+        self.classes: dict[str, ClassInfo] = {}
+        # A closure root's free variables, typed from its live cells: {key: {name: Ty}}.
+        self.cells: dict[FunctionKey, dict[str, Ty]] = {}
+        for name, tree in modules.items():
+            self.symbols[name] = self._scan(name, tree)
+        # Signatures after every module's names are known, so an annotation may name a
+        # class defined later or in another module.
+        for name, tree in modules.items():
+            for n in tree.body:
+                if isinstance(n, ast.FunctionDef):
+                    self._register(name, n, n.name)
+                elif isinstance(n, ast.ClassDef):
+                    self._class(name, n)
+
+    # ---------------------------------------------------------- module scan
+    def resolve_module(self, module: str, target: str | None, level: int) -> str | None:
+        """The app module an import names, relative to `module`, or None."""
+        if level:
+            parts = module.split(".")[:-level] if level <= module.count(".") + 1 else None
+            if parts is None:
+                return None
+            target = ".".join(parts + ([target] if target else []))
+        return target if target in self.modules else None
+
+    def _scan(self, module: str, tree: ast.Module) -> dict[str, Symbol]:
+        syms: dict[str, Symbol] = {}
+        for n in tree.body:
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    bound = a.asname or a.name.split(".")[0]
+                    if a.name in LIBS:
+                        syms[bound] = Symbol("lib", a.name)
+                    elif a.name in self.modules and (a.asname or "." not in a.name):
+                        syms[bound] = Symbol("module", a.name)
+                    else:
+                        syms[bound] = Symbol("setup", f"import {a.name}")
+            elif isinstance(n, ast.ImportFrom):
+                src = self.resolve_module(module, n.module, n.level)
+                for a in n.names:
+                    bound = a.asname or a.name
+                    sub = self.resolve_module(
+                        module, f"{n.module}.{a.name}" if n.module else a.name, n.level
+                    )
+                    if src is not None:
+                        syms[bound] = Symbol("import", (src, a.name))
+                    elif sub is not None:
+                        syms[bound] = Symbol("module", sub)
+                    else:
+                        syms[bound] = Symbol("setup", f"from {n.module} import {a.name}")
+            elif isinstance(n, ast.FunctionDef):
+                syms[n.name] = Symbol("func", (module, n.name))
+            elif isinstance(n, ast.ClassDef):
+                syms[n.name] = Symbol("class", f"{module}.{n.name}")
+            elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in targets:
+                    for name in target_names(t):
+                        syms[name] = Symbol("const", (module, name))
+        return syms
+
+    def _register(
+        self,
+        module: str,
+        n: ast.FunctionDef,
+        qualname: str,
+        cls: str | None = None,
+        parent: FunctionKey | None = None,
+    ) -> FuncInfo:
+        """A FuncInfo for n and for each function defined inside it."""
+        key = (module, qualname)
+        info = self._func_info(key, n, module)
+        info.cls, info.parent = cls, parent
+        if cls and n.args.args and n.args.args[0].annotation is None:
+            info.param_types[n.args.args[0].arg] = obj(cls)
+        info.declared = dict(info.param_types)
+        self.functions[key] = info
+        for st in own_statements(n.body):
+            if isinstance(st, ast.FunctionDef):
+                self._register(module, st, f"{qualname}.<locals>.{st.name}", parent=key)
+        return info
+
+    def _class(self, module: str, n: ast.ClassDef) -> None:
+        name = f"{module}.{n.name}"
+        info = ClassInfo(name, n, any(self.is_dataclass(d, module) for d in n.decorator_list))
+        self.classes[name] = info
+        for st in n.body:
+            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                if is_classvar(st.annotation):
+                    continue
+                info.fields[st.target.id] = self.annotation(st.annotation, module)
+                info.annotated.add(st.target.id)
+                if info.dataclass:
+                    info.init_fields.append(st)
+            elif isinstance(st, ast.FunctionDef):
+                f = self._register(module, st, f"{n.name}.{st.name}", cls=name)
+                info.methods[st.name] = f.key
+                if any(ast.unparse(d) == "property" for d in st.decorator_list):
+                    info.properties.add(st.name)
+        if info.dataclass and "__init__" not in info.methods:
+            init = self._dataclass_init(n, info.init_fields)
+            info.methods["__init__"] = self._register(
+                module, init, f"{n.name}.__init__", cls=name
+            ).key
+
+    @staticmethod
+    def _dataclass_init(n: ast.ClassDef, fields: list[ast.AnnAssign]) -> ast.FunctionDef:
+        """The __init__ @dataclass generates, as a def: one parameter per field, whose
+        default is the field's value (a constant or a field(...) call)."""
+        args = [ast.arg("self")] + [ast.arg(f.target.id, f.annotation) for f in fields]
+        defaults = [f.value for f in fields if f.value is not None]
+        init = ast.FunctionDef(
+            name="__init__",
+            args=ast.arguments(
+                posonlyargs=[], args=args, kwonlyargs=[], kw_defaults=[], defaults=defaults
+            ),
+            body=[],
+            decorator_list=[],
+            returns=None,
+            type_params=[],
+        )
+        return ast.copy_location(init, n)
+
+    def is_dataclass(self, d: ast.expr, module: str) -> bool:
+        """d is @dataclass or @dataclass(...), from the dataclasses module."""
+        d = d.func if isinstance(d, ast.Call) else d
+        return self.from_stdlib(d, module, "dataclasses", "dataclass")
+
+    def from_stdlib(self, n: ast.expr, module: str, lib: str, name: str) -> bool:
+        """n names `lib.name`, imported either way."""
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            sym = self.symbols.get(module, {}).get(n.value.id)
+            return n.attr == name and sym is not None and sym.target == f"import {lib}"
+        if isinstance(n, ast.Name):
+            sym = self.symbols.get(module, {}).get(n.id)
+            return sym is not None and sym.target == f"from {lib} import {name}"
+        return False
+
+    def ctx_of(self, info: FuncInfo) -> Ctx:
+        """The Ctx of info's body: a function defined inside another sees that one's names;
+        a closure whose live cells are known sees their types first."""
+        parent = self.ctx_of(self.functions[info.parent]) if info.parent else None
+        return Ctx(info.key[0], info, tuple(self.cells.get(info.key, {}).items()), parent)
+
+    def register_lambda(self, module: str, qualname: str, n: ast.Lambda) -> FuncInfo:
+        """A lambda as a function of its own (a GUI getter is one), keyed
+        (module, "qualname@line:col"); its free variables come from `cells`."""
+        body = ast.copy_location(ast.Return(n.body), n.body)
+        node = ast.FunctionDef(
+            name="<lambda>",
+            args=n.args,
+            body=[body],
+            decorator_list=[],
+            returns=None,
+            type_params=[],
+        )
+        key = (module, f"{qualname}@{n.lineno}:{n.col_offset}")
+        info = self._func_info(key, ast.copy_location(node, n), module)
+        info.declared = dict(info.param_types)
+        self.functions[key] = info
+        return info
+
+    def _func_info(self, key: FunctionKey, n: ast.FunctionDef, module: str) -> FuncInfo:
+        a = n.args
+        params = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs]
+        positional = a.posonlyargs + a.args
+        defaults = {
+            p.arg: d for p, d in zip(positional[len(positional) - len(a.defaults) :], a.defaults)
+        }
+        defaults |= {p.arg: d for p, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None}
+        types = {}
+        for p in a.posonlyargs + a.args + a.kwonlyargs:
+            types[p.arg] = self.annotation(p.annotation, module) if p.annotation else UNKNOWN
+        return FuncInfo(key, n, params, defaults, types)
+
+    def annotation(self, node: ast.expr, module: str) -> Ty:
+        """The type an annotation names; unknown for what the model has no kind for."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return self.annotation(ast.parse(node.value, mode="eval").body, module)
+        if isinstance(node, ast.Constant) and node.value is None:
+            return NONE
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return union(self.annotation(node.left, module), self.annotation(node.right, module))
+        if isinstance(node, ast.Name):
+            simple = {"int": INT, "float": NUM, "bool": BOOL, "str": STR}
+            if node.id in simple:
+                return simple[node.id]
+            sym = self.resolve(module, node.id)
+            if sym is not None and sym.kind == "class":
+                return obj(sym.target)
+            return UNKNOWN
+        if isinstance(node, ast.Attribute) and ast.unparse(node) in ("np.ndarray", "numpy.ndarray"):
+            return vec("f64")
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            args = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            ts = [self.annotation(x, module) for x in args]
+            head = node.value.id
+            if head == "list" and len(ts) == 1:
+                return list_of(ts[0])
+            if head == "set" and len(ts) == 1:
+                return set_of(ts[0])
+            if head == "dict" and len(ts) == 2:
+                return dict_of(*ts)
+            if head == "tuple":
+                return tuple_of(*ts)
+            if head == "Optional" and len(ts) == 1:
+                return union(ts[0], NONE)
+        return UNKNOWN
+
+    # ---------------------------------------------------------- lookups
+    def resolve(self, module: str, name: str) -> Symbol | None:
+        """The module-level symbol `name` in `module`, following imports from app modules."""
+        seen = set()
+        sym = self.symbols.get(module, {}).get(name)
+        while sym is not None and sym.kind == "import" and sym.target not in seen:
+            seen.add(sym.target)
+            src, attr = sym.target
+            sym = self.symbols[src].get(attr)
+            if sym is None and self.resolve_module(src, attr, 0) is None:
+                sub = f"{src}.{attr}"
+                sym = Symbol("module", sub) if sub in self.modules else None
+        return sym
+
+    def function(self, key: FunctionKey) -> FuncInfo:
+        return self.functions[key]
+
+    def local(self, key: FunctionKey, name: str) -> Ty:
+        info = self.functions[key]
+        return info.locals.get(name, info.param_types.get(name, UNKNOWN))
+
+    @staticmethod
+    def is_local(name: str, ctx: Ctx) -> bool:
+        return ctx.binder(name) is not None
+
+    def lib_name(self, n: ast.expr, ctx: Ctx) -> str | None:
+        """The dotted name n spells inside a library module ("numpy.linalg.norm",
+        "math.pi"), or None when n does not start at a library import."""
+        parts = []
+        while isinstance(n, ast.Attribute):
+            parts.append(n.attr)
+            n = n.value
+        if not isinstance(n, ast.Name) or self.is_local(n.id, ctx):
+            return None
+        sym = self.symbols.get(ctx.module, {}).get(n.id)
+        if sym is None or sym.kind != "lib":
+            return None
+        return ".".join([sym.target, *reversed(parts)])
+
+    def np_dtype(self, n: ast.Call, ctx: Ctx) -> str | None:
+        """The dtype an np.array or np.zeros call asks for: "f64" by default, "f32" for
+        np.float32, None for any other."""
+        given = [k.value for k in n.keywords if k.arg == "dtype"] + n.args[1:2]
+        if not given:
+            return "f64"
+        return {"numpy.float32": "f32", "numpy.float64": "f64"}.get(
+            self.lib_name(given[0], ctx) or ""
+        )
+
+    def lib_call(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
+        if name in ("numpy.array", "numpy.zeros"):
+            d = self.np_dtype(n, ctx)
+            return vec(d) if d else UNKNOWN
+        if name == "numpy.arange":
+            return vec("f64")
+        if name == "numpy.linalg.norm" and n.args:
+            t = self.expr(n.args[0], ctx)
+            return Ty("num", dtype=t.dtype) if t.kind == "vec" else UNKNOWN
+        if name in ("math.floor", "math.ceil"):
+            return INT
+        if name.startswith("math.") and name[5:] in MATH_FUNCTIONS:
+            return NUM
+        if name == "textwrap.wrap":
+            return list_of(STR)
+        return UNKNOWN
+
+    def name(self, name: str, ctx: Ctx) -> Ty:
+        c = ctx.binder(name)
+        if c is not None:
+            for k, t in reversed(c.extra):
+                if k == name:
+                    return t
+            return self.local(c.func.key, name)
+        sym = self.resolve(ctx.module, name)
+        if sym is None:
+            return UNKNOWN
+        if sym.kind == "const":
+            return self.globals.get(sym.target, UNKNOWN)
+        if sym.kind == "func":
+            return fn(key_label(sym.target), self.functions[sym.target].returns)
+        return UNKNOWN
+
+    def attribute(self, recv: Ty, attr: str) -> Ty:
+        """The type of recv.attr, joined over the app classes recv may be. A class without
+        the attribute adds nothing (hasattr or isinstance guards that read)."""
+        if not recv.members:
+            return NEVER
+        out = []
+        for m in recv.members:
+            if m.kind == "none":
+                continue
+            c = self.classes.get(m.name) if m.kind == "obj" else None
+            if c is None:
+                known = RUNTIME_SURFACE.get(m.name, {}) if m.kind == "obj" else {}
+                if attr not in known:
+                    return UNKNOWN
+                out.append(known[attr])
+                continue
+            if attr in c.properties:
+                out.append(self.functions[c.methods[attr]].returns)
+            elif attr in c.methods:
+                key = c.methods[attr]
+                out.append(fn(key_label(key), self.functions[key].returns))
+            elif attr in c.fields:
+                out.append(c.fields[attr])
+        return union(*out) if out else UNKNOWN
+
+    def methods(self, recv: Ty, attr: str) -> list[FuncInfo] | None:
+        """The methods recv.attr calls, one per app class recv may be; None when recv is
+        not only app objects or a class has a field (not a method) by that name."""
+        out = []
+        for m in recv.members:
+            if m.kind == "none":
+                continue
+            c = self.classes.get(m.name) if m.kind == "obj" else None
+            if c is None or attr in c.fields or attr in c.properties:
+                return None
+            if attr in c.methods:
+                out.append(self.functions[c.methods[attr]])
+        return out or None
+
+    def returns_of_call(self, t: Ty) -> Ty:
+        """What calling a value of type t returns: a function's return, an object's
+        __call__'s."""
+        out = []
+        for m in t.members:
+            if m.kind == "fn" and m.args:
+                out.append(m.args[0])
+            elif (
+                m.kind == "obj"
+                and m.name in self.classes
+                and "__call__" in (c := self.classes[m.name]).methods
+            ):
+                out.append(self.functions[c.methods["__call__"]].returns)
+            else:
+                return UNKNOWN
+        return union(*out)
+
+    # ---------------------------------------------------------- expressions
+    def expr(self, n: ast.expr, ctx: Ctx) -> Ty:
+        """The type of expression n in ctx."""
+        if isinstance(n, ast.Constant):
+            v = n.value
+            if v is None:
+                return NONE
+            return {bool: BOOL, int: INT, float: NUM, str: STR}.get(type(v), UNKNOWN)
+        if isinstance(n, ast.Name):
+            return self.name(n.id, ctx)
+        if isinstance(n, ast.List):
+            return list_of(union(*(self.expr(e, ctx) for e in n.elts)))
+        if isinstance(n, ast.Set):
+            return set_of(union(*(self.expr(e, ctx) for e in n.elts)))
+        if isinstance(n, ast.Tuple):
+            return tuple_of(*(self.expr(e, ctx) for e in n.elts))
+        if isinstance(n, ast.Dict):
+            return dict_of(
+                union(*(self.expr(k, ctx) for k in n.keys if k is not None)),
+                union(*(self.expr(v, ctx) for v in n.values)),
+            )
+        if isinstance(n, (ast.ListComp, ast.GeneratorExp)):
+            return list_of(self.expr(n.elt, self.comprehension(n.generators, ctx)))
+        if isinstance(n, ast.SetComp):
+            return set_of(self.expr(n.elt, self.comprehension(n.generators, ctx)))
+        if isinstance(n, ast.BinOp):
+            return self.binop(n.op, self.expr(n.left, ctx), self.expr(n.right, ctx))
+        if isinstance(n, ast.UnaryOp):
+            t = self.expr(n.operand, ctx)
+            if isinstance(n.op, ast.Not):
+                return BOOL
+            if t.is_bool:
+                return INT
+            return t
+        if isinstance(n, ast.Compare):
+            return BOOL
+        if isinstance(n, ast.BoolOp):
+            return union(*(self.expr(v, ctx) for v in n.values))
+        if isinstance(n, ast.IfExp):
+            return union(self.expr(n.body, ctx), self.expr(n.orelse, ctx))
+        if isinstance(n, ast.Subscript):
+            return self.subscript(n, ctx)
+        if isinstance(n, ast.Call):
+            return self.call(n, ctx)
+        if isinstance(n, ast.Lambda):
+            return fn(None, self.expr(n.body, ctx.bind(self.lambda_params(n, ctx))))
+        if isinstance(n, ast.Attribute):
+            return self.attribute_expr(n, ctx)
+        if isinstance(n, ast.JoinedStr):
+            return STR
+        return UNKNOWN
+
+    def lambda_params(self, n: ast.Lambda, ctx: Ctx) -> dict[str, Ty]:
+        """A lambda's parameters: one with a default has the default's type, the others
+        are unknown."""
+        a = n.args
+        out = {x.arg: UNKNOWN for x in a.args}
+        for x, d in zip(a.args[len(a.args) - len(a.defaults) :], a.defaults):
+            out[x.arg] = self.expr(d, ctx)
+        return out
+
+    def attribute_expr(self, n: ast.Attribute, ctx: Ctx) -> Ty:
+        lib = self.lib_name(n, ctx)
+        if lib is not None:
+            return NUM if lib in LIB_CONSTANTS else UNKNOWN
+        if isinstance(n.value, ast.Name) and not self.is_local(n.value.id, ctx):
+            sym = self.resolve(ctx.module, n.value.id)
+            if sym is not None and sym.kind == "module":
+                return self.name(n.attr, Ctx(sym.target))
+        return self.attribute(self.expr(n.value, ctx), n.attr)
+
+    def comprehension(self, generators: list[ast.comprehension], ctx: Ctx) -> Ctx:
+        """ctx with the names the generators bind."""
+        for g in generators:
+            names: dict[str, Ty] = {}
+            bind_target(g.target, elem(self.expr(g.iter, ctx)), names)
+            ctx = ctx.bind(names)
+        return ctx
+
+    @staticmethod
+    def binop(op: ast.operator, a: Ty, b: Ty) -> Ty:
+        if not (a.members and b.members):  # a side not typed yet (a call's return): wait
+            return NEVER
+        if not (a.known and b.known):
+            return UNKNOWN
+        if a.is_numeric and b.is_numeric:
+            d = arith_dtype(a, b)
+            if d == "mixed":
+                return UNKNOWN
+            if d is not None:
+                return Ty("num", dtype=d)
+            if isinstance(op, ast.Div):
+                return NUM
+            if a.all("int", "bool") and b.all("int", "bool"):
+                return union(INT, NUM) if isinstance(op, ast.Pow) else INT  # 2 ** -1 is 0.5
+            return NUM
+        if isinstance(op, ast.Add) and a.all("str") and b.all("str"):
+            return STR
+        if isinstance(op, ast.Add) and a.all("list") and b.all("list"):
+            return union(a, b)
+        if isinstance(op, ast.Add) and a.all("tuple") and b.all("tuple"):
+            return (
+                union(*a.members, *b.members)
+                if len(a.members) > 1 or len(b.members) > 1
+                else tuple_of(*a.args, *b.args)
+            )
+        if isinstance(op, ast.Mult):
+            for s, k in ((a, b), (b, a)):
+                if s.all("list", "str", "tuple") and k.all("int", "bool"):
+                    return s
+        if (a.kind == "vec" or b.kind == "vec") and all(
+            t.kind == "vec" or t.is_numeric for t in (a, b)
+        ):
+            d = arith_dtype(a, b)
+            return vec(d or "f64") if d != "mixed" else UNKNOWN
+        return UNKNOWN
+
+    def subscript(self, n: ast.Subscript, ctx: Ctx) -> Ty:
+        t = self.expr(n.value, ctx)
+        if isinstance(n.slice, ast.Slice):
+            return t
+        out = []
+        for m in t.members:
+            if (
+                m.kind == "tuple"
+                and isinstance(n.slice, ast.Constant)
+                and isinstance(n.slice.value, int)
+                and -len(m.args) <= n.slice.value < len(m.args)
+            ):
+                out.append(m.args[n.slice.value])
+            elif m.kind == "dict":
+                out.append(m.args[1])
+            elif m.kind in ("list", "tuple", "str", "vec"):
+                out.append(elem(m))
+            else:
+                return UNKNOWN
+        return union(*out)
+
+    def call(self, n: ast.Call, ctx: Ctx) -> Ty:
+        f = n.func
+        if isinstance(f, ast.Name):
+            local = self.is_local(f.id, ctx)
+            if local:
+                return self.returns_of_call(self.name(f.id, ctx))
+            sym = self.resolve(ctx.module, f.id)
+            if sym is not None and sym.kind == "func":
+                return self.functions[sym.target].returns
+            if sym is not None and sym.kind == "class":
+                return obj(sym.target)
+            if sym is None:
+                return self.builtin_call(f.id, n, ctx)
+            if sym.kind == "setup":
+                return self.library_class(sym.target, None)
+            return UNKNOWN
+        if isinstance(f, ast.Attribute):
+            lib = self.lib_name(f, ctx)
+            if lib is not None:
+                return self.lib_call(lib, n, ctx)
+            if isinstance(f.value, ast.Name):
+                sym = self.resolve(ctx.module, f.value.id)
+                if sym is not None and sym.kind == "module":
+                    target = self.resolve(sym.target, f.attr)
+                    if target is not None and target.kind == "func":
+                        return self.functions[target.target].returns
+                    if target is not None and target.kind == "class":
+                        return obj(target.target)
+                    return UNKNOWN
+                if sym is not None and sym.kind == "setup":
+                    return self.library_class(sym.target, f.attr)
+            recv = self.expr(f.value, ctx)
+            if recv.all("list") and f.attr == "pop":
+                return elem(recv)
+            if recv.all("list") and f.attr in ("append", "extend", "insert"):
+                return NONE
+            if recv.all("dict"):
+                k, v = (union(*(m.args[i] for m in recv.members)) for i in (0, 1))
+                if f.attr in ("get", "setdefault"):
+                    other = self.expr(n.args[1], ctx) if len(n.args) > 1 else NONE
+                    return union(v, other)
+                return {
+                    "keys": list_of(k),
+                    "values": list_of(v),
+                    "items": list_of(tuple_of(k, v)),
+                }.get(f.attr, UNKNOWN)
+            if recv.all("str") and f.attr in STR_METHODS:
+                return STR_METHODS[f.attr]
+            methods = self.methods(recv, f.attr)
+            if methods:
+                return union(*(m.returns for m in methods))
+            return self.returns_of_call(self.attribute(recv, f.attr))
+        return self.returns_of_call(self.expr(f, ctx))
+
+    @staticmethod
+    def library_class(imported: str, attr: str | None) -> Ty:
+        """What calling a setup-only name makes: an object of a library class when the name
+        is one (`from pathlib import Path`, or `import pathlib` and `pathlib.Path`), looked up
+        among the modules setup already imported; unknown otherwise."""
+        words = imported.split()
+        if words[0] == "from":
+            module, name = words[1], words[3]
+            v = getattr(sys.modules.get(module), name, None)
+        else:
+            v = sys.modules.get(words[1])
+        if attr is not None:
+            v = getattr(v, attr, None)
+        return obj(class_name(v)) if isinstance(v, type) else UNKNOWN
+
+    def builtin_call(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
+        args = [self.expr(a, ctx) for a in n.args]
+        if name in ("min", "max"):
+            return elem(args[0]) if len(args) == 1 else union(*args)
+        if name == "abs" and args:
+            return INT if args[0].is_bool else args[0]
+        if name in ("list", "tuple"):  # a tuple of unknown length types as a list
+            return list_of(elem(args[0]) if args else NEVER)
+        if name == "set":
+            return set_of(elem(args[0]) if args else NEVER)
+        if name == "next" and args:
+            return union(elem(args[0]), *args[1:])
+        return BUILTIN_RETURNS.get(name, UNKNOWN)
+
+    # ---------------------------------------------------------- inference
+    def solve(self, functions=None, root_of=None, report: bool = True) -> None:
+        """Type `functions` (every function when None): their parameters from the arguments
+        their call sites in `functions` pass (and their defaults), their locals and returns,
+        the app classes' fields and the module globals, to a fixed point. Annotations win,
+        then live field types, then inference.
+
+        Each pass starts over from annotations, live types and the parameter types the last
+        pass found; an argument still unknown is left out of its parameter while the others
+        settle (so recursion types), and counts again once they have. With `report`, the
+        first operator whose operand stays unknown raises TranspileError asking for an
+        annotation; `root_of(key)` names the root that reached a function, for the message."""
+        keys = list(self.functions) if functions is None else list(functions)
+        self._labels = {key_label(k): k for k in self.functions}
+        self._sites: dict[tuple[FunctionKey, str], Ty] = {}
+        for _ in range(self.MAX_PASSES):
+            self._infer(keys)
+            sites = self._site_types(keys, optimistic=True)
+            if sites == self._sites:
+                break
+            self._sites = sites
+        final = self._site_types(keys, optimistic=False)
+        if final != self._sites:
+            self._sites = final
+            self._infer(keys)
+        if report:
+            self._report(keys, root_of)
+
+    def _infer(self, keys: list[FunctionKey]) -> None:
+        """Locals, returns, fields and globals over keys, from the current parameter types."""
+        live = self.live.fields if self.live is not None else {}
+        for c in self.classes.values():
+            c.fields = {k: t for k, t in c.fields.items() if k in c.annotated}
+            for k, t in live.get(c.name, {}).items():
+                c.fields.setdefault(k, t)
+        for info in self.functions.values():
+            info.locals, info.annotated, info.returns = {}, set(), NEVER
+            info.param_types = dict(info.declared)
+            for p, t in info.declared.items():
+                if not t.known and (info.key, p) in self._sites:
+                    info.param_types[p] = self._sites[(info.key, p)]
+        self.globals = dict(self.live.globals) if self.live is not None else {}
+        for _ in range(self.MAX_PASSES):
+            changed = self._globals_pass()
+            for key in keys:
+                changed |= self._function_pass(self.functions[key])
+            if not changed:
+                return
+
+    def _site_types(self, keys, optimistic: bool) -> dict[tuple[FunctionKey, str], Ty]:
+        """Each parameter's type as the join of what reached call sites pass it and its
+        default. `optimistic` leaves unknown arguments out, and types a parameter whose
+        arguments are all unknown as not typed yet (the empty type), so a cycle through it
+        (a field fed by a call that reads the field) settles instead of staying unknown."""
+        found: dict[tuple[FunctionKey, str], list[Ty]] = {}
+        for key in keys:
+            info = self.functions[key]
+            for n, ctx in self.walk(info):
+                if isinstance(n, ast.Call):
+                    for callee, skip in self.callees(n, ctx):
+                        self._bind_args(n, callee, skip, ctx, found)
+            outer = self.ctx_of(self.functions[info.parent]) if info.parent else Ctx(key[0])
+            for p, d in info.defaults.items():
+                found.setdefault((key, p), []).append(self.expr(d, outer))
+        out = {}
+        for (key, p), ts in found.items():
+            if self.functions[key].declared.get(p, UNKNOWN).known:
+                continue
+            known = [t for t in ts if t.known]
+            out[(key, p)] = (union(*known) if known else NEVER) if optimistic else union(*ts)
+        return out
+
+    def _bind_args(self, call: ast.Call, info: FuncInfo, skip: int, ctx: Ctx, found) -> None:
+        params = info.params[skip:]
+        positional = len(info.node.args.posonlyargs) + len(info.node.args.args) - skip
+        for i, a in enumerate(call.args):
+            if isinstance(a, ast.Starred) or i >= positional:
+                break
+            found.setdefault((info.key, params[i]), []).append(self.expr(a, ctx))
+        for k in call.keywords:
+            if k.arg in params:
+                found.setdefault((info.key, k.arg), []).append(self.expr(k.value, ctx))
+
+    def callees(self, call: ast.Call, ctx: Ctx) -> list[tuple[FuncInfo, int]]:
+        """The app functions `call` may run, each with how many leading parameters the call
+        does not pass (1 for a method's self or a constructor's)."""
+        f = call.func
+        if isinstance(f, ast.Name) and not self.is_local(f.id, ctx):
+            return self._symbol_callees(self.resolve(ctx.module, f.id))
+        if isinstance(f, ast.Attribute):
+            if self.lib_name(f, ctx) is not None:
+                return []
+            if isinstance(f.value, ast.Name) and not self.is_local(f.value.id, ctx):
+                sym = self.resolve(ctx.module, f.value.id)
+                if sym is not None and sym.kind == "module":
+                    return self._symbol_callees(self.resolve(sym.target, f.attr))
+            methods = self.methods(self.expr(f.value, ctx), f.attr)
+            if methods:
+                return [(m, 1) for m in methods]
+        return self.value_callees(self.expr(f, ctx))
+
+    def _symbol_callees(self, sym: Symbol | None) -> list[tuple[FuncInfo, int]]:
+        if sym is not None and sym.kind == "func":
+            return [(self.functions[sym.target], 0)]
+        if sym is not None and sym.kind == "class":
+            init = self.classes[sym.target].methods.get("__init__")
+            return [(self.functions[init], 1)] if init else []
+        return []
+
+    def value_callees(self, t: Ty) -> list[tuple[FuncInfo, int]]:
+        """What calling a value of type t runs: a named function (a method's value is bound,
+        so its self is not passed), an object's __call__."""
+        out = []
+        labels = getattr(self, "_labels", None) or {key_label(k): k for k in self.functions}
+        for m in t.members:
+            if m.kind == "fn" and m.name in labels:
+                info = self.functions[labels[m.name]]
+                out.append((info, 1 if info.cls else 0))
+            elif m.kind == "obj" and m.name in self.classes:
+                call = self.classes[m.name].methods.get("__call__")
+                if call is not None:
+                    out.append((self.functions[call], 1))
+        return out
+
+    def walk(self, info: FuncInfo):
+        """(node, ctx) for every node of info's body, each in the Ctx it is read in: a
+        lambda's body and a comprehension's parts see the names they bind. A def inside is
+        its own function: only its defaults are walked here."""
+        ctx = self.ctx_of(info)
+        for st in info.node.body:
+            yield from self._walk(st, ctx)
+
+    def _walk(self, n: ast.AST, ctx: Ctx):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in [*n.args.defaults, *(d for d in n.args.kw_defaults if d is not None)]:
+                yield from self._walk(d, ctx)
+            return
+        if isinstance(n, ast.ClassDef):
+            return
+        yield n, ctx
+        if isinstance(n, ast.Lambda):
+            for d in n.args.defaults:
+                yield from self._walk(d, ctx)
+            yield from self._walk(n.body, ctx.bind(self.lambda_params(n, ctx)))
+            return
+        if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            c = ctx
+            for g in n.generators:
+                yield from self._walk(g.iter, c)
+                names: dict[str, Ty] = {}
+                bind_target(g.target, elem(self.expr(g.iter, c)), names)
+                c = c.bind(names)
+                for test in g.ifs:
+                    yield from self._walk(test, c)
+            for part in (n.key, n.value) if isinstance(n, ast.DictComp) else (n.elt,):
+                yield from self._walk(part, c)
+            return
+        for child in ast.iter_child_nodes(n):
+            yield from self._walk(child, ctx)
+
+    def _report(self, keys, root_of) -> None:
+        """Raise for the first operator, in keys' order, whose operand type is unknown:
+        + * % (and their augmented forms), == and != unless the other side is a known
+        scalar, and an f-string field with no format spec."""
+        for key in keys:
+            for n, ctx in self.walk(self.functions[key]):
+                bad = self._unknown_operand(n, ctx)
+                if bad is not None:
+                    raise TranspileError(
+                        module_path(key[0]),
+                        n.lineno,
+                        bad,
+                        root_of(key) if root_of else None,
+                    )
+
+    def _unknown_operand(self, n: ast.AST, ctx: Ctx) -> str | None:
+        def unknown(x):
+            return not self.expr(x, ctx).known
+
+        def msg(x):
+            return (
+                f"`{ast.unparse(n)}` with an operand of unknown type (annotate `{ast.unparse(x)}`)"
+            )
+
+        if isinstance(n, (ast.BinOp, ast.AugAssign)) and isinstance(
+            n.op, (ast.Add, ast.Mult, ast.Mod)
+        ):
+            left = n.left if isinstance(n, ast.BinOp) else n.target
+            right = n.right if isinstance(n, ast.BinOp) else n.value
+            for side in (left, right):
+                if unknown(side):
+                    return msg(side)
+        if isinstance(n, ast.Compare):
+            nodes = [n.left, *n.comparators]
+            for i, op in enumerate(n.ops):
+                if isinstance(op, (ast.Eq, ast.NotEq)):
+                    a, b = nodes[i], nodes[i + 1]
+                    for x, other in ((a, b), (b, a)):
+                        o = self.expr(other, ctx)
+                        if unknown(x) and not (o.known and o.is_scalar):
+                            return msg(x)
+        if isinstance(n, ast.FormattedValue) and n.format_spec is None and unknown(n.value):
+            x = ast.unparse(n.value)
+            return f"the f-string field `{{{x}}}` of unknown type (annotate `{x}`)"
+        return None
+
+    def _globals_pass(self) -> bool:
+        changed = False
+        for module, tree in self.modules.items():
+            ctx = Ctx(module)
+            for n in tree.body:
+                if isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None:
+                    found: dict[str, Ty] = {}
+                    if isinstance(n, ast.AnnAssign):
+                        bind_target(n.target, self.annotation(n.annotation, module), found)
+                    else:
+                        for t in n.targets:
+                            bind_target(t, self.expr(n.value, ctx), found)
+                    for name, t in found.items():
+                        new = join(self.globals.get((module, name), NEVER), t)
+                        if new != self.globals.get((module, name)):
+                            self.globals[(module, name)] = new
+                            changed = True
+        return changed
+
+    def _function_pass(self, info: FuncInfo) -> bool:
+        cls = self.classes.get(info.cls) if info.cls else None
+        before = (dict(info.locals), info.returns, dict(cls.fields) if cls else None)
+        ctx = self.ctx_of(info)
+
+        def field_(target: ast.expr, t: Ty):
+            """`self.x = v` in a method types the field x."""
+            if (
+                cls is not None
+                and isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == info.self_name
+                and target.attr not in cls.annotated
+            ):
+                cls.fields[target.attr] = join(cls.fields.get(target.attr, NEVER), t)
+
+        def assign(names: dict[str, Ty]):
+            for k, t in names.items():
+                if k in info.annotated or k in info.param_types:
+                    continue
+                info.locals[k] = join(info.locals.get(k, NEVER), t)
+
+        for st in own_statements(info.node.body):
+            if isinstance(st, ast.Assign):
+                t = self.expr(st.value, ctx)
+                for target in st.targets:
+                    found: dict[str, Ty] = {}
+                    bind_target(target, t, found)
+                    assign(found)
+                    field_(target, t)
+            elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                info.locals[st.target.id] = self.annotation(st.annotation, info.key[0])
+                info.annotated.add(st.target.id)
+            elif isinstance(st, ast.AnnAssign) and cls is not None:
+                field_(st.target, self.annotation(st.annotation, info.key[0]))
+            elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Attribute):
+                old = self.expr(st.target, ctx)
+                if old.kind != "vec":
+                    field_(st.target, self.binop(st.op, old, self.expr(st.value, ctx)))
+            elif isinstance(st, ast.FunctionDef):
+                inner = self.functions[(info.key[0], f"{info.key[1]}.<locals>.{st.name}")]
+                assign({st.name: fn(key_label(inner.key), inner.returns)})
+            elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Name):
+                old = self.expr(st.target, ctx)
+                if old.kind == "vec":
+                    continue  # numpy's += writes into the array: its dtype stays
+                assign({st.target.id: self.binop(st.op, old, self.expr(st.value, ctx))})
+            elif isinstance(st, ast.For):
+                found = {}
+                bind_target(st.target, elem(self.expr(st.iter, ctx)), found)
+                assign(found)
+            elif isinstance(st, ast.Return):
+                t = self.expr(st.value, ctx) if st.value is not None else NONE
+                info.returns = join(info.returns, t)
+            elif isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
+                self._mutation(st.value, ctx, assign)
+        if not ends_in_return(info.node.body):
+            info.returns = join(info.returns, NONE)
+        return (info.locals, info.returns, dict(cls.fields) if cls else None) != before
+
+    def _mutation(self, call: ast.Call, ctx: Ctx, assign) -> None:
+        """`xs.append(v)` widens a local list's element type to v's."""
+        f = call.func
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and call.args:
+            name = f.value.id
+            recv = self.expr(f.value, ctx)
+            if recv.all("list") and f.attr in ("append", "insert"):
+                assign({name: list_of(self.expr(call.args[-1], ctx))})
+            elif recv.all("list") and f.attr == "extend":
+                assign({name: list_of(elem(self.expr(call.args[0], ctx)))})
+
+
+def is_classvar(annotation: ast.expr) -> bool:
+    head = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    return ast.unparse(head) in ("ClassVar", "typing.ClassVar")
+
+
+def target_names(t: ast.expr) -> list[str]:
+    if isinstance(t, ast.Name):
+        return [t.id]
+    if isinstance(t, (ast.Tuple, ast.List)):
+        return [n for e in t.elts for n in target_names(e)]
+    if isinstance(t, ast.Starred):
+        return target_names(t.value)
+    return []
+
+
+def bind_target(t: ast.expr, ty: Ty, out: dict[str, Ty]) -> None:
+    """The names an assignment target binds, with the types it gives them."""
+    if isinstance(t, ast.Name):
+        out[t.id] = join(out.get(t.id, NEVER), ty)
+    elif isinstance(t, (ast.Tuple, ast.List)):
+        for i, e in enumerate(t.elts):
+            items = [
+                m.args[i] if m.kind == "tuple" and len(m.args) == len(t.elts) else elem(m)
+                for m in ty.members
+            ]
+            bind_target(e, union(*items) if items else UNKNOWN, out)
+
+
+def own_statements(body: list[ast.stmt]):
+    """Every statement in body, entering blocks but not nested functions or classes."""
+    for st in body:
+        yield st
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for name in ("body", "orelse", "finalbody"):
+            yield from own_statements(getattr(st, name, None) or [])
+        for h in getattr(st, "handlers", None) or []:
+            yield from own_statements(h.body)
+
+
+def ends_in_return(body: list[ast.stmt]) -> bool:
+    return bool(body) and isinstance(body[-1], ast.Return)
