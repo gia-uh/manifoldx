@@ -18,6 +18,7 @@ import math
 import re
 from dataclasses import dataclass
 
+from .reach import Reach
 from .types import (
     LIB_CONSTANTS,
     MATH_FUNCTIONS,
@@ -25,10 +26,9 @@ from .types import (
     ClassInfo,
     Ctx,
     FuncInfo,
-    FunctionKey,
+    LiveTypes,
     Ty,
     TypeEnv,
-    UNKNOWN,
     TranspileError,
     arith_dtype,
     elem,
@@ -123,100 +123,16 @@ def _constant(n: ast.expr) -> bool:
     return isinstance(n, ast.Tuple) and all(_constant(e) for e in n.elts)
 
 
-# ---------------------------------------------------------------- reach
-
-
-class _Reach:
-    """Which functions and module globals are emitted, and the root that reached each.
-
-    With no roots, everything is. With roots ("module.function"), what their bodies name
-    through module-level names and app-module attributes, transitively."""
-
-    def __init__(self, env: TypeEnv, roots: list[str] | None):
-        self.env = env
-        self.everything = roots is None
-        self.functions: dict[FunctionKey, str] = {}
-        self.globals: dict[tuple[str, str], str] = {}
-        self.classes: dict[str, str] = {}
-        if roots is None:
-            return
-        todo = []
-        for label in roots:
-            key = self._root_key(label)
-            self.functions[key] = label
-            todo.append((key[0], self.env.function(key).node, label, self.env.function(key)))
-        while todo:
-            module, node, label, info = todo.pop()
-            for n in ast.walk(node):
-                sym = None
-                if isinstance(n, ast.Name) and not (
-                    info and (n.id in info.locals or n.id in info.param_types)
-                ):
-                    sym = self.env.resolve(module, n.id)
-                elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
-                    outer = self.env.resolve(module, n.value.id)
-                    if outer is not None and outer.kind == "module":
-                        sym = self.env.resolve(outer.target, n.attr)
-                if sym is None:
-                    continue
-                if sym.kind == "func" and sym.target not in self.functions:
-                    self.functions[sym.target] = label
-                    f = self.env.function(sym.target)
-                    todo.append((sym.target[0], f.node, label, f))
-                elif sym.kind == "const" and sym.target not in self.globals:
-                    self.globals[sym.target] = label
-                    value = self._global_value(*sym.target)
-                    if value is not None:
-                        todo.append((sym.target[0], value, label, None))
-                elif sym.kind == "class" and sym.target not in self.classes:
-                    # Until reach follows types (task 7), a class named is reached whole.
-                    self.classes[sym.target] = label
-                    for key in self.env.classes[sym.target].methods.values():
-                        if key not in self.functions:
-                            self.functions[key] = label
-                            f = self.env.function(key)
-                            todo.append((key[0], f.node, label, f))
-
-    def _root_key(self, label: str) -> FunctionKey:
-        module, _, name = label.rpartition(".")
-        while module and module not in self.env.modules:
-            module, _, head = module.rpartition(".")
-            name = f"{head}.{name}"
-        if (module, name) not in self.env.functions:
-            raise ValueError(f"no module-level function {label} in the sources")
-        return (module, name)
-
-    def _global_value(self, module: str, name: str) -> ast.expr | None:
-        for n in self.env.modules[module].body:
-            if isinstance(n, ast.Assign) and any(name in target_names(t) for t in n.targets):
-                return n.value
-            if isinstance(n, ast.AnnAssign) and name in target_names(n.target):
-                return n.value
-        return None
-
-    def function(self, key: FunctionKey) -> bool:
-        return self.everything or key in self.functions
-
-    def root(self, key: FunctionKey) -> str | None:
-        return self.functions.get(key)
-
-    def global_(self, module: str, name: str) -> bool:
-        return self.everything or (module, name) in self.globals
-
-    def class_(self, qualname: str) -> bool:
-        return self.everything or qualname in self.classes
-
-
 def transpile_app(
-    sources: dict[str, str], roots: list[str] | None = None, live=None
+    sources: dict[str, str], roots: list | None = None, live: LiveTypes | None = None
 ) -> dict[str, JsModule]:
-    """Transpile the app's modules ({module name: source}); with roots ("module.function"),
-    only what they reach. A module "pkg.sub" is reported as pkg/sub.py and written as
-    pkg.sub.js; its imports of other app modules become ES imports of those files."""
+    """Transpile the app's modules ({module name: source}); with roots (reach.Root objects,
+    or "module.function" strings), only what they reach. A module "pkg.sub" is reported as
+    pkg/sub.py and written as pkg.sub.js; its imports of other app modules become ES
+    imports of those files."""
     trees = {name: ast.parse(src, filename=module_path(name)) for name, src in sources.items()}
     env = TypeEnv(trees, live)
-    env.solve()
-    reach = _Reach(env, roots)
+    reach = Reach(roots, env)
     return {name: _Module(env, name, reach).write() for name in trees}
 
 
@@ -226,7 +142,7 @@ Lines = list[tuple[str, int]]
 
 
 class _Module:
-    def __init__(self, env: TypeEnv, name: str, reach: _Reach):
+    def __init__(self, env: TypeEnv, name: str, reach: Reach):
         self.env, self.name, self.reach = env, name, reach
         self.path = module_path(name)
         self.ctx = Ctx(name)
@@ -300,7 +216,7 @@ class _Module:
                 names = [x for t in targets for x in target_names(t)]
                 reached = [x for x in names if self.reach.global_(self.name, x)]
                 if reached and n.value is not None:
-                    self.root = self.reach.globals.get((self.name, reached[0]))
+                    self.root = self.reach.root(("global", self.name, reached[0]))
                     if len(targets) != 1:
                         self.fail(n, "a chained assignment at module level")
                     body.append(
@@ -309,7 +225,7 @@ class _Module:
             elif isinstance(n, ast.ClassDef):
                 qual = f"{self.name}.{n.name}"
                 if self.reach.class_(qual):
-                    self.root = self.reach.classes.get(qual)
+                    self.root = self.reach.root(("class", qual))
                     body += self.klass(n, self.env.classes[qual]) + [("", n.end_lineno)]
             elif self.reach.everything:
                 self.fail(n, FRIENDLY.get(type(n).__name__, type(n).__name__))

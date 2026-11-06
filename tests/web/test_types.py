@@ -226,3 +226,26 @@ def test_equality_of_two_unknowns_asks_for_an_annotation():
 def test_equality_with_a_scalar_needs_no_type():
     out = transpile_app({"mod": "def is_a(a):\n    return a == 'a'\n"})
     assert "is_a" in out["mod"].code
+
+
+CYCLE = """
+class Doc:
+    def __init__(self):
+        self.n = 1
+
+    def bump(self):
+        self.n += helper(self.n)
+
+def helper(k):
+    return k * 2
+"""
+
+
+def test_a_field_fed_by_a_call_that_reads_it_keeps_its_live_type(load):
+    mods, env_of = load({"app": CYCLE})
+    live = LiveTypes()
+    live.observe(mods["app"].Doc())
+    env = env_of(live)
+    env.solve([("app", "Doc.bump"), ("app", "helper")])
+    assert env.classes["app.Doc"].fields["n"] == INT
+    assert env.function(("app", "helper")).param_types["k"] == INT

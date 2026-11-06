@@ -225,6 +225,16 @@ def _library(module: str) -> bool:
     return "site-packages" in path or "dist-packages" in path
 
 
+def class_name(cls: type) -> str:
+    """ "module.Qualname", by the shortest module that exports the class: a Path made at
+    setup is a pathlib.PosixPath, not a pathlib._local.PosixPath."""
+    parts = cls.__module__.split(".")
+    for i in range(1, len(parts)):
+        if getattr(sys.modules.get(".".join(parts[:i])), cls.__qualname__, None) is cls:
+            return f"{'.'.join(parts[:i])}.{cls.__qualname__}"
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
 class LiveTypes:
     """The field types of the app's objects as setup left them: observe(obj) records the
     type of each field of obj's class, joined over every instance observed, and walks into
@@ -237,6 +247,7 @@ class LiveTypes:
     def __init__(self, modules=None):
         self.modules = set(modules) if modules is not None else None
         self.fields: dict[str, dict[str, Ty]] = {}
+        self.globals: dict[tuple[str, str], Ty] = {}
         self._seen: dict[int, object] = {}  # keeps what it saw alive, so ids stay unique
 
     def is_app(self, cls: type) -> bool:
@@ -247,6 +258,12 @@ class LiveTypes:
     def observe(self, value) -> Ty:
         """value's type; for an app object, also record its class's fields."""
         return self.of(value)
+
+    def observe_global(self, module: str, name: str, value) -> Ty:
+        """Record the module global module.name as holding value."""
+        t = self.of(value)
+        self.globals[(module, name)] = join(self.globals.get((module, name), NEVER), t)
+        return t
 
     def of(self, v) -> Ty:
         if v is None:
@@ -279,7 +296,7 @@ class LiveTypes:
         if isinstance(v, (type, types.ModuleType)) or callable(v) and not hasattr(v, "__dict__"):
             return UNKNOWN
         cls = type(v)
-        name = f"{cls.__module__}.{cls.__qualname__}"
+        name = class_name(cls)
         if self.is_app(cls) and id(v) not in self._seen:
             self._seen[id(v)] = v
             fields = self.fields.setdefault(name, {})
@@ -458,6 +475,8 @@ class TypeEnv:
         self.globals: dict[tuple[str, str], Ty] = {}
         self.functions: dict[FunctionKey, FuncInfo] = {}
         self.classes: dict[str, ClassInfo] = {}
+        # A closure root's free variables, typed from its live cells: {key: {name: Ty}}.
+        self.cells: dict[FunctionKey, dict[str, Ty]] = {}
         for name, tree in modules.items():
             self.symbols[name] = self._scan(name, tree)
         # Signatures after every module's names are known, so an annotation may name a
@@ -593,9 +612,28 @@ class TypeEnv:
         return False
 
     def ctx_of(self, info: FuncInfo) -> Ctx:
-        """The Ctx of info's body: a function defined inside another sees that one's names."""
+        """The Ctx of info's body: a function defined inside another sees that one's names;
+        a closure whose live cells are known sees their types first."""
         parent = self.ctx_of(self.functions[info.parent]) if info.parent else None
-        return Ctx(info.key[0], info, (), parent)
+        return Ctx(info.key[0], info, tuple(self.cells.get(info.key, {}).items()), parent)
+
+    def register_lambda(self, module: str, qualname: str, n: ast.Lambda) -> FuncInfo:
+        """A lambda as a function of its own (a GUI getter is one), keyed
+        (module, "qualname@line:col"); its free variables come from `cells`."""
+        body = ast.copy_location(ast.Return(n.body), n.body)
+        node = ast.FunctionDef(
+            name="<lambda>",
+            args=n.args,
+            body=[body],
+            decorator_list=[],
+            returns=None,
+            type_params=[],
+        )
+        key = (module, f"{qualname}@{n.lineno}:{n.col_offset}")
+        info = self._func_info(key, ast.copy_location(node, n), module)
+        info.declared = dict(info.param_types)
+        self.functions[key] = info
+        return info
 
     def _func_info(self, key: FunctionKey, n: ast.FunctionDef, module: str) -> FuncInfo:
         a = n.args
@@ -729,6 +767,8 @@ class TypeEnv:
     def attribute(self, recv: Ty, attr: str) -> Ty:
         """The type of recv.attr, joined over the app classes recv may be. A class without
         the attribute adds nothing (hasattr or isinstance guards that read)."""
+        if not recv.members:
+            return NEVER
         out = []
         for m in recv.members:
             if m.kind == "none":
@@ -857,6 +897,8 @@ class TypeEnv:
 
     @staticmethod
     def binop(op: ast.operator, a: Ty, b: Ty) -> Ty:
+        if not (a.members and b.members):  # a side not typed yet (a call's return): wait
+            return NEVER
         if not (a.known and b.known):
             return UNKNOWN
         if a.is_numeric and b.is_numeric:
@@ -925,6 +967,8 @@ class TypeEnv:
                 return obj(sym.target)
             if sym is None:
                 return self.builtin_call(f.id, n, ctx)
+            if sym.kind == "setup":
+                return self.library_class(sym.target, None)
             return UNKNOWN
         if isinstance(f, ast.Attribute):
             lib = self.lib_name(f, ctx)
@@ -939,6 +983,8 @@ class TypeEnv:
                     if target is not None and target.kind == "class":
                         return obj(target.target)
                     return UNKNOWN
+                if sym is not None and sym.kind == "setup":
+                    return self.library_class(sym.target, f.attr)
             recv = self.expr(f.value, ctx)
             if recv.all("list") and f.attr == "pop":
                 return elem(recv)
@@ -961,6 +1007,21 @@ class TypeEnv:
                 return union(*(m.returns for m in methods))
             return self.returns_of_call(self.attribute(recv, f.attr))
         return self.returns_of_call(self.expr(f, ctx))
+
+    @staticmethod
+    def library_class(imported: str, attr: str | None) -> Ty:
+        """What calling a setup-only name makes: an object of a library class when the name
+        is one (`from pathlib import Path`, or `import pathlib` and `pathlib.Path`), looked up
+        among the modules setup already imported; unknown otherwise."""
+        words = imported.split()
+        if words[0] == "from":
+            module, name = words[1], words[3]
+            v = getattr(sys.modules.get(module), name, None)
+        else:
+            v = sys.modules.get(words[1])
+        if attr is not None:
+            v = getattr(v, attr, None)
+        return obj(class_name(v)) if isinstance(v, type) else UNKNOWN
 
     def builtin_call(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
         args = [self.expr(a, ctx) for a in n.args]
@@ -1017,7 +1078,7 @@ class TypeEnv:
             for p, t in info.declared.items():
                 if not t.known and (info.key, p) in self._sites:
                     info.param_types[p] = self._sites[(info.key, p)]
-        self.globals = {}
+        self.globals = dict(self.live.globals) if self.live is not None else {}
         for _ in range(self.MAX_PASSES):
             changed = self._globals_pass()
             for key in keys:
@@ -1027,7 +1088,9 @@ class TypeEnv:
 
     def _site_types(self, keys, optimistic: bool) -> dict[tuple[FunctionKey, str], Ty]:
         """Each parameter's type as the join of what reached call sites pass it and its
-        default; `optimistic` leaves unknown arguments out unless all are unknown."""
+        default. `optimistic` leaves unknown arguments out, and types a parameter whose
+        arguments are all unknown as not typed yet (the empty type), so a cycle through it
+        (a field fed by a call that reads the field) settles instead of staying unknown."""
         found: dict[tuple[FunctionKey, str], list[Ty]] = {}
         for key in keys:
             info = self.functions[key]
@@ -1043,7 +1106,7 @@ class TypeEnv:
             if self.functions[key].declared.get(p, UNKNOWN).known:
                 continue
             known = [t for t in ts if t.known]
-            out[(key, p)] = union(*known) if optimistic and known else union(*ts)
+            out[(key, p)] = (union(*known) if known else NEVER) if optimistic else union(*ts)
         return out
 
     def _bind_args(self, call: ast.Call, info: FuncInfo, skip: int, ctx: Ctx, found) -> None:
