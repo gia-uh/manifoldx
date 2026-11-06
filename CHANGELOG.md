@@ -9,14 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`manifoldx export --web` writes a browser page.** Serve the folder over HTTP and open
+  `index.html`: the app's systems run every animation frame on the browser's input, built
+  into the replay's frame form (releases, pointer position, wheel and modifiers included),
+  three.js draws `scene.glb` with the desktop's calibration (the sky environment at 1.45,
+  BasicMaterial and PhongMaterial under the desktop's fixed light), and `engine.gui` is
+  HTML (`Panel`, `Text`, `ValueDisplay`, nine anchors; `Button`, `Slider`, `Toggle` and
+  `Image` fail the export). `capture_pointer` is pointer lock, requested at a user gesture,
+  refused after a touch; losing the lock gives the app an Escape. A JS error stops the page
+  and names the Python file and line from the source maps; a progress bar follows the
+  scene's download. Transpiled code may read `engine.gui.pointer_over_gui` and
+  `engine.camera.fov`. Tests in headless Chromium replay `examples/web_walk.py` against
+  Python and compare the page's frame with the desktop's by mean colour; they need the new
+  `browser` dependency group (Playwright) and run in their own CI job (#140).
+
+- **three.js 0.186.1, vendored in `manifoldx/web/vendor/three/`.** The published ES
+  modules and the GLTFLoader with its two utils, unchanged, under the npm integrity hash
+  that `SOURCE` records with the upgrade steps (#140).
+
 - **`manifoldx export --web [-m module | app.py] OUTDIR`: the app's per-frame Python,
   transpiled to JavaScript, with the state its setup left.** The app runs its setup in
   Python (startup handlers included); its systems, event handlers and ValueDisplay getters,
   and what they reach through types, become ES modules with source maps to the `.py` lines.
   The folder also holds the runtime, `state.json` (the reached objects and `engine.state`),
   `scene.glb` and `report.json` (roots, transpiled and setup functions, state left out).
-  Code outside the subset fails with its file, line and root, and nothing is written. No
-  browser page yet: the folder runs in Node. `know-how/web-export.md` says how (#140).
+  Code outside the subset fails with its file, line and root, and nothing is written. The
+  folder also runs in Node. `know-how/web-export.md` says how (#140).
 
 - **`manifoldx.web`: transpiler, snapshot, headless runtime and replay.** `transpile_app`
   and its typing from annotations, live objects and call sites; `snapshot` of reached
@@ -278,6 +296,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   50 s to 0.7 s, with flat memory (#85).
 
 ### Fixed
+
+- **`export --web` types what it used to leave unknown.** An attribute read on a value of
+  unknown type fails the export, naming what to annotate, instead of leaving the field out
+  of the snapshot; an annotation the transpiler cannot read (a bare `tuple`) gives way to
+  the live type (#142). Unpacking a call result takes the callee's return type, and a
+  return annotation is read (#143). `tuple[X, ...]` types every item as X (#144). A starred
+  item in a list, set or tuple display keeps its items' types (#145).
+
+- **`export --web` treats a global's initializer as setup.** Reach stops at a reached
+  global, so a function only its initializer calls is not transpiled, and the globals that
+  initializer read stay out of the snapshot (#140).
+
+- **Startup at export, `render_frame`, the glTF export and the replay need a wgpu device,
+  not the `[offline]` extra.** The headless canvas no longer goes through the video
+  renderer's imageio-ffmpeg check, so an app with a startup handler exports on plain
+  `manifold-gfx` (#140).
+
+- **glTF export: `StandardMaterial` opacity.** The base colour's alpha is the colour's
+  alpha times `opacity`, and `opacity` below 1 writes alphaMode BLEND, so a transparent
+  material is transparent in the browser too (#140).
 
 - **`engine.input.viewport_size` is right from the first frame.** It read (0, 0) until a
   resize event, which a window that is never resized does not send (#17).
