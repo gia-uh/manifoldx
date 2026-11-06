@@ -1,6 +1,6 @@
 // The engine surface the transpiled modules call, the state loader and the frame step.
 
-import { callable_ } from "./pyrt.js";
+import { callable_, str_, vnorm32 } from "./pyrt.js";
 
 // ---------------------------------------------------------------- state
 
@@ -97,4 +97,133 @@ export function loadState(state, modules, resolve) {
     moduleOf(modules, name).__set_globals(values);
   }
   return state.roots.map((r) => ({ kind: r.kind, label: r.label, event: r.event, fn: value(r.fn) }));
+}
+
+// ---------------------------------------------------------------- the engine, headless
+
+// One name per physical key, as manifoldx.input._key_name: a letter lowercase, the space
+// bar "Space".
+const keyName = (k) => (k === " " ? "Space" : k.length === 1 ? k.toLowerCase() : k);
+
+// engine.input, fed one frame at a time: setFrame({keys, just, d: [dx, dy], buttons,
+// clicks, vp: [w, h]}) replaces what the last frame said. keys and just are key names
+// (pressed, and pressed this frame), buttons and clicks mouse buttons the same way.
+export class ScriptInput {
+  constructor(onResize = null) {
+    this._keys = new Set();
+    this._just = new Set();
+    this._buttons = new Set();
+    this._clicks = new Set();
+    this._delta = [0, 0];
+    this._viewport = [0, 0];
+    this._captured = false;
+    this._onResize = onResize;
+    this._log = null;
+  }
+
+  setFrame(frame) {
+    this._keys = new Set(frame.keys.map(keyName));
+    this._just = new Set(frame.just.map(keyName));
+    this._buttons = new Set(frame.buttons);
+    this._clicks = new Set(frame.clicks);
+    this._delta = [frame.d[0], frame.d[1]];
+    const [w, h] = frame.vp;
+    if (w !== this._viewport[0] || h !== this._viewport[1]) {
+      this._viewport = [w, h];
+      if (this._onResize) this._onResize(w, h);
+    }
+  }
+
+  get pressed_keys() { return new Set(this._keys); }
+  is_pressed(key) { return this._keys.has(keyName(key)); }
+  just_pressed(key) { return this._just.has(keyName(key)); }
+  get mouse_delta() { return this._delta; }
+  is_mouse_pressed(button) { return this._buttons.has(button); }
+  just_mouse_pressed(button) { return this._clicks.has(button); }
+  get viewport_size() { return this._viewport; }
+  get pointer_captured() { return this._captured; }
+
+  // Headless, the capture always takes: the flag follows and the log records it.
+  capture_pointer(on) {
+    this._captured = Boolean(on);
+    if (this._log) this._log.push(["capture", this._captured]);
+    return true;
+  }
+}
+
+// engine.camera: position and target are float32, as manifoldx.camera.Camera holds them.
+export class Camera {
+  constructor({ position, target, near = 0.1, far = 1000.0 }) {
+    this.position = Float32Array.from(position);
+    this.target = Float32Array.from(target);
+    this.near = near;
+    this.far = far;
+  }
+
+  // numpy's (target - position) / norm(...) in float32: subtract, norm and divide each
+  // rounded to float32.
+  get_forward() {
+    const d = new Float32Array(3);
+    for (let i = 0; i < 3; i++) d[i] = this.target[i] - this.position[i];
+    const n = vnorm32(d);
+    return d.map((x) => Math.fround(x / n));
+  }
+}
+
+// createEngine({w, h, camera: {position, target, near, far}, materials, log, state}):
+// the engine object transpiled code reaches. materials maps a material id to the
+// renderer's material (none, headless); log receives ["material", entity, material_id] and
+// ["capture", on] as reached code asks for them. resolve(kind, value) is loadState's
+// resolver for this engine.
+export function createEngine({ w, h, camera, materials = {}, log = [], state = {} }) {
+  const engine = { w, h, state, log };
+  engine.input = new ScriptInput((nw, nh) => { engine.w = nw; engine.h = nh; });
+  engine.input._log = log;
+  engine.input._viewport = [w, h];
+  engine.camera = new Camera(camera);
+  engine.gui = { pointer_over_gui: false, widgets: [] };
+
+  const entities = new Map(), mats = new Map();
+  engine.set_material = (entity, material) => {
+    log.push(["material", typeof entity === "number" ? entity : entity.index, material.id]);
+  };
+  engine.resolve = (kind, value) => {
+    if (kind === "engine") {
+      if (value === "Engine") return engine;
+      if (value in engine) return engine[value];
+      throw new Error(`the state names engine.${value}, which the runtime does not have`);
+    }
+    if (kind === "entity") {
+      if (!entities.has(value)) entities.set(value, { index: value });
+      return entities.get(value);
+    }
+    if (kind === "material") {
+      if (!mats.has(value)) mats.set(value, { id: value, material: materials[value] ?? null });
+      return mats.get(value);
+    }
+    if (kind === "widget") {
+      engine.gui.widgets[value] ??= { index: value };
+      return engine.gui.widgets[value];
+    }
+    throw new Error(`a state handle of unknown kind: ${kind}`);
+  };
+  return engine;
+}
+
+// ---------------------------------------------------------------- frames
+
+// app: {engine, roots}, roots as loadState returns them. One frame: every system, in the
+// order the app registered them, called as the engine calls them, with (query, dt).
+export function step(app, dt) {
+  for (const r of app.roots) if (r.kind === "system") r.fn(null, dt);
+}
+
+// What each ValueDisplay shows: its getter's value, as str() makes it.
+export function guiValues(app) {
+  return app.roots
+    .filter((r) => r.kind === "getter")
+    .map((r) => {
+      const v = r.fn();
+      return typeof v === "string" ? v : str_(v);
+    });
 }
