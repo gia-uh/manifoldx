@@ -32,6 +32,12 @@ const FLOATS = { nan: NaN, inf: Infinity, "-inf": -Infinity };
 // "widget" (an index). An object is built without its constructor, from its class's
 // prototype; an object of a class with __call__ is callable; a shared object stays one.
 export function loadState(state, modules, resolve) {
+  return load(state, modules, resolve).roots;
+}
+
+// loadState's work: {roots, state}, state being engine.state as a Map (undefined when the
+// snapshot has none).
+function load(state, modules, resolve) {
   const table = state.table;
   const built = table.map((e) => {
     if (Array.isArray(e)) return [];
@@ -96,7 +102,20 @@ export function loadState(state, modules, resolve) {
     for (const [k, x] of Object.entries(globals)) values[k] = value(x);
     moduleOf(modules, name).__set_globals(values);
   }
-  return state.roots.map((r) => ({ kind: r.kind, label: r.label, event: r.event, fn: value(r.fn) }));
+  return {
+    roots: state.roots.map((r) => ({ kind: r.kind, label: r.label, event: r.event, fn: value(r.fn) })),
+    state: state.state === undefined ? undefined : value(state.state),
+  };
+}
+
+// loadApp(state, modules, options): the app as an export left it, {engine, roots}, ready for
+// step(). The engine is createEngine(state.engine) with options over it; engine.state is the
+// snapshot's, set once the state is loaded, because its handles resolve through the engine.
+export function loadApp(state, modules, options = {}) {
+  const engine = createEngine({ ...state.engine, ...options });
+  const loaded = load(state, modules, engine.resolve);
+  if (loaded.state !== undefined) engine.state = loaded.state;
+  return { engine, roots: loaded.roots };
 }
 
 // ---------------------------------------------------------------- the engine, headless
@@ -173,9 +192,9 @@ export class Camera {
 // createEngine({w, h, camera: {position, target, near, far}, materials, log, state}):
 // the engine object transpiled code reaches. materials maps a material id to the
 // renderer's material (none, headless); log receives ["material", entity, material_id] and
-// ["capture", on] as reached code asks for them. resolve(kind, value) is loadState's
-// resolver for this engine.
-export function createEngine({ w, h, camera, materials = {}, log = [], state = {} }) {
+// ["capture", on] as reached code asks for them; state is engine.state, a Map as every dict.
+// resolve(kind, value) is loadState's resolver for this engine.
+export function createEngine({ w, h, camera, materials = {}, log = [], state = new Map() }) {
   const engine = { w, h, state, log };
   engine.input = new ScriptInput((nw, nh) => { engine.w = nw; engine.h = nh; });
   engine.input._log = log;

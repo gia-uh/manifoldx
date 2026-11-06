@@ -1,11 +1,13 @@
 """The state the browser starts from: what setup left in the objects reached code reads.
 
-snapshot(roots, reach, engine) walks from the roots (a bound method's object, a closure's
-cells and defaults) and the module globals reached code reads, and writes JSON:
+snapshot(roots, reach, engine) walks from engine.state, the roots (a bound method's object, a
+closure's cells and defaults) and the module globals reached code reads, and writes JSON:
 
-    {"table": [entry, ...], "roots": [root, ...], "globals": {module: {name: value}}}
+    {"table": [entry, ...], "roots": [root, ...], "globals": {module: {name: value}},
+     "state": value, "engine": {"w", "h", "camera": {"position", "target", "near", "far"}}}
 
 A root is {"kind", "label", "event", "fn": value}, in the order find_roots gave them.
+"state" is engine.state as a dict entry; "engine" is what the runtime's createEngine takes.
 
 A value is null, a bool, a number, a str, a tuple as a JSON array, or one of
     {"__ref": n}                    the table's entry n, so a shared object stays one
@@ -50,10 +52,12 @@ class SnapshotError(Exception):
         return f"{self.path_from_root}: {self.what} cannot cross to the browser"
 
 
-def snapshot(roots, reach: Reach, engine) -> dict:
-    """The JSON state of roots (reach.Root objects) and what they reach; registers every
-    material it meets in the engine's material registry, so the glTF export writes it."""
-    return _Writer(reach, engine).write(roots)
+def snapshot(roots, reach: Reach, engine, left_out: list | None = None) -> dict:
+    """The JSON state of roots (reach.Root objects) and what they reach, and engine.state;
+    registers every material it meets in the engine's material registry, so the glTF export
+    writes it. A key of engine.state that cannot cross raises SnapshotError, or with
+    left_out given is skipped and appended to it as the SnapshotError."""
+    return _Writer(reach, engine).write(roots, left_out)
 
 
 def _join(path: str, name: str) -> str:
@@ -80,7 +84,8 @@ class _Writer:
         self.widgets = {id(w): i for i, w in enumerate(walk)}
         self.Entity, self.Widget, self.Material = EntityHandle, Widget, Material
 
-    def write(self, roots) -> dict:
+    def write(self, roots, left_out: list | None = None) -> dict:
+        state = self.state(left_out)
         out = []
         for r in roots:
             path = type(r.owner).__name__ if r.owner is not None else ""
@@ -94,7 +99,49 @@ class _Writer:
                 if name in namespace:
                     value = self.value(namespace[name], f"{module}.{name}")
                     globals_.setdefault(module, {})[name] = value
-        return {"table": self.table, "roots": out, "globals": globals_}
+        cam = self.engine.camera
+        engine = {
+            "w": int(self.engine.w),
+            "h": int(self.engine.h),
+            "camera": {
+                "position": [float(x) for x in cam.position],
+                "target": [float(x) for x in cam.target],
+                "near": float(cam.near),
+                "far": float(cam.far),
+            },
+        }
+        return {
+            "table": self.table,
+            "roots": out,
+            "globals": globals_,
+            "state": state,
+            "engine": engine,
+        }
+
+    def state(self, left_out: list | None):
+        """engine.state as a dict entry, written first so what roots share with it stays
+        shared. A key that fails is rolled back out of the table when left_out is given."""
+        state = self.engine.state
+        n = len(self.table)
+        self.table.append(None)
+        self.refs[id(state)] = n
+        self.keep.append(state)
+        pairs = []
+        for k, x in state.items():
+            path = f"engine.state[{k!r}]"
+            mark = len(self.table)
+            try:
+                if not isinstance(k, str):
+                    raise SnapshotError(path, f"a {type(k).__name__} key")
+                pairs.append([k, self.value(x, path)])
+            except SnapshotError as e:
+                if left_out is None:
+                    raise
+                left_out.append(e)
+                del self.table[mark:]
+                self.refs = {i: j for i, j in self.refs.items() if j < mark}
+        self.table[n] = {"__dict": pairs}
+        return {"__ref": n}
 
     # ---------------------------------------------------------- values
     def value(self, v, path: str):

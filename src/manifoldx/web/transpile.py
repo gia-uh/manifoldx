@@ -124,17 +124,29 @@ def _constant(n: ast.expr) -> bool:
     return isinstance(n, ast.Tuple) and all(_constant(e) for e in n.elts)
 
 
-def transpile_app(
+def reach_app(
     sources: dict[str, str], roots: list | None = None, live: LiveTypes | None = None
+) -> Reach:
+    """What roots reach among the app's modules ({module name: source}), typed."""
+    trees = {name: ast.parse(src, filename=module_path(name)) for name, src in sources.items()}
+    return Reach(roots, TypeEnv(trees, live))
+
+
+def transpile_app(
+    sources: dict[str, str],
+    roots: list | None = None,
+    live: LiveTypes | None = None,
+    reach: Reach | None = None,
+    runtime: str = "./pyrt.js",
 ) -> dict[str, JsModule]:
     """Transpile the app's modules ({module name: source}); with roots (reach.Root objects,
     or "module.function" strings), only what they reach. A module "pkg.sub" is reported as
     pkg/sub.py and written as pkg.sub.js; its imports of other app modules become ES
-    imports of those files."""
-    trees = {name: ast.parse(src, filename=module_path(name)) for name, src in sources.items()}
-    env = TypeEnv(trees, live)
-    reach = Reach(roots, env)
-    return {name: _Module(env, name, reach).write() for name in trees}
+    imports of those files, and the runtime's import reads `runtime`. A reach_app result
+    given as reach is used instead of a new one (the snapshot's, so both see one reach)."""
+    if reach is None:
+        reach = reach_app(sources, roots, live)
+    return {name: _Module(reach.env, name, reach, runtime).write() for name in reach.env.modules}
 
 
 _B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -172,8 +184,8 @@ Lines = list[tuple[str, int]]
 
 
 class _Module:
-    def __init__(self, env: TypeEnv, name: str, reach: Reach):
-        self.env, self.name, self.reach = env, name, reach
+    def __init__(self, env: TypeEnv, name: str, reach: Reach, runtime: str = "./pyrt.js"):
+        self.env, self.name, self.reach, self.runtime = env, name, reach, runtime
         self.path = module_path(name)
         self.ctx = Ctx(name)
         self.root: str | None = None
@@ -275,7 +287,7 @@ class _Module:
             body.append((f"export function __set_globals($g) {{ {sets} }}", 0))
         head = [f"// Generated from {self.path} by manifoldx.web; do not edit."]
         if self.uses_rt:
-            head.append('import * as $rt from "./pyrt.js";')
+            head.append(f'import * as $rt from "{self.runtime}";')
         lines = [(h, 0) for h in head + imports] + [("", 0)] + body
         # One generated line per entry: an entry whose text holds newlines maps each.
         lines = [(t, line) for text, line in lines for t in text.split("\n")]
