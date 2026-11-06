@@ -33,22 +33,26 @@ def _widgets(widget):
         yield from _widgets(child)
 
 
-def code_report(engine):
+def code_report(engine, transpiled=()):
+    """What the scene leaves out of the app's code; `transpiled` holds the functions export
+    --web carries to the browser, which are not reported."""
     r = ExportReport()
     for system in engine.systems._systems:
+        if system.func in transpiled:
+            continue
         r.add("system", _label(system.func), "dropped", "custom Python that runs every frame", _where(system.func))
     for event, handlers in engine._event_bus._handlers.items():
         if event == "startup":  # the export runs it: it is how most apps spawn
             continue
         for h in handlers:
-            if not _internal(h.func):
+            if not _internal(h.func) and h.func not in transpiled:
                 r.add("handler", f'on("{event}") {_label(h.func)}', "dropped", "event handlers are not exported",
                       _where(h.func))
     for panel in engine.gui:
         r.add("gui", type(panel).__name__, "dropped", "glTF has no GUI")
         for widget in _widgets(panel):
             for attr, value in vars(widget).items():
-                if callable(value) and not isinstance(value, type):
+                if callable(value) and not isinstance(value, type) and value not in transpiled:
                     r.add("gui", f"{type(widget).__name__}.{attr.lstrip('_')} = {_label(value)}", "dropped",
                           "Python callbacks cannot run outside manifoldx", _where(value))
     for cls in engine._compute_runner._registered:
@@ -103,10 +107,10 @@ def nodes(engine, names, extras, report):
     return out
 
 
-def export_engine(engine, path, *, names=None, extras=None, strict=False):
+def export_engine(engine, path, *, names=None, extras=None, strict=False, transpiled=()):
     if engine._device is None and engine._event_bus._handlers.get("startup"):
         engine._ensure_offscreen(1)  # startup handlers may need the device (load_texture)
-    report = code_report(engine)
+    report = code_report(engine, transpiled)
     lights = [light for light in (engine._sun, engine._spot) if light is not None] + list(engine._lights)
     data, written = build_glb(nodes(engine, names, extras, report), camera=engine.camera, lights=lights,
                               environment=engine._environment, scene_extras=scene_extras(engine),

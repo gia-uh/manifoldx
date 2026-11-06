@@ -55,6 +55,8 @@ def capture_engine(module: str | None, script: str | None, app_args: list[str]):
 def export_web(module: str | None, script: str | None, out: Path, app_args: list[str]) -> int:
     """Write the folder for the app; 0 when written, 1 when the app's code cannot cross
     (nothing written), 2 when the app never called engine.run()."""
+    from manifoldx.gltf.engine_export import export_engine
+
     from .reach import find_roots
     from .snapshot import SnapshotError, snapshot
     from .transpile import reach_app, transpile_app
@@ -110,7 +112,8 @@ def export_web(module: str | None, script: str | None, out: Path, app_args: list
     for f in RUNTIME:
         shutil.copy(JS / f, out / f)
     (out / "state.json").write_text(json.dumps(state, allow_nan=False))
-    engine.export_gltf(out / "scene.glb")
+    # Not engine.export_gltf: its report would call the transpiled roots dropped.
+    export_engine(engine, out / "scene.glb", transpiled=[r.func for r in roots])
     (out / "report.json").write_text(json.dumps(report, indent=1) + "\n")
     for e in left_out:
         _say(f"left out of the state: {e}")

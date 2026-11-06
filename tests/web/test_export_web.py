@@ -265,3 +265,10 @@ def test_the_capture_restores_engine_run_and_main(app_dir, tmp_path):
     _export(app_dir, tmp_path / "out", APP, webx_rig=RIG)
     assert mx.Engine.run is before_run
     assert sys.modules["__main__"] is before_main
+
+
+def test_the_scene_report_does_not_call_transpiled_code_dropped(app_dir, tmp_path, capsys):
+    assert _export(app_dir, tmp_path / "out", APP, webx_rig=RIG) == 0
+    err = capsys.readouterr().err
+    assert "custom Python that runs every frame" not in err
+    assert "ValueDisplay.getter = label" not in err  # transpiled too
