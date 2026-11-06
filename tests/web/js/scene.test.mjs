@@ -49,8 +49,8 @@ function marked(root) {
   return out;
 }
 
-test("CALIBRATION starts from the first consumer's measured factors", () => {
-  assert.deepEqual(CALIBRATION, { environment: 1.5, sun: 1.0 });
+test("CALIBRATION holds the factors the visual parity test measured", () => {
+  assert.deepEqual(CALIBRATION, { environment: 1.45, sun: 1.0 });
 });
 
 test("entities holds every mx.entity and the meshes under each", { skip }, async () => {
@@ -180,7 +180,7 @@ test("the sun is scaled by CALIBRATION.sun and setCalibration rescales it", asyn
   assert.equal(sun.intensity, 1.5);
   mx.setCalibration({ environment: 2 });
   assert.equal(sun.intensity, 1.5);
-  assert.deepEqual(CALIBRATION, { environment: 1.5, sun: 1.0 });
+  assert.deepEqual(CALIBRATION, { environment: 1.45, sun: 1.0 });
 });
 
 test("shadows with auto_fit: every mesh casts and receives, the shadow camera covers the bounding sphere", async () => {

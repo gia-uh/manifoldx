@@ -3,10 +3,14 @@
 // BasicMaterial and PhongMaterial, and handles from entities and material ids to three.js
 // meshes and materials. THREE is passed in, so this module imports nothing.
 
-// three.js against the desktop at the same intensities. The first consumer measured its sky
-// environment darker by a factor it corrected with 1.5 (mean colour within 1-6% per channel);
-// the sun needs none.
-export const CALIBRATION = { environment: 1.5, sun: 1.0 };
+// three.js against the desktop at the same intensities, measured by tests/web/browser/test_visual.py
+// on tests/web/apps/lit_yard.py (sky environment, sun, shadows, fog) at 320x200, lavapipe for the
+// desktop and SwiftShader for Chromium. The desktop's mean colour is (131.7, 141.3, 157.9); the
+// page gives (126.5, 133.6, 146.4) uncalibrated (4.0, 5.5, 7.3% darker), (132.3, 142.0, 159.7)
+// at 1.5, the first consumer's factor (worst channel 1.1%), and (131.7, 141.2, 158.4) at 1.45,
+// the best of a sweep from 1.30 to 1.70 in steps of 0.05 (worst channel 0.3%; each step moves
+// the means about 0.5%). The sun needs none.
+export const CALIBRATION = { environment: 1.45, sun: 1.0 };
 
 // The desktop lights BasicMaterial and PhongMaterial with a fixed light from (1, 1, 1) in world
 // space: 0.3 ambient + 0.7 Lambert (resources.py, the basic shader).
