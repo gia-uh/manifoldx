@@ -446,3 +446,106 @@ def test_an_attribute_read_on_an_unknown_type_fails_naming_what_to_annotate(
     assert f"app.py:{line}: `it.name`" in err
     assert "annotate `it`" in err
     assert not out.exists()
+
+
+GRID = """
+import manifoldx as mx
+
+engine = mx.Engine("grid", width=320, height=200)
+LEVELS = {"a": [1.0, 2.0], "b": [3.0]}
+
+
+def grid(levels):
+    xs = [x for level in levels for x in level]
+    return min(xs), max(xs)
+
+
+X0, X1 = grid(LEVELS.values())
+
+
+def tick(query, dt: float):
+    engine.state["span"] = X1 - X0
+
+
+engine.system(tick)
+engine.run()
+"""
+
+LEVELS = """
+from pathlib import Path
+
+DATA = Path(__file__).parent
+LEVELS = {"a": {"w": 3.0}, "root": {"w": float(len(str(DATA)))}}
+"""
+
+ROOMS = """
+import manifoldx as mx
+from webx_levels import LEVELS
+
+engine = mx.Engine("rooms", width=320, height=200)
+ROOMS = {"first": LEVELS["a"]}
+
+
+def tick(query, dt: float):
+    w: float = ROOMS["first"]["w"]
+    engine.state["w"] = w * 2.0
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_a_global_set_by_a_call_does_not_reach_the_call(app_dir, tmp_path):
+    """A global's value comes from the snapshot: its initializer ran at setup, so the function
+    it calls stays setup and the globals it reads stay out of the browser."""
+    out = tmp_path / "out"
+    py, node = _replay_both(app_dir, out, GRID)
+    assert py[0]["state"]["span"] == 2.0
+    assert compare(py, node) is None, str(compare(py, node))
+    report = json.loads((out / "report.json").read_text())
+    assert "__main__.grid" in report["setup"]
+    assert report["globals"] == ["__main__.X0", "__main__.X1", "__main__.engine"]
+
+
+def test_a_global_built_from_another_does_not_snapshot_that_one(app_dir, tmp_path):
+    """ROOMS reads LEVELS at setup; reached code reads only ROOMS, so neither LEVELS nor the
+    Path LEVELS' initializer read goes in the snapshot."""
+    out = tmp_path / "out"
+    py, node = _replay_both(app_dir, out, ROOMS, webx_levels=LEVELS)
+    assert py[0]["state"]["w"] == 6.0
+    assert compare(py, node) is None, str(compare(py, node))
+    report = json.loads((out / "report.json").read_text())
+    assert report["globals"] == ["__main__.ROOMS", "__main__.engine"]
+    assert set(json.loads((out / "state.json").read_text())["globals"]) == {"__main__"}
+
+
+HELD = """
+import manifoldx as mx
+
+engine = mx.Engine("held", width=320, height=200)
+
+
+class Item:
+    def __init__(self, name):
+        self.name = name
+
+
+PICK = Item("a")
+
+
+def tick(query, dt: float):
+    engine.state["p"] = PICK
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_a_global_s_object_crosses_when_reached_code_only_passes_it(app_dir, tmp_path):
+    """With no initializer to walk, the class of what a reached global holds is reached from
+    the global's type, so the snapshot writes it."""
+    out = tmp_path / "out"
+    assert _export(app_dir, out, HELD) == 0
+    assert "__main__.Item" in json.loads((out / "report.json").read_text())["classes"]

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from manifoldx.gltf.engine_export import _internal, _label, _widgets
 
 from .types import (
+    NEVER,
     NUM,
     Ctx,
     FuncInfo,
@@ -26,7 +27,6 @@ from .types import (
     TypeEnv,
     key_label,
     module_path,
-    target_names,
 )
 
 
@@ -120,6 +120,7 @@ class Reach:
         self._order: list[FunctionKey] = []
         self._kinds: dict[FunctionKey, Root | str] = {}
         self.root_keys: list[FunctionKey] = []  # each root's key, in the order of roots
+        self._labels = {key_label(k): k for k in env.functions}
         for r in self.roots:
             key = self._root_key(r)
             self.root_keys.append(key)
@@ -129,6 +130,8 @@ class Reach:
         while True:
             env.solve(self._order, report=False)
             n = (len(self.functions), len(self.classes), len(self.globals))
+            for g in sorted(self.globals):
+                self._held(env.globals.get(g, NEVER), self._via[("global", *g)])
             self._expand(check=False)
             if (len(self.functions), len(self.classes), len(self.globals)) == n:
                 break
@@ -255,22 +258,22 @@ class Reach:
         elif sym.kind == "class":
             self._class(sym.target, via)
         elif sym.kind == "const" and sym.target not in self.globals:
+            # Its value comes from the snapshot: the initializer is setup and reaches nothing.
             self.globals.add(sym.target)
             self._via[("global", *sym.target)] = via
-            value = self._global_value(*sym.target)
-            if value is not None:
-                module = sym.target[0]
-                for n in ast.walk(value):
-                    if isinstance(n, ast.Name):
-                        self._symbol(self.env.resolve(module, n.id), via)
 
-    def _global_value(self, module: str, name: str) -> ast.expr | None:
-        for n in self.env.modules[module].body:
-            if isinstance(n, ast.Assign) and any(name in target_names(t) for t in n.targets):
-                return n.value
-            if isinstance(n, ast.AnnAssign) and name in target_names(n.target):
-                return n.value
-        return None
+    def _held(self, t, via: FunctionKey) -> None:
+        """The app classes and named functions a value of type t holds, which the snapshot
+        writes even when reached code only passes the value along."""
+        for m in t.members:
+            if m.kind == "obj":
+                self._class(m.name, via)
+            elif m.kind == "fn" and m.name is not None:
+                key = self._labels.get(m.name)
+                if key is not None:
+                    self._add(key, via)
+            for a in m.args:
+                self._held(a, via)
 
     def _expand(self, check: bool) -> None:
         """One walk over every reached function (the list grows as it goes)."""
