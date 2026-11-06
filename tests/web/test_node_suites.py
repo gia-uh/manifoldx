@@ -16,6 +16,42 @@ HERE = Path(__file__).parent / "js"
 FORWARD = HERE / "forward.json"
 WEB_WALK = Path(__file__).parents[2] / "examples" / "web_walk.py"
 
+# A two-module app whose system calls a helper that reads an attribute of None, for
+# sourcemap.test.mjs: the error must name the helper's line, then the system's call.
+HELPER = """
+class Spot:
+    def __init__(self):
+        self.x = 1.0
+
+
+def far(spot: Spot | None) -> float:
+    return spot.x * 2.0
+"""
+
+FAILING = """
+import manifoldx as mx
+from mxsm_helper import Spot, far
+
+
+class Holder:
+    def __init__(self):
+        self.spot: Spot | None = Spot()
+        self.n = 0.0
+
+
+holder = Holder()
+engine = mx.Engine("sourcemap", width=64, height=64)
+
+
+def tick(query, dt: float):
+    holder.spot = None
+    holder.n = holder.n + far(holder.spot)
+
+
+engine.system(tick)
+engine.run()
+"""
+
 # Position/target pairs whose float32 arithmetic differs from float64's.
 PAIRS = [
     ((0.1, 1.7, 3.3), (-2.25, 0.3, 7.1)),
@@ -58,14 +94,52 @@ def web_walk_export(tmp_path_factory) -> Path:
     return out
 
 
-def test_node_suites_pass(web_walk_export):
-    # Node 22's --test takes files or globs, not a folder.
-    suites = sorted(str(f) for f in HERE.glob("*.test.mjs"))
-    assert suites
-    env = {**os.environ, "MX_WEB_WALK_EXPORT": str(web_walk_export)}
+@pytest.fixture(scope="session")
+def sourcemap_export(tmp_path_factory) -> Path:
+    """FAILING exported, with expect.json beside it: the Python lines the error must name."""
+    import sys
+
+    base = tmp_path_factory.mktemp("sourcemap_export")
+    src = base / "src"
+    src.mkdir()
+    (src / "mxsm_helper.py").write_text(HELPER)
+    (src / "failing.py").write_text(FAILING)
+    out = base / "out"
+    try:
+        assert export_web(None, str(src / "failing.py"), out, []) == 0
+    finally:
+        sys.modules.pop("mxsm_helper", None)
+    lines = {
+        "helper": HELPER.splitlines().index("    return spot.x * 2.0") + 1,
+        "call": FAILING.splitlines().index("    holder.n = holder.n + far(holder.spot)") + 1,
+    }
+    (base / "expect.json").write_text(json.dumps(lines))
+    return out
+
+
+def _run(suites: list[str], env: dict[str, str]) -> None:
     done = subprocess.run(
         ["node", "--test", *suites], capture_output=True, text=True, timeout=120, env=env
     )
     assert done.returncode == 0, done.stdout + done.stderr
     # A suite that skips for want of the export would pass without checking anything.
     assert "# skipped 0" in done.stdout, done.stdout
+
+
+def test_node_suites_pass(web_walk_export, sourcemap_export):
+    # Node 22's --test takes files or globs, not a folder.
+    suites = sorted(str(f) for f in HERE.glob("*.test.mjs"))
+    assert suites
+    env = {
+        **os.environ,
+        "MX_WEB_WALK_EXPORT": str(web_walk_export),
+        "MX_SOURCEMAP_EXPORT": str(sourcemap_export),
+    }
+    _run(suites, env)
+
+
+def test_sourcemap_names_the_python_lines(sourcemap_export):
+    _run(
+        [str(HERE / "sourcemap.test.mjs")],
+        {**os.environ, "MX_SOURCEMAP_EXPORT": str(sourcemap_export)},
+    )
