@@ -890,10 +890,12 @@ class TypeEnv:
         if isinstance(n, ast.Name):
             return self.name(n.id, ctx)
         if isinstance(n, ast.List):
-            return list_of(union(*(self.expr(e, ctx) for e in n.elts)))
+            return list_of(union(*(self.item(e, ctx) for e in n.elts)))
         if isinstance(n, ast.Set):
-            return set_of(union(*(self.expr(e, ctx) for e in n.elts)))
+            return set_of(union(*(self.item(e, ctx) for e in n.elts)))
         if isinstance(n, ast.Tuple):
+            if any(isinstance(e, ast.Starred) for e in n.elts):  # its length is not known
+                return list_of(union(*(self.item(e, ctx) for e in n.elts)))
             return tuple_of(*(self.expr(e, ctx) for e in n.elts))
         if isinstance(n, ast.Dict):
             return dict_of(
@@ -930,6 +932,10 @@ class TypeEnv:
         if isinstance(n, ast.JoinedStr):
             return STR
         return UNKNOWN
+
+    def item(self, e: ast.expr, ctx: Ctx) -> Ty:
+        """The type of what an element of a display adds: a starred one, its items."""
+        return elem(self.expr(e.value, ctx)) if isinstance(e, ast.Starred) else self.expr(e, ctx)
 
     def lambda_params(self, n: ast.Lambda, ctx: Ctx) -> dict[str, Ty]:
         """A lambda's parameters: one with a default has the default's type, the others

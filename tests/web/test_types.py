@@ -284,3 +284,18 @@ def test_a_variable_length_tuple_annotation_types_every_item():
     )
     py, js = run_both(src)
     assert js == py == 13.0
+
+
+def test_a_starred_tuple_display_keeps_the_item_types():
+    """gia-uh/manifoldx#145: (*a, *b) holds the items of a and of b."""
+    src = (
+        "def main():\n"
+        "    a: list[float] = [1.0, 2.0]\n"
+        "    b: list[float] = [3.0]\n"
+        "    out = []\n"
+        "    for x in (*a, *b):\n"
+        "        out.append(x * 2.0)\n"
+        "    return out\n"
+    )
+    py, js = run_both(src)
+    assert js == py == [2.0, 4.0, 6.0]
