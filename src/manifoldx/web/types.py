@@ -39,7 +39,10 @@ KINDS = frozenset(
 class Ty:
     """A type. `args` holds the element types: list[elem], set[elem], tuple[*items],
     dict[key, value], union[*members], fn[return] (empty when the return is unknown).
-    `dtype` is a vec's "f64" or "f32"; `name` is an obj's class ("module.Qualname") or a
+    `dtype` is a vec's "f64" or "f32". A num carries one when it is a numpy scalar, which
+    numpy keeps at its precision ("f32": np.float32, float32 arithmetic; "f64":
+    np.float64); a Python float or int has none and takes the other operand's precision
+    (NEP 50). `name` is an obj's class ("module.Qualname") or a
     fn's function ("module.qualname"), None for a lambda.
 
     A union with no members is the empty type: the elements of `[]`, or a variable before
@@ -56,6 +59,10 @@ class Ty:
             raise ValueError(f"unknown type kind {self.kind!r}")
         if self.kind == "vec" and self.dtype not in ("f64", "f32"):
             raise ValueError(f"a vec's dtype is f64 or f32, not {self.dtype!r}")
+        if self.kind == "num" and self.dtype not in (None, "f64", "f32"):
+            raise ValueError(f"a num's dtype is None, f64 or f32, not {self.dtype!r}")
+        if self.kind not in ("vec", "num") and self.dtype is not None:
+            raise ValueError(f"a {self.kind} has no dtype")
 
     def __str__(self) -> str:
         k, a = self.kind, self.args
@@ -63,8 +70,8 @@ class Ty:
             return " | ".join(map(str, a)) if a else "never"
         if k in ("list", "set", "tuple", "dict"):
             return f"{k}[{', '.join(map(str, a))}]"
-        if k == "vec":
-            return f"vec[{self.dtype}]"
+        if k == "vec" or (k == "num" and self.dtype):
+            return f"{k}[{self.dtype}]"
         if k in ("obj", "fn") and self.name:
             return f"{k} {self.name}"
         return k
@@ -98,6 +105,7 @@ class Ty:
 NUM, INT, BOOL, STR, NONE = Ty("num"), Ty("int"), Ty("bool"), Ty("str"), Ty("none")
 UNKNOWN = Ty("unknown")
 NEVER = Ty("union")
+NUM32, NUM64 = Ty("num", dtype="f32"), Ty("num", dtype="f64")
 
 
 def list_of(elem: Ty) -> Ty:
@@ -163,6 +171,25 @@ def join(a: Ty, b: Ty) -> Ty:
     return union(a, b)
 
 
+def precision(t: Ty) -> str | None:
+    """The numpy precision arithmetic on t's numbers runs at: "f32" when some member is
+    float32 and none float64, "f64" when some is float64 and none float32, None for Python
+    numbers only, "mixed" when a member is each (the result depends on the value)."""
+    found = {m.dtype for m in t.members if m.kind in ("num", "vec") and m.dtype}
+    return "mixed" if len(found) > 1 else (found.pop() if found else None)
+
+
+def arith_dtype(a: Ty, b: Ty) -> str | None:
+    """The precision of a + b (or -, *, /) on numbers or vecs, numpy 2's rules: two float32
+    sides or float32 against a Python number stay float32; float64 anywhere wins."""
+    pa, pb = precision(a), precision(b)
+    if "mixed" in (pa, pb):
+        return "mixed"
+    if "f64" in (pa, pb):
+        return "f64"
+    return "f32" if "f32" in (pa, pb) else None
+
+
 def elem(t: Ty) -> Ty:
     """The type of the items iterating a value of type t yields."""
     out = []
@@ -176,7 +203,7 @@ def elem(t: Ty) -> Ty:
         elif m.kind == "str":
             out.append(STR)
         elif m.kind == "vec":
-            out.append(NUM)
+            out.append(Ty("num", dtype=m.dtype))
         else:
             return UNKNOWN
     return union(*out)
@@ -248,6 +275,20 @@ BUILTIN_RETURNS = {
 }
 
 LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
+
+# math's functions the subset has, and its constants.
+MATH_FUNCTIONS = frozenset(
+    "sin cos tan asin acos atan atan2 sqrt exp log floor ceil fabs hypot radians degrees".split()
+)
+LIB_CONSTANTS = {
+    "math.pi": "Math.PI",
+    "math.e": "Math.E",
+    "math.tau": "(2 * Math.PI)",
+    "math.inf": "Infinity",
+    "math.nan": "NaN",
+    "numpy.pi": "Math.PI",
+    "numpy.inf": "Infinity",
+}
 
 
 class TypeEnv:
@@ -387,6 +428,54 @@ class TypeEnv:
         info = self.functions[key]
         return info.locals.get(name, info.param_types.get(name, UNKNOWN))
 
+    @staticmethod
+    def is_local(name: str, ctx: Ctx) -> bool:
+        f = ctx.func
+        return any(k == name for k, _ in ctx.extra) or (
+            f is not None and (name in f.locals or name in f.param_types)
+        )
+
+    def lib_name(self, n: ast.expr, ctx: Ctx) -> str | None:
+        """The dotted name n spells inside a library module ("numpy.linalg.norm",
+        "math.pi"), or None when n does not start at a library import."""
+        parts = []
+        while isinstance(n, ast.Attribute):
+            parts.append(n.attr)
+            n = n.value
+        if not isinstance(n, ast.Name) or self.is_local(n.id, ctx):
+            return None
+        sym = self.symbols.get(ctx.module, {}).get(n.id)
+        if sym is None or sym.kind != "lib":
+            return None
+        return ".".join([sym.target, *reversed(parts)])
+
+    def np_dtype(self, n: ast.Call, ctx: Ctx) -> str | None:
+        """The dtype an np.array or np.zeros call asks for: "f64" by default, "f32" for
+        np.float32, None for any other."""
+        given = [k.value for k in n.keywords if k.arg == "dtype"] + n.args[1:2]
+        if not given:
+            return "f64"
+        return {"numpy.float32": "f32", "numpy.float64": "f64"}.get(
+            self.lib_name(given[0], ctx) or ""
+        )
+
+    def lib_call(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
+        if name in ("numpy.array", "numpy.zeros"):
+            d = self.np_dtype(n, ctx)
+            return vec(d) if d else UNKNOWN
+        if name == "numpy.arange":
+            return vec("f64")
+        if name == "numpy.linalg.norm" and n.args:
+            t = self.expr(n.args[0], ctx)
+            return Ty("num", dtype=t.dtype) if t.kind == "vec" else UNKNOWN
+        if name in ("math.floor", "math.ceil"):
+            return INT
+        if name.startswith("math.") and name[5:] in MATH_FUNCTIONS:
+            return NUM
+        if name == "textwrap.wrap":
+            return list_of(STR)
+        return UNKNOWN
+
     def name(self, name: str, ctx: Ctx) -> Ty:
         for k, t in reversed(ctx.extra):
             if k == name:
@@ -449,6 +538,8 @@ class TypeEnv:
             return self.call(n, ctx)
         if isinstance(n, ast.Lambda):
             return fn(None)
+        if isinstance(n, ast.Attribute) and self.lib_name(n, ctx) in LIB_CONSTANTS:
+            return NUM
         return UNKNOWN
 
     def comprehension(self, generators: list[ast.comprehension], ctx: Ctx) -> Ctx:
@@ -464,6 +555,11 @@ class TypeEnv:
         if not (a.known and b.known):
             return UNKNOWN
         if a.is_numeric and b.is_numeric:
+            d = arith_dtype(a, b)
+            if d == "mixed":
+                return UNKNOWN
+            if d is not None:
+                return Ty("num", dtype=d)
             if isinstance(op, ast.Div):
                 return NUM
             if a.all("int", "bool") and b.all("int", "bool"):
@@ -483,8 +579,11 @@ class TypeEnv:
             for s, k in ((a, b), (b, a)):
                 if s.all("list", "str", "tuple") and k.all("int", "bool"):
                     return s
-        if a.kind == "vec" or b.kind == "vec":
-            return a if a.kind == "vec" else b
+        if (a.kind == "vec" or b.kind == "vec") and all(
+            t.kind == "vec" or t.is_numeric for t in (a, b)
+        ):
+            d = arith_dtype(a, b)
+            return vec(d or "f64") if d != "mixed" else UNKNOWN
         return UNKNOWN
 
     def subscript(self, n: ast.Subscript, ctx: Ctx) -> Ty:
@@ -523,6 +622,9 @@ class TypeEnv:
                 return self.builtin_call(f.id, n, ctx)
             return UNKNOWN
         if isinstance(f, ast.Attribute):
+            lib = self.lib_name(f, ctx)
+            if lib is not None:
+                return self.lib_call(lib, n, ctx)
             if isinstance(f.value, ast.Name):
                 sym = self.resolve(ctx.module, f.value.id)
                 if sym is not None and sym.kind == "module":
@@ -601,8 +703,10 @@ class TypeEnv:
                 info.locals[st.target.id] = self.annotation(st.annotation, info.key[0])
                 info.annotated.add(st.target.id)
             elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Name):
-                t = self.binop(st.op, self.expr(st.target, ctx), self.expr(st.value, ctx))
-                assign({st.target.id: t})
+                old = self.expr(st.target, ctx)
+                if old.kind == "vec":
+                    continue  # numpy's += writes into the array: its dtype stays
+                assign({st.target.id: self.binop(st.op, old, self.expr(st.value, ctx))})
             elif isinstance(st, ast.For):
                 found = {}
                 bind_target(st.target, elem(self.expr(st.iter, ctx)), found)

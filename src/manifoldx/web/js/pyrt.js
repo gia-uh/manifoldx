@@ -134,3 +134,78 @@ export function setitem(c, k, v) {
   else if (isDict(c)) c[k] = v;
   else throw new TypeError("object does not support item assignment");
 }
+
+// ---------------------------------------------------------------- math and small numpy vectors
+
+// CPython multiplies by a constant computed once (Modules/mathmodule.c); x * Math.PI / 180
+// rounds differently.
+const DEG_TO_RAD = Math.PI / 180, RAD_TO_DEG = 180 / Math.PI;
+export const radians = (x) => x * DEG_TO_RAD;
+export const degrees = (x) => x * RAD_TO_DEG;
+
+// A float64 array is a Float64Array, a float32 one a Float32Array. Arithmetic broadcasts a
+// number against an array; the "32" variants hold float32 results and round a Python number
+// to float32 before using it, as numpy does with a float32 array and a Python scalar.
+function vop(f, Out) {
+  const cast = Out === Float32Array ? Math.fround : (x) => x;
+  return (a, b) => {
+    const A = isArr(a), B = isArr(b);
+    if (A && B && a.length !== b.length) {
+      throw new Error(`ValueError: operands could not be broadcast together (${a.length}) (${b.length})`);
+    }
+    const n = A ? a.length : b.length, out = new Out(n);
+    for (let i = 0; i < n; i++) out[i] = f(cast(A ? a[i] : a), cast(B ? b[i] : b));
+    return out;
+  };
+}
+const add = (x, y) => x + y, sub = (x, y) => x - y, mul = (x, y) => x * y, div = (x, y) => x / y;
+export const vadd = vop(add, Float64Array), vsub = vop(sub, Float64Array);
+export const vmul = vop(mul, Float64Array), vdiv = vop(div, Float64Array);
+export const vadd32 = vop(add, Float32Array), vsub32 = vop(sub, Float32Array);
+export const vmul32 = vop(mul, Float32Array), vdiv32 = vop(div, Float32Array);
+export const vneg = (a) => a.map((x) => -x);
+
+// numpy's a += b writes into a, so an alias of a sees the change. A typed array rounds what
+// it stores to its own precision.
+function viop(f, cast) {
+  return (a, b) => {
+    const B = isArr(b);
+    if (B && a.length !== b.length) {
+      throw new Error(`ValueError: operands could not be broadcast together (${a.length}) (${b.length})`);
+    }
+    for (let i = 0; i < a.length; i++) a[i] = f(a[i], cast(B ? b[i] : b));
+    return a;
+  };
+}
+const same = (x) => x;
+export const viadd = viop(add, same), visub = viop(sub, same);
+export const vimul = viop(mul, same), vidiv = viop(div, same);
+export const viadd32 = viop(add, Math.fround), visub32 = viop(sub, Math.fround);
+export const vimul32 = viop(mul, Math.fround), vidiv32 = viop(div, Math.fround);
+
+// np.linalg.norm is sqrt(dot(a, a)) through BLAS. OpenBLAS's ddot sums the products in order
+// below 16 items; its sdot sums float32 products in a double below 32 items. Longer arrays
+// go through SIMD kernels whose order this does not follow.
+export function vnorm(a) {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * a[i];
+  return Math.sqrt(s);
+}
+export function vnorm32(a) {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += Math.fround(a[i] * a[i]);
+  return Math.fround(Math.sqrt(Math.fround(s)));
+}
+
+// np.arange fills start, start + step, then start + i * delta with delta the difference of
+// those two, and has ceil((stop - start) / step) items.
+export function arange(start, stop, step = 1) {
+  if (stop === undefined) { stop = start; start = 0; }
+  if (step === 0) throw new Error("ZeroDivisionError: arange() step is zero");
+  const n = Math.max(0, Math.ceil((stop - start) / step)), out = new Float64Array(n);
+  if (n > 0) out[0] = start;
+  if (n > 1) out[1] = start + step;
+  const delta = out[1] - out[0];
+  for (let i = 2; i < n; i++) out[i] = start + i * delta;
+  return out;
+}

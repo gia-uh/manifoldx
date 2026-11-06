@@ -18,14 +18,19 @@ import math
 from dataclasses import dataclass
 
 from .types import (
+    LIB_CONSTANTS,
+    MATH_FUNCTIONS,
     Ctx,
     FuncInfo,
     FunctionKey,
     Ty,
     TypeEnv,
     UNKNOWN,
+    arith_dtype,
+    elem,
     key_label,
     own_statements,
+    precision,
     target_names,
 )
 
@@ -96,6 +101,12 @@ def js_name(name: str) -> str:
 
 def module_path(name: str) -> str:
     return name.replace(".", "/") + ".py"
+
+
+# numpy's arithmetic as runtime helpers; a "32" suffix gives a Float32Array.
+VECTOR_OPS = {ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div"}
+SCALAR_OPS = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
+MATH_JS = {"fabs": "Math.abs", "radians": "$rt.radians", "degrees": "$rt.degrees"}
 
 
 def _simple(n: ast.expr) -> bool:
@@ -239,6 +250,17 @@ class _Module:
             f"(annotate `{ast.unparse(operand)}`)",
         )
 
+    def numeric(self, call: ast.expr, x: ast.expr, what: str) -> None:
+        """Fail unless x is known to be a number: `what` is the call that needs one."""
+        t = self.ty(x)
+        if not t.is_numeric:
+            self.fail(
+                call,
+                f"{what} of a {t}"
+                if t.known
+                else f"{what} of `{ast.unparse(x)}`, of unknown type (annotate it),",
+            )
+
     def test(self, n: ast.expr) -> str:
         """n in a test position: plain JS only for a known bool."""
         return self.e(n) if self.ty(n).is_bool else f"{self.rt('truthy')}({self.e(n)})"
@@ -374,6 +396,8 @@ class _Module:
                 self.fail(n, f"`{ast.unparse(n)}` on a computed target")
             if not isinstance(t, (ast.Name, ast.Attribute, ast.Subscript)):
                 self.fail(n, "this augmented assignment")
+            if self.ty(t).kind == "vec":
+                return [(f"{p}{self.vector_inplace(n)};", line)]
             value = ast.copy_location(ast.BinOp(t, n.op, n.value), n)
             load = ast.copy_location(type(t)(**{**vars(t), "ctx": ast.Load()}), t)
             value.left = load
@@ -408,6 +432,18 @@ class _Module:
         if isinstance(n, ast.Continue):
             return [(f"{p}continue;", line)]
         self.fail(n, FRIENDLY.get(type(n).__name__, type(n).__name__))
+
+    def vector_inplace(self, n: ast.AugAssign) -> str:
+        """`a += b` on a numpy array writes into a, which every alias of a sees."""
+        if type(n.op) not in VECTOR_OPS:
+            self.fail(n, f"`{ast.unparse(n)}` on a numpy array")
+        a_t, b_t = self.ty(n.target), self.ty(n.value)
+        if not (b_t.kind == "vec" or b_t.is_numeric) or precision(b_t) == "mixed":
+            self.fail(n, f"`{ast.unparse(n)}` with a {b_t} on the right")
+        # Into a float32 array, a float32 or Python right side is rounded to float32 first.
+        f32 = a_t.dtype == "f32" and precision(b_t) in (None, "f32")
+        helper = f"vi{VECTOR_OPS[type(n.op)]}{'32' if f32 else ''}"
+        return f"{self.rt(helper)}({self.e(n.target)}, {self.e(n.value)})"
 
     def assign(self, targets: list[ast.expr], value: ast.expr, n: ast.stmt) -> str:
         if len(targets) > 1:
@@ -556,6 +592,11 @@ class _Module:
         self.fail(n, f"the undefined name {name}")
 
     def e_Attribute(self, n: ast.Attribute) -> str:
+        lib = self.env.lib_name(n, self.ctx)
+        if lib in LIB_CONSTANTS:
+            return LIB_CONSTANTS[lib]
+        if lib is not None:
+            self.fail(n, ast.unparse(n))
         if isinstance(n.value, ast.Name) and not self.is_local(n.value.id):
             sym = self.env.symbols[self.ctx.module].get(n.value.id)
             final = self.env.resolve(self.ctx.module, n.value.id) if sym else None
@@ -605,9 +646,11 @@ class _Module:
                 if not t.known:
                     self.unknown(n, side)
         if any(m.kind == "vec" for m in a_t.members + b_t.members):
-            self.fail(n, "arithmetic on numpy arrays")
+            return self.vector_op(n, a_t, b_t)
         a, b = self.e(n.left), self.e(n.right)
         num = a_t.is_numeric and b_t.is_numeric
+        if num and arith_dtype(a_t, b_t) is not None:
+            return self.numpy_scalar_op(n, a_t, b_t, a, b)
         loose = num or not a_t.known or not b_t.known
         if isinstance(op, ast.Add):
             if num or (a_t.all("str") and b_t.all("str")):
@@ -635,10 +678,41 @@ class _Module:
             self.fail(n, f"the operator {type(op).__name__}")
         self.fail(n, f"`{ast.unparse(n)}` on {a_t} and {b_t}")
 
+    def vector_op(self, n: ast.BinOp, a_t: Ty, b_t: Ty) -> str:
+        """Arithmetic with a numpy array on a side: a number broadcasts."""
+        if type(n.op) not in VECTOR_OPS:
+            self.fail(n, f"the operator {type(n.op).__name__} on numpy arrays")
+        for side, t in ((n.left, a_t), (n.right, b_t)):
+            if not (t.kind == "vec" or t.is_numeric):
+                self.fail(n, f"`{ast.unparse(n)}` on a {t} (annotate `{ast.unparse(side)}`)")
+        d = arith_dtype(a_t, b_t)
+        if d == "mixed":
+            self.fail(n, f"`{ast.unparse(n)}`, whose float32 or float64 result the run decides,")
+        helper = f"v{VECTOR_OPS[type(n.op)]}{'32' if d == 'f32' else ''}"
+        return f"{self.rt(helper)}({self.e(n.left)}, {self.e(n.right)})"
+
+    def numpy_scalar_op(self, n: ast.BinOp, a_t: Ty, b_t: Ty, a: str, b: str) -> str:
+        """Arithmetic on a numpy scalar: float64 is JS's own; float32 rounds each operand
+        and the result, which gives float32's result for + - * /."""
+        d = arith_dtype(a_t, b_t)
+        if d == "mixed":
+            self.fail(n, f"`{ast.unparse(n)}`, whose float32 or float64 result the run decides,")
+        if type(n.op) not in SCALAR_OPS:
+            self.fail(n, f"the operator {type(n.op).__name__} on a numpy {d} scalar")
+        if d == "f64":
+            return f"({a} {SCALAR_OPS[type(n.op)]} {b})"
+
+        def f32(t: Ty, code: str) -> str:
+            return code if all(m.dtype == "f32" for m in t.members) else f"Math.fround({code})"
+
+        return f"Math.fround({f32(a_t, a)} {SCALAR_OPS[type(n.op)]} {f32(b_t, b)})"
+
     def e_UnaryOp(self, n: ast.UnaryOp) -> str:
         if isinstance(n.op, ast.Not):
             return f"!{self.test(n.operand)}"
         t = self.ty(n.operand)
+        if t.kind == "vec" and isinstance(n.op, ast.USub):
+            return f"{self.rt('vneg')}({self.e(n.operand)})"
         if t.known and not t.is_numeric:
             self.fail(n, f"`{ast.unparse(n)}` on a {t}")
         if isinstance(n.op, ast.USub):
@@ -658,6 +732,10 @@ class _Module:
 
     def compare(self, op: ast.cmpop, ln: ast.expr, rn: ast.expr, a: str, b: str, n) -> str:
         lt, rt_ = self.ty(ln), self.ty(rn)
+        if not isinstance(op, (ast.In, ast.NotIn)) and any(
+            m.kind == "vec" for m in lt.members + rt_.members
+        ):
+            self.fail(n, "comparing numpy arrays, which numpy does item by item,")
         if isinstance(op, (ast.Is, ast.IsNot)):
             if not (lt.all("none") or rt_.all("none")):
                 self.fail(n, "`is` against anything but None")
@@ -719,6 +797,10 @@ class _Module:
         if isinstance(s, ast.Slice):
             if s.step is not None:
                 self.fail(n, "a slice with a step")
+            if t.kind == "vec":  # a view, as numpy's
+                lo = self.e(s.lower) if s.lower else "0"
+                hi = f", {self.e(s.upper)}" if s.upper else ""
+                return f"{self.e(n.value)}.subarray({lo}{hi})"
             if not t.all("list", "tuple"):
                 self.fail(
                     n,
@@ -794,12 +876,56 @@ class _Module:
                 if target is not None and target.kind == "func":
                     return self.place(n, self.env.function(target.target), self.e(f))
         if isinstance(f, ast.Attribute):
+            lib = self.env.lib_name(f, self.ctx)
+            if lib is not None:
+                return self.lib_call(lib, n)
             method = self.method(n, f)
             if method is not None:
                 return method
         if n.keywords:
             self.fail(n, f"keyword arguments to `{ast.unparse(f)}`, whose signature is unknown,")
         return f"{self.e(f)}({', '.join(self.e(a) for a in n.args)})"
+
+    def lib_call(self, name: str, n: ast.Call) -> str:
+        """A call into math or numpy."""
+        what = f"{ast.unparse(n.func)}()"
+        args, kw = n.args, {k.arg for k in n.keywords}
+        if name in ("numpy.array", "numpy.zeros"):
+            if kw - {"dtype"} or not 1 <= len(args) + len(kw) <= 2:
+                self.fail(n, f"this call to {what}")
+            d = self.env.np_dtype(n, self.ctx)
+            if d is None:
+                self.fail(n, f"the dtype in `{ast.unparse(n)}` (float32 and float64 are in)")
+            cls = "Float32Array" if d == "f32" else "Float64Array"
+            x, t = args[0], self.ty(args[0])
+            if name == "numpy.zeros":
+                if not t.all("int", "bool"):
+                    self.fail(n, f"{what} of a shape that is not an int")
+                return f"new {cls}({self.e(x)})"
+            if not (t.kind == "vec" or (t.all("list", "tuple") and elem(t).is_numeric)):
+                self.fail(n, f"{what} of a {t}" if t.known else f"{what} of an unknown type")
+            return f"{cls}.from({self.iterable(x)})"
+        if kw:
+            self.fail(n, f"keyword arguments to {what}")
+        if name == "numpy.arange" and 1 <= len(args) <= 3:
+            for x in args:
+                self.numeric(n, x, what)
+            return f"{self.rt('arange')}({', '.join(self.e(x) for x in args)})"
+        if name == "numpy.linalg.norm" and len(args) == 1:
+            t = self.ty(args[0])
+            if t.kind != "vec":
+                self.fail(n, f"{what} of a {t}, not a numpy array,")
+            return f"{self.rt('vnorm32' if t.dtype == 'f32' else 'vnorm')}({self.e(args[0])})"
+        fname = name.removeprefix("math.")
+        arity = 2 if fname in ("atan2", "hypot") else 1
+        if fname in MATH_FUNCTIONS and name.startswith("math.") and len(args) == arity:
+            for x in args:
+                self.numeric(n, x, what)
+            js = MATH_JS.get(fname, f"Math.{fname}")
+            if js.startswith("$rt."):
+                js = self.rt(js[4:])
+            return f"{js}({', '.join(self.e(x) for x in args)})"
+        self.fail(n, what)
 
     def method(self, n: ast.Call, f: ast.Attribute) -> str | None:
         """A method call on a typed builtin value; None for an app object's method."""
