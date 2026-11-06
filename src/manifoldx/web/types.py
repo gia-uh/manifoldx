@@ -724,8 +724,11 @@ class TypeEnv:
             return vec("f64")
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
             args = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
-            ts = [self.annotation(x, module) for x in args]
             head = node.value.id
+            if head == "tuple" and len(args) == 2 and _is_ellipsis(args[1]):
+                # Of any length, as a tuple(...) call's result: a list of its items' type.
+                return list_of(self.annotation(args[0], module))
+            ts = [self.annotation(x, module) for x in args]
             if head == "list" and len(ts) == 1:
                 return list_of(ts[0])
             if head == "set" and len(ts) == 1:
@@ -1394,6 +1397,10 @@ class TypeEnv:
                 assign({name: list_of(self.expr(call.args[-1], ctx))})
             elif recv.all("list") and f.attr == "extend":
                 assign({name: list_of(elem(self.expr(call.args[0], ctx)))})
+
+
+def _is_ellipsis(n: ast.expr) -> bool:
+    return isinstance(n, ast.Constant) and n.value is Ellipsis
 
 
 def is_classvar(annotation: ast.expr) -> bool:
