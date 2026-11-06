@@ -34,7 +34,7 @@ def test_entities_names_extras_and_scene_state(tmp_path):
     e.export_gltf(tmp_path / "s.glb", names={a.index: "a"}, extras={a.index: {"pick": "p1"}})
     g = load(tmp_path / "s.glb")
     named = {n.name: n for n in g.nodes}
-    assert named["a"].translation == [1, 2, 3] and named["a"].extras == {"pick": "p1"}
+    assert named["a"].translation == [1, 2, 3] and named["a"].extras["pick"] == "p1"
     assert named[f"entity_{b.index}"].translation == [4, 0, 0]
     assert len(g.meshes) == 2  # one geometry, two materials
     extras = g.scenes[0].extras["manifoldx"]
@@ -97,8 +97,8 @@ def test_names_and_extras_can_be_functions(tmp_path):
     e.export_gltf(tmp_path / "s.glb", names=lambda i: "first" if i == a.index else None,
                   extras=lambda i: {"pick": f"p{i}"} if i == b.index else None)
     named = {n.name: n for n in load(tmp_path / "s.glb").nodes}
-    assert "first" in named and not named["first"].extras  # pygltflib reads absent extras as {}
-    assert named[f"entity_{b.index}"].extras == {"pick": f"p{b.index}"}
+    assert "first" in named and set(named["first"].extras) == {"mx"}
+    assert named[f"entity_{b.index}"].extras["pick"] == f"p{b.index}"
 
 
 def test_entities_without_a_mesh_are_reported(tmp_path):
@@ -123,3 +123,42 @@ def test_mesh_without_material_is_written_like_the_renderer_draws_it(tmp_path):
     report = e.export_gltf(tmp_path / "s.glb")
     assert len(load(tmp_path / "s.glb").meshes) == 1
     assert [(r.kind, r.name, r.effect) for r in report] == [("material", "BasicMaterial", "approximated")]
+
+
+def _mx(e, h):
+    return {"entity": h.index, "material": int(e.store._components["Material"][h.index, 0])}
+
+
+def test_nodes_carry_entity_and_material_ids(tmp_path):
+    e, a, b = scene()
+    e.export_gltf(tmp_path / "s.glb")
+    g = load(tmp_path / "s.glb")
+    named = {n.name: n for n in g.nodes}
+    assert named[f"entity_{a.index}"].extras == {"mx": _mx(e, a)}
+    assert named[f"entity_{b.index}"].extras == {"mx": _mx(e, b)}
+    ids = g.scenes[0].extras["manifoldx"]["mx_materials"]
+    for h in (a, b):  # the id resolves to the material the node's mesh draws with
+        node = named[f"entity_{h.index}"]
+        assert g.meshes[node.mesh].primitives[0].material == ids[str(node.extras["mx"]["material"])]
+
+
+def test_app_extras_keep_their_keys_next_to_mx(tmp_path):
+    e, a, b = scene()
+    e.export_gltf(tmp_path / "s.glb", extras={b.index: {"pick": "b1"}})
+    named = {n.name: n for n in load(tmp_path / "s.glb").nodes}
+    assert named[f"entity_{b.index}"].extras == {"pick": "b1", "mx": _mx(e, b)}
+
+
+def test_unused_registered_materials_are_written(tmp_path):
+    e, a, b = scene()
+    white = e._material_registry.get(_mx(e, a)["material"])
+    green = StandardMaterial("#00ff00")
+    e.set_material(a, green)  # white stays registered, drawn by no entity
+    report = e.export_gltf(tmp_path / "s.glb")
+    g = load(tmp_path / "s.glb")
+    ids = g.scenes[0].extras["manifoldx"]["mx_materials"]
+    assert set(ids) == {str(k) for k in e._material_registry._materials}
+    white_id = e._material_registry.register(white)
+    assert g.materials[ids[str(white_id)]].pbrMetallicRoughness.baseColorFactor == [1.0, 1.0, 1.0, 1.0]
+    assert len(g.materials) == 3 and len(g.meshes) == 2
+    assert len(report) == 0

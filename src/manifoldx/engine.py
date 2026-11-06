@@ -1110,6 +1110,16 @@ class Engine:
                 )
         self._render_pipeline._joints.set_many(idx, m)
 
+    def set_material(self, entity, material) -> None:
+        """Draw `entity` (an EntityHandle or an entity index) with `material` from the
+        next frame on, as EntityHandle.set_material does. Raises ValueError when the
+        entity is not alive.
+        """
+        index = entity.index if isinstance(entity, EntityHandle) else int(entity)
+        if not (0 <= index < len(self.store._alive) and self.store._alive[index]):
+            raise ValueError(f"set_material: entity {index} is not alive")
+        self.store._components["Material"][index, 0] = self._material_registry.register(material)
+
     def destroy(self, indices):
         """Destroy entities matching condition by emitting DESTROY command."""
         if indices is None:
