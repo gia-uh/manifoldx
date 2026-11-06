@@ -10,6 +10,7 @@ import pytest
 
 from manifoldx.web import TranspileError, transpile_app
 from manifoldx.web.types import (
+    BOOL,
     INT,
     NONE,
     NUM,
@@ -20,6 +21,7 @@ from manifoldx.web.types import (
     TypeEnv,
     list_of,
     obj,
+    tuple_of,
     union,
     vec,
 )
@@ -249,3 +251,21 @@ def test_a_field_fed_by_a_call_that_reads_it_keeps_its_live_type(load):
     env.solve([("app", "Doc.bump"), ("app", "helper")])
     assert env.classes["app.Doc"].fields["n"] == INT
     assert env.function(("app", "helper")).param_types["k"] == INT
+
+
+def test_the_engine_surface_types_as_the_runtime_has_it():
+    """engine.input and engine.camera, which the headless runtime implements, have types, so
+    a system can poll the input and place the camera without annotations."""
+    env = TypeEnv({})
+    engine = obj("manifoldx.Engine")
+    inp, cam = env.attribute(engine, "input"), env.attribute(engine, "camera")
+    assert inp == obj("manifoldx.input.InputState")
+    assert cam == obj("manifoldx.Camera")
+    assert env.attribute(engine, "w") == INT
+    assert env.attribute(inp, "mouse_delta") == tuple_of(NUM, NUM)
+    assert env.attribute(inp, "viewport_size") == tuple_of(INT, INT)
+    assert env.attribute(inp, "pointer_captured") == BOOL
+    assert env.returns_of_call(env.attribute(inp, "just_pressed")) == BOOL
+    assert env.attribute(cam, "position") == vec("f32")
+    assert env.returns_of_call(env.attribute(cam, "get_forward")) == vec("f32")
+    assert not env.attribute(engine, "store").known  # not in the runtime: stays unknown

@@ -8,6 +8,15 @@ import pytest
 HERE = Path(__file__).parent
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--regen",
+        action="store_true",
+        default=False,
+        help="rewrite the web tests' fixtures (the replay script) from their generators",
+    )
+
+
 def pytest_collection_modifyitems(config, items):
     if shutil.which("node") is not None:
         return

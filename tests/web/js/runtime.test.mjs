@@ -56,6 +56,17 @@ test("setFrame drives every input getter", () => {
   assert.deepEqual(input.mouse_delta, [0, 0]);
 });
 
+test("what a frame does not hold answers as nothing happened", () => {
+  const input = engine().input;
+  input.setFrame({ keys: ["w"], just: ["w"], d: [1, 1], buttons: [2, 1], clicks: [1], vp: [800, 600] });
+  assert.deepEqual(input.pressed_buttons, [1, 2]);
+  assert.equal(input.just_released("w"), false);
+  assert.equal(input.just_mouse_released(1), false);
+  assert.deepEqual(input.modifiers, []);
+  assert.deepEqual(input.mouse_pos, [0, 0]);
+  assert.deepEqual(input.wheel_delta, [0, 0]);
+});
+
 test("set_material and capture_pointer append to the log", () => {
   const log = [];
   const e = engine({ log });

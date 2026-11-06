@@ -441,6 +441,49 @@ STR_METHODS = {
 
 LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
 
+# The manifoldx objects the headless runtime (js/manifoldx.js) implements, by class: each
+# attribute's type, a method's as fn(name, return), by the names class_name gives the
+# classes. What is not here types as unknown.
+_INPUT, _CAMERA = "manifoldx.input.InputState", "manifoldx.Camera"
+RUNTIME_SURFACE = {
+    "manifoldx.Engine": {
+        "input": obj(_INPUT),
+        "camera": obj(_CAMERA),
+        "w": INT,
+        "h": INT,
+        "set_material": fn("manifoldx.Engine.set_material", NONE),
+    },
+    _INPUT: {
+        "pressed_keys": set_of(STR),
+        "modifiers": list_of(STR),
+        "mouse_pos": tuple_of(NUM, NUM),
+        "mouse_delta": tuple_of(NUM, NUM),
+        "wheel_delta": tuple_of(NUM, NUM),
+        "pressed_buttons": list_of(INT),
+        "viewport_size": tuple_of(INT, INT),
+        "pointer_captured": BOOL,
+        **{
+            m: fn(f"{_INPUT}.{m}", BOOL)
+            for m in (
+                "is_pressed",
+                "just_pressed",
+                "just_released",
+                "is_mouse_pressed",
+                "just_mouse_pressed",
+                "just_mouse_released",
+                "capture_pointer",
+            )
+        },
+    },
+    _CAMERA: {
+        "position": vec("f32"),
+        "target": vec("f32"),
+        "near": NUM,
+        "far": NUM,
+        "get_forward": fn(f"{_CAMERA}.get_forward", vec("f32")),
+    },
+}
+
 # math's functions the subset has, and its constants.
 MATH_FUNCTIONS = frozenset(
     "sin cos tan asin acos atan atan2 sqrt exp log floor ceil fabs hypot radians degrees".split()
@@ -775,7 +818,11 @@ class TypeEnv:
                 continue
             c = self.classes.get(m.name) if m.kind == "obj" else None
             if c is None:
-                return UNKNOWN
+                known = RUNTIME_SURFACE.get(m.name, {}) if m.kind == "obj" else {}
+                if attr not in known:
+                    return UNKNOWN
+                out.append(known[attr])
+                continue
             if attr in c.properties:
                 out.append(self.functions[c.methods[attr]].returns)
             elif attr in c.methods:

@@ -159,6 +159,13 @@ export class ScriptInput {
   get mouse_delta() { return this._delta; }
   is_mouse_pressed(button) { return this._buttons.has(button); }
   just_mouse_pressed(button) { return this._clicks.has(button); }
+  get pressed_buttons() { return [...this._buttons].sort((a, b) => a - b); }
+  // What a frame does not hold answers as nothing happened, as manifoldx.web.replay's does.
+  just_released(key) { return false; }
+  just_mouse_released(button) { return false; }
+  get modifiers() { return []; }
+  get mouse_pos() { return [0, 0]; }
+  get wheel_delta() { return [0, 0]; }
   get viewport_size() { return this._viewport; }
   get pointer_captured() { return this._captured; }
 
