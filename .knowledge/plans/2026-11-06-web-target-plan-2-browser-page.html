@@ -119,7 +119,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 -->
 <div class="chrome">
   <div class="bar"><span>manifoldx</span><span class="tab">plan · web target 2</span>
-    <span class="st"><span class="pill acc">execution method: not chosen yet</span><span class="pill">#140</span><span class="pill">2026-11-06</span></span></div>
+    <span class="st"><span class="pill acc">execution: subagent-driven, one queue worker per task</span><span class="pill">#140</span><span class="pill">2026-11-06</span></span></div>
   <div class="progress"><span id="pcount">0 of 0 done</span><div class="track" id="ptrack"></div></div>
 </div>
 <main>
@@ -131,7 +131,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 <b>architecture</b><span><code>manifoldx.js</code> stays the engine core with no three.js and no DOM, so the Node replay keeps working; browser-only modules sit on it: <code>input.js</code> (DOM events to Frames, pointer lock), <code>scene.js</code> (glTF, extras, calibration, handles to three.js objects), <code>gui.js</code> (HTML panels), <code>sourcemap.js</code> (Python lines), <code>progress.js</code>, and <code>browser.js</code>, the bootstrap <code>index.html</code> loads. three.js 0.186.1 is vendored in the wheel.</span>
 <b>tech</b><span>Python 3.13; plain ES modules; three.js 0.186.1 (vendored, minified); Node 20+ for <code>node --test</code>; Playwright for Python with Chromium for the browser tests, in a separate CI job.</span>
 <b>spec</b><span><a href="../analysis/2026-11-06-web-target-design.html">.knowledge/analysis/2026-11-06-web-target-design.html</a> (sections 06, 07, 10 slice 3, 11)</span>
-<b>builds on</b><span><a href="2026-11-06-web-target-plan-1-transpiler-and-replay.html">plan 1</a>, on branch <code>feat/web-target-1</code> (PR #141). This plan's branch <code>feat/web-target-2</code> is stacked on it; its PR targets <code>feat/web-target-1</code> until #141 merges, then <code>main</code>.</span>
+<b>builds on</b><span><a href="2026-11-06-web-target-plan-1-transpiler-and-replay.html">plan 1</a>, merged to <code>main</code> as #141. This plan's branch <code>feat/web-target-2</code> starts from that merge; its PR targets <code>main</code>.</span>
 <b>later plans</b><span>plan 3: <code>run --web</code> (slice 4), with the overlay that quotes the Python source and the agent commands against the tab.</span>
 </div>
 
@@ -190,7 +190,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 
 <div class="q"><h3>Q8 · Plan 1's task 14</h3>
 <p>Plan 1's last task (the consumer replays in its own CI) is still pending. It needs the same pin and the same three API swaps as this plan's last task.</p>
-<p><span class="rec">recommend</span>Fold it into task 12: one consumer branch pins manifoldx after both PRs merge, adds the replay test and CI, then moves the web build to <code>export --web</code>. If plan 1's task 14 lands first on its own, task 12 skips its first three steps.</p></div>
+<p><span class="rec">recommend</span>Fold it into task 12: one consumer branch pins manifoldx after both PRs merge, adds the replay test and CI, then moves the web build to <code>export --web</code>. If plan 1's task 14 lands first on its own, task 12 skips its first three steps.</p><p><span class="rec">settled</span>Plan 1's task 14 runs on its own in the consumer's repo now that #141 is merged, so task 12 skips its first three steps.</p></div>
 
 <div class="q"><h3>Q9 · The GUI's font</h3>
 <p>The desktop measures and draws GUI text with DejaVu Sans Mono (<code>viz/text.py:19</code>). With the browser's default font, a fixed-width panel wraps or clips differently.</p>
@@ -482,7 +482,7 @@ Also assert the frames the page built hold what the script did: the tick after <
         run: uv run pytest tests/web/browser -v --tb=short</script></li>
 <li>Update <code>know-how/web-export.md</code>: the page replaces "there is no browser page yet"; serving the folder; what the page does (progress, input mapping with the frame's new fields, pointer lock and its user-gesture rule, Escape, touch, the GUI's supported widgets and anchors, the error panel); the calibration and how to re-measure it; the browser tests and the <code>browser</code> group; how to upgrade three.js (the <code>SOURCE</code> file). Update the sub-projects line in <code>AGENTS.md</code> to name this plan. Add the CHANGELOG entry under <code>[Unreleased]</code>.</li>
 <li>Run <code>make lint</code> and the tests of <code>tests/web</code> outside <code>browser/</code>; leave <code>make test</code> and the browser tests to CI.</li>
-<li>Push <code>feat/web-target-2</code>, open the PR against <code>feat/web-target-1</code> referencing #140 (retarget to <code>main</code> once #141 merges), and work it until both CI jobs are green. Then ask the maintainer to merge.</li>
+<li>Push <code>feat/web-target-2</code>, open the PR against <code>main</code> referencing #140, and work it until every CI job is green. Then merge it.</li>
 </ol>
 <div class="verify"><span class="lbl">verify</span><p>CI: <code>test</code> and <code>browser</code> green on the PR; the <code>browser</code> job's log shows tasks 9 and 10's tests passed, none skipped.</p></div>
 </div>
