@@ -76,7 +76,7 @@ export function contains(c, x) {
 
 // len counts code points in a string, as Python does; JS's length counts UTF-16 units.
 export function len(x) {
-  if (typeof x === "string") { let n = 0; for (const _ of x) n++; return n; }
+  if (typeof x === "string") return cplen(x);
   if (isArr(x)) return x.length;
   if (x instanceof Set || x instanceof Map) return x.size;
   if (isDict(x)) return Object.keys(x).length;
@@ -208,4 +208,186 @@ export function arange(start, stop, step = 1) {
   const delta = out[1] - out[0];
   for (let i = 2; i < n; i++) out[i] = start + i * delta;
   return out;
+}
+
+// ---------------------------------------------------------------- objects and collections
+
+// An instance of a class with __call__: a function that carries the object, so that
+// obj(x) calls obj.__call__(x) and obj.field, methods and instanceof still work.
+export function callable_(obj) {
+  const f = (...args) => f.__call__(...args);
+  delete f.name;     // a field may have these names; a function's own ones are read-only
+  delete f.length;
+  Object.setPrototypeOf(f, Object.getPrototypeOf(obj));
+  return Object.assign(f, obj);
+}
+
+// obj.method as a value keeps obj, as a Python bound method does.
+export const bound = (obj, name) => obj[name].bind(obj);
+
+// hasattr: the object's fields, its class's methods and properties, not what every JS
+// object inherits (toString) or a class's prototype holds for JS (constructor).
+export function hasattr_(x, name) {
+  for (let o = x; o != null && o !== Object.prototype && o !== Function.prototype;
+    o = Object.getPrototypeOf(o)) {
+    if (Object.hasOwn(o, name) && !(o !== x && name === "constructor")) return true;
+  }
+  return false;
+}
+
+export const isinstance_ = (x, classes) => classes.some((c) => x instanceof c);
+
+export const dget = (d, k, dflt = null) => (Object.hasOwn(d, k) ? d[k] : dflt);
+
+// What next() of an exhausted generator gives: its default, or StopIteration.
+export function next_(...dflt) {
+  if (dflt.length) return dflt[0];
+  throw new Error("StopIteration");
+}
+
+// ---------------------------------------------------------------- text
+
+// A str's length in code points, as Python counts: JS's .length counts UTF-16 units.
+export function cplen(s) {
+  let n = 0;
+  for (const _ of s) n++;
+  return n;
+}
+
+// The characters str.isspace() accepts, which str.strip() removes.
+const PY_SPACE = "[\\t-\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]";
+const STRIP = new RegExp(`^${PY_SPACE}+|${PY_SPACE}+$`, "gu");
+export const strip = (s) => s.replace(STRIP, "");
+
+// The double x is exactly mant * 2 ** exp.
+function decompose(x) {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  const bits = view.getBigUint64(0);
+  const e = Number((bits >> 52n) & 0x7ffn), m = bits & ((1n << 52n) - 1n);
+  return e === 0 ? [m, -1074] : [m | (1n << 52n), e - 1075];
+}
+
+// format(x, ".Nf") as Python: rounded from the double's exact value, a tie to even. JS's
+// toFixed breaks exact ties upward and switches to exponents at 1e21.
+export function fmt(x, spec) {
+  const m = /^\.(\d+)f$/.exec(spec);
+  if (!m) throw new Error(`the format spec :${spec} is outside the subset`);
+  const n = Number(m[1]);
+  if (typeof x === "boolean") x = Number(x);
+  if (Number.isNaN(x)) return "nan";
+  if (!Number.isFinite(x)) return x > 0 ? "inf" : "-inf";
+  const neg = x < 0 || Object.is(x, -0);
+  const [mant, exp] = decompose(Math.abs(x));
+  const scaled = mant * 10n ** BigInt(n);
+  let q;
+  if (exp >= 0) {
+    q = scaled << BigInt(exp);
+  } else {
+    const den = 1n << BigInt(-exp);
+    q = scaled / den;
+    const twice = 2n * (scaled - q * den);
+    if (twice > den || (twice === den && (q & 1n) === 1n)) q += 1n;
+  }
+  let digits = q.toString();
+  if (n > 0) {
+    digits = digits.padStart(n + 1, "0");
+    digits = `${digits.slice(0, -n)}.${digits.slice(-n)}`;
+  }
+  return (neg ? "-" : "") + digits;
+}
+
+// repr of a float: the shortest digits that round-trip (JS finds the same ones), laid out
+// as Python does, positional from 1e-4 up to 1e16, "3.0" for an integral value.
+function floatRepr(x) {
+  if (Number.isNaN(x)) return "nan";
+  if (!Number.isFinite(x)) return x > 0 ? "inf" : "-inf";
+  if (x === 0) return Object.is(x, -0) ? "-0.0" : "0.0";
+  const [mantissa, e] = Math.abs(x).toExponential().split("e");
+  const digits = mantissa.replace(".", ""), exp = Number(e), sign = x < 0 ? "-" : "";
+  if (exp < -4 || exp >= 16) {
+    const head = digits.length > 1 ? `${digits[0]}.${digits.slice(1)}` : digits;
+    return `${sign}${head}e${exp < 0 ? "-" : "+"}${String(Math.abs(exp)).padStart(2, "0")}`;
+  }
+  if (exp < 0) return `${sign}0.${"0".repeat(-exp - 1)}${digits}`;
+  const whole = digits.slice(0, exp + 1).padEnd(exp + 1, "0");
+  return `${sign}${whole}.${digits.slice(exp + 1) || "0"}`;
+}
+
+// str(x) for a scalar. The transpiler passes how a number is written, "float" or "int",
+// from the type: 3.0 and 3 are the same JS number.
+export function str_(x, mode = "int") {
+  if (x === null || x === undefined) return "None";
+  if (typeof x === "boolean") return x ? "True" : "False";
+  if (typeof x === "string") return x;
+  if (typeof x === "number") {
+    if (mode === "float") return floatRepr(x);
+    return Math.abs(x) < 1e21 ? String(x) : BigInt(x).toString();
+  }
+  throw new TypeError("str() of this value is outside the subset");
+}
+
+// textwrap.wrap(text, width) with TextWrapper's defaults, ported from CPython's textwrap:
+// the chunks of _split (whitespace, words, and the parts of hyphenated words) and
+// _wrap_chunks, counting code points. \w and the letters are Unicode, as in Python's re.
+const WS = "[\\t\\n\\x0b\\x0c\\r ]", NWS = "[^\\t\\n\\x0b\\x0c\\r ]";
+const WORD = "[\\p{L}\\p{N}_]";
+const WORD_PUNCT = "[\\p{L}\\p{N}_!\"'&.,?]";
+const LETTER = "[\\p{L}\\p{Nl}\\p{No}_]";   // \w but not a decimal digit
+const WORDSEP = new RegExp(
+  `(${WS}+`
+  + `|(?<=${WORD_PUNCT})-{2,}(?=${WORD})`
+  + `|${NWS}+?(?:-(?:(?<=${LETTER}{2}-)|(?<=${LETTER}-${LETTER}-))(?=${LETTER}-?${LETTER})`
+  + `|(?=${WS}|$)`
+  + `|(?<=${WORD_PUNCT})(?=-{2,}${WORD})))`,
+  "u",
+);
+
+function expandtabs(s, size) {
+  let out = "", col = 0;
+  for (const ch of s) {
+    if (ch === "\t") {
+      const k = size - (col % size);
+      out += " ".repeat(k);
+      col += k;
+    } else {
+      out += ch;
+      col = ch === "\n" || ch === "\r" ? 0 : col + 1;
+    }
+  }
+  return out;
+}
+
+export function wrap(text, width = 70) {
+  if (width <= 0) throw new Error(`ValueError: invalid width ${width} (must be > 0)`);
+  const munged = expandtabs(text, 8).replace(/[\t\n\x0b\x0c\r]/g, " ");
+  // Each chunk as an array of code points; reversed, so the next chunk is the last.
+  const chunks = munged.split(WORDSEP).filter((c) => c).map((c) => Array.from(c)).reverse();
+  const blank = (c) => strip(c.join("")) === "";
+  const lines = [];
+  while (chunks.length) {
+    const cur = [];
+    let curLen = 0;
+    if (blank(chunks.at(-1)) && lines.length) chunks.pop();
+    while (chunks.length && curLen + chunks.at(-1).length <= width) {
+      const c = chunks.pop();
+      cur.push(c);
+      curLen += c.length;
+    }
+    if (chunks.length && chunks.at(-1).length > width) {
+      // _handle_long_word: break the word, after its last hyphen when one fits.
+      const spaceLeft = width < 1 ? 1 : width - curLen, chunk = chunks.at(-1);
+      let end = spaceLeft;
+      if (chunk.length > spaceLeft) {
+        const hyphen = chunk.slice(0, spaceLeft).lastIndexOf("-");
+        if (hyphen > 0 && chunk.slice(0, hyphen).some((ch) => ch !== "-")) end = hyphen + 1;
+      }
+      cur.push(chunk.slice(0, end));
+      chunks[chunks.length - 1] = chunk.slice(end);
+      curLen = cur.reduce((n, c) => n + c.length, 0);
+    }
+    if (cur.length && blank(cur.at(-1))) cur.pop();
+    if (cur.length) lines.push(cur.map((c) => c.join("")).join(""));
+  }
+  return lines;
 }

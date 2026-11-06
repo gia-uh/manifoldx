@@ -15,11 +15,14 @@ import ast
 import builtins
 import json
 import math
+import re
 from dataclasses import dataclass
 
 from .types import (
     LIB_CONSTANTS,
     MATH_FUNCTIONS,
+    STR_METHODS,
+    ClassInfo,
     Ctx,
     FuncInfo,
     FunctionKey,
@@ -148,6 +151,7 @@ class _Reach:
         self.everything = roots is None
         self.functions: dict[FunctionKey, str] = {}
         self.globals: dict[tuple[str, str], str] = {}
+        self.classes: dict[str, str] = {}
         if roots is None:
             return
         todo = []
@@ -178,6 +182,14 @@ class _Reach:
                     value = self._global_value(*sym.target)
                     if value is not None:
                         todo.append((sym.target[0], value, label, None))
+                elif sym.kind == "class" and sym.target not in self.classes:
+                    # Until reach follows types (task 7), a class named is reached whole.
+                    self.classes[sym.target] = label
+                    for key in self.env.classes[sym.target].methods.values():
+                        if key not in self.functions:
+                            self.functions[key] = label
+                            f = self.env.function(key)
+                            todo.append((key[0], f.node, label, f))
 
     def _root_key(self, label: str) -> FunctionKey:
         module, _, name = label.rpartition(".")
@@ -204,6 +216,9 @@ class _Reach:
 
     def global_(self, module: str, name: str) -> bool:
         return self.everything or (module, name) in self.globals
+
+    def class_(self, qualname: str) -> bool:
+        return self.everything or qualname in self.classes
 
 
 def transpile_app(
@@ -266,10 +281,13 @@ class _Module:
         return self.e(n) if self.ty(n).is_bool else f"{self.rt('truthy')}({self.e(n)})"
 
     def is_local(self, name: str) -> bool:
-        f = self.ctx.func
-        return any(k == name for k, _ in self.ctx.extra) or (
-            f is not None and (name in f.locals or name in f.param_types)
-        )
+        return self.ctx.binder(name) is not None
+
+    def is_self(self, name: str) -> bool:
+        """name is the instance parameter of the method it is read in (or of a method a
+        closure or lambda sits in): it emits as `this`, which arrows keep."""
+        c = self.ctx.binder(name)
+        return c is not None and not any(k == name for k, _ in c.extra) and c.func.self_name == name
 
     # ---------------------------------------------------------- module
     def write(self) -> JsModule:
@@ -303,8 +321,10 @@ class _Module:
                         (f"export let {self.target(targets[0])} = {self.e(n.value)};", n.lineno)
                     )
             elif isinstance(n, ast.ClassDef):
-                if self.reach.everything:
-                    self.fail(n, f"the class {n.name}")
+                qual = f"{self.name}.{n.name}"
+                if self.reach.class_(qual):
+                    self.root = self.reach.classes.get(qual)
+                    body += self.klass(n, self.env.classes[qual]) + [("", n.end_lineno)]
             elif self.reach.everything:
                 self.fail(n, FRIENDLY.get(type(n).__name__, type(n).__name__))
         head = [f"// Generated from {self.path} by manifoldx.web; do not edit."]
@@ -321,6 +341,8 @@ class _Module:
             return self.reach.function(sym.target)
         if sym.kind == "const":
             return self.reach.global_(*sym.target)
+        if sym.kind == "class":
+            return self.reach.class_(sym.target)
         return False
 
     def import_(self, n: ast.Import | ast.ImportFrom) -> list[str]:
@@ -337,36 +359,204 @@ class _Module:
                 final = self.env.resolve(self.name, bound)
                 if final is not None and final.kind == "module":
                     out.append(f'import * as {js_name(bound)} from "./{final.target}.js";')
-                elif final is not None and final.kind in ("func", "const"):
-                    module, name = final.target
+                elif final is not None and final.kind in ("func", "const", "class"):
+                    module, name = (
+                        final.target.rpartition(".")[::2] if final.kind == "class" else final.target
+                    )
                     if self.exported(module, name):
                         alias = "" if name == bound else f" as {js_name(bound)}"
                         out.append(f'import {{ {js_name(name)}{alias} }} from "./{module}.js";')
         return out
 
     # ---------------------------------------------------------- functions
-    def function(self, n: ast.FunctionDef, info: FuncInfo) -> Lines:
+    def function(
+        self, n: ast.FunctionDef, info: FuncInfo, kind: str = "function", ind: int = 0, tail=()
+    ) -> Lines:
+        """n as JS. kind: "function" (a module function, exported), "method", "getter" (a
+        @property), "constructor", or "closure" (a def inside a function: an arrow bound to
+        its name, its non-constant defaults evaluated once, where the def runs). A method's
+        first parameter is not written: it is `this`. `tail` closes the body."""
         a = n.args
         if a.vararg or a.kwarg:
             self.fail(n, "*args or **kwargs")
-        if n.decorator_list:
-            self.fail(n, f"the decorator @{ast.unparse(n.decorator_list[0])}")
-        params = []
-        for p in info.params:
+        for d in n.decorator_list:
+            if not (kind == "getter" and ast.unparse(d) == "property"):
+                self.fail(n, f"the decorator @{ast.unparse(d)}")
+        method = kind in ("method", "getter", "constructor")
+        if method and not a.args:
+            self.fail(n, f"the method {n.name} without a self parameter")
+        if kind == "getter" and len(info.params) > 1:
+            self.fail(n, f"the property {n.name} with parameters")
+        params, captured = [], []
+        for p in info.params[1:] if method else info.params:
             d = info.defaults.get(p)
-            if d is not None and not _constant(d):
+            if d is None:
+                params.append(js_name(p))
+            elif _constant(d):
+                params.append(f"{js_name(p)} = {self.e(d)}")
+            elif kind == "closure":
+                captured.append(self.e(d))
+                params.append(f"{js_name(p)} = $d{len(captured) - 1}")
+            else:
                 self.fail(d, f"the default `{ast.unparse(d)}`, which is not a constant,")
-            params.append(js_name(p) if d is None else f"{js_name(p)} = {self.e(d)}")
-        outer, self.ctx = self.ctx, Ctx(self.name, info)
+        sig = ", ".join(params)
+        p = "  " * ind
+        name = js_name(n.name)
+        if kind == "closure" and captured:
+            ds = ", ".join(f"$d{i}" for i in range(len(captured)))
+            head = f"{name} = (({ds}) => ({sig}) => {{"
+            close = f"}})({', '.join(captured)});"
+        else:
+            head = {
+                "function": f"export function {name}({sig}) {{",
+                "method": f"{n.name}({sig}) {{",
+                "getter": f"get {n.name}() {{",
+                "constructor": f"constructor({sig}) {{",
+                "closure": f"{name} = ({sig}) => {{",
+            }[kind]
+            close = "};" if kind == "closure" else "}"
+        outer = self.ctx
+        self.ctx = Ctx(self.name, info, (), outer if kind == "closure" else None)
         try:
             local = [js_name(v) for v in info.locals if v not in info.param_types]
-            out = [(f"export function {js_name(n.name)}({', '.join(params)}) {{", n.lineno)]
+            out = [(f"{p}{head}", n.lineno)]
             if local:
-                out.append((f"  let {', '.join(local)};", n.lineno))
-            out += self.block(n.body, 1)
-            return out + [("}", n.end_lineno)]
+                out.append((f"{p}  let {', '.join(local)};", n.lineno))
+            out += self.block(n.body, ind + 1)
+            out += [(f"{p}  {t}", n.end_lineno) for t in tail]
+            return out + [(f"{p}{close}", n.end_lineno)]
         finally:
             self.ctx = outer
+
+    # ---------------------------------------------------------- classes
+    def klass(self, n: ast.ClassDef, c: ClassInfo) -> Lines:
+        """An app class. Its constructor is written for a dataclass or a reached __init__;
+        objects setup made arrive through the snapshot, built without it. An instance of a
+        class with __call__ is a function that carries the object (runtime callable_)."""
+        for b in n.bases:
+            if ast.unparse(b) != "object":
+                self.fail(n, f"the class {n.name} with the base class {ast.unparse(b)}")
+        if n.keywords:
+            self.fail(n, f"the class {n.name} with keywords")
+        for d in n.decorator_list:
+            if not self.env.is_dataclass(d, self.name):
+                self.fail(n, f"the decorator @{ast.unparse(d)}")
+            given = {k.arg for k in d.keywords} if isinstance(d, ast.Call) else set()
+            if given - {"eq", "frozen", "repr", "unsafe_hash", "slots"} or (
+                isinstance(d, ast.Call) and d.args
+            ):
+                self.fail(n, f"the decorator @{ast.unparse(d)}")
+        tail = [f"return {self.rt('callable_')}(this);"] if "__call__" in c.methods else []
+        out: Lines = [(f"export class {js_name(n.name)} {{", n.lineno)]
+        init = next(
+            (s for s in n.body if isinstance(s, ast.FunctionDef) and s.name == "__init__"), None
+        )
+        if init is not None and self.reach.function(c.methods["__init__"]):
+            if tail and any(isinstance(st, ast.Return) for st in own_statements(init.body)):
+                self.fail(init, "a return in the __init__ of a class with __call__")
+            info = self.env.function(c.methods["__init__"])
+            out += self.function(init, info, "constructor", 1, tail)
+        elif c.dataclass:
+            out += self.dataclass_init(n, c, tail)
+        elif tail:
+            out += [
+                ("  constructor() {", n.lineno),
+                (f"    {tail[0]}", n.lineno),
+                ("  }", n.lineno),
+            ]
+        shared: Lines = []
+        for st in n.body:
+            if isinstance(st, ast.FunctionDef):
+                if st.name == "constructor":
+                    self.fail(st, "a method named constructor, which JS reserves,")
+                key = c.methods[st.name]
+                if st.name != "__init__" and self.reach.function(key):
+                    kind = "getter" if st.name in c.properties else "method"
+                    out += self.function(st, self.env.function(key), kind, 1)
+            elif isinstance(st, (ast.AnnAssign, ast.Assign)):
+                if isinstance(st, ast.AnnAssign) and (c.dataclass or st.value is None):
+                    continue  # a field
+                targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+                if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+                    self.fail(st, "this class attribute")
+                # A class attribute: every instance reads it through the prototype.
+                value = self.e(st.value)
+                shared.append(
+                    (f"{js_name(n.name)}.prototype.{targets[0].id} = {value};", st.lineno)
+                )
+            elif not (
+                isinstance(st, ast.Pass)
+                or isinstance(st, ast.Expr)
+                and isinstance(st.value, ast.Constant)
+            ):
+                self.fail(st, FRIENDLY.get(type(st).__name__, type(st).__name__))
+        return out + [("}", n.end_lineno)] + shared
+
+    def dataclass_init(self, n: ast.ClassDef, c: ClassInfo, tail) -> Lines:
+        """The constructor @dataclass generates: one parameter per field, in order. JS
+        evaluates a parameter's default on every call, so a default_factory is its call."""
+        params, body = [], []
+        for f in c.init_fields:
+            name, v = f.target.id, f.value
+            default = None
+            if isinstance(v, ast.Call) and self.env.from_stdlib(
+                v.func, self.name, "dataclasses", "field"
+            ):
+                kw = {k.arg: k.value for k in v.keywords}
+                if v.args or set(kw) - {"default", "default_factory"}:
+                    self.fail(v, f"`{ast.unparse(v)}`")
+                if "default_factory" in kw:
+                    default = self.factory(kw["default_factory"])
+                v = kw.get("default")
+            if v is not None:
+                if not _constant(v):
+                    self.fail(v, f"the field default `{ast.unparse(v)}`, which is not a constant,")
+                default = self.e(v)
+            params.append(js_name(name) if default is None else f"{js_name(name)} = {default}")
+            body.append((f"    this.{name} = {js_name(name)};", f.lineno))
+        if "__post_init__" in c.methods:
+            body.append(("    this.__post_init__();", n.lineno))
+        body += [(f"    {t}", n.lineno) for t in tail]
+        return [(f"  constructor({', '.join(params)}) {{", n.lineno), *body, ("  }", n.lineno)]
+
+    def factory(self, fac: ast.expr) -> str:
+        """A default_factory as the expression that makes one value."""
+        if isinstance(fac, ast.Name) and not self.is_local(fac.id):
+            if self.env.resolve(self.ctx.module, fac.id) is None and fac.id in (
+                "list",
+                "dict",
+                "set",
+            ):
+                return {"list": "[]", "dict": f"{self.rt('dict')}([])", "set": "new Set()"}[fac.id]
+        if isinstance(fac, ast.Lambda) and not fac.args.args:
+            return f"{self.e(fac)}()"
+        cls = self.class_ref(fac)
+        if cls is not None:
+            return self.construct(ast.Call(fac, [], []), *cls)
+        return f"{self.e(fac)}()"
+
+    def class_ref(self, n: ast.expr) -> tuple[str, str] | None:
+        """(JS expression, "module.Class") when n names an app class, else None."""
+        if isinstance(n, ast.Name) and not self.is_local(n.id):
+            sym = self.env.resolve(self.ctx.module, n.id)
+            if sym is not None and sym.kind == "class":
+                return js_name(n.id), sym.target
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            if not self.is_local(n.value.id):
+                outer = self.env.resolve(self.ctx.module, n.value.id)
+                if outer is not None and outer.kind == "module":
+                    sym = self.env.resolve(outer.target, n.attr)
+                    if sym is not None and sym.kind == "class":
+                        return f"{js_name(n.value.id)}.{js_name(n.attr)}", sym.target
+        return None
+
+    def construct(self, n: ast.Call, callee: str, qualname: str) -> str:
+        init = self.env.classes[qualname].methods.get("__init__")
+        if init is None:
+            if n.args or n.keywords:
+                self.fail(n, f"arguments to {qualname}(), which has no __init__,")
+            return f"new {callee}()"
+        return self.place(n, self.env.function(init), f"new {callee}", skip=1)
 
     def block(self, body: list[ast.stmt], ind: int) -> Lines:
         out: Lines = []
@@ -427,6 +617,11 @@ class _Module:
                 *self.block(n.body, ind + 1),
                 (f"{p}}}", line),
             ]
+        if isinstance(n, ast.FunctionDef):
+            info = self.env.function(
+                (self.ctx.func.key[0], f"{self.ctx.func.key[1]}.<locals>.{n.name}")
+            )
+            return self.function(n, info, "closure", ind)
         if isinstance(n, ast.Break):
             return [(f"{p}break;", line)]
         if isinstance(n, ast.Continue):
@@ -571,6 +766,8 @@ class _Module:
 
     def e_Name(self, n: ast.Name) -> str:
         name = n.id
+        if self.is_self(name):
+            return "this"
         if self.is_local(name):
             return js_name(name)
         sym = self.env.symbols[self.ctx.module].get(name)
@@ -580,7 +777,7 @@ class _Module:
             if sym.kind == "lib":
                 self.fail(n, f"the module {name} as a value")
             if sym.kind == "class":
-                self.fail(n, f"the class {name}")
+                self.fail(n, f"the class {name} as a value")
             final = self.env.resolve(self.ctx.module, name)
             if final is None:
                 self.fail(n, f"`{name}`, which its module does not define,")
@@ -607,8 +804,10 @@ class _Module:
             if sym is not None and sym.kind == "lib":
                 self.fail(n, f"{ast.unparse(n)}")
         t = self.ty(n.value)
-        if t.known and not t.all("obj"):
+        if t.known and not t.all("obj", "none"):
             self.fail(n, f"the attribute .{n.attr} of a {t}")
+        if self.env.methods(t, n.attr):  # a bound method keeps its object, as in Python
+            return f"{self.rt('bound')}({self.e(n.value)}, {json.dumps(n.attr)})"
         return f"{self.e(n.value)}.{n.attr}"
 
     def items(self, elts: list[ast.expr]) -> str:
@@ -745,6 +944,13 @@ class _Module:
             return f"{'!' if isinstance(op, ast.NotIn) else ''}{self.rt('contains')}({b}, {a})"
         if isinstance(op, (ast.Eq, ast.NotEq)):
             neg = isinstance(op, ast.NotEq)
+            if any(
+                m.kind == "obj"
+                and m.name in self.env.classes
+                and self.env.classes[m.name].dataclass
+                for m in lt.members + rt_.members
+            ):
+                self.fail(n, "== on dataclass instances, which compares their fields,")
             if lt.all("none") or rt_.all("none"):
                 return f"{b if lt.all('none') else a} {'!=' if neg else '=='} null"
             same = any(lt.all(*k) and rt_.all(*k) for k in (("num", "int"), ("str",), ("bool",)))
@@ -781,15 +987,31 @@ class _Module:
         return f"({self.test(n.test)} ? {self.e(n.body)} : {self.e(n.orelse)})"
 
     def e_Lambda(self, n: ast.Lambda) -> str:
+        """An arrow. A default is evaluated once, where the lambda is made, as in Python
+        (`lambda i=i: i` keeps the loop's value): non-constant ones go through an outer arrow."""
         a = n.args
-        if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs or a.defaults:
-            self.fail(n, "a lambda with defaults, *args or keyword-only parameters")
-        names = [x.arg for x in a.args]
-        outer, self.ctx = self.ctx, self.ctx.bind({x: UNKNOWN for x in names})
+        if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs:
+            self.fail(n, "a lambda with *args or keyword-only parameters")
+        first = len(a.args) - len(a.defaults)
+        params, captured = [], []
+        for i, x in enumerate(a.args):
+            d = a.defaults[i - first] if i >= first else None
+            if d is None:
+                params.append(js_name(x.arg))
+            elif _constant(d):
+                params.append(f"{js_name(x.arg)} = {self.e(d)}")
+            else:
+                captured.append(self.e(d))
+                params.append(f"{js_name(x.arg)} = $d{len(captured) - 1}")
+        outer, self.ctx = self.ctx, self.ctx.bind(self.env.lambda_params(n, self.ctx))
         try:
-            return f"(({', '.join(map(js_name, names))}) => {self.e(n.body)})"
+            arrow = f"(({', '.join(params)}) => {self.e(n.body)})"
         finally:
             self.ctx = outer
+        if not captured:
+            return arrow
+        ds = ", ".join(f"$d{i}" for i in range(len(captured)))
+        return f"(({ds}) => {arrow})({', '.join(captured)})"
 
     def e_Subscript(self, n: ast.Subscript) -> str:
         t = self.ty(n.value)
@@ -819,9 +1041,8 @@ class _Module:
             return f"{obj}[{k}]" if k is not None and k >= 0 else f"{obj}.at({self.e(s)})"
         return f"{self.rt('getitem')}({obj}, {self.e(s)})"
 
-    def comprehension(self, n, wrap: str = "") -> str:
-        """A comprehension as an IIFE that fills an array, eagerly; a generator expression
-        is one too (the subset has no lazy generators)."""
+    def loops(self, n, inner) -> str:
+        """The for-heads and ifs of comprehension n around inner(), emitted in its scope."""
         heads = []
         outer = self.ctx
         try:
@@ -831,15 +1052,32 @@ class _Module:
                 head, _ = self.for_head(g.target, g.iter, declare=True)
                 self.ctx = self.env.comprehension([g], self.ctx)
                 heads.append((head, [self.test(c) for c in g.ifs]))
-            body = f"$r.push({self.e(n.elt)});"
+            body = inner()
         finally:
             self.ctx = outer
         for head, conds in reversed(heads):
             for c in reversed(conds):
                 body = f"if ({c}) {{ {body} }}"
             body = f"{head} {{ {body} }}"
+        return body
+
+    def comprehension(self, n, wrap: str = "") -> str:
+        """A comprehension as an IIFE that fills an array, eagerly; a generator expression
+        is one too (the subset has no lazy generators, except under next())."""
+        body = self.loops(n, lambda: f"$r.push({self.e(n.elt)});")
         iife = f"(() => {{ const $r = []; {body} return $r; }})()"
         return f"new Set({iife})" if wrap == "set" else iife
+
+    def next_(self, n: ast.Call) -> str:
+        """next(x for x in xs if ...[, default]): the first item, computed lazily as
+        Python's generator does; with no item, the default or StopIteration."""
+        gen = n.args[0] if n.args else None
+        if not isinstance(gen, ast.GeneratorExp) or len(n.args) > 2 or n.keywords:
+            self.fail(n, "next() of anything but a generator expression")
+        body = self.loops(gen, lambda: f"return {self.e(gen.elt)};")
+        if len(n.args) == 1:
+            return f"(() => {{ {body} return {self.rt('next_')}(); }})()"
+        return f"(($d) => {{ {body} return {self.rt('next_')}($d); }})({self.e(n.args[1])})"
 
     def e_ListComp(self, n: ast.ListComp) -> str:
         return self.comprehension(n)
@@ -865,6 +1103,8 @@ class _Module:
             final = self.env.resolve(self.ctx.module, f.id)
             if final is not None and final.kind == "func":
                 return self.place(n, self.env.function(final.target), js_name(f.id))
+            if final is not None and final.kind == "class":
+                return self.construct(n, js_name(f.id), final.target)
         if (
             isinstance(f, ast.Attribute)
             and isinstance(f.value, ast.Name)
@@ -875,10 +1115,18 @@ class _Module:
                 target = self.env.resolve(outer.target, f.attr)
                 if target is not None and target.kind == "func":
                     return self.place(n, self.env.function(target.target), self.e(f))
+                if target is not None and target.kind == "class":
+                    return self.construct(n, self.e(f), target.target)
         if isinstance(f, ast.Attribute):
             lib = self.env.lib_name(f, self.ctx)
             if lib is not None:
                 return self.lib_call(lib, n)
+            methods = self.env.methods(self.ty(f.value), f.attr)
+            if methods:
+                sigs = {(tuple(m.params[1:]), tuple(sorted(m.defaults))) for m in methods}
+                if n.keywords and len(sigs) > 1:
+                    self.fail(n, f"keyword arguments to .{f.attr}(), whose classes differ in it,")
+                return self.place(n, methods[0], f"{self.e(f.value)}.{f.attr}", skip=1)
             method = self.method(n, f)
             if method is not None:
                 return method
@@ -905,6 +1153,16 @@ class _Module:
             if not (t.kind == "vec" or (t.all("list", "tuple") and elem(t).is_numeric)):
                 self.fail(n, f"{what} of a {t}" if t.known else f"{what} of an unknown type")
             return f"{cls}.from({self.iterable(x)})"
+        if name == "textwrap.wrap":
+            if kw - {"width"} or not 1 <= len(args) + len(kw) <= 2:
+                self.fail(n, f"{what} with options other than width")
+            given = [k.value for k in n.keywords] + args[1:]
+            if not self.ty(args[0]).all("str"):
+                self.fail(n, f"{what} of anything but a str")
+            if given and not self.ty(given[0]).all("int", "bool"):
+                self.fail(n, f"{what} with a width that is not an int")
+            width = f", {self.e(given[0])}" if given else ""
+            return f"{self.rt('wrap')}({self.e(args[0])}{width})"
         if kw:
             self.fail(n, f"keyword arguments to {what}")
         if name == "numpy.arange" and 1 <= len(args) <= 3:
@@ -955,6 +1213,25 @@ class _Module:
         if n.keywords:
             self.fail(n, f"keyword arguments to .{f.attr}()")
         obj, args = self.e(f.value), [self.e(a) for a in n.args]
+        if t.all("dict"):
+            if f.attr == "get" and len(args) in (1, 2):
+                return f"{self.rt('dget')}({obj}, {', '.join(args)})"
+            js = {"keys": "Object.keys", "values": "Object.values", "items": "Object.entries"}
+            if f.attr in js and not args:
+                return f"{js[f.attr]}({obj})"
+        if t.all("str") and f.attr in STR_METHODS:
+            if f.attr in ("lower", "upper") and not args:
+                return f"{obj}.to{f.attr.capitalize()}Case()"
+            if f.attr == "strip" and not args:
+                return f"{self.rt('strip')}({obj})"
+            if f.attr in ("startswith", "endswith") and len(args) == 1:
+                if not self.ty(n.args[0]).all("str"):
+                    self.fail(n, f".{f.attr}() of anything but a str")
+                return f"{obj}.{'startsWith' if f.attr == 'startswith' else 'endsWith'}({args[0]})"
+            if f.attr == "join" and len(args) == 1:
+                if not elem(self.ty(n.args[0])).all("str"):
+                    self.fail(n, ".join() of items that are not all str")
+                return f"Array.from({self.iterable(n.args[0])}).join({obj})"
         if t.all("list"):
             if f.attr == "append" and len(args) == 1:
                 return f"{obj}.push({args[0]})"
@@ -968,23 +1245,25 @@ class _Module:
                 return f"{obj}.splice({args[0]}, 0, {args[1]})"
         self.fail(n, f"the method {t}.{f.attr}()")
 
-    def place(self, n: ast.Call, info: FuncInfo, callee: str) -> str:
-        """Arguments placed by the callee's signature; keywords become positions."""
+    def place(self, n: ast.Call, info: FuncInfo, callee: str, skip: int = 0) -> str:
+        """Arguments placed by the callee's signature; keywords become positions. `skip`
+        leaves out a method's self."""
         label = key_label(info.key)
         a = info.node.args
-        positional = len(a.posonlyargs) + len(a.args)
+        params = info.params[skip:]
+        positional = len(a.posonlyargs) + len(a.args) - skip
         if len(n.args) > positional:
             self.fail(n, f"a call to {label} with {len(n.args)} positional arguments")
-        slots: list[ast.expr | None] = [*n.args] + [None] * (len(info.params) - len(n.args))
+        slots: list[ast.expr | None] = [*n.args] + [None] * (len(params) - len(n.args))
         for k in n.keywords:
             if (
-                k.arg not in info.params
-                or info.params.index(k.arg) < len(n.args)
+                k.arg not in params
+                or params.index(k.arg) < len(n.args)
                 or (k.arg in [x.arg for x in a.posonlyargs])
             ):
                 self.fail(n, f"the keyword {k.arg} to {label}")
-            slots[info.params.index(k.arg)] = k.value
-        for p, s in zip(info.params, slots):
+            slots[params.index(k.arg)] = k.value
+        for p, s in zip(params, slots):
             if s is None and p not in info.defaults:
                 self.fail(n, f"a call to {label} without the argument {p}")
         while slots and slots[-1] is None:
@@ -1014,8 +1293,14 @@ class _Module:
             if "key" not in kw and all(self.ty(x).is_numeric for x in args):
                 return f"Math.{name}({', '.join(self.e(x) for x in args)})"
             return f"{self.rt(name + '_')}({self.items(args)}, {key})"
+        if name == "next":
+            return self.next_(n)
         if kw:
             self.fail(n, f"keyword arguments to {name}()")
+        if name == "hasattr" and len(args) == 2:
+            return self.hasattr_(n)
+        if name == "isinstance" and len(args) == 2:
+            return self.isinstance_(n)
         if name == "range" and 1 <= len(args) <= 3:
             return f"{self.rt('range')}({', '.join(self.e(x) for x in args)})"
         if name in ("list", "tuple") and len(args) <= 1:
@@ -1030,7 +1315,11 @@ class _Module:
                 return f"{self.e(x)}.length"
             if t.all("set"):
                 return f"{self.e(x)}.size"
+            if t.all("str"):  # code points, as Python counts
+                return f"{self.rt('cplen')}({self.e(x)})"
             return f"{self.rt('len')}({self.e(x)})"
+        if name == "str":
+            return self.to_str(n, x)
         if name == "bool":
             return self.test(x)
         if name in ("any", "all"):
@@ -1046,3 +1335,77 @@ class _Module:
             js = {"abs": "Math.abs", "int": "Math.trunc", "float": "Number"}[name]
             return f"{js}({self.e(x)})"
         self.fail(n, f"{name}()")
+
+    def hasattr_(self, n: ast.Call) -> str:
+        x, attr = n.args
+        t = self.ty(x)
+        if not t.known:
+            self.fail(
+                n,
+                f"hasattr() of `{ast.unparse(x)}`, of unknown type (annotate `{ast.unparse(x)}`),",
+            )
+        if not t.all("obj", "none"):
+            self.fail(n, f"hasattr() of a {t}")
+        if not (isinstance(attr, ast.Constant) and isinstance(attr.value, str)):
+            self.fail(n, "hasattr() with a computed name")
+        return f"{self.rt('hasattr_')}({self.e(x)}, {json.dumps(attr.value)})"
+
+    def isinstance_(self, n: ast.Call) -> str:
+        """isinstance against the app's own classes, whose instances are built on the
+        transpiled prototypes."""
+        x, classes = n.args
+        refs = []
+        for c in classes.elts if isinstance(classes, ast.Tuple) else [classes]:
+            ref = self.class_ref(c)
+            if ref is None:
+                self.fail(n, f"isinstance() against `{ast.unparse(c)}`, which is not an app class,")
+            refs.append(ref[0])
+        if len(refs) == 1:
+            return f"({self.e(x)} instanceof {refs[0]})"
+        return f"{self.rt('isinstance_')}({self.e(x)}, [{', '.join(refs)}])"
+
+    def to_str(self, n: ast.expr, x: ast.expr, spec: str = "str()") -> str:
+        """str(x), or x in an f-string with no format spec. JS cannot tell 3.0 from 3, so
+        the type decides: str_ writes a float as Python's repr and an int as digits."""
+        t = self.ty(x)
+        if not t.known:
+            self.fail(
+                n, f"{spec} of `{ast.unparse(x)}`, of unknown type (annotate `{ast.unparse(x)}`),"
+            )
+        if t.all("str"):
+            return self.e(x)
+        if not t.all("str", "int", "bool", "none", "num"):
+            self.fail(n, f"{spec} of a {t}")
+        kinds = {m.kind for m in t.members}
+        if {"num", "int"} <= kinds:
+            self.fail(
+                n,
+                f"{spec} of `{ast.unparse(x)}`, which may be an int or a float, written "
+                f"differently (annotate `{ast.unparse(x)}`),",
+            )
+        if spec == "str()" and any(m.kind == "num" and m.dtype == "f32" for m in t.members):
+            self.fail(n, "str() of a numpy float32, which numpy writes its own way,")
+        mode = "float" if "num" in kinds else "int"
+        return f'{self.rt("str_")}({self.e(x)}, "{mode}")'
+
+    def e_JoinedStr(self, n: ast.JoinedStr) -> str:
+        parts = []
+        for v in n.values:
+            if isinstance(v, ast.Constant):
+                parts.append(json.dumps(v.value))
+                continue
+            if v.conversion != -1:
+                self.fail(v, f"the conversion !{chr(v.conversion)}")
+            if v.format_spec is None:
+                parts.append(self.to_str(v, v.value, "an f-string field"))
+                continue
+            if not all(isinstance(x, ast.Constant) for x in v.format_spec.values):
+                self.fail(v, "a computed format spec")
+            spec = "".join(x.value for x in v.format_spec.values)
+            if not re.fullmatch(r"\.\d+f", spec):
+                self.fail(v, f"the format spec :{spec}")
+            self.numeric(v, v.value, f"the format :{spec}")
+            parts.append(f"{self.rt('fmt')}({self.e(v.value)}, {json.dumps(spec)})")
+        if not parts:
+            return '""'
+        return parts[0] if len(parts) == 1 else "(" + " + ".join(parts) + ")"

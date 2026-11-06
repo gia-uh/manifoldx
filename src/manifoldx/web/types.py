@@ -236,7 +236,11 @@ class Symbol:
 
 @dataclass
 class FuncInfo:
-    """A function's signature and what inference knows about its body."""
+    """A function's signature and what inference knows about its body.
+
+    A method's key is (module, "Class.method") and `cls` its class ("module.Class"); its
+    first parameter is typed as that class. A function defined inside another has the key
+    (module, "outer.<locals>.inner") and `parent` the outer one's key."""
 
     key: FunctionKey
     node: ast.FunctionDef
@@ -246,19 +250,56 @@ class FuncInfo:
     locals: dict[str, Ty] = field(default_factory=dict)
     returns: Ty = NEVER
     annotated: set[str] = field(default_factory=set)  # locals whose annotation fixes them
+    cls: str | None = None
+    parent: FunctionKey | None = None
+
+    @property
+    def self_name(self) -> str | None:
+        """The name a method's instance goes by (its first parameter)."""
+        return self.params[0] if self.cls and self.params else None
+
+
+@dataclass
+class ClassInfo:
+    """An app class: its fields' types (from class-level annotations, then from every
+    `self.x = ...` in its methods), its methods and properties, and for a dataclass the
+    fields its generated __init__ takes, in order."""
+
+    name: str  # "module.Qualname"
+    node: ast.ClassDef
+    dataclass: bool
+    fields: dict[str, Ty] = field(default_factory=dict)
+    annotated: set[str] = field(default_factory=set)
+    init_fields: list[ast.AnnAssign] = field(default_factory=list)
+    methods: dict[str, FunctionKey] = field(default_factory=dict)
+    properties: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
 class Ctx:
-    """Where an expression is: its module, its function (None at module level) and the
-    names an enclosing comprehension or lambda binds."""
+    """Where an expression is: its module, its function (None at module level), the names
+    an enclosing comprehension or lambda binds, and the enclosing function's Ctx for a
+    function defined inside another."""
 
     module: str
     func: FuncInfo | None = None
     extra: tuple[tuple[str, Ty], ...] = ()
+    parent: Ctx | None = None
 
     def bind(self, names: dict[str, Ty]) -> Ctx:
-        return Ctx(self.module, self.func, self.extra + tuple(names.items()))
+        return Ctx(self.module, self.func, self.extra + tuple(names.items()), self.parent)
+
+    def binder(self, name: str) -> Ctx | None:
+        """The innermost Ctx whose function or bindings hold `name`, None for a global."""
+        c = self
+        while c is not None:
+            if any(k == name for k, _ in c.extra):
+                return c
+            f = c.func
+            if f is not None and (name in f.locals or name in f.param_types):
+                return c
+            c = c.parent
+        return None
 
 
 BUILTIN_RETURNS = {
@@ -272,6 +313,16 @@ BUILTIN_RETURNS = {
     "isinstance": BOOL,
     "str": STR,
     "range": list_of(INT),
+}
+
+# Methods of builtin values the subset has, and what they return.
+STR_METHODS = {
+    "lower": STR,
+    "upper": STR,
+    "strip": STR,
+    "startswith": BOOL,
+    "endswith": BOOL,
+    "join": STR,
 }
 
 LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
@@ -309,8 +360,17 @@ class TypeEnv:
         self.symbols: dict[str, dict[str, Symbol]] = {}
         self.globals: dict[tuple[str, str], Ty] = {}
         self.functions: dict[FunctionKey, FuncInfo] = {}
+        self.classes: dict[str, ClassInfo] = {}
         for name, tree in modules.items():
             self.symbols[name] = self._scan(name, tree)
+        # Signatures after every module's names are known, so an annotation may name a
+        # class defined later or in another module.
+        for name, tree in modules.items():
+            for n in tree.body:
+                if isinstance(n, ast.FunctionDef):
+                    self._register(name, n, n.name)
+                elif isinstance(n, ast.ClassDef):
+                    self._class(name, n)
 
     # ---------------------------------------------------------- module scan
     def resolve_module(self, module: str, target: str | None, level: int) -> str | None:
@@ -348,9 +408,7 @@ class TypeEnv:
                     else:
                         syms[bound] = Symbol("setup", f"from {n.module} import {a.name}")
             elif isinstance(n, ast.FunctionDef):
-                key = (module, n.name)
-                self.functions[key] = self._func_info(key, n, module)
-                syms[n.name] = Symbol("func", key)
+                syms[n.name] = Symbol("func", (module, n.name))
             elif isinstance(n, ast.ClassDef):
                 syms[n.name] = Symbol("class", f"{module}.{n.name}")
             elif isinstance(n, (ast.Assign, ast.AnnAssign)):
@@ -359,6 +417,87 @@ class TypeEnv:
                     for name in target_names(t):
                         syms[name] = Symbol("const", (module, name))
         return syms
+
+    def _register(
+        self,
+        module: str,
+        n: ast.FunctionDef,
+        qualname: str,
+        cls: str | None = None,
+        parent: FunctionKey | None = None,
+    ) -> FuncInfo:
+        """A FuncInfo for n and for each function defined inside it."""
+        key = (module, qualname)
+        info = self._func_info(key, n, module)
+        info.cls, info.parent = cls, parent
+        if cls and n.args.args and n.args.args[0].annotation is None:
+            info.param_types[n.args.args[0].arg] = obj(cls)
+        self.functions[key] = info
+        for st in own_statements(n.body):
+            if isinstance(st, ast.FunctionDef):
+                self._register(module, st, f"{qualname}.<locals>.{st.name}", parent=key)
+        return info
+
+    def _class(self, module: str, n: ast.ClassDef) -> None:
+        name = f"{module}.{n.name}"
+        info = ClassInfo(name, n, any(self.is_dataclass(d, module) for d in n.decorator_list))
+        self.classes[name] = info
+        for st in n.body:
+            if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                if is_classvar(st.annotation):
+                    continue
+                info.fields[st.target.id] = self.annotation(st.annotation, module)
+                info.annotated.add(st.target.id)
+                if info.dataclass:
+                    info.init_fields.append(st)
+            elif isinstance(st, ast.FunctionDef):
+                f = self._register(module, st, f"{n.name}.{st.name}", cls=name)
+                info.methods[st.name] = f.key
+                if any(ast.unparse(d) == "property" for d in st.decorator_list):
+                    info.properties.add(st.name)
+        if info.dataclass and "__init__" not in info.methods:
+            init = self._dataclass_init(n, info.init_fields)
+            info.methods["__init__"] = self._register(
+                module, init, f"{n.name}.__init__", cls=name
+            ).key
+
+    @staticmethod
+    def _dataclass_init(n: ast.ClassDef, fields: list[ast.AnnAssign]) -> ast.FunctionDef:
+        """The __init__ @dataclass generates, as a def: one parameter per field, whose
+        default is the field's value (a constant or a field(...) call)."""
+        args = [ast.arg("self")] + [ast.arg(f.target.id, f.annotation) for f in fields]
+        defaults = [f.value for f in fields if f.value is not None]
+        init = ast.FunctionDef(
+            name="__init__",
+            args=ast.arguments(
+                posonlyargs=[], args=args, kwonlyargs=[], kw_defaults=[], defaults=defaults
+            ),
+            body=[],
+            decorator_list=[],
+            returns=None,
+            type_params=[],
+        )
+        return ast.copy_location(init, n)
+
+    def is_dataclass(self, d: ast.expr, module: str) -> bool:
+        """d is @dataclass or @dataclass(...), from the dataclasses module."""
+        d = d.func if isinstance(d, ast.Call) else d
+        return self.from_stdlib(d, module, "dataclasses", "dataclass")
+
+    def from_stdlib(self, n: ast.expr, module: str, lib: str, name: str) -> bool:
+        """n names `lib.name`, imported either way."""
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            sym = self.symbols.get(module, {}).get(n.value.id)
+            return n.attr == name and sym is not None and sym.target == f"import {lib}"
+        if isinstance(n, ast.Name):
+            sym = self.symbols.get(module, {}).get(n.id)
+            return sym is not None and sym.target == f"from {lib} import {name}"
+        return False
+
+    def ctx_of(self, info: FuncInfo) -> Ctx:
+        """The Ctx of info's body: a function defined inside another sees that one's names."""
+        parent = self.ctx_of(self.functions[info.parent]) if info.parent else None
+        return Ctx(info.key[0], info, (), parent)
 
     def _func_info(self, key: FunctionKey, n: ast.FunctionDef, module: str) -> FuncInfo:
         a = n.args
@@ -430,10 +569,7 @@ class TypeEnv:
 
     @staticmethod
     def is_local(name: str, ctx: Ctx) -> bool:
-        f = ctx.func
-        return any(k == name for k, _ in ctx.extra) or (
-            f is not None and (name in f.locals or name in f.param_types)
-        )
+        return ctx.binder(name) is not None
 
     def lib_name(self, n: ast.expr, ctx: Ctx) -> str | None:
         """The dotted name n spells inside a library module ("numpy.linalg.norm",
@@ -477,12 +613,12 @@ class TypeEnv:
         return UNKNOWN
 
     def name(self, name: str, ctx: Ctx) -> Ty:
-        for k, t in reversed(ctx.extra):
-            if k == name:
-                return t
-        f = ctx.func
-        if f is not None and (name in f.locals or name in f.param_types):
-            return self.local(f.key, name)
+        c = ctx.binder(name)
+        if c is not None:
+            for k, t in reversed(c.extra):
+                if k == name:
+                    return t
+            return self.local(c.func.key, name)
         sym = self.resolve(ctx.module, name)
         if sym is None:
             return UNKNOWN
@@ -491,6 +627,56 @@ class TypeEnv:
         if sym.kind == "func":
             return fn(key_label(sym.target), self.functions[sym.target].returns)
         return UNKNOWN
+
+    def attribute(self, recv: Ty, attr: str) -> Ty:
+        """The type of recv.attr, joined over the app classes recv may be. A class without
+        the attribute adds nothing (hasattr or isinstance guards that read)."""
+        out = []
+        for m in recv.members:
+            if m.kind == "none":
+                continue
+            c = self.classes.get(m.name) if m.kind == "obj" else None
+            if c is None:
+                return UNKNOWN
+            if attr in c.properties:
+                out.append(self.functions[c.methods[attr]].returns)
+            elif attr in c.methods:
+                key = c.methods[attr]
+                out.append(fn(key_label(key), self.functions[key].returns))
+            elif attr in c.fields:
+                out.append(c.fields[attr])
+        return union(*out) if out else UNKNOWN
+
+    def methods(self, recv: Ty, attr: str) -> list[FuncInfo] | None:
+        """The methods recv.attr calls, one per app class recv may be; None when recv is
+        not only app objects or a class has a field (not a method) by that name."""
+        out = []
+        for m in recv.members:
+            if m.kind == "none":
+                continue
+            c = self.classes.get(m.name) if m.kind == "obj" else None
+            if c is None or attr in c.fields or attr in c.properties:
+                return None
+            if attr in c.methods:
+                out.append(self.functions[c.methods[attr]])
+        return out or None
+
+    def returns_of_call(self, t: Ty) -> Ty:
+        """What calling a value of type t returns: a function's return, an object's
+        __call__'s."""
+        out = []
+        for m in t.members:
+            if m.kind == "fn" and m.args:
+                out.append(m.args[0])
+            elif (
+                m.kind == "obj"
+                and m.name in self.classes
+                and "__call__" in (c := self.classes[m.name]).methods
+            ):
+                out.append(self.functions[c.methods["__call__"]].returns)
+            else:
+                return UNKNOWN
+        return union(*out)
 
     # ---------------------------------------------------------- expressions
     def expr(self, n: ast.expr, ctx: Ctx) -> Ty:
@@ -537,10 +723,31 @@ class TypeEnv:
         if isinstance(n, ast.Call):
             return self.call(n, ctx)
         if isinstance(n, ast.Lambda):
-            return fn(None)
-        if isinstance(n, ast.Attribute) and self.lib_name(n, ctx) in LIB_CONSTANTS:
-            return NUM
+            return fn(None, self.expr(n.body, ctx.bind(self.lambda_params(n, ctx))))
+        if isinstance(n, ast.Attribute):
+            return self.attribute_expr(n, ctx)
+        if isinstance(n, ast.JoinedStr):
+            return STR
         return UNKNOWN
+
+    def lambda_params(self, n: ast.Lambda, ctx: Ctx) -> dict[str, Ty]:
+        """A lambda's parameters: one with a default has the default's type, the others
+        are unknown."""
+        a = n.args
+        out = {x.arg: UNKNOWN for x in a.args}
+        for x, d in zip(a.args[len(a.args) - len(a.defaults) :], a.defaults):
+            out[x.arg] = self.expr(d, ctx)
+        return out
+
+    def attribute_expr(self, n: ast.Attribute, ctx: Ctx) -> Ty:
+        lib = self.lib_name(n, ctx)
+        if lib is not None:
+            return NUM if lib in LIB_CONSTANTS else UNKNOWN
+        if isinstance(n.value, ast.Name) and not self.is_local(n.value.id, ctx):
+            sym = self.resolve(ctx.module, n.value.id)
+            if sym is not None and sym.kind == "module":
+                return self.name(n.attr, Ctx(sym.target))
+        return self.attribute(self.expr(n.value, ctx), n.attr)
 
     def comprehension(self, generators: list[ast.comprehension], ctx: Ctx) -> Ctx:
         """ctx with the names the generators bind."""
@@ -610,15 +817,15 @@ class TypeEnv:
     def call(self, n: ast.Call, ctx: Ctx) -> Ty:
         f = n.func
         if isinstance(f, ast.Name):
-            local = (
-                ctx.func is not None
-                and f.id in ctx.func.locals
-                or any(k == f.id for k, _ in ctx.extra)
-            )
-            sym = None if local else self.resolve(ctx.module, f.id)
+            local = self.is_local(f.id, ctx)
+            if local:
+                return self.returns_of_call(self.name(f.id, ctx))
+            sym = self.resolve(ctx.module, f.id)
             if sym is not None and sym.kind == "func":
                 return self.functions[sym.target].returns
-            if sym is None and not local:
+            if sym is not None and sym.kind == "class":
+                return obj(sym.target)
+            if sym is None:
                 return self.builtin_call(f.id, n, ctx)
             return UNKNOWN
         if isinstance(f, ast.Attribute):
@@ -631,13 +838,31 @@ class TypeEnv:
                     target = self.resolve(sym.target, f.attr)
                     if target is not None and target.kind == "func":
                         return self.functions[target.target].returns
+                    if target is not None and target.kind == "class":
+                        return obj(target.target)
                     return UNKNOWN
             recv = self.expr(f.value, ctx)
             if recv.all("list") and f.attr == "pop":
                 return elem(recv)
             if recv.all("list") and f.attr in ("append", "extend", "insert"):
                 return NONE
-        return UNKNOWN
+            if recv.all("dict"):
+                k, v = (union(*(m.args[i] for m in recv.members)) for i in (0, 1))
+                if f.attr == "get":
+                    other = self.expr(n.args[1], ctx) if len(n.args) > 1 else NONE
+                    return union(v, other)
+                return {
+                    "keys": list_of(k),
+                    "values": list_of(v),
+                    "items": list_of(tuple_of(k, v)),
+                }.get(f.attr, UNKNOWN)
+            if recv.all("str") and f.attr in STR_METHODS:
+                return STR_METHODS[f.attr]
+            methods = self.methods(recv, f.attr)
+            if methods:
+                return union(*(m.returns for m in methods))
+            return self.returns_of_call(self.attribute(recv, f.attr))
+        return self.returns_of_call(self.expr(f, ctx))
 
     def builtin_call(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
         args = [self.expr(a, ctx) for a in n.args]
@@ -649,6 +874,8 @@ class TypeEnv:
             return list_of(elem(args[0]) if args else NEVER)
         if name == "set":
             return set_of(elem(args[0]) if args else NEVER)
+        if name == "next" and args:
+            return union(elem(args[0]), *args[1:])
         return BUILTIN_RETURNS.get(name, UNKNOWN)
 
     # ---------------------------------------------------------- inference
@@ -683,8 +910,20 @@ class TypeEnv:
         return changed
 
     def _function_pass(self, info: FuncInfo) -> bool:
-        before = (dict(info.locals), info.returns)
-        ctx = Ctx(info.key[0], info)
+        cls = self.classes.get(info.cls) if info.cls else None
+        before = (dict(info.locals), info.returns, dict(cls.fields) if cls else None)
+        ctx = self.ctx_of(info)
+
+        def field_(target: ast.expr, t: Ty):
+            """`self.x = v` in a method types the field x."""
+            if (
+                cls is not None
+                and isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == info.self_name
+                and target.attr not in cls.annotated
+            ):
+                cls.fields[target.attr] = join(cls.fields.get(target.attr, NEVER), t)
 
         def assign(names: dict[str, Ty]):
             for k, t in names.items():
@@ -699,9 +938,19 @@ class TypeEnv:
                     found: dict[str, Ty] = {}
                     bind_target(target, t, found)
                     assign(found)
+                    field_(target, t)
             elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
                 info.locals[st.target.id] = self.annotation(st.annotation, info.key[0])
                 info.annotated.add(st.target.id)
+            elif isinstance(st, ast.AnnAssign) and cls is not None:
+                field_(st.target, self.annotation(st.annotation, info.key[0]))
+            elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Attribute):
+                old = self.expr(st.target, ctx)
+                if old.kind != "vec":
+                    field_(st.target, self.binop(st.op, old, self.expr(st.value, ctx)))
+            elif isinstance(st, ast.FunctionDef):
+                inner = self.functions[(info.key[0], f"{info.key[1]}.<locals>.{st.name}")]
+                assign({st.name: fn(key_label(inner.key), inner.returns)})
             elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Name):
                 old = self.expr(st.target, ctx)
                 if old.kind == "vec":
@@ -718,7 +967,7 @@ class TypeEnv:
                 self._mutation(st.value, ctx, assign)
         if not ends_in_return(info.node.body):
             info.returns = join(info.returns, NONE)
-        return (info.locals, info.returns) != before
+        return (info.locals, info.returns, dict(cls.fields) if cls else None) != before
 
     def _mutation(self, call: ast.Call, ctx: Ctx, assign) -> None:
         """`xs.append(v)` widens a local list's element type to v's."""
@@ -730,6 +979,11 @@ class TypeEnv:
                 assign({name: list_of(self.expr(call.args[-1], ctx))})
             elif recv.all("list") and f.attr == "extend":
                 assign({name: list_of(elem(self.expr(call.args[0], ctx)))})
+
+
+def is_classvar(annotation: ast.expr) -> bool:
+    head = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    return ast.unparse(head) in ("ClassVar", "typing.ClassVar")
 
 
 def target_names(t: ast.expr) -> list[str]:
