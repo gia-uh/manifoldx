@@ -558,3 +558,66 @@ def test_startup_handlers_run_without_the_offline_extra(app_dir, tmp_path, monke
     out = tmp_path / "out"
     assert _export(app_dir, out, ASYNC) == 0
     assert _node(out)["state"] == {"loaded": "yes"}
+
+
+FIRST = """
+import manifoldx as mx
+
+engine = mx.Engine("first", width=320, height=200)
+
+
+class P:
+    def __init__(self):
+        self.pt: tuple[float, float] = (1.0, 2.0)
+
+    def first(self) -> tuple[float, float]:
+        return self.pt
+
+
+p = P()
+
+
+def tick(query, dt: float):
+    ax, ay = p.first()
+    engine.state["x"] = ax * 2.0
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_unpacking_a_call_result_types_from_the_return_annotation(app_dir, tmp_path):
+    """gia-uh/manifoldx#143: the names unpacked from a call take the callee's return type."""
+    py, node = _replay_both(app_dir, tmp_path / "out", FIRST)
+    assert py[0]["state"]["x"] == 2.0
+    assert compare(py, node) is None, str(compare(py, node))
+
+
+READ = """
+import manifoldx as mx
+
+engine = mx.Engine("read", width=320, height=200)
+engine.state["a"] = 1.5
+engine.state["b"] = 2.0
+
+
+def read() -> tuple[float, float]:
+    return engine.state["a"], engine.state["b"]
+
+
+def tick(query, dt: float):
+    a, b = read()
+    engine.state["s"] = a + b
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_a_return_annotation_wins_over_an_unknown_inferred_return(app_dir, tmp_path):
+    """gia-uh/manifoldx#143: reads of engine.state are unknown; the annotation types them."""
+    py, node = _replay_both(app_dir, tmp_path / "out", READ)
+    assert py[0]["state"]["s"] == 3.5
+    assert compare(py, node) is None, str(compare(py, node))

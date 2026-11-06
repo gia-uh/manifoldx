@@ -370,6 +370,7 @@ class FuncInfo:
     cls: str | None = None
     parent: FunctionKey | None = None
     declared: dict[str, Ty] = field(default_factory=dict)  # param types before call sites
+    declared_returns: Ty = UNKNOWN  # the return annotation, which wins over inference
 
     @property
     def self_name(self) -> str | None:
@@ -700,7 +701,8 @@ class TypeEnv:
         types = {}
         for p in a.posonlyargs + a.args + a.kwonlyargs:
             types[p.arg] = self.annotation(p.annotation, module) if p.annotation else UNKNOWN
-        return FuncInfo(key, n, params, defaults, types)
+        returns = self.annotation(n.returns, module) if n.returns else UNKNOWN
+        return FuncInfo(key, n, params, defaults, types, declared_returns=returns)
 
     def annotation(self, node: ast.expr, module: str) -> Ty:
         """The type an annotation names; unknown for what the model has no kind for."""
@@ -1371,12 +1373,14 @@ class TypeEnv:
                 found = {}
                 bind_target(st.target, elem(self.expr(st.iter, ctx)), found)
                 assign(found)
-            elif isinstance(st, ast.Return):
+            elif isinstance(st, ast.Return) and not info.declared_returns.known:
                 t = self.expr(st.value, ctx) if st.value is not None else NONE
                 info.returns = join(info.returns, t)
             elif isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
                 self._mutation(st.value, ctx, assign)
-        if not ends_in_return(info.node.body):
+        if info.declared_returns.known:
+            info.returns = info.declared_returns
+        elif not ends_in_return(info.node.body):
             info.returns = join(info.returns, NONE)
         return (info.locals, info.returns, dict(cls.fields) if cls else None) != before
 
@@ -1417,7 +1421,7 @@ def bind_target(t: ast.expr, ty: Ty, out: dict[str, Ty]) -> None:
                 m.args[i] if m.kind == "tuple" and len(m.args) == len(t.elts) else elem(m)
                 for m in ty.members
             ]
-            bind_target(e, union(*items) if items else UNKNOWN, out)
+            bind_target(e, union(*items), out)  # nothing yet (a call's return): wait
 
 
 def own_statements(body: list[ast.stmt]):
