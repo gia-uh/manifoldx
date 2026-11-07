@@ -29,6 +29,7 @@ from .types import (
     RUNTIME_SURFACE,
     STATE,
     STR_METHODS,
+    TIME_HINT,
     ClassInfo,
     Ctx,
     FuncInfo,
@@ -932,6 +933,8 @@ class _Module:
             return js_name(name)
         sym = self.env.symbols[self.ctx.module].get(name)
         if sym is not None:
+            if sym.kind == "setup" and str(sym.target).startswith("from time import "):
+                self.fail(n, f"`{sym.target}` {TIME_HINT}")
             if sym.kind == "setup":
                 self.fail(n, f"`{name}` (bound by `{sym.target}`, which runs only at setup)")
             if sym.kind == "lib":
@@ -1548,6 +1551,10 @@ class _Module:
                 self.fail(n, f"{what} with a width that is not an int")
             width = f", {self.e(given[0])}" if given else ""
             return f"{self.rt('wrap')}({self.e(args[0])}{width})"
+        if name == "time.time" and not args and not kw:  # the frame's clock
+            return f"{self.rt('time_time')}()"
+        if name.startswith("time."):
+            self.fail(n, f"`{what}` {TIME_HINT}")
         if name == "random.Random":
             self.fail(n, f"`{ast.unparse(n)}`, a generator made in frame code (make it at setup)")
         if name == "random.seed":

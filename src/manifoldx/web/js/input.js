@@ -31,6 +31,8 @@ const sortedNumbers = (set) => [...set].sort((a, b) => a - b);
 // ["key_down" | "key_up", {key, modifiers, is_down}], ["pointer_down" | "pointer_up" |
 // "pointer_move", {x, y, dx, dy, button, buttons, modifiers, phase, pointer_id}], ["wheel",
 // {dx, dy, x, y, buttons, modifiers}] and, at take(), ["resize", {width, height, pixel_ratio}].
+// clock is the wall clock at take(), Date.now() / 1000, never less than the last frame's, so
+// time.time() in frame code does not run backwards when the system clock steps back.
 export class FrameBuilder {
   constructor({ devicePixelRatio = 1 } = {}) {
     this.devicePixelRatio = devicePixelRatio;
@@ -41,6 +43,7 @@ export class FrameBuilder {
     this._last = null; // the last pointer event's position, which a move's dx and dy are from
     this._mods = [];
     this._viewport = null;
+    this._clock = 0;
     this._reset();
   }
 
@@ -161,6 +164,7 @@ export class FrameBuilder {
       this._events.push(["resize", { width: w, height: h, pixel_ratio: this.devicePixelRatio }]);
     }
     this._viewport = [w, h];
+    this._clock = Math.max(Date.now() / 1000, this._clock);
     const frame = {
       keys: sortedNames(new Set(this._held.values())),
       just: sortedNames(this._just),
@@ -174,6 +178,7 @@ export class FrameBuilder {
       wheel: [...this._wheel],
       mods: [...this._mods],
       events: this._events,
+      clock: this._clock,
     };
     this._reset();
     return frame;

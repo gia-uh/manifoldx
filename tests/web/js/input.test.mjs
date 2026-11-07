@@ -11,7 +11,9 @@ const pick = (frame, ...names) => Object.fromEntries(names.map((n) => [n, frame[
 
 test("a frame with no events is the empty frame, every field present", () => {
   const b = new FrameBuilder();
-  assert.deepEqual(b.take(vp), {
+  const { clock, ...frame } = b.take(vp);
+  assert.equal(typeof clock, "number");
+  assert.deepEqual(frame, {
     keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [800, 500],
     up: [], released: [], pos: [0, 0], wheel: [0, 0], mods: [], events: [],
   });

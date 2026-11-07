@@ -842,3 +842,13 @@ export let random = null;
 export function setRandom(r) {
   random = r;
 }
+
+// time.time() in frame code: the clock of the frame being run, seconds since the epoch, which
+// advance sets from the frame's "clock" (0.0 when it has none).
+let clock = 0.0;
+export function setClock(seconds) {
+  clock = seconds;
+}
+export function time_time() {
+  return clock;
+}

@@ -627,7 +627,15 @@ STR_METHODS = {
     "join": STR,
 }
 
-LIBS = {"math": "math", "numpy": "numpy", "random": "random", "textwrap": "textwrap"}
+LIBS = {
+    "math": "math",
+    "numpy": "numpy",
+    "random": "random",
+    "textwrap": "textwrap",
+    "time": "time",
+}
+# time.time() reads the frame's clock; frame code has no other time function.
+TIME_HINT = "(frame code reads time.time(), the frame's clock, or engine.elapsed)"
 # The numpy functions on arrays of any rank (TypeEnv.nd_function types them).
 ND_FUNCTIONS = frozenset(
     f"numpy.{f}"
@@ -1244,6 +1252,8 @@ class TypeEnv:
             return RANDOM_METHODS[name[7:]]
         if name == "random.Random":
             return RANDOM
+        if name == "time.time":
+            return NUM
         return UNKNOWN
 
     @staticmethod

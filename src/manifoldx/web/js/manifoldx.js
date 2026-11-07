@@ -1,6 +1,6 @@
 // The engine surface the transpiled modules call, the state loader and the frame step.
 
-import { NdArray, Random, callable_, nd, setRandom, str_, vnorm32 } from "./pyrt.js";
+import { NdArray, Random, callable_, nd, setClock, setRandom, str_, vnorm32 } from "./pyrt.js";
 
 // ---------------------------------------------------------------- state
 
@@ -912,12 +912,13 @@ export function eventOf(name, payload) {
 }
 
 // app: {engine, roots}, roots as loadState returns them. One frame as Engine._draw_frame runs
-// it: the frame to engine.input; elapsed, 0 on the first frame and dt more on each later one;
+// it, time.time() reading the frame's clock (0.0 without one) throughout: the frame to engine.input; elapsed, 0 on the first frame and dt more on each later one;
 // the queue, with the frame event ({dt, elapsed, frame}) first, then what was emitted during
 // the previous frame, then the frame's events ([name, payload], JSON, through eventOf);
 // delivery; the systems and the flush (step).
 export function advance(app, frame, dt) {
   const { engine } = app;
+  setClock(frame.clock ?? 0.0);
   engine.input.setFrame(frame);
   if (engine.frame > 0) engine.elapsed += dt;
   for (const [name, payload] of frame.events ?? []) engine.emit(name, eventOf(name, payload));

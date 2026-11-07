@@ -20,7 +20,8 @@ they came, the page's input events with the fields of the desktop's classes,
     ["resize", {"width", "height", "pixel_ratio"}]
 
 delivered as KeyEvent, PointerEvent, WheelEvent and ResizeEvent (event_of), and any other event
-with its JSON payload. Each side reads one frame, delivers the event queue, then runs the app's
+with its JSON payload. "clock", optional, is the wall clock the page read for the frame, in
+seconds since the epoch: time.time() in frame code returns it (0.0 when the frame has none). Each side reads one frame, delivers the event queue, then runs the app's
 systems once with a fixed dt and traces:
 
     {"camera": {"position", "target"}, "gui": [str], "log": [...], "state": engine.state,
@@ -49,6 +50,8 @@ import json
 import math
 import os
 import subprocess
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -211,20 +214,21 @@ def replay_python(
             delivered.clear()
             # Engine._draw_frame's order: the input, elapsed, the GUI's reset, the queue (the
             # frame event first, then the previous frame's emits, then the frame's events),
-            # the systems, the flush.
-            engine.input.set_frame(frame)
-            if i > 0:
-                engine.elapsed += dt
-            engine._gui_bridge.begin_frame()
-            for name, payload in frame.get("events", ()):
-                engine.emit(name, event_of(name, payload))
-            payload = {"dt": dt, "elapsed": engine.elapsed, "frame": engine._frame_index}
-            bus._pending.insert(0, ("frame", payload))
-            bus.dispatch_pending(engine)
-            engine.systems.run_all(engine, dt)
-            engine.commands.execute(engine.store)
-            engine.commands.clear()
-            engine._frame_index += 1
+            # the systems, the flush; time.time() reads the frame's clock throughout.
+            with _clock(frame.get("clock", 0.0)):
+                engine.input.set_frame(frame)
+                if i > 0:
+                    engine.elapsed += dt
+                engine._gui_bridge.begin_frame()
+                for name, payload in frame.get("events", ()):
+                    engine.emit(name, event_of(name, payload))
+                payload = {"dt": dt, "elapsed": engine.elapsed, "frame": engine._frame_index}
+                bus._pending.insert(0, ("frame", payload))
+                bus.dispatch_pending(engine)
+                engine.systems.run_all(engine, dt)
+                engine.commands.execute(engine.store)
+                engine.commands.clear()
+                engine._frame_index += 1
             cam = engine.camera
             entry = {
                 "camera": {"position": cam.position, "target": cam.target},
@@ -237,6 +241,18 @@ def replay_python(
             }
             trace.append(json.loads(json.dumps(entry, default=_plain)))
     return trace
+
+
+@contextmanager
+def _clock(seconds: float):
+    """time.time() returns seconds while the frame runs, as the page's frame clock does; the
+    real one is back after it."""
+    real = time.time
+    time.time = lambda: seconds
+    try:
+        yield
+    finally:
+        time.time = real
 
 
 KEY_EVENTS = ("key_down", "key_up")
