@@ -13,7 +13,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import { buildGui } from "./gui.js";
 import { FrameBuilder, PointerLock, attachDom } from "./input.js";
-import { encodeState, guiValues, loadApp, step, traceEntry } from "./manifoldx.js";
+import { encodeState, fire, fromJSON, guiValues, loadApp, mergePatch, stateView, step, traceEntry } from "./manifoldx.js";
 import { RateMeter, frameDt, progressLine } from "./progress.js";
 import { buildScene } from "./scene.js";
 import { describe, lineTable } from "./sourcemap.js";
@@ -139,6 +139,7 @@ async function start() {
   const hooks = {
     setMaterial: (entity, id) => scene.setMaterial(entity, id),
     capture: (on) => lock.request(on),
+    log: (text) => mx.dev?.appLog(text), // engine.log: to the dev server's log, nowhere in an export
   };
   const makeApp = (version) => ({ ...loadApp(version.state, version.modules, { hooks }), modules: version.modules });
   running.app = makeApp(running);
@@ -149,6 +150,7 @@ async function start() {
   let size = [0, 0], guiH = null;
   let frozen = null; // while a reload builds (Q2): the timer that unfreezes after FREEZE_MAX
   let manual = false;
+  const events = []; // [name, payload] an agent emitted, fired at the start of the next frame
   let onPause = () => {}; // dev mode: an exception in a frame pauses until the next edit
 
   // One frame as the loop runs it: the frame the DOM built, the systems, the GUI, the camera,
@@ -159,10 +161,11 @@ async function start() {
     const { app } = running, { engine } = app;
     const w = canvas.clientWidth, h = canvas.clientHeight;
     const frame = builder.take([w, h]);
-    engine.log.length = 0; // the log is the trace's record of one frame
+    engine.calls.length = 0; // the trace's record of one frame
     try {
       engine.gui.pointer_over_gui = gui.pointerOver;
       engine.input.setFrame(frame);
+      for (const [name, payload] of events.splice(0)) fire(app, name, payload);
       step(app, dt);
       gui.sync(engine.gui.widgets);
       gui.update(guiValues(app));
@@ -268,6 +271,7 @@ async function start() {
   if (DEV) {
     const dev = await import("./dev.js");
     mx.dev = dev;
+    dev.forwardConsole(window);
     const overlay = $("mx-dev");
     overlay.hidden = false;
     // The status line and the error panel follow the model (overlayText's rows).
@@ -300,13 +304,31 @@ async function start() {
         say(msg);
       },
       onOffline: () => say({ type: "offline" }),
-      onCall: (kind) => {
-        if (kind === "reload_state") {
-          freeze();
-          say({ type: "reloading" });
-          return { ok: true, value: null, state: encodeState(running.app.engine.state) };
+      // The agent's commands. Every reply carries the tab's state (Q4); a look's is the PNG.
+      onCall: (kind, body) => {
+        const engine = running.app.engine;
+        const reply = (value) => ({ ok: true, value, state: encodeState(engine.state) });
+        switch (kind) {
+          case "reload_state":
+            freeze();
+            say({ type: "reloading" });
+            return reply(null);
+          case "state":
+            return reply(stateView(engine.state));
+          case "patch":
+            mergePatch(engine.state, fromJSON(body));
+            return reply(stateView(engine.state));
+          case "emit":
+            events.push([body.name, fromJSON(body.payload)]);
+            return reply(null);
+          case "look":
+            return dev.lookPng(canvas, $("mx-gui"), () => {
+              scene.sync(engine);
+              renderer.render(scene.scene, scene.camera);
+            });
+          default:
+            return { ok: false, error: `the tab does not answer ${kind}` };
         }
-        return { ok: false, error: `the tab does not answer ${kind} yet` };
       },
     });
     // The state a tab leaves with: a tab opened next starts from it (Q4).

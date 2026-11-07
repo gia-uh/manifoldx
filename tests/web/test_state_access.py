@@ -2,6 +2,8 @@
 attributes. Reached code that uses either form, and its dict methods, must run in Node as it
 does in Python; a form the browser cannot run fails the export with its file and line."""
 
+import json
+import subprocess
 import sys
 
 import pytest
@@ -102,3 +104,45 @@ def test_a_form_the_browser_cannot_run_fails_the_export(app, tmp_path, capsys, b
     assert main(["export", "--web", str(app / "bad.py"), str(tmp_path / "out")]) == 1
     assert f"bad.py:7: {error}" in capsys.readouterr().err
     assert not (tmp_path / "out").exists()
+
+
+LOG_APP = """
+import manifoldx as mx
+
+engine = mx.Engine("log", width=64, height=64)
+engine.state.yaw = 10.0
+
+
+def tick(query, dt):
+    yaw: float = engine.state.yaw
+    engine.state.yaw = yaw + 2.5
+    engine.log(f"yaw {yaw:.1f}")
+
+
+engine.system(tick)
+
+if __name__ == "__main__":
+    engine.run()
+"""
+
+LINES = """
+import { load, replay } from %s;
+const app = await load(new URL(%s));
+replay(app, JSON.parse(process.argv[2]), []);
+console.log(JSON.stringify(app.engine.lines));
+"""
+
+
+def test_engine_log_transpiles_and_collects_lines_in_node(app, tmp_path):
+    script, out = app / "app.py", tmp_path / "out"
+    script.write_text(LOG_APP)
+    assert export_web(None, str(script), out, []) == 0
+    runner = tmp_path / "lines.mjs"
+    runner.write_text(
+        LINES % (json.dumps((out / "replay.mjs").as_uri()), json.dumps(out.as_uri() + "/"))
+    )
+    done = subprocess.run(
+        ["node", str(runner), json.dumps(FRAMES)], capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == ["yaw 10.0", "yaw 12.5", "yaw 15.0"]

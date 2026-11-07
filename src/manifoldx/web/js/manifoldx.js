@@ -229,21 +229,27 @@ export class Camera {
   }
 }
 
-// createEngine({w, h, camera: {position, target, fov, up, near, far}, gui, materials, log,
+// createEngine({w, h, camera: {position, target, fov, up, near, far}, gui, materials, calls,
 // state, hooks}): the engine object transpiled code reaches. gui is state.json's "gui": each
 // widget it names becomes engine.gui.widgets[n] with the fields reached code may write (a
 // Panel's offset, a Text's text, every widget's style_overrides), which the page applies. materials maps a material id to the
-// renderer's material (none, headless); log receives ["material", entity, material_id] and
-// ["capture", on] as reached code asks for them, the trace's record; state is engine.state, a
-// Map as every dict. hooks are where the browser acts, both optional:
-// setMaterial(entityIndex, materialId) after the log, and capture(on) -> boolean, whether the
-// capture took (headless: a no-op and () => true). resolve(kind, value) is loadState's
+// renderer's material (none, headless); calls receives ["material", entity, material_id] and
+// ["capture", on] as reached code asks for them, the trace's record (its "log"); state is
+// engine.state, a Map as every dict. hooks are where the browser acts, all optional:
+// setMaterial(entityIndex, materialId) after the record, capture(on) -> boolean, whether the
+// capture took (headless: a no-op and () => true), and log(text), where engine.log(text)
+// sends the app's lines (headless: they collect in engine.lines). resolve(kind, value) is loadState's
 // resolver for this engine.
-export function createEngine({ w, h, camera, gui = null, materials = {}, log = [], state = new Map(), hooks = {} }) {
-  const { setMaterial = () => {}, capture = () => true } = hooks;
-  const engine = { w, h, state, log };
+export function createEngine({ w, h, camera, gui = null, materials = {}, calls = [], state = new Map(), hooks = {} }) {
+  const { setMaterial = () => {}, capture = () => true, log = null } = hooks;
+  const engine = { w, h, state, calls, lines: [] };
+  engine.log = (text) => {
+    const line = typeof text === "string" ? text : str_(text);
+    if (log) log(line);
+    else engine.lines.push(line);
+  };
   engine.input = new ScriptInput((nw, nh) => { engine.w = nw; engine.h = nh; });
-  engine.input._log = log;
+  engine.input._log = calls;
   engine.input._capture = capture;
   engine.input._viewport = [w, h];
   engine.camera = new Camera(camera);
@@ -252,7 +258,7 @@ export function createEngine({ w, h, camera, gui = null, materials = {}, log = [
   const entities = new Map(), mats = new Map();
   engine.set_material = (entity, material) => {
     const index = typeof entity === "number" ? entity : entity.index;
-    log.push(["material", index, material.id]);
+    calls.push(["material", index, material.id]);
     setMaterial(index, material.id);
   };
   engine.resolve = (kind, value) => {
@@ -300,6 +306,12 @@ export function step(app, dt) {
   for (const r of app.roots) if (r.kind === "system") r.fn(null, dt);
 }
 
+// An event, as engine.emit delivers it: every handler root of that event, in the order the
+// app registered them, called with the payload (runtime values: a dict is a Map).
+export function fire(app, event, payload) {
+  for (const r of app.roots) if (r.kind === "handler" && r.event === event) r.fn(payload);
+}
+
 // What each ValueDisplay shows: its getter's value, as str() makes it.
 export function guiValues(app) {
   return app.roots
@@ -343,14 +355,14 @@ export function pathValue(app, path) {
 }
 
 // The trace entry of the frame just run, as plain JSON values (the form is
-// manifoldx.web.replay's): {camera, gui, log, state, paths}, log being what the engine's log
+// manifoldx.web.replay's): {camera, gui, log, state, paths}, log being what engine.calls
 // gained since logStart.
 export function traceEntry(app, paths, logStart) {
   const { engine } = app;
   const entry = {
     camera: { position: engine.camera.position, target: engine.camera.target },
     gui: guiValues(app),
-    log: engine.log.slice(logStart),
+    log: engine.calls.slice(logStart),
     state: engine.state,
     paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
   };

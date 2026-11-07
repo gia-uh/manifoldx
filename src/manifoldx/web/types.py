@@ -461,6 +461,7 @@ RUNTIME_SURFACE = {
         "h": INT,
         "state": STATE,
         "set_material": fn("manifoldx.Engine.set_material", NONE),
+        "log": fn("manifoldx.Engine.log", NONE),
     },
     _INPUT: {
         "pressed_keys": set_of(STR),
