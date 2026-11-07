@@ -633,6 +633,7 @@ NP_DTYPES = {
 # attribute's type, a method's as fn(name, return), by the names class_name gives the
 # classes. What is not here types as unknown.
 _INPUT, _CAMERA = "manifoldx.input.InputState", "manifoldx.Camera"
+_HANDLE, _PROXY = "manifoldx.engine.EntityHandle", "manifoldx.engine._TransformProxy"
 _GUI = "manifoldx.gui.widgets._GuiRoot"
 _PANEL, _TEXT, _VALUE_DISPLAY = (
     "manifoldx.gui.Panel",
@@ -675,12 +676,22 @@ RUNTIME_SURFACE = {
     _CAMERA: {
         "position": vec("f32"),
         "target": vec("f32"),
+        "up": vec("f32"),
         "fov": NUM,
         "near": NUM,
         "far": NUM,
         "get_forward": fn(f"{_CAMERA}.get_forward", vec("f32")),
     },
     _GUI: {"pointer_over_gui": BOOL},
+    # An entity handle: its transform reads and writes the entity's row at once (pos in world
+    # coordinates, float64), set_material writes its Material column, destroy queues it.
+    _HANDLE: {
+        "index": INT,
+        "transform": obj(_PROXY),
+        "set_material": fn(f"{_HANDLE}.set_material", NONE),
+        "destroy": fn(f"{_HANDLE}.destroy", NONE),
+    },
+    _PROXY: {"pos": vec("f64"), "rot": vec("f32"), "scale": vec("f32")},
     # The widgets gui.js draws: the fields the page applies each frame when reached code
     # writes them (gui.js's sync), and nothing else.
     _PANEL: {"offset": tuple_of(NUM, NUM), "style_overrides": dict_of(STR, UNKNOWN)},
@@ -692,7 +703,8 @@ RUNTIME_SURFACE = {
 # (gui.js's sync for the widgets, scene.js's sync for the camera). A write of any other field
 # of a manifoldx object moves the desktop and not the page, so it fails the export.
 WRITABLE = {
-    _CAMERA: {"position", "target", "fov", "near", "far"},
+    _CAMERA: {"position", "target", "up", "fov", "near", "far"},
+    _PROXY: {"pos", "rot", "scale"},
     _PANEL: {"offset", "style_overrides"},
     _TEXT: {"text", "style_overrides"},
     _VALUE_DISPLAY: {"style_overrides"},
@@ -704,6 +716,8 @@ RUNTIME_NAMES = {
     _INPUT: "the input",
     _CAMERA: "the camera",
     _GUI: "the GUI",
+    _HANDLE: "an entity handle",
+    _PROXY: "an entity's transform",
     _PANEL: "a Panel",
     _TEXT: "a Text",
     _VALUE_DISPLAY: "a ValueDisplay",
@@ -875,9 +889,10 @@ class TypeEnv:
     def library_object(self, n: ast.expr, module: str):
         """The library object a setup-imported name (`Transform`, `mx.Transform`) holds, as
         setup imported it; None for anything else."""
-        attr = None
-        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
-            n, attr = n.value, n.attr
+        attrs = []
+        while isinstance(n, ast.Attribute):
+            attrs.append(n.attr)
+            n = n.value
         if not isinstance(n, ast.Name):
             return None
         sym = self.symbols.get(module, {}).get(n.id)
@@ -888,7 +903,9 @@ class TypeEnv:
             v = getattr(sys.modules.get(words[1]), words[3], None)
         else:
             v = sys.modules.get(words[1])
-        return getattr(v, attr, None) if attr is not None else v
+        for a in reversed(attrs):
+            v = getattr(v, a, None)
+        return v
 
     def component_name(self, n: ast.expr, ctx: Ctx) -> str | None:
         """The store name of the component n names in q[n]: Transform, Mesh, Material, a
@@ -1552,6 +1569,8 @@ class TypeEnv:
             lib = self.lib_name(f, ctx)
             if lib is not None:
                 return self.lib_call(lib, n, ctx)
+            if self.is_rotation(f, ctx):
+                return vec("f32")
             if isinstance(f.value, ast.Name):
                 sym = self.resolve(ctx.module, f.value.id)
                 if sym is not None and sym.kind == "module":
@@ -1589,6 +1608,17 @@ class TypeEnv:
                 return union(*(m.returns for m in methods))
             return self.returns_of_call(self.attribute(recv, f.attr))
         return self.returns_of_call(self.expr(f, ctx))
+
+    def is_rotation(self, f: ast.expr, ctx: Ctx) -> bool:
+        """f names Transform.rotation, as setup imported it (Transform.rotation,
+        mx.Transform.rotation)."""
+        from manifoldx.components import Transform
+
+        return (
+            isinstance(f, ast.Attribute)
+            and f.attr == "rotation"
+            and self.library_object(f.value, ctx.module) is Transform
+        )
 
     @staticmethod
     def library_class(imported: str, attr: str | None) -> Ty:

@@ -136,6 +136,20 @@ const DEG_TO_RAD = Math.PI / 180, RAD_TO_DEG = 180 / Math.PI;
 export const radians = (x) => x * DEG_TO_RAD;
 export const degrees = (x) => x * RAD_TO_DEG;
 
+// Transform.rotation(x, y, z) of Python numbers: numpy computes the half angles' cos and sin
+// and the products in float64, then stacks them as float32 (x, y, z, w).
+export function quat_euler(x, y, z) {
+  const cx = Math.cos(x / 2), sx = Math.sin(x / 2);
+  const cy = Math.cos(y / 2), sy = Math.sin(y / 2);
+  const cz = Math.cos(z / 2), sz = Math.sin(z / 2);
+  return Float32Array.of(
+    sx * cy * cz - cx * sy * sz,
+    cx * sy * cz + sx * cy * sz,
+    cx * cy * sz - sx * sy * cz,
+    cx * cy * cz + sx * sy * sz,
+  );
+}
+
 // A float64 array is a Float64Array, a float32 one a Float32Array. Arithmetic broadcasts a
 // number against an array; the "32" variants hold float32 results and round a Python number
 // to float32 before using it, as numpy does with a float32 array and a Python scalar.

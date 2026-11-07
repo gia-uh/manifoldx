@@ -36,6 +36,7 @@ from .types import (
     TranspileError,
     arith_dtype,
     component_fields,
+    array_rank,
     elem,
     field_compare_dtype,
     is_array,
@@ -634,6 +635,11 @@ class _Module:
                 self.fail(n, f"`{ast.unparse(n)}` on a computed target")
             if not isinstance(t, (ast.Name, ast.Attribute, ast.Subscript)):
                 self.fail(n, "this augmented assignment")
+            if self.ty(t).kind == "vec" and self.proxy_field(t):
+                # pos/rot/scale read a copy: Python's += writes the sum back through the setter.
+                if not _simple(t.value):
+                    self.fail(n, f"`{ast.unparse(n)}` on a computed target")
+                return [(f"{p}{self.e(t)} = {self.vector_inplace(n)};", line)]
             if self.ty(t).kind == "vec":
                 return [(f"{p}{self.vector_inplace(n)};", line)]
             if self.ty(t).kind == "nd":
@@ -681,6 +687,13 @@ class _Module:
         if isinstance(n, ast.Continue):
             return [(f"{p}continue;", line)]
         self.fail(n, FRIENDLY.get(type(n).__name__, type(n).__name__))
+
+    def proxy_field(self, t: ast.expr) -> bool:
+        """t is pos, rot or scale of an entity handle's transform."""
+        return isinstance(t, ast.Attribute) and any(
+            m.kind == "obj" and m.name == "manifoldx.engine._TransformProxy"
+            for m in self.ty(t.value).members
+        )
 
     def shown(self, n: ast.stmt) -> str:
         """A write as an error quotes it: `q[Velocity].v += ...`."""
@@ -772,6 +785,12 @@ class _Module:
         float64 array, or a tuple, where the runtime rounds to float32 (get_forward, +=)."""
         v = self.ty(value)
         for m in self.ty(t.value).members:
+            if m.kind == "obj" and m.name == "manifoldx.engine._TransformProxy":
+                # The proxy's setters take what np.asarray takes: an array or numbers.
+                flat = v.all("list", "tuple") and elem(v).is_numeric
+                if not (flat or (is_array(v) and array_rank(v) == 1)):
+                    self.fail(value, f"writing a {v} to `{ast.unparse(t)}` (an array or numbers)")
+                continue
             field = RUNTIME_SURFACE.get(m.name, {}).get(t.attr) if m.kind == "obj" else None
             if field is None or field.kind not in ("vec", "num"):
                 continue
@@ -1372,6 +1391,8 @@ class _Module:
             lib = self.env.lib_name(f, self.ctx)
             if lib is not None:
                 return self.lib_call(lib, n)
+            if self.env.is_rotation(f, self.ctx):
+                return self.rotation(n)
             methods = self.env.methods(self.ty(f.value), f.attr)
             if methods:
                 sigs = {(tuple(m.params[1:]), tuple(sorted(m.defaults))) for m in methods}
@@ -1495,6 +1516,24 @@ class _Module:
         if f in ("argmin", "argmax") or (f == "where" and len(args) == 1):
             return f"{self.rt('nd.' + f)}({args[0]})"
         return f'{self.rt("nd." + f)}({", ".join(args)}, "{d}")'
+
+    def rotation(self, n: ast.Call) -> str:
+        """Transform.rotation(x, y, z) of numbers: its quaternion, computed in float64 as numpy
+        does for Python numbers, then float32."""
+        what = "Transform.rotation()"
+        given = dict(zip("xyz", n.args))
+        ok = len(n.args) <= 3
+        for k in n.keywords:
+            ok = ok and k.arg in ("x", "y", "z") and k.arg not in given
+            given[k.arg] = k.value
+        if not ok:
+            self.fail(n, f"this call to {what} (x, y and z, numbers; euler is not in)")
+        for x in given.values():
+            self.numeric(n, x, what)
+            if precision(self.ty(x)) == "f32":
+                self.fail(n, f"{what} of a numpy float32, which numpy computes in float32,")
+        args = ", ".join(self.e(given[k]) if k in given else "0" for k in "xyz")
+        return f"{self.rt('quat_euler')}({args})"
 
     def nd_full(self, name: str, n: ast.Call, what: str) -> str:
         """np.zeros, np.ones and np.full: a float vector for an int shape, else an NdArray."""

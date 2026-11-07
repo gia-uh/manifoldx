@@ -494,6 +494,62 @@ export function traceStore(store) {
   return { alive, free: [...store.free], high_water: store.highWater, rows };
 }
 
+// ---------------------------------------------------------------- entity handles
+
+// A value as float64 values, as np.asarray(v, np.float64) makes them.
+const toF64 = (v) => (v instanceof NdArray ? Float64Array.from(v.data) : Float64Array.from(Array.isArray(v) ? v.flat(Infinity) : v));
+
+// An entity's Transform row, as manifoldx.engine._TransformProxy: pos is world coordinates in
+// float64, the row plus the engine's origin [ox, 0, oz]; setting it stores v - origin rounded to
+// float32. rot and scale read float32 copies. Every read is a new array (writing into it
+// changes nothing) and every set writes the row at once.
+export class TransformProxy {
+  constructor(engine, index) {
+    Object.defineProperty(this, "_engine", { value: engine });
+    Object.defineProperty(this, "_index", { value: index });
+  }
+
+  _row() {
+    return this._engine.store.column("Transform").subarray(this._index * 10, this._index * 10 + 10);
+  }
+
+  get pos() {
+    const r = this._row(), [ox, oz] = this._engine.origin;
+    return Float64Array.of(r[0] + ox, r[1] + 0, r[2] + oz);
+  }
+
+  set pos(v) {
+    const a = toF64(v), [ox, oz] = this._engine.origin;
+    this._engine.store.write("Transform", this._index, 0, Float32Array.of(a[0] - ox, a[1] - 0, a[2] - oz));
+  }
+
+  get rot() { return Float32Array.from(this._row().subarray(3, 7)); }
+  set rot(v) { this._engine.store.write("Transform", this._index, 3, toF32(v)); }
+  get scale() { return Float32Array.from(this._row().subarray(7, 10)); }
+  set scale(v) { this._engine.store.write("Transform", this._index, 7, toF32(v)); }
+}
+
+// manifoldx.engine.EntityHandle: set_material writes the entity's Material column at once, as
+// the handle's does (no "material" record: that is engine.set_material's); destroy queues it
+// for the flush and frees nothing, since the geometry stays in the library for later spawns.
+export class EntityHandle {
+  constructor(engine, index) {
+    Object.defineProperty(this, "_engine", { value: engine });
+    this.index = index;
+    this.transform = new TransformProxy(engine, index);
+  }
+
+  set_material(material) {
+    this._engine.store.write("Material", this.index, 0, [material.id]);
+    return null;
+  }
+
+  destroy(free_geometry = true) {
+    this._engine.store.queueDestroy([this.index]);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------- the engine, headless
 
 // One name per physical key, as manifoldx.input._key_name: a letter lowercase, the space
@@ -604,7 +660,7 @@ export class Camera {
   }
 }
 
-// createEngine({w, h, camera: {position, target, fov, up, near, far}, gui, materials, calls,
+// createEngine({w, h, camera: {position, target, fov, up, near, far}, origin: [x, z], gui, materials, calls,
 // state, hooks}): the engine object transpiled code reaches. gui is state.json's "gui": each
 // widget it names becomes engine.gui.widgets[n] with the fields reached code may write (a
 // Panel's offset, a Text's text, every widget's style_overrides), which the page applies. materials maps a material id to the
@@ -615,9 +671,9 @@ export class Camera {
 // capture took (headless: a no-op and () => true), and log(text), where engine.log(text)
 // sends the app's lines (headless: they collect in engine.lines). resolve(kind, value) is loadState's
 // resolver for this engine.
-export function createEngine({ w, h, camera, gui = null, materials = {}, calls = [], state = new Map(), hooks = {} }) {
+export function createEngine({ w, h, camera, origin = [0, 0], gui = null, materials = {}, calls = [], state = new Map(), hooks = {} }) {
   const { setMaterial = () => {}, capture = () => true, log = null } = hooks;
-  const engine = { w, h, state, calls, lines: [] };
+  const engine = { w, h, origin, state, calls, lines: [] };
   engine.log = (text) => {
     const line = typeof text === "string" ? text : str_(text);
     if (log) log(line);
@@ -633,6 +689,10 @@ export function createEngine({ w, h, camera, gui = null, materials = {}, calls =
   const entities = new Map(), mats = new Map(), geometries = new Map();
   engine.set_material = (entity, material) => {
     const index = typeof entity === "number" ? entity : entity.index;
+    const store = engine.store;
+    if (store && !(index >= 0 && index < store.capacity && store.alive[index])) {
+      throw new Error(`ValueError: set_material: entity ${index} is not alive`);
+    }
     calls.push(["material", index, material.id]);
     engine.store?.write("Material", index, 0, [material.id]); // the column, now, as the desktop's
     setMaterial(index, material.id);
@@ -644,7 +704,7 @@ export function createEngine({ w, h, camera, gui = null, materials = {}, calls =
       throw new Error(`the state names engine.${value}, which the runtime does not have`);
     }
     if (kind === "entity") {
-      if (!entities.has(value)) entities.set(value, { index: value });
+      if (!entities.has(value)) entities.set(value, new EntityHandle(engine, value));
       return entities.get(value);
     }
     if (kind === "material") {
@@ -770,6 +830,7 @@ const number = (x) =>
 // A handle's name, as the desktop's repr fallback shows it; null when v is not a handle.
 function handleName(v) {
   if (v instanceof Camera) return "<camera>";
+  if (v instanceof EntityHandle) return `<entity ${v.index}>`;
   if (v instanceof ScriptInput) return "<input>";
   const proto = Object.getPrototypeOf(v);
   if (proto !== Object.prototype && proto !== null) return null;

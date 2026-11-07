@@ -351,10 +351,15 @@ class Reach:
                 manifoldx = (m.name or "").startswith("manifoldx.")
                 if check and not read and manifoldx and attr not in WRITABLE.get(m.name, ()):
                     what = RUNTIME_NAMES.get(m.name, f"a {m.name.rsplit('.', 1)[-1]}")
+                    hint = ""
+                    if _is_material(m.name):
+                        what = "a material"
+                        hint = " (swap materials made at setup with engine.set_material)"
                     raise TranspileError(
                         module_path(key[0]),
                         n.lineno,
-                        f"writing `{ast.unparse(n)}`, a field of {what} the page does not apply,",
+                        f"writing `{ast.unparse(n)}`, a field of {what} the page does not "
+                        f"apply{hint},",
                         self.root(key),
                     )
                 if check and not manifoldx:
@@ -411,6 +416,16 @@ class Reach:
 
     def class_(self, qualname: str) -> bool:
         return self.everything or qualname in self.classes
+
+
+def _is_material(name: str) -> bool:
+    """name ("manifoldx.resources.PhongMaterial") is a material class: the page builds its
+    materials once from the glTF, so their fields do not change at runtime."""
+    from manifoldx import resources
+
+    module, _, cls = name.rpartition(".")
+    c = getattr(resources, cls, None) if module == "manifoldx.resources" else None
+    return isinstance(c, type) and issubclass(c, resources.Material)
 
 
 def is_closure(key: FunctionKey) -> bool:

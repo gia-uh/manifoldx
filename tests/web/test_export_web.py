@@ -792,12 +792,9 @@ def test_a_write_through_a_value_of_unknown_type_fails_the_export(
 @pytest.mark.parametrize(
     "write, what",
     [
-        (
-            "engine.camera.up = np.array([1.0, 0.0, 0.0], np.float32)",
-            "`engine.camera.up`, a field of the camera",
-        ),
+        ("engine.camera.layers = {1}", "`engine.camera.layers`, a field of the camera"),
         ("engine.camera.zoom = 2.0", "`engine.camera.zoom`, a field of the camera"),
-        ("cam.up += np.array([1.0, 0.0, 0.0], np.float32)", "`cam.up`, a field of the camera"),
+        ("cam.zoom += 1.0", "`cam.zoom`, a field of the camera"),
         ("engine.camera = cam", "`engine.camera`, a field of the engine"),
         ("engine.w = 640", "`engine.w`, a field of the engine"),
         ("engine.state = {}", "`engine.state`, a field of the engine"),
