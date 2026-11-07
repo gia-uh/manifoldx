@@ -397,6 +397,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **GUI panels honour all nine anchors on the desktop.** A root panel anchored anywhere but
+  top-left painted and hit-tested at the top-left. Paint and hit-test now place it through
+  one function, `gui.layout.anchored_slot`, by the page's rule: the offset measured inward
+  from the anchored edges and, on a centred axis, rightward or downward; a panel without a
+  width or height fits its content, except a top-left one, which still fills the window.
+  The loading overlay is a `center` panel instead of an offset recomputed every frame (#13).
 - **A query reads the fields of a `Component` subclass.** `q[Velocity].v` raised
   `AttributeError` for a component declared with the `Component` base, the form AGENTS.md
   recommends; the accessor now reads the class's layout.
