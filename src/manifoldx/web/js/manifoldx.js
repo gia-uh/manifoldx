@@ -1,6 +1,6 @@
 // The engine surface the transpiled modules call, the state loader and the frame step.
 
-import { NdArray, callable_, nd, str_, vnorm32 } from "./pyrt.js";
+import { NdArray, Random, callable_, nd, setClock, setRandom, str_, vnorm32 } from "./pyrt.js";
 
 // ---------------------------------------------------------------- state
 
@@ -30,7 +30,8 @@ const FLOATS = { nan: NaN, inf: Infinity, "-inf": -Infinity };
 // resolve(kind, value) turns a handle into the runtime's object: kind "engine" (value
 // "Engine", "input", "camera" or "gui"), "material" (an id), "entity" (an index),
 // "widget" (an index) or "geometry" (an id in the engine's geometry registry). An object is built without its constructor, from its class's
-// prototype; an object of a class with __call__ is callable; a shared object stays one.
+// prototype; an object of a class with __call__ is callable; a shared object stays one. A
+// random.Random is pyrt's, and the state's "random" becomes the random module's ($rt.random).
 export function loadState(state, modules, resolve) {
   return load(state, modules, resolve).roots;
 }
@@ -45,6 +46,7 @@ function load(state, modules, resolve) {
     if ("__set" in e) return new Set();
     if ("__f32" in e) return Float32Array.from(e.__f32, value);
     if ("__f64" in e) return Float64Array.from(e.__f64, value);
+    if ("__random" in e) return Random.fromState(e.__random);
     if ("__type" in e) {
       const proto = classOf(modules, e.__type).prototype;
       const obj = Object.create(proto);
@@ -98,6 +100,7 @@ function load(state, modules, resolve) {
     }
   });
 
+  if (state.random !== undefined) setRandom(Random.fromState(state.random));
   for (const [name, globals] of Object.entries(state.globals ?? {})) {
     const values = Object.create(null);
     for (const [k, x] of Object.entries(globals)) values[k] = value(x);
@@ -739,11 +742,15 @@ export class Camera {
 // engine.state, a Map as every dict. hooks are where the browser acts, all optional:
 // setMaterial(entityIndex, materialId) after the record, capture(on) -> boolean, whether the
 // capture took (headless: a no-op and () => true), and log(text), where engine.log(text)
-// sends the app's lines (headless: they collect in engine.lines). resolve(kind, value) is loadState's
+// sends the app's lines (headless: they collect in engine.lines), and delivered(name, payload),
+// called as delivery reaches each event but the frame event and the seven input events (the
+// page tells a host page). resolve(kind, value) is loadState's
 // resolver for this engine.
 export function createEngine({ w, h, camera, origin = [0, 0], gui = null, materials = {}, calls = [], state = new Map(), hooks = {} }) {
-  const { setMaterial = () => {}, capture = () => true, log = null } = hooks;
-  const engine = { w, h, origin, state, calls, lines: [] };
+  const { setMaterial = () => {}, capture = () => true, log = null, delivered = null } = hooks;
+  const engine = { w, h, origin, state, calls, lines: [], elapsed: 0.0, frame: 0, delivered };
+  engine.bus = new EventBus();
+  engine.emit = (name, payload = null) => engine.bus.emit(name, payload);
   engine.log = (text) => {
     const line = typeof text === "string" ? text : str_(text);
     if (log) log(line);
@@ -755,6 +762,7 @@ export function createEngine({ w, h, camera, origin = [0, 0], gui = null, materi
   engine.input._viewport = [w, h];
   engine.camera = new Camera(camera);
   engine.gui = { pointer_over_gui: false, widgets: gui === null ? [] : guiWidgets(gui) };
+  engine.gui.bridge = new GuiBridge(engine);
 
   const entities = new Map(), mats = new Map(), geometries = new Map();
 
@@ -839,13 +847,29 @@ export function createEngine({ w, h, camera, origin = [0, 0], gui = null, materi
   return engine;
 }
 
-// The widget objects of a gui spec, by their index in the snapshot's walk.
+// The widget objects of a gui spec, by their index in the snapshot's walk: kind, the fields
+// reached code reads and writes, and the state the widget code keeps (a Button's _latch, the
+// box the bridge stashes in _layout_box).
 function guiWidgets(spec) {
   const widgets = [];
   const walk = (node) => {
-    const w = { index: node.widget, style_overrides: new Map(Object.entries(node.overrides)) };
+    const w = { index: node.widget, kind: node.kind, style_overrides: new Map(Object.entries(node.overrides)) };
     if (node.kind === "Panel") w.offset = [...node.offset];
     if (node.kind === "Text") w.text = node.text;
+    if (node.kind === "Button") {
+      Object.assign(w, { name: node.name, label: node.label, _latch: false });
+      // Button.was_clicked: True once per click since the last read; the latch is consumed.
+      w.was_clicked = () => {
+        const v = w._latch;
+        w._latch = false;
+        return v;
+      };
+    }
+    if (node.kind === "Slider") {
+      Object.assign(w, { name: node.name, min: node.min, max: node.max, value: node.value, label: node.label, _layout_box: null });
+    }
+    if (node.kind === "Toggle") Object.assign(w, { name: node.name, value: node.value, label: node.label });
+    if (node.kind === "Joystick") Object.assign(w, { name: node.name, value: [...node.value], _layout_box: null });
     widgets[node.widget] = w;
     for (const c of node.children ?? []) walk(c);
   };
@@ -853,11 +877,251 @@ function guiWidgets(spec) {
   return widgets;
 }
 
+// ---------------------------------------------------------------- the GUI's widget code
+
+// An arrow key's direction on a focused Slider, and the fraction of its range it steps, as
+// manifoldx.gui.bridge.STEPS and manifoldx.gui.slider.SLIDER_STEPS.
+const STEPS = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 };
+const SLIDER_STEPS = 20;
+
+// The box a routed pointer is in: its place is the fraction of the widget's width and height.
+const UNIT = Object.freeze({ x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+
+// Slider._update_from_x: the value at x in the stashed box, clamped; the value as it was when
+// there is no box or it has no width.
+function sliderValue(w, x) {
+  const box = w._layout_box;
+  if (box === null || box.w <= 0) return w.value;
+  const t = Math.max(0.0, Math.min(1.0, (x - box.x) / box.w));
+  return w.min + t * (w.max - w.min);
+}
+
+// Joystick._update_from: the pointer from the box's centre over half its shorter side, y up,
+// clipped to the unit circle by sqrt; unchanged with no box.
+function joystickValue(w, ev) {
+  const box = w._layout_box;
+  if (box === null || box.w <= 0) return w.value;
+  const r = Math.min(box.w, box.h) * 0.5;
+  let x = (ev.x - (box.x + box.w * 0.5)) / r;
+  let y = -(ev.y - (box.y + box.h * 0.5)) / r;
+  const n = Math.sqrt(x * x + y * y);
+  if (n > 1.0) [x, y] = [x / n, y / n];
+  return [x, y];
+}
+
+// Each widget's _on_pointer_down/_move/_up and Slider._on_step, statement for statement as
+// button.py, slider.py, toggle.py and joystick.py: the value is set before its event is queued.
+const WIDGET_HOOKS = {
+  Button: {
+    down(w, ev, engine) {
+      w._latch = true;
+      engine.emit(`gui:button:${w.name}:click`, new Map());
+    },
+  },
+  Slider: {
+    down(w, ev, engine) {
+      w.value = sliderValue(w, ev.x);
+      engine.emit(`gui:slider:${w.name}:change`, new Map([["value", w.value]]));
+    },
+    move(w, ev, engine) {
+      w.value = sliderValue(w, ev.x);
+      engine.emit(`gui:slider:${w.name}:change`, new Map([["value", w.value]]));
+    },
+    up(w, ev, engine) {
+      w.value = sliderValue(w, ev.x);
+      engine.emit(`gui:slider:${w.name}:commit`, new Map([["value", w.value]]));
+    },
+    step(w, sign, engine) {
+      const step = (sign * (w.max - w.min)) / SLIDER_STEPS;
+      w.value = Math.max(w.min, Math.min(w.max, w.value + step));
+      engine.emit(`gui:slider:${w.name}:change`, new Map([["value", w.value]]));
+      engine.emit(`gui:slider:${w.name}:commit`, new Map([["value", w.value]]));
+    },
+  },
+  Toggle: {
+    down(w, ev, engine) {
+      w.value = !w.value;
+      engine.emit(`gui:toggle:${w.name}:change`, new Map([["value", w.value]]));
+    },
+  },
+  Joystick: {
+    down(w, ev, engine) {
+      w.value = joystickValue(w, ev);
+      engine.emit(`gui:joystick:${w.name}:change`, new Map([["value", w.value]]));
+    },
+    move(w, ev, engine) {
+      w.value = joystickValue(w, ev);
+      engine.emit(`gui:joystick:${w.name}:change`, new Map([["value", w.value]]));
+    },
+    up(w, ev, engine) {
+      w.value = [0.0, 0.0];
+      engine.emit(`gui:joystick:${w.name}:change`, new Map([["value", w.value]]));
+    },
+  },
+};
+
+// Which widgets capture the pointer that went down on them (_gui_captures_pointer), and which
+// take part at all (_is_gui_interactive).
+const CAPTURES = new Set(["Slider", "Joystick"]);
+
+// manifoldx.gui.bridge._GuiBridge, line for line, with the replay's _locate: the page's DOM
+// decided which widget a pointer event went to, and advance puts that in routes (the event
+// object to [widget, fx, fy]); an event with no route is on no widget.
+export class GuiBridge {
+  constructor(engine) {
+    this.engine = engine;
+    this.captured = new Map(); // pointer_id -> widget
+    this.focused = null;
+    this.routes = new Map();
+  }
+
+  beginFrame() {
+    this.engine.gui.pointer_over_gui = false;
+  }
+
+  onPointer(ev, phase) {
+    // A captured pointer turns the view; its position means nothing to widgets.
+    const input = this.engine.input;
+    if (input !== null && input !== undefined && input.pointer_captured) return;
+    const gui = this.engine.gui;
+    let result;
+    [ev, result] = this.locate(ev);
+
+    const captured = this.captured.get(ev.pointer_id);
+    if (captured !== undefined) {
+      if (phase === "down") {
+        this.captured.delete(ev.pointer_id);
+      } else {
+        this.dispatch(captured, ev, phase);
+        gui.pointer_over_gui = true;
+        if (phase === "up") this.captured.delete(ev.pointer_id);
+        return;
+      }
+    }
+
+    if (result === null) {
+      if (phase === "down") this.focused = null;
+      return;
+    }
+    const [widget, box] = result;
+    gui.pointer_over_gui = true;
+    widget._layout_box = box;
+
+    if (phase !== "move") {
+      this.dispatch(widget, ev, phase);
+      if (phase === "down") {
+        if (CAPTURES.has(widget.kind)) this.captured.set(ev.pointer_id, widget);
+        this.focused = widget;
+      }
+    }
+  }
+
+  locate(ev) {
+    const hit = this.routes.get(ev);
+    if (hit === undefined) return [ev, null];
+    this.routes.delete(ev);
+    const [widget, fx, fy] = hit;
+    return [Object.freeze({ ...ev, x: fx, y: fy }), [widget, UNIT]];
+  }
+
+  onKey(ev) {
+    const sign = STEPS[ev.key];
+    if (sign !== undefined && this.focused !== null && this.focused.kind === "Slider") {
+      WIDGET_HOOKS.Slider.step(this.focused, sign, this.engine);
+    }
+  }
+
+  dispatch(widget, ev, phase) {
+    const hook = WIDGET_HOOKS[widget.kind]?.[phase];
+    if (hook !== undefined) hook(widget, ev, this.engine);
+  }
+}
+
 // ---------------------------------------------------------------- frames
 
-// app: {engine, roots}, roots as loadState returns them. One frame: every system, in the
-// order the app registered them, called as the engine calls them, with (query, dt), the query
-// of the components it registered (null without a store); then the
+// The engine's event queue, as manifoldx.events.EventBus: emit appends, drain swaps the
+// queue for a new one before delivering, so an emit during delivery waits for the next drain.
+// delivered: the names drained since the trace last read them.
+export class EventBus {
+  constructor() {
+    this.pending = [];
+    this.delivered = [];
+  }
+
+  emit(name, payload = null) {
+    this.pending.push([name, payload]);
+  }
+
+  drain(deliver) {
+    const drained = this.pending;
+    this.pending = [];
+    for (const [name, payload] of drained) {
+      this.delivered.push(name);
+      deliver(name, payload);
+    }
+  }
+}
+
+// The fields of the desktop's input event classes (manifoldx.input), by event name.
+const KEY_FIELDS = ["key", "modifiers", "is_down"];
+const POINTER_FIELDS = ["x", "y", "dx", "dy", "button", "buttons", "modifiers", "phase", "pointer_id"];
+const POINTER_EVENTS = new Set(["pointer_down", "pointer_up", "pointer_move"]);
+const EVENT_FIELDS = {
+  key_down: KEY_FIELDS,
+  key_up: KEY_FIELDS,
+  pointer_down: POINTER_FIELDS,
+  pointer_up: POINTER_FIELDS,
+  pointer_move: POINTER_FIELDS,
+  wheel: ["dx", "dy", "x", "y", "buttons", "modifiers"],
+  resize: ["width", "height", "pixel_ratio"],
+};
+
+// eventOf(name, payload): a frame event's JSON payload as its handlers receive it, as
+// manifoldx.web.replay.event_of builds it: the seven input events as frozen objects with the
+// fields of their desktop class (lists frozen as the tuples they are; pointer_id 0 when
+// absent), any other payload through fromJSON.
+export function eventOf(name, payload) {
+  const fields = EVENT_FIELDS[name];
+  if (fields === undefined) return fromJSON(payload);
+  const ev = {};
+  for (const f of fields) {
+    const v = payload[f] ?? (f === "pointer_id" ? 0 : undefined);
+    ev[f] = Array.isArray(v) ? Object.freeze([...v]) : v;
+  }
+  return Object.freeze(ev);
+}
+
+// app: {engine, roots}, roots as loadState returns them. One frame as Engine._draw_frame runs
+// it, time.time() reading the frame's clock (0.0 without one) throughout: the frame to engine.input; elapsed, 0 on the first frame and dt more on each later one;
+// the queue, with the frame event ({dt, elapsed, frame}) first, then what was emitted during
+// the previous frame, then the frame's events ([name, payload], JSON, through eventOf; a
+// pointer event's "gui" target routes it to its widget, GuiBridge); delivery; the systems and
+// the flush (step). engine.gui.pointer_over_gui is reset before delivery, as begin_frame does.
+export function advance(app, frame, dt) {
+  const { engine } = app;
+  setClock(frame.clock ?? 0.0);
+  engine.input.setFrame(frame);
+  if (engine.frame > 0) engine.elapsed += dt;
+  const { bridge } = engine.gui;
+  bridge.beginFrame();
+  bridge.routes.clear(); // each frame's events are delivered in that frame
+  for (const [name, payload] of frame.events ?? []) {
+    const ev = eventOf(name, payload);
+    if (POINTER_EVENTS.has(name) && payload.gui !== undefined) {
+      const [i, fx, fy] = payload.gui;
+      bridge.routes.set(ev, [engine.gui.widgets[i], fx, fy]);
+    }
+    engine.emit(name, ev);
+  }
+  const payload = new Map([["dt", dt], ["elapsed", engine.elapsed], ["frame", engine.frame]]);
+  engine.bus.pending.unshift(["frame", payload]);
+  engine.bus.drain((name, p) => deliver(app, name, p));
+  step(app, dt);
+  engine.frame += 1;
+}
+
+// Every system, in the order the app registered them, called as the engine calls them, with
+// (query, dt), the query of the components it registered (null without a store); then the
 // store's queued writes and destroys land, as the engine executes its commands.
 export function step(app, dt) {
   const store = app.engine.store ?? null;
@@ -867,9 +1131,20 @@ export function step(app, dt) {
   store?.flush();
 }
 
-// An event, as engine.emit delivers it: every handler root of that event, in the order the
-// app registered them, called with the payload (runtime values: a dict is a Map).
-export function fire(app, event, payload) {
+// An event delivered: the GUI bridge first for the pointer events and key_down (its handlers
+// are the engine's own, registered before the app's), the delivered hook for any but the frame
+// and input events, then every handler root of that event,
+// in the order the app registered them, called with the payload (runtime values: a dict is a
+// Map) and, when it registered components, a read-only query.
+function deliver(app, event, payload) {
+  const { bridge } = app.engine.gui;
+  if (event === "pointer_down") bridge.onPointer(payload, "down");
+  else if (event === "pointer_move") bridge.onPointer(payload, "move");
+  else if (event === "pointer_up") bridge.onPointer(payload, "up");
+  else if (event === "key_down") bridge.onKey(payload);
+  if (app.engine.delivered !== null && event !== "frame" && EVENT_FIELDS[event] === undefined) {
+    app.engine.delivered(event, payload);
+  }
   const store = app.engine.store ?? null;
   for (const r of app.roots) {
     if (r.kind !== "handler" || r.event !== event) continue;
@@ -921,8 +1196,9 @@ export function pathValue(app, path) {
 }
 
 // The trace entry of the frame just run, as plain JSON values (the form is
-// manifoldx.web.replay's): {camera, gui, log, state, paths, store}, log being what
-// engine.calls gained since logStart, store traceStore's (null without a store).
+// manifoldx.web.replay's): {camera, gui, log, state, paths, store, events}, log being what
+// engine.calls gained since logStart, store traceStore's (null without a store), events the
+// names the queue delivered since the last entry.
 export function traceEntry(app, paths, logStart) {
   const { engine } = app;
   const entry = {
@@ -932,6 +1208,7 @@ export function traceEntry(app, paths, logStart) {
     state: engine.state,
     paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
     store: engine.store === null || engine.store === undefined ? null : traceStore(engine.store),
+    events: engine.bus.delivered.splice(0),
   };
   return JSON.parse(toJSON(entry));
 }

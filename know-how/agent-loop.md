@@ -57,7 +57,7 @@ A slow frame line says only how long; log where the person was from the app (`en
 Under `manifoldx run --web` (`know-how/web-export.md`, "While you edit") the app runs in a browser tab, the app's page is `/` and the dev page moves to `/dev`. The same commands work, and the server forwards them to the tab:
 
 - `look` is the tab's frame with the GUI painted over it (the HTML panels' backgrounds and text, drawn into the PNG at the drawing buffer's size), also while the tab is paused or reloading.
-- `state`, `set` and `emit` act on the tab's `engine.state` and handlers; emitted events run at the start of the tab's next frame. `events` answers from the Python engine (the handlers' docstrings are there), without `startup`, `shutdown` and manifoldx's own GUI handlers, which the tab does not run.
+- `state`, `set` and `emit` act on the tab's `engine.state` and handlers. An emitted event enters the tab's next frame as one of its events (`know-how/web-export.md`, Events in the page), so it is recorded in the tab's frames and a replay of them runs it too, and its handlers run in that frame's delivery, before the systems. `events` answers from the Python engine (the handlers' docstrings are there), without `startup`, `shutdown` and manifoldx's own GUI handlers.
 - `log` holds the runner's lines, the app's `engine.log` lines from frame code, and the tab's console warnings and errors, uncaught errors and unhandled rejections with the prefix `tab: `, sent every 250 ms.
 - `metrics` does not exist (404 `metrics are not measured under --web`), and `--debug` is refused.
 
@@ -111,7 +111,7 @@ Let the person play while you watch the log, and act on what they say:
 ## Gotchas
 
 - **The commands need the folder the app was started from**, where `.manifoldx/server.json` is.
-- **`emit` answers before the handlers run**: they run at the start of the next frame. Wait for their log line, or read the state after it.
+- **`emit` answers before the handlers run**: they run at the start of the next frame (under `--web`, the tab's next frame, which records it). Wait for their log line, or read the state after it.
 - **A merge patch replaces lists whole.** To add to a list, read it, change it and patch the whole list, or use an event.
 - **Values that are not JSON** (numpy arrays, the app's objects) come back as `repr` and cannot be patched back; keep plain data in the state.
 - **No authentication**: anyone on the machine can call the API while `manifoldx run` runs. It never listens beyond 127.0.0.1.

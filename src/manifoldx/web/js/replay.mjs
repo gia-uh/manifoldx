@@ -6,7 +6,7 @@
 
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { guiValues, loadApp, step, toJSON, traceEntry } from "./manifoldx.js";
+import { advance, guiValues, loadApp, toJSON, traceEntry } from "./manifoldx.js";
 
 // The folder's app, {engine, roots, modules}; options go to createEngine over the exported ones.
 export async function load(folder = new URL(".", import.meta.url), options = {}) {
@@ -18,15 +18,13 @@ export async function load(folder = new URL(".", import.meta.url), options = {})
   return { ...loadApp(state, modules, { ecs, ...options }), modules };
 }
 
-// One trace entry per frame: the frame goes to engine.input, the systems run once with dt,
-// then traceEntry reads it.
+// One trace entry per frame: advance runs the frame, then traceEntry reads it.
 export function replay(app, frames, paths, dt = 1 / 60) {
   const { engine } = app;
   const trace = [];
   for (const frame of frames) {
     const start = engine.calls.length;
-    engine.input.setFrame(frame);
-    step(app, dt);
+    advance(app, frame, dt);
     trace.push(traceEntry(app, paths, start));
   }
   return trace;

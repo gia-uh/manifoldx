@@ -61,6 +61,17 @@ def test_slider_value_clamped_outside_box():
     assert s.value == 0.0
 
 
+def test_on_step_moves_a_twentieth_of_the_range():
+    received = []
+    s = Slider(name="G", min=2.0, max=4.0, value=3.0)
+    s._on_step(1, _fake_engine(received))
+    assert s.value == 3 + 1 * (4 - 2) / 20
+    assert received == [
+        ("gui:slider:G:change", {"value": s.value}),
+        ("gui:slider:G:commit", {"value": s.value}),
+    ]
+
+
 def _fake_pointer(x, y):
     from manifoldx.input import PointerEvent
     return PointerEvent(x=x, y=y, dx=0, dy=0, button=1, buttons=(1,),

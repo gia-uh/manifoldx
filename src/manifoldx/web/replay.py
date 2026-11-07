@@ -10,16 +10,36 @@ keys and buttons are held, just and clicks pressed this frame, d the mouse motio
 viewport size. The last five are optional and read as empty when absent: up and released are
 the keys and buttons released this frame, pos the pointer position in CSS pixels from the
 canvas's top-left, wheel the wheel's motion, mods the held modifiers among Alt, Control, Meta
-and Shift, sorted. Each side reads one frame, then runs the app's systems once with a fixed dt and
-traces:
+and Shift, sorted. "events" is optional too: the frame's events, [name, payload] in the order
+they came, the page's input events with the fields of the desktop's classes,
+
+    ["key_down" | "key_up", {"key", "modifiers": [str], "is_down"}]
+    ["pointer_down" | "pointer_up" | "pointer_move",
+     {"x", "y", "dx", "dy", "button", "buttons": [int], "modifiers": [str], "phase", "pointer_id"}]
+    ["wheel", {"dx", "dy", "x", "y", "buttons", "modifiers"}]
+    ["resize", {"width", "height", "pixel_ratio"}]
+
+and a pointer event the page routed to a widget also has "gui": [widget, fx, fy], the widget's
+index in state.json's gui and the pointer's place in its box as fractions of its width and
+height; the GUI bridge then dispatches to that widget (_routed). They are delivered as
+KeyEvent, PointerEvent, WheelEvent and ResizeEvent (event_of), and any other event with its
+JSON payload. "clock", optional, is the wall clock the page read for the frame, in seconds
+since the epoch: time.time() in frame code returns it (0.0 when the frame has none).
+
+Each side reads one frame, delivers the event queue, then runs the app's systems once with a
+fixed dt and traces:
 
     {"camera": {"position", "target"}, "gui": [str], "log": [...], "state": engine.state,
-     "paths": {path: value}, "store": store_trace(engine.store)}
+     "paths": {path: value}, "store": store_trace(engine.store), "events": [name]}
 
 gui is what each ValueDisplay shows; log the ["material", entity, material_id] and
 ["capture", on] entries this frame added; a path ("rig.pos", "selected") starts at a global of
 the app's main module or, when it has no such global, at a key of engine.state, and goes on
-through attributes and dict keys. The store is traced after the frame's queued commands ran,
+through attributes and dict keys; events the names the event queue delivered this frame, in
+order, as Engine._draw_frame delivers them: the frame event, {"dt", "elapsed", "frame"}, first,
+then what was emitted during the previous frame, then the frame's optional "events" ([name,
+payload] pairs); an emit during delivery waits for the next frame. engine.elapsed is 0.0 on the
+first frame and adds dt on each later one. The store is traced after the frame's queued commands ran,
 as the engine runs them after its systems:
 
     {"alive": [slot], "free": [slot], "high_water": int, "rows": {component: [[value]]}}
@@ -35,12 +55,15 @@ import json
 import math
 import os
 import subprocess
-from dataclasses import dataclass
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
-from manifoldx.input import _key_name
+from manifoldx.gui.layout import LayoutBox
+from manifoldx.input import KeyEvent, PointerEvent, ResizeEvent, WheelEvent, _key_name
 
 DT = 1 / 60
 
@@ -153,6 +176,7 @@ def replay_python(
     with app_args as its sys.argv[1:] (give the export's, so both take the same branch), then
     run through frames: one trace entry per frame, as JSON reads it back."""
     from .export import _as_main, _sources, capture_engine
+    from .gui import widget_list
     from .reach import find_roots
     from .snapshot import snapshot
     from .transpile import reach_app
@@ -182,13 +206,46 @@ def replay_python(
             log.append(["material", int(index), engine._material_registry.register(material)])
 
         engine.set_material = recorded
+        bus = engine._event_bus
+        delivered: list[str] = []
+        deliver = bus._deliver
+
+        def recorded_delivery(engine, event, payload):
+            delivered.append(event)
+            deliver(engine, event, payload)
+
+        bus._deliver = recorded_delivery
+        # The page's DOM is the GUI's hit test: a pointer event it routed to a widget carries
+        # "gui": [widget, fx, fy], and the desktop's bridge reads that in place of its own.
+        widgets = widget_list(engine)
+        routes: dict[int, tuple] = {}
+        engine._gui_bridge._locate = _routed(engine, routes)
         trace = []
-        for frame in frames:
+        for i, frame in enumerate(frames):
             start = len(log)
-            engine.input.set_frame(frame)
-            engine.systems.run_all(engine, dt)
-            engine.commands.execute(engine.store)
-            engine.commands.clear()
+            delivered.clear()
+            # Engine._draw_frame's order: the input, elapsed, the GUI's reset, the queue (the
+            # frame event first, then the previous frame's emits, then the frame's events),
+            # the systems, the flush; time.time() reads the frame's clock throughout.
+            with _clock(frame.get("clock", 0.0)):
+                engine.input.set_frame(frame)
+                if i > 0:
+                    engine.elapsed += dt
+                engine._gui_bridge.begin_frame()
+                routes.clear()  # each frame's events are delivered in that frame
+                for name, payload in frame.get("events", ()):
+                    ev = event_of(name, payload)
+                    if name in POINTER_EVENTS and "gui" in payload:
+                        i, fx, fy = payload["gui"]
+                        routes[id(ev)] = (widgets[i], fx, fy)
+                    engine.emit(name, ev)
+                payload = {"dt": dt, "elapsed": engine.elapsed, "frame": engine._frame_index}
+                bus._pending.insert(0, ("frame", payload))
+                bus.dispatch_pending(engine)
+                engine.systems.run_all(engine, dt)
+                engine.commands.execute(engine.store)
+                engine.commands.clear()
+                engine._frame_index += 1
             cam = engine.camera
             entry = {
                 "camera": {"position": cam.position, "target": cam.target},
@@ -197,9 +254,73 @@ def replay_python(
                 "state": engine.state,
                 "paths": {p: _path(vars(main), engine.state, p) for p in paths},
                 "store": store_trace(engine.store),
+                "events": list(delivered),
             }
             trace.append(json.loads(json.dumps(entry, default=_plain)))
     return trace
+
+
+@contextmanager
+def _clock(seconds: float):
+    """time.time() returns seconds while the frame runs, as the page's frame clock does; the
+    real one is back after it."""
+    real = time.time
+    time.time = lambda: seconds
+    try:
+        yield
+    finally:
+        time.time = real
+
+
+UNIT = LayoutBox(0.0, 0.0, 1.0, 1.0)
+
+
+def _routed(engine, routes: dict[int, tuple]):
+    """engine._gui_bridge._locate for a replay: an event in routes (by id, as the replay
+    emitted it) is at (fx, fy) in its widget's box, which is the unit box; any other is on no
+    widget. The rest of the bridge and the widgets' code runs as on the desktop."""
+
+    def locate(ev):
+        hit = routes.pop(id(ev), None)
+        if hit is None:
+            return ev, None
+        widget, fx, fy = hit
+        return replace(ev, x=fx, y=fy), (widget, UNIT)
+
+    return locate
+
+
+KEY_EVENTS = ("key_down", "key_up")
+POINTER_EVENTS = ("pointer_down", "pointer_up", "pointer_move")
+
+
+def event_of(name: str, payload):
+    """The payload a frame's event is delivered with, as js/manifoldx.js's eventOf: the seven
+    input events as the desktop's classes (their lists as tuples, a missing pointer_id 0), any
+    other payload as it is."""
+    if name in KEY_EVENTS:
+        return KeyEvent(payload["key"], tuple(payload["modifiers"]), payload["is_down"])
+    if name in POINTER_EVENTS:
+        p = payload
+        return PointerEvent(
+            p["x"],
+            p["y"],
+            p["dx"],
+            p["dy"],
+            p["button"],
+            tuple(p["buttons"]),
+            tuple(p["modifiers"]),
+            p["phase"],
+            p.get("pointer_id", 0),
+        )
+    if name == "wheel":
+        p = payload
+        return WheelEvent(
+            p["dx"], p["dy"], p["x"], p["y"], tuple(p["buttons"]), tuple(p["modifiers"])
+        )
+    if name == "resize":
+        return ResizeEvent(payload["width"], payload["height"], payload["pixel_ratio"])
+    return payload
 
 
 DIGEST_PAST = 1000  # alive entities past which the trace carries a digest of each component

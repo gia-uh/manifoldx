@@ -730,3 +730,125 @@ export function wrap(text, width = 70) {
   }
   return lines;
 }
+
+// ---------------------------------------------------------------- random
+
+const MT_N = 624, MT_M = 397;
+const MT_MATRIX_A = 0x9908b0df, MT_UPPER = 0x80000000, MT_LOWER = 0x7fffffff;
+
+// n.bit_length() for an int 0 <= n <= 2 ** 53.
+function bitLength(n) {
+  return n < 4294967296 ? 32 - Math.clz32(n) : 64 - Math.clz32(Math.floor(n / 4294967296));
+}
+
+// random.Random as CPython's: MT19937 as Modules/_randommodule.c, the rest as Lib/random.py
+// of Python 3.13. It is never seeded here: its state comes from a generator setup made,
+// {key: 624 words, pos, gauss}, as Random.getstate() holds it. getrandbits stops at 53 bits.
+export class Random {
+  static fromState({ key, pos, gauss }) {
+    const r = new Random();
+    r.mt = Uint32Array.from(key);
+    r.pos = pos;
+    r.gauss = gauss ?? null;
+    return r;
+  }
+
+  getstate() {
+    return { key: Array.from(this.mt), pos: this.pos, gauss: this.gauss };
+  }
+
+  // genrand_uint32
+  uint32() {
+    const mt = this.mt;
+    if (this.pos >= MT_N) {
+      let kk = 0, y;
+      for (; kk < MT_N - MT_M; kk++) {
+        y = (mt[kk] & MT_UPPER) | (mt[kk + 1] & MT_LOWER);
+        mt[kk] = mt[kk + MT_M] ^ (y >>> 1) ^ (y & 1 ? MT_MATRIX_A : 0);
+      }
+      for (; kk < MT_N - 1; kk++) {
+        y = (mt[kk] & MT_UPPER) | (mt[kk + 1] & MT_LOWER);
+        mt[kk] = mt[kk + (MT_M - MT_N)] ^ (y >>> 1) ^ (y & 1 ? MT_MATRIX_A : 0);
+      }
+      y = (mt[MT_N - 1] & MT_UPPER) | (mt[0] & MT_LOWER);
+      mt[MT_N - 1] = mt[MT_M - 1] ^ (y >>> 1) ^ (y & 1 ? MT_MATRIX_A : 0);
+      this.pos = 0;
+    }
+    let y = mt[this.pos++];
+    y ^= y >>> 11;
+    y ^= (y << 7) & 0x9d2c5680;
+    y ^= (y << 15) & 0xefc60000;
+    y ^= y >>> 18;
+    return y >>> 0;
+  }
+
+  random() {
+    const a = this.uint32() >>> 5, b = this.uint32() >>> 6;
+    return (a * 67108864 + b) / 9007199254740992;
+  }
+
+  getrandbits(k) {
+    if (k < 0) throw new Error("ValueError: number of bits must be non-negative");
+    if (k > 53) throw new Error("ValueError: getrandbits() past 53 bits is not in the page");
+    if (k === 0) return 0;
+    if (k <= 32) return this.uint32() >>> (32 - k);
+    const lo = this.uint32();
+    return lo + (this.uint32() >>> (64 - k)) * 4294967296;
+  }
+
+  _randbelow(n) {
+    const k = bitLength(n);
+    let r = this.getrandbits(k);
+    while (r >= n) r = this.getrandbits(k);
+    return r;
+  }
+
+  uniform(a, b) {
+    return a + (b - a) * this.random();
+  }
+
+  randrange(start, stop = null, step = 1) {
+    if (stop === null) {
+      if (step !== 1) throw new TypeError("Missing a non-None stop argument");
+      if (start > 0) return this._randbelow(start);
+      throw new Error("ValueError: empty range for randrange()");
+    }
+    const width = stop - start;
+    if (step === 1) {
+      if (width > 0) return start + this._randbelow(width);
+      throw new Error(`ValueError: empty range in randrange(${start}, ${stop})`);
+    }
+    let n;
+    if (step > 0) n = floordiv(width + step - 1, step);
+    else if (step < 0) n = floordiv(width + step + 1, step);
+    else throw new Error("ValueError: zero step for randrange()");
+    if (n <= 0) throw new Error(`ValueError: empty range in randrange(${start}, ${stop}, ${step})`);
+    return start + step * this._randbelow(n);
+  }
+
+  randint(a, b) {
+    return this.randrange(a, b + 1);
+  }
+
+  choice(seq) {
+    if (!seq.length) throw new Error("IndexError: Cannot choose from an empty sequence");
+    return seq[this._randbelow(seq.length)];
+  }
+}
+
+// The random module's own instance (random._inst), its state loaded from the snapshot's
+// "random"; null until then.
+export let random = null;
+export function setRandom(r) {
+  random = r;
+}
+
+// time.time() in frame code: the clock of the frame being run, seconds since the epoch, which
+// advance sets from the frame's "clock" (0.0 when it has none).
+let clock = 0.0;
+export function setClock(seconds) {
+  clock = seconds;
+}
+export function time_time() {
+  return clock;
+}

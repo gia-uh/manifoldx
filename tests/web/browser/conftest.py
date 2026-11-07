@@ -203,12 +203,15 @@ def fake_lock(chromium, served, web_walk_export) -> bool:
 def open_page(chromium, fake_lock):
     """open_page(url, width=800, height=500, scale=1) -> a page of its own context, past
     __mx.ready unless ready=False, its loop stopped (MANUAL) so the test ticks it, with the fake
-    lock when the probe asked for it. before(page) runs before the page loads."""
+    lock when the probe asked for it. before(page) runs before the page loads. touch=True makes
+    a context with a touch screen, for touch(page, points)."""
     contexts = []
 
-    def open_(url, width=800, height=500, scale=1, ready=True, before=None):
+    def open_(url, width=800, height=500, scale=1, ready=True, before=None, touch=False):
         ctx = chromium.new_context(
-            viewport={"width": width, "height": height}, device_scale_factor=scale
+            viewport={"width": width, "height": height},
+            device_scale_factor=scale,
+            has_touch=touch,
         )
         contexts.append(ctx)
         ctx.add_init_script(MANUAL)
@@ -265,3 +268,27 @@ def run_web():
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=10)
+
+
+_touches: dict = {}  # page -> [its CDP session, the touch points down]
+
+
+def touch(page, points: dict) -> None:
+    """Put the touch screen in the state points says, {finger: (x, y)} in CSS pixels, through
+    Input.dispatchTouchEvent: a finger new to points goes down, one gone from it lifts, and the
+    others move to their place. Chromium sends one pointer event per finger that changed. The
+    page needs a context made with touch=True."""
+    if page not in _touches:
+        _touches[page] = [page.context.new_cdp_session(page), {}]
+    cdp, before = _touches[page]
+    # Chromium's touchEnd lifts the fingers it lists; touchStart and touchMove list them all.
+    lifted = {f: xy for f, xy in before.items() if f not in points}
+    if lifted:
+        kind, sent = "touchEnd", lifted
+    else:
+        kind, sent = ("touchStart" if points.keys() - before.keys() else "touchMove"), points
+    active = [{"x": x, "y": y, "id": finger} for finger, (x, y) in sent.items()]
+    cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": active})
+    _touches[page][1] = dict(points)
+    # Chromium hands pointermove to the page at its next animation frame.
+    page.evaluate("new Promise((r) => requestAnimationFrame(() => r()))")

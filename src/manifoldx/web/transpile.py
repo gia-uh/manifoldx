@@ -24,10 +24,12 @@ from .types import (
     LIB_CONSTANTS,
     MATH_FUNCTIONS,
     ND_FUNCTIONS,
+    RANDOM_FUNCTIONS,
     RUNTIME_KEYWORDS,
     RUNTIME_SURFACE,
     STATE,
     STR_METHODS,
+    TIME_HINT,
     ClassInfo,
     Ctx,
     FuncInfo,
@@ -931,6 +933,8 @@ class _Module:
             return js_name(name)
         sym = self.env.symbols[self.ctx.module].get(name)
         if sym is not None:
+            if sym.kind == "setup" and str(sym.target).startswith("from time import "):
+                self.fail(n, f"`{sym.target}` {TIME_HINT}")
             if sym.kind == "setup":
                 self.fail(n, f"`{name}` (bound by `{sym.target}`, which runs only at setup)")
             if sym.kind == "lib":
@@ -1499,7 +1503,7 @@ class _Module:
         return f"{self.rt('component')}({json.dumps(name)}, new Map([{pairs}]))"
 
     def lib_call(self, name: str, n: ast.Call) -> str:
-        """A call into math or numpy."""
+        """A call into math, numpy, textwrap or random."""
         what = f"{ast.unparse(n.func)}()"
         args, kw = n.args, {k.arg for k in n.keywords}
         self.no_field(n)
@@ -1547,8 +1551,18 @@ class _Module:
                 self.fail(n, f"{what} with a width that is not an int")
             width = f", {self.e(given[0])}" if given else ""
             return f"{self.rt('wrap')}({self.e(args[0])}{width})"
+        if name == "time.time" and not args and not kw:  # the frame's clock
+            return f"{self.rt('time_time')}()"
+        if name.startswith("time."):
+            self.fail(n, f"`{what}` {TIME_HINT}")
+        if name == "random.Random":
+            self.fail(n, f"`{ast.unparse(n)}`, a generator made in frame code (make it at setup)")
+        if name == "random.seed":
+            self.fail(n, f"`{ast.unparse(n)}`, a reseed in frame code (seed it at setup)")
         if kw:
             self.fail(n, f"keyword arguments to {what}")
+        if name in RANDOM_FUNCTIONS:  # the module's generator, loaded from the snapshot
+            return f"{self.rt('random')}.{name[7:]}({', '.join(self.e(x) for x in args)})"
         if name == "numpy.arange" and 1 <= len(args) <= 3:
             for x in args:
                 self.numeric(n, x, what)

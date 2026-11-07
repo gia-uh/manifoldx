@@ -12,6 +12,9 @@ from typing import Any
 from manifoldx.gui.layout import LayoutBox
 from manifoldx.gui.widgets import Widget
 
+# An arrow key on a focused slider moves it by this fraction of its range.
+SLIDER_STEPS = 20
+
 
 class Slider(Widget):
     _is_gui_interactive = True
@@ -63,4 +66,11 @@ class Slider(Widget):
 
     def _on_pointer_up(self, ev: Any, engine: Any) -> None:
         self._update_from_x(ev.x)
+        engine.emit(f"gui:slider:{self.name}:commit", {"value": self.value})
+
+    def _on_step(self, sign: int, engine: Any) -> None:
+        """Step by a twentieth of the range (an arrow key on the focused slider)."""
+        step = sign * (self.max - self.min) / SLIDER_STEPS
+        self.value = max(self.min, min(self.max, self.value + step))
+        engine.emit(f"gui:slider:{self.name}:change", {"value": self.value})
         engine.emit(f"gui:slider:{self.name}:commit", {"value": self.value})

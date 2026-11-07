@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createEngine } from "../../../src/manifoldx/web/js/manifoldx.js";
+import { createEngine, eventOf } from "../../../src/manifoldx/web/js/manifoldx.js";
 import { FrameBuilder, PointerLock, attachDom } from "../../../src/manifoldx/web/js/input.js";
 
 const vp = [800, 500];
@@ -11,9 +11,11 @@ const pick = (frame, ...names) => Object.fromEntries(names.map((n) => [n, frame[
 
 test("a frame with no events is the empty frame, every field present", () => {
   const b = new FrameBuilder();
-  assert.deepEqual(b.take(vp), {
+  const { clock, ...frame } = b.take(vp);
+  assert.equal(typeof clock, "number");
+  assert.deepEqual(frame, {
     keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [800, 500],
-    up: [], released: [], pos: [0, 0], wheel: [0, 0], mods: [],
+    up: [], released: [], pos: [0, 0], wheel: [0, 0], mods: [], events: [],
   });
 });
 
@@ -136,6 +138,105 @@ test("lockEnded after an Escape keydown in the same frame adds nothing", () => {
   b.keyDown({ key: "Escape", code: "Escape" });
   b.lockEnded();
   assert.deepEqual(pick(b.take(vp), "keys", "just"), { keys: ["Escape"], just: ["Escape"] });
+});
+
+// ---------------------------------------------------------------- the frame's events
+
+test("the frame lists the events in the order the DOM gave them", () => {
+  const b = new FrameBuilder();
+  b.keyDown({ key: " ", code: "Space", shiftKey: false });
+  b.pointerDown({ x: 10, y: 20, button: 0, pointerId: 1, isPrimary: true });
+  b.pointerMove({ x: 14, y: 17, movementX: 4, movementY: -3, pointerId: 1, isPrimary: true });
+  b.pointerUp({ x: 14, y: 17, button: 0, pointerId: 1, isPrimary: true });
+  const f = b.take([800, 500]);
+  assert.deepEqual(f.events.map(([n]) => n), ["key_down", "pointer_down", "pointer_move", "pointer_up"]);
+  assert.deepEqual(f.events[2][1], { x: 14, y: 17, dx: 4, dy: -3, button: 0, buttons: [1], modifiers: [],
+    phase: "move", pointer_id: 0 });
+  assert.equal(f.events[1][1].dx, 0); // down and up carry no motion, as the desktop's
+  assert.deepEqual(f.events[0][1], { key: "Space", modifiers: [], is_down: true });
+  assert.deepEqual(f.events[3][1], { x: 14, y: 17, dx: 0, dy: 0, button: 1, buttons: [], modifiers: [],
+    phase: "up", pointer_id: 0 });
+  assert.deepEqual(b.take([800, 500]).events, []);
+});
+
+test("dx and dy are measured from the last pointer event, not from movementX", () => {
+  const b = new FrameBuilder();
+  b.pointerMove({ x: 50, y: 50, movementX: 9, movementY: 9 }); // the first move has no last position
+  b.pointerMove({ x: 53, y: 49, movementX: 9, movementY: 9 });
+  b.pointerDown({ x: 60, y: 40, button: 0, movementX: 0, movementY: 0 });
+  b.pointerMove({ x: 61.5, y: 42, movementX: 9, movementY: 9 }); // re-anchored at the down
+  const f = b.take(vp);
+  assert.deepEqual(f.events.map(([, p]) => [p.dx, p.dy]), [[0, 0], [3, -1], [0, 0], [1.5, 2]]);
+  assert.deepEqual(f.d, [27, 27]); // the frame's d still sums movementX, for the pointer lock
+});
+
+test("a repeated keydown is no key_down, as rendercanvas sends none", () => {
+  const b = new FrameBuilder();
+  b.keyDown({ key: "w", code: "KeyW" });
+  b.keyDown({ key: "w", code: "KeyW", repeat: true });
+  b.keyUp({ key: "w", code: "KeyW" });
+  b.keyUp({ key: "q", code: "KeyQ" }); // never held: nothing
+  assert.deepEqual(b.take(vp).events, [
+    ["key_down", { key: "w", modifiers: [], is_down: true }],
+    ["key_up", { key: "w", modifiers: [], is_down: false }],
+  ]);
+});
+
+test("the primary pointer is 0, another keeps its DOM pointerId", () => {
+  const b = new FrameBuilder();
+  b.pointerDown({ x: 1, y: 1, button: 0, pointerId: 7, isPrimary: true, pointerType: "touch" });
+  b.pointerDown({ x: 2, y: 2, button: 0, pointerId: 9, isPrimary: false, pointerType: "touch" });
+  b.pointerUp({ x: 2, y: 2, button: 0, pointerId: 9, isPrimary: false });
+  assert.deepEqual(b.take(vp).events.map(([, p]) => p.pointer_id), [0, 9, 9]);
+});
+
+test("a new viewport size adds a resize event with the device pixel ratio", () => {
+  const b = new FrameBuilder({ devicePixelRatio: 2 });
+  assert.deepEqual(b.take([800, 500]).events, []); // the first frame sets the size, no event
+  assert.deepEqual(b.take([800, 500]).events, []);
+  b.keyDown({ key: "a", code: "KeyA" });
+  assert.deepEqual(b.take([640, 480]).events, [
+    ["key_down", { key: "a", modifiers: [], is_down: true }],
+    ["resize", { width: 640, height: 480, pixel_ratio: 2 }],
+  ]);
+  assert.deepEqual(b.take([640, 480]).events, []);
+});
+
+test("the wheel event carries the scaled deltas the frame's wheel sums", () => {
+  const b = new FrameBuilder({ devicePixelRatio: 2 });
+  b.pointerDown({ x: 30, y: 40, button: 2, shiftKey: true });
+  b.wheel({ deltaX: 0, deltaY: 100, deltaMode: 0 });
+  b.wheel({ deltaX: 1, deltaY: 3, deltaMode: 1 });
+  const f = b.take(vp);
+  assert.deepEqual(f.events.slice(1), [
+    ["wheel", { dx: 0, dy: 50, x: 30, y: 40, buttons: [2], modifiers: ["Shift"] }],
+    ["wheel", { dx: 16, dy: 48, x: 30, y: 40, buttons: [2], modifiers: ["Shift"] }],
+  ]);
+  assert.deepEqual(f.wheel, [16, 98]);
+});
+
+test("blur adds a key_up per held key and a pointer_up per held button, as its releases", () => {
+  const b = new FrameBuilder();
+  b.keyDown({ key: "w", code: "KeyW" });
+  b.pointerDown({ x: 5, y: 6, button: 0 });
+  b.pointerDown({ x: 5, y: 6, button: 2 });
+  b.take(vp);
+  b.blur();
+  assert.deepEqual(b.take(vp).events, [
+    ["key_up", { key: "w", modifiers: [], is_down: false }],
+    ["pointer_up", { x: 5, y: 6, dx: 0, dy: 0, button: 1, buttons: [2], modifiers: [], phase: "up", pointer_id: 0 }],
+    ["pointer_up", { x: 5, y: 6, dx: 0, dy: 0, button: 2, buttons: [], modifiers: [], phase: "up", pointer_id: 0 }],
+  ]);
+});
+
+test("eventOf builds frozen objects with the desktop's fields, other payloads through fromJSON", () => {
+  const ev = eventOf("pointer_move", { x: 1, y: 2, dx: 0.5, dy: 0, button: 0, buttons: [1], modifiers: ["Shift"], phase: "move", pointer_id: 0 });
+  assert.deepEqual({ ...ev }, { x: 1, y: 2, dx: 0.5, dy: 0, button: 0, buttons: [1], modifiers: ["Shift"], phase: "move", pointer_id: 0 });
+  assert.ok(Object.isFrozen(ev) && Object.isFrozen(ev.buttons));
+  assert.equal(eventOf("pointer_down", { x: 1, y: 2, dx: 0, dy: 0, button: 1, buttons: [1], modifiers: [], phase: "down" }).pointer_id, 0);
+  assert.deepEqual({ ...eventOf("resize", { width: 4, height: 3, pixel_ratio: 1 }) }, { width: 4, height: 3, pixel_ratio: 1 });
+  const ping = eventOf("ping", { n: 1, at: { x: 2 } });
+  assert.ok(ping instanceof Map && ping.get("at") instanceof Map);
 });
 
 // ---------------------------------------------------------------- pointer lock
@@ -340,4 +441,59 @@ test("a click while the pointer is locked reaches the builder; no capture is tri
   attachDom(canvas, b);
   canvas.fire("pointerdown", { button: 0, clientX: 410, clientY: 290, pointerType: "mouse", pointerId: 1 });
   assert.deepEqual(b.take(vp).clicks, [1]);
+});
+
+// A GUI as attachDom sees it: the layer the panels are in, and targetOf, which names the
+// widget a DOM event went to ([widget, fx, fy]) or null; release ends a held pointer.
+function fakeGui() {
+  const layer = { on: {} };
+  layer.addEventListener = (type, fn) => { layer.on[type] = fn; };
+  layer.removeEventListener = (type, fn) => { if (layer.on[type] === fn) delete layer.on[type]; };
+  const released = [];
+  return {
+    layer, released,
+    targetOf: (ev) => (ev.onWidget ? [2, 0.25, 0.5] : null),
+    release: (id) => released.push(id),
+  };
+}
+
+test("a pointer down on the GUI is a click and carries its target", () => {
+  const { win, canvas } = domFakes();
+  const gui = fakeGui();
+  const b = new FrameBuilder();
+  attachDom(canvas, b, { gui });
+  gui.layer.on.pointerdown({ button: 0, clientX: 30, clientY: 60, pointerType: "mouse", pointerId: 1, isPrimary: true, onWidget: true });
+  win.fire("pointermove", { movementX: 200, movementY: 0, clientX: 230, clientY: 60, pointerId: 1, isPrimary: true, onWidget: true });
+  win.fire("pointerup", { button: 0, clientX: 230, clientY: 60, pointerId: 1, isPrimary: true, onWidget: true });
+  win.fire("pointermove", { movementX: 1, movementY: 0, clientX: 231, clientY: 60, pointerId: 1, isPrimary: true });
+  const f = b.take(vp);
+  assert.deepEqual(f.clicks, [1]);
+  assert.deepEqual(f.events.map(([name, p]) => [name, p.gui ?? null]), [
+    ["pointer_down", [2, 0.25, 0.5]], ["pointer_move", [2, 0.25, 0.5]], ["pointer_up", [2, 0.25, 0.5]], ["pointer_move", null],
+  ]);
+  assert.deepEqual(f.events[0][1].x, 20); // CSS pixels from the canvas's top-left
+  assert.equal("gui" in f.events[3][1], false);
+  assert.deepEqual(gui.released, [1]); // after the up read its target
+  assert.deepEqual(canvas.captured, []); // the canvas captures only its own downs
+});
+
+test("a pointer down on the canvas asks the GUI too, and detach removes the layer's listener", () => {
+  const { canvas } = domFakes();
+  const gui = fakeGui();
+  const b = new FrameBuilder();
+  const detach = attachDom(canvas, b, { gui });
+  canvas.fire("pointerdown", { button: 0, clientX: 110, clientY: 90, pointerType: "touch", pointerId: 9, isPrimary: false });
+  assert.equal("gui" in b.take(vp).events[0][1], false);
+  detach();
+  assert.deepEqual(Object.keys(gui.layer.on), []);
+});
+
+test("emit records an outside event among the input events, in arrival order", () => {
+  const b = new FrameBuilder();
+  b.keyDown({ key: "a", code: "KeyA" });
+  b.emit("host:hello", { n: 2 });
+  b.keyUp({ code: "KeyA" });
+  assert.deepEqual(b.take(vp).events.map(([name]) => name), ["key_down", "host:hello", "key_up"]);
+  b.emit("later");
+  assert.deepEqual(b.take(vp).events, [["later", null]]);
 });

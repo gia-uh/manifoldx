@@ -9,7 +9,7 @@ triggers: ["export --web", "run --web", "web export", "transpile", "transpiler",
 
 Reach for this when you export an app for the browser, when the export refuses an app and you have to change its code, when the page draws or behaves differently from the desktop, or when you want proof that the exported app behaves as the Python one does. The code is `src/manifoldx/web/` (the page's modules in `js/`, three.js in `vendor/three/`); the tests in `tests/web/` show every behaviour below, and `examples/web_walk.py` and `examples/web_crowd.py` are apps that export, replay and run in the page (web_crowd's systems are queries over the entity store).
 
-The export writes a folder with a page: the transpiled app runs its systems every animation frame on the browser's input, three.js draws the exported scene, and the GUI is HTML. The same folder replays in Node. `manifoldx run --web` serves the same page and swaps each save into the open tab (see "While you edit: `run --web`"). Spec: `.knowledge/analysis/2026-11-06-web-target-design.html`. Plans: `.knowledge/plans/2026-11-06-web-target-plan-1-transpiler-and-replay.html` (transpiler, snapshot, replay), `.knowledge/plans/2026-11-06-web-target-plan-2-browser-page.html` (the page), `.knowledge/plans/2026-11-07-web-target-plan-3-run-web.html` (`run --web`) and `.knowledge/plans/2026-11-07-web-target-plan-5a-store-and-batches.html` (the entity store, queries, spawn and destroy, batches; spec `.knowledge/analysis/2026-11-07-web-target-slice5-design.html`); each plan's "where this plan departs" section explains the choices that differ from the spec.
+The export writes a folder with a page: the transpiled app runs its systems every animation frame on the browser's input, three.js draws the exported scene, and the GUI is HTML. The same folder replays in Node. `manifoldx run --web` serves the same page and swaps each save into the open tab (see "While you edit: `run --web`"). Spec: `.knowledge/analysis/2026-11-06-web-target-design.html`. Plans: `.knowledge/plans/2026-11-06-web-target-plan-1-transpiler-and-replay.html` (transpiler, snapshot, replay), `.knowledge/plans/2026-11-06-web-target-plan-2-browser-page.html` (the page), `.knowledge/plans/2026-11-07-web-target-plan-3-run-web.html` (`run --web`) and `.knowledge/plans/2026-11-07-web-target-plan-5a-store-and-batches.html` (the entity store, queries, spawn and destroy, batches; spec `.knowledge/analysis/2026-11-07-web-target-slice5-design.html`) and `.knowledge/plans/2026-11-07-web-target-plan-5b-events-and-widgets.html` (events, input events, the clock, `random`, the widgets, the host page; same spec); each plan's "where this plan departs" section explains the choices that differ from the spec.
 
 ## Running it
 
@@ -64,7 +64,7 @@ Serve the folder over HTTP: opened as a `file://` URL the page cannot load its E
 
 ### What it does each frame
 
-`browser.js` loads `state.json`, imports the app's modules, streams `scene.glb` behind a progress bar (`#mx-progress`, hidden once loaded) and builds the scene and the GUI. Then, every animation frame, it takes one frame from the DOM's input, sets `engine.gui.pointer_over_gui`, runs the systems with the frame's real dt, applies the widget fields they wrote, updates the ValueDisplays, follows the canvas's size, syncs the three.js camera to `engine.camera` and renders. The canvas fills the window; `engine.w` and `engine.h` are its CSS size, and the drawing buffer is that times the device pixel ratio, capped at 2.
+`browser.js` loads `state.json`, imports the app's modules, streams `scene.glb` behind a progress bar (`#mx-progress`, hidden once loaded) and builds the scene and the GUI. Then, every animation frame, it takes one frame from the DOM's input, delivers the frame's events (see Events in the page), runs the systems with the frame's real dt, applies the widget fields they wrote, updates the ValueDisplays, follows the canvas's size, syncs the three.js camera to `engine.camera` and renders. The canvas fills the window; `engine.w` and `engine.h` are its CSS size, and the drawing buffer is that times the device pixel ratio, capped at 2.
 
 ### Input
 
@@ -78,13 +78,27 @@ Serve the folder over HTTP: opened as a `file://` URL the page cannot load its E
 
 ### The GUI
 
-`gui.js` draws `engine.gui` as HTML over the canvas from `state.json`'s `gui` (written by `src/manifoldx/web/gui.py`): `Panel`, `Text` and `ValueDisplay`, with their resolved styles, the GUI's font and its scale (rescaled with the window when the GUI has a `design_height`). Root panels take all nine anchors (`top-left` to `bottom-right`), an offset measured inward from the anchored edges; the desktop still paints every anchor top-left (manifoldx#13), so only top-left panels match today. `Button`, `Slider`, `Toggle` and `Image` fail the export with exit 1 and the widget's place:
+`gui.js` draws `engine.gui` as HTML over the canvas from `state.json`'s `gui` (written by `src/manifoldx/web/gui.py`): `Panel`, `Text`, `ValueDisplay`, `Button`, `Slider`, `Toggle`, `Joystick` and `Image`, with their resolved styles (the keys the desktop's painter reads), the GUI's font and its scale (rescaled with the window when the GUI has a `design_height`). Root panels take all nine anchors (`top-left` to `bottom-right`), an offset measured inward from the anchored edges; the desktop still paints every anchor top-left and hit-tests top-left panels only (manifoldx#13), so keep panels with widgets top-left for the desktop and the page to agree. A widget of another class fails the export with exit 1 and its place:
 
 ```text
-manifoldx export --web: the GUI widget Button is not supported by export --web yet (panel 0, child 2)
+manifoldx export --web: the GUI widget Gauge is not supported by export --web yet (panel 0, child 2)
 ```
 
-Reached code may write three widget fields, and the page applies them every frame as the desktop does: a Panel's `offset` (`hud.panel.offset = (x, y)` moves it), a Text's `text`, and any widget's `style_overrides` (`panel.style_overrides["width"] = 120`, or a new dict), resolved over the widget's theme and class. Each frame `gui.js`'s `sync` compares the widget objects (`engine.gui.widgets`, one per widget in `state.json`'s `gui`, by its `widget` index) with what it last applied, and writes only the CSS properties that changed. A write of any other field of a widget or of `engine.gui` would move the desktop and not the page, so it fails the export:
+The widgets, what they emit, and what they hold:
+
+| Widget | Fields | Event and payload |
+| --- | --- | --- |
+| `Button(name=, label=)` | `label`, `was_clicked()` (True once per click, the latch consumed on read) | `gui:button:<name>:click`, `{}`, on the pointer's down |
+| `Slider(name=, min=, max=, value=, label=)` | `value`, `min`, `max`, `label` | `gui:slider:<name>:change` `{"value": v}` on down and on each move of the drag; `:commit` on the up |
+| `Toggle(name=, value=, label=)` | `value` (bool), `label` | `gui:toggle:<name>:change` `{"value": b}` on the down |
+| `Joystick(name=)` | `value`, `(x, y)` in the unit disc, y up, `(0.0, 0.0)` at rest | `gui:joystick:<name>:change` `{"value": (x, y)}` on down, move and up (the up gives `(0.0, 0.0)`) |
+| `Image(svg)` (a path, SVG markup or bytes) | (none) | (none); an Image of a texture is left blank in the page |
+
+The widget code that runs is the desktop's own, in both replays, and the page runs a line-for-line port of it, so a value is set before its event is queued and the event reaches its handler the frame after the pointer (see Events in the page). A Slider and a Joystick keep the pointer that went down on them until it lifts, one capture per pointer, so a thumb on the Joystick and another finger on a Button work at once. After a pointer goes down on a Slider, the arrow keys step it by a twentieth of its range (Left and Down lower it, Right and Up raise it), emitting change and commit, until a pointer goes down outside every widget; this works on the desktop too. An Image is shown from its SVG text as a `data:image/svg+xml` URL, which runs no script and needs no request; measuring the SVG at export needs the `svg` extra (`uv sync --extra svg`). Each interactive element has `touch-action: none` and its ARIA role (the Slider `role="slider"` with `aria-valuenow`, the Toggle `role="switch"` with `aria-checked`, the Button a `<button>`), and every widget's element carries `data-mx-widget` with its index in `engine.gui.widgets`.
+
+A pointer that goes down on the GUI is also a click in the frame (`buttons`, `clicks`, `pos`), as the desktop's input layer records every pointer event before the GUI sees it. An app that picks on click checks `engine.gui.pointer_over_gui` first, as `examples/web_crowd.py`'s `pick` does.
+
+Reached code may write these widget fields, and the page applies them every frame as the desktop does: a Panel's `offset` (`hud.panel.offset = (x, y)` moves it), a Text's `text`, a Button's `label`, a Slider's `value`, `min` and `max`, a Toggle's `value`, a Joystick's `value`, and any widget's `style_overrides` (`panel.style_overrides["width"] = 120`, or a new dict), resolved over the widget's theme and class. A write sets the field and emits nothing, as on the desktop. Each frame `gui.js`'s `sync` compares the widget objects (`engine.gui.widgets`, one per widget in `state.json`'s `gui`, by its `widget` index) with what it last applied, and writes only the CSS properties that changed. A write of any other field of a widget or of `engine.gui` would move the desktop and not the page, so it fails the export:
 
 ```text
 app.py:21: writing `hud.panel.visible`, a field of a Panel the page does not apply, is outside the subset (reached from system tick)
@@ -185,7 +199,7 @@ app.py:6: `Path('x').exists` on a pathlib.Path, a library object the browser doe
 
 What is in: functions with positional and keyword arguments and defaults, nested functions and lambdas (closures), classes (dataclasses with `field(default_factory=...)`, `@property`, `__call__`, a value that may be one of several app classes), `if`/`for`/`while`/`break`/`continue`, comprehensions, f-strings with or without a format spec, `%` with Python's sign, `and`/`or` on any values, lists, tuples, dicts with str keys, sets, `math` (`sin cos tan asin acos atan atan2 sqrt exp log floor ceil fabs hypot radians degrees`, `pi e tau inf nan`), numpy 1-d float vectors (`np.array`, `np.zeros`, `np.arange`, `np.linalg.norm`, `+ - * /` and in-place `+=` that aliases see; float32 stays float32) and the array subset of Entities in the page, `textwrap.wrap(s, width)`, the set methods `add`, `discard`, `remove` (KeyError when the item is missing), `clear` and `update` (any number of iterables), each returning None, and the builtins `len str bool int float abs min max any all range list tuple set next hasattr isinstance`. A JS Set compares items by identity, so `add`, `discard`, `remove` or `update` of a tuple, a list or an object fails the export: keep set items to strings, numbers, bools and None. Strings count code points, as Python does.
 
-What is out, among others: `try`, `raise`, `with`, `global`, `nonlocal`, `del`, `assert`, `async`/`await`, `yield`, `match`, `:=`, `for`/`else` and `while`/`else`, imports inside functions, `*args`/`**kwargs`, slices with a step or assigned to, dict comprehensions, and imports of libraries other than `math`, `numpy` and `textwrap`. A builtin or library function not listed above fails as `app.py:5: enumerate() is outside the subset (reached from system tick)`.
+What is out, among others: `try`, `raise`, `with`, `global`, `nonlocal`, `del`, `assert`, `async`/`await`, `yield`, `match`, `:=`, `for`/`else` and `while`/`else`, imports inside functions, `*args`/`**kwargs`, slices with a step or assigned to, dict comprehensions, and imports of libraries other than `math`, `numpy`, `textwrap`, `random` and `time` (see Events in the page for the last two). A builtin or library function not listed above fails as `app.py:5: enumerate() is outside the subset (reached from system tick)`.
 
 There is no `global`: state that frame code reassigns lives in an object's attribute (`rig.mode = "fly"`) or in `engine.state` (`engine.state["selected"] = box.name`), never in a module-level name. Module globals are fine to read and to mutate in place.
 
@@ -233,10 +247,10 @@ The annotations understood are `int`, `float`, `bool`, `str`, `None`, app classe
 
 Reached code may use exactly what `RUNTIME_SURFACE` in `src/manifoldx/web/types.py` lists; anything else of a manifoldx object types as unknown:
 
-- `engine.input`, `engine.camera`, `engine.gui.pointer_over_gui` (whether the pointer is over a root panel, so a click there is the GUI's), `engine.w`, `engine.h`, `engine.set_material(entity, material)`, `engine.spawn(...)` and `engine.destroy(...)` (see Entities in the page), `engine.log(text)` (under `run --web` the line goes to the dev server's log; an exported page drops it, as the desktop does outside `run`, and a replay in Node collects it in `engine.lines`), and `engine.state` (subscripts or attributes, see above);
+- `engine.input`, `engine.camera`, `engine.gui.pointer_over_gui` (whether a pointer event of this frame went to an interactive widget, so a click there is the GUI's), `engine.w`, `engine.h`, `engine.set_material(entity, material)`, `engine.spawn(...)` and `engine.destroy(...)` (see Entities in the page), `engine.emit(name, payload)` and `engine.elapsed` (see Events in the page), `engine.log(text)` (under `run --web` the line goes to the dev server's log; an exported page drops it, as the desktop does outside `run`, and a replay in Node collects it in `engine.lines`), and `engine.state` (subscripts or attributes, see above);
 - `engine.input`: `pressed_keys`, `modifiers`, `mouse_pos`, `mouse_delta`, `wheel_delta`, `pressed_buttons`, `viewport_size`, `pointer_captured`, `is_pressed(key)`, `just_pressed(key)`, `just_released(key)`, `is_mouse_pressed(button)`, `just_mouse_pressed(button)`, `just_mouse_released(button)`, `capture_pointer(on)`;
 - `engine.camera`: `position`, `target` and `up` (float32 vectors), `fov` (vertical, in degrees: with `mouse_pos` and `engine.w`/`engine.h` it turns a tap into a ray), `near`, `far`, `get_forward()`;
-- the GUI's widgets (see The GUI): a Panel's `offset`, a Text's `text`, every widget's `style_overrides`, to read and to write.
+- the GUI's widgets (see The GUI): a Panel's `offset`, a Text's `text`, the fields of `Button`, `Slider`, `Toggle` and `Joystick` in its table, every widget's `style_overrides`, to read and to write.
 
 Reached code may write only the fields the page applies each frame: the camera's `position`, `target`, `up`, `fov`, `near` and `far`, which `scene.js`'s `sync` copies to the three.js camera before each render, the widget fields above, and `engine.state`'s keys. `position`, `target` and `up` take a float32 vector (`np.array(x, np.float32)`, or float32 arithmetic such as `cam.position + forward`; `cam.position += v` and `cam.position[i] = x` write in place) and `fov`, `near` and `far` a number: numpy would keep a float64 array or a tuple where the runtime rounds to float32. A write of any other field of the engine, its `input`, `camera` or `gui`, or another manifoldx object moves the desktop and not the page, so it fails the export:
 
@@ -247,9 +261,62 @@ app.py:9: writing a vec[f64] to `engine.camera.position`, a float32 vector (buil
 
 Fields of app objects are written freely, through a global, a field or a typed local (`r: Rig = engine.state["rig"]`, then `r.x = 2.0`).
 
-`engine.emit` from transpiled code is not there yet. Event handlers are transpiled, and under `run --web` the tab fires them when an agent emits (`manifoldx emit`, at the start of the next frame, as the desktop does); an exported page has no one to emit and a replay does not fire them, so read input by polling `engine.input` in a system. Handlers and systems registered with the decorators (`@engine.on("bump")`, `@engine.system` on a module function, `engine` a module global) export as the call forms `engine.on("bump")(bump)` and `engine.system(orbit)` do; any other decorator fails the export. Do the scene's building in a `startup` handler or at module level: that is setup.
+Handlers and systems registered with the decorators (`@engine.on("bump")`, `@engine.system` on a module function, `engine` a module global) export as the call forms `engine.on("bump")(bump)` and `engine.system(orbit)` do; any other decorator fails the export. Do the scene's building in a `startup` handler or at module level: that is setup.
 
 The runtime's record of the engine calls a frame made (`["material", ...]`, `["capture", ...]`) is `engine.calls`; the trace's JSON keeps the key `log` for it, so fixtures and `replay.py` read it as before.
+
+## Events in the page
+
+The page has the desktop's event bus. `engine.emit(name, payload)` and every `@engine.on(name)` handler work in transpiled code, and each frame runs as `Engine._draw_frame` does:
+
+1. the queue gets, in order, the `frame` event, what was emitted since the last delivery, and this frame's own events (input, host page, agent) last;
+2. the queue is delivered, each event to its handlers in registration order; manifoldx's own GUI handlers come first, so a widget sees a pointer before the app does;
+3. the systems run, then the flush.
+
+Delivery swaps the queue before it starts, so an event emitted by a handler or a system waits for the next frame's delivery: a Button's click reaches its handler the frame after the pointer went down, and an event the click handler emits one frame after that. Write handlers that expect it.
+
+**Input events.** The seven input events of the desktop reach handlers with payloads of the desktop's classes (`manifoldx.input`), built from the frame's events:
+
+| Event | Payload fields |
+| --- | --- |
+| `key_down`, `key_up` | `key`, `modifiers` (a tuple of str), `is_down` |
+| `pointer_down`, `pointer_up`, `pointer_move` | `x`, `y` (CSS pixels from the canvas's top-left), `dx`, `dy`, `button`, `buttons` (held after the event), `modifiers`, `phase`, `pointer_id` (0 for the mouse and the first finger, the DOM's `pointerId` for the others; always 0 on the desktop) |
+| `wheel` | `dx`, `dy`, `x`, `y`, `buttons`, `modifiers` |
+| `resize` | `width`, `height`, `pixel_ratio` |
+
+Their fields are read only. Polling `engine.input` in a system still works and is often simpler.
+
+**The frame event and `engine.elapsed`.** `frame` is first in every frame's queue, with `{"dt": dt, "elapsed": engine.elapsed, "frame": n}`. `engine.elapsed` is 0.0 on the first frame and adds each later frame's dt, as the desktop's wall-clock mode does; it is read only.
+
+**A handler's payload.** The transpiler types the payload of the events above, and of the widget events, from a table (`EVENT_PAYLOADS` in `src/manifoldx/web/types.py`). An app's own event has no class, so annotate its handler's payload, or the export stops:
+
+```text
+app.py:5: the payload of on("ping") on_ping, with no type (annotate it: def on_ping(p: dict)), is outside the subset
+```
+
+**The clock.** `time.time()` in frame code returns the frame's clock: the page reads `Date.now() / 1000` once per frame and never lets it run backwards, and a replay frame carries it as `clock`. Any other function of `time`, and `from time import time`, fail the export with a hint to use `time.time()` or `engine.elapsed`. Setup runs in Python and sees the real time.
+
+**`random.Random`.** Make a generator at setup (`RNG = random.Random(1107)`, a global or a field) and call `random()`, `uniform(a, b)`, `randrange(...)`, `randint(a, b)`, `choice(seq)` and `getrandbits(k)` (k up to 53) on it in frame code: the page runs CPython's MT19937 from the state the generator had at export, so both draw the same numbers bit for bit. The module functions `random.random`, `random.uniform`, `random.randint`, `random.randrange` and `random.choice` use the module's generator, whose state the export writes too. Seed every generator at setup (`random.seed(n)` for the module's): an unseeded one differs between any two runs, so no replay can match. Making or reseeding a generator in frame code fails the export (`a reseed in frame code (seed it at setup)`), as do its other methods and `from random import ...`.
+
+## A host page around the export
+
+A page that frames the export in an `<iframe>` talks to the app through events, with `postMessage`:
+
+- **Into the app.** The host posts `{mx: "emit", name, payload}` to the frame's window, the payload plain JSON. The page takes it from `window.parent` only, records it in the next frame's events, and the app's handlers get it as from `engine.emit` (a JSON object is a dict). A message posted while the page loads waits for its first frame.
+- **Out of the app.** Every event the app or its widgets emit is posted to `window.parent` as `{mx: "emit", name, payload}` when the queue delivers it, and dispatched on the page's own window as the `CustomEvent` `"mx:emit"` with `detail: {name, payload}`. The payload is as `state.json` writes values, so a dict arrives as `{"__dict": [[key, value], ...]}`. Input events and the `frame` event are not sent.
+
+```html
+<iframe id="app" src="out/index.html"></iframe>
+<script>
+  const app = document.getElementById("app");
+  addEventListener("message", (ev) => {
+    if (ev.source === app.contentWindow && ev.data?.mx === "emit") console.log(ev.data.name, ev.data.payload);
+  });
+  function hello() { app.contentWindow.postMessage({ mx: "emit", name: "host:hello", payload: { n: 2 } }, "*"); }
+</script>
+```
+
+The app handles `host:hello` with `@engine.on("host:hello") def hello(p: dict)` and answers with `engine.emit("app:ack", {"n": p["n"]})`. Since the host's events are in the frames, a replay of the page's frames runs them too (`tests/web/browser/test_host_page.py`).
 
 ## Entities in the page
 
@@ -277,7 +344,7 @@ The page holds manifoldx's entity store. The export writes the store's arrays be
 - `+ - * /`, comparisons, `&`, `|`, `**` with the exponents 2, 0.5 and -1 only (another fails with `` `a ** 3`, a power numpy does not compute exactly in the page (2, 0.5 and -1 are in; use a * a * a) ``), indexing by an int, `[:, j]`, a bool mask or an index array (no other slices) (past the end it throws numpy's `IndexError`), `.shape`, `.tolist()`;
 - `np.sin cos exp sqrt floor clip minimum maximum where sum mean min max argmin argmax` and `np.linalg.norm` (`axis` by keyword); reductions take `axis` None, 0 or 1.
 
-Its limits: float32 `sin`, `cos` and `exp` may differ from numpy's in the last float32 step (exp in two), since numpy runs its own float32 kernels; keep trigonometry the replay must match in float64, as web_crowd does. Integer arrays are int32 in the page where numpy makes int64, which differs only past 2^31. `a += b` on an array fails the export (numpy writes in place and keeps the dtype): build a new array. `@`, `np.eye` and `random` are not in yet.
+Its limits: float32 `sin`, `cos` and `exp` may differ from numpy's in the last float32 step (exp in two), since numpy runs its own float32 kernels; keep trigonometry the replay must match in float64, as web_crowd does. Integer arrays are int32 in the page where numpy makes int64, which differs only past 2^31. `a += b` on an array fails the export (numpy writes in place and keeps the dtype): build a new array. `@` and `np.eye` are not in yet; for random numbers use `random.Random` (see Events in the page).
 
 **Batches and draw calls.** `scene.glb` under `--web` is a library: each geometry and material by id, mapped in the scene's extras (`mx_geometries`, `mx_materials`), with no entity nodes. `scene.js` keeps one `InstancedMesh` per (geometry, material) of the alive entities with a Mesh, in slot order; an entity with no Material is drawn white with the basic light. When the store's version moves (a spawn, a destroy, a Mesh or Material write) or the store is another one (a new version under `run --web`) the batches are rebuilt; otherwise only the dirty Transform rows are written. A batch that empties draws nothing. One frame draws one call per non-empty batch (`__mx.renderer.info.render.calls`), plus the shadow pass when the scene has shadows. `__mx.scene.batches` maps `"gid:mid"` to the InstancedMesh, and `__mx.scene.materialOf(entity)` reads the store's Material column as the last sync saw it (null before the first frame).
 
@@ -303,9 +370,9 @@ assert mismatch is None, str(mismatch)          # "frame 41, paths.rig.yaw: 0.12
 
 Give `replay_python` the `app_args` the export got: the app starts with them as its `sys.argv[1:]`, so it takes the branch the export took. A path can read a widget's fields (`hud.panel.offset`) as any object's.
 
-A frame is what `engine.input` reports for one frame: `keys` held, `just` pressed this frame, `d` the mouse motion, `buttons` held, `clicks` pressed this frame, `vp` the viewport size (a new size resizes the engine). Five more fields are optional and read as empty when absent: `up` and `released` (keys and buttons released this frame), `pos` (the pointer in CSS pixels from the canvas's top-left), `wheel` and `mods` (held modifiers among Alt, Control, Meta, Shift, sorted). The page builds every field; `src/manifoldx/web/replay.py`'s docstring is the reference. In a replay `capture_pointer` always succeeds, as in a headless browser.
+A frame is what `engine.input` reports for one frame: `keys` held, `just` pressed this frame, `d` the mouse motion, `buttons` held, `clicks` pressed this frame, `vp` the viewport size (a new size resizes the engine). Five more fields are optional and read as empty when absent: `up` and `released` (keys and buttons released this frame), `pos` (the pointer in CSS pixels from the canvas's top-left), `wheel` and `mods` (held modifiers among Alt, Control, Meta, Shift, sorted), `events` and `clock`. `events` is the frame's events in the order they happened, each `[name, payload]` with a JSON payload: the input events with the fields of Events in the page (lists for the tuples), a host page's or an agent's events as they came. A pointer event routed to a widget carries `"gui": [widget, fx, fy]`, the widget's index in `engine.gui.widgets` and the pointer's place in that widget's box as fractions of its width and height: the page decides which widget a pointer is on, and the Python replay hands that widget to the desktop's GUI bridge (it replaces only `_GuiBridge._locate`), so the widget code runs as on the desktop. A pointer event with no `gui` is on no widget. `clock` is what `time.time()` returns in that frame, 0.0 when absent. The page builds every field; `src/manifoldx/web/replay.py`'s docstring is the reference. In a replay `capture_pointer` always succeeds, as in a headless browser.
 
-Each side reads a frame, runs the systems once with dt 1/60, and traces the camera's position and target, what each ValueDisplay shows, the `["material", entity, material_id]` and `["capture", on]` calls of that frame, all of `engine.state`, the values of `paths`, and the entity store after the frame's flush: `store` holds `alive` (the alive slots), `free` (the free list), `high_water` and `rows`, each component's rows of the alive slots, or past 1,000 alive entities `{"digest", "n"}`, the weighted sum of its uint32 words mod 2^32. NaN and infinities are written `"nan"`, `"inf"` and `"-inf"`, since JSON has neither. The Python replay flushes after the systems as `Engine._draw_frame` does, and registers materials and geometries in the export's order, so ids agree.
+Each side reads a frame, delivers its events and runs the systems once with dt 1/60, and traces `events`, the names of the events delivered that frame in order (payloads are left out: keep the values you care about in `engine.state` from a handler), the camera's position and target, what each ValueDisplay shows, the `["material", entity, material_id]` and `["capture", on]` calls of that frame, all of `engine.state`, the values of `paths`, and the entity store after the frame's flush: `store` holds `alive` (the alive slots), `free` (the free list), `high_water` and `rows`, each component's rows of the alive slots, or past 1,000 alive entities `{"digest", "n"}`, the weighted sum of its uint32 words mod 2^32. NaN and infinities are written `"nan"`, `"inf"` and `"-inf"`, since JSON has neither. The Python replay flushes after the systems as `Engine._draw_frame` does, and registers materials and geometries in the export's order, so ids agree.
 
 A path starts at a global of the app's main module or, when it has no global by that name, at a key of `engine.state`, then goes through attributes and dict keys (`rig.pos`, `selected`). The global must be one reached code reads: the JS module has only those.
 
@@ -333,11 +400,12 @@ Each construct of the subset has a parity test that runs a `main()` in Python an
 
 - `test_page.py` drives `examples/web_walk.py` through Playwright's real keyboard, mouse, wheel and viewport, one `__mx.tick(1/60)` after each step, then replays the frames the page built in Python and asserts `compare` is None. It also checks the error panel, `file://`, a device scale of 2, the progress count and the lock lost on Escape.
 - `test_run_web.py` runs `manifoldx run --web` of `tests/web/apps/dev_orbit.py` in a temporary copy (the `run_web` fixture, which needs the `manifoldx` script beside `sys.executable`) and edits it: a save keeps the state, a colour edit rebuilds the scene, a broken edit and a frame error show their lines, the lock and a reopened tab's camera survive, and the agent commands answer from the tab. Two breaking tests damage the tab (an empty state answer, batches that rebuild on a new version number but not on a new store) and assert that the check then fails.
-- `test_web_crowd_page.py` drives `examples/web_crowd.py` with `tests/web/test_web_crowd.py`'s script, replays the page's frames in Python, and checks that `renderer.info.render.calls` equals the number of non-empty batches and that a picked box is drawn by the batch of its material.
+- `test_web_crowd_page.py` drives `examples/web_crowd.py` with `tests/web/test_web_crowd.py`'s script (each frame's events made with Playwright's keyboard, mouse and wheel, a routed one at its place in the widget's real box), replays the page's frames in Python, and checks that `renderer.info.render.calls` equals the number of non-empty batches and that a picked box is drawn by the batch of its material. It uses each widget under the mouse, a Joystick and a Button under two fingers at once (a touch context, `touch(page, points)` in `conftest.py` sending `Input.dispatchTouchEvent`), and checks the widgets' ARIA roles; a breaking test serves a copy whose GUI bridge keeps one capture for all pointers and sees the Joystick stop following its finger.
+- `test_host_page.py` frames an export in a host page and sends events both ways.
 - `test_visual.py` compares the page's first frame with the desktop's `Engine.render_frame` by mean colour per channel (see the calibration above).
 
 **The fake pointer lock.** Headless Chromium grants the lock, but under it each synthetic mouse move arrives as two cancelling movements, so mouse look nets zero. The session probes the lock once (granted, and does a 10 px move net 10 px?) and prints `pointer lock probe: ...` at the end of the run. When the probe fails, as it does in headless Chromium, every page gets `FAKE_LOCK` from `tests/web/browser/conftest.py`: an init script that keeps the lock in a field and records whether each request came with a user activation, which the replay test asserts.
 
-**Frame checks.** The Python side replays the frames the page built, so a defect in turning DOM events into frames (a key's case, a missing `just`) changes both traces alike and `compare` cannot see it. The test asserts the frames themselves: the tick after `keyboard.down("w")` has `w` in `just` and `keys`, Shift+W gives `just == ["w"]`, the tick after the resize has `vp == [640, 480]`. Keep such checks for every input path you add. The material check likewise finds the batch whose drawn instance sits at the entity's Transform row (`BATCHES_OF` in `tests/web/browser/conftest.py`), rather than trusting the store's Material column. The scene has no meshes before the first tick: batches are built at the first sync.
+**Frame checks.** The Python side replays the frames the page built, so a defect in turning DOM events into frames (a key's case, a missing `just`) changes both traces alike and `compare` cannot see it. The test asserts the frames themselves: the tick after `keyboard.down("w")` has `w` in `just` and `keys`, Shift+W gives `just == ["w"]`, the tick after the resize has `vp == [640, 480]`. In `test_web_crowd_page.py`, the Button's press is a `pointer_down` routed to the Button and a click, its click event is delivered the frame after and the throw it emits the frame after that, each move of a Slider's drag is routed to it with its fraction rising past 1.0, the clock never runs backwards, and an arrow key's change and commit come the frame after the key. Keep such checks for every input path you add. The material check likewise finds the batch whose drawn instance sits at the entity's Transform row (`BATCHES_OF` in `tests/web/browser/conftest.py`), rather than trusting the store's Material column. The scene has no meshes before the first tick: batches are built at the first sync.
 
 **CI** (`.github/workflows/test.yml`) runs three jobs: `test` (the whole suite on the offscreen backend, every GPU request skipped), `web` (`tests/web` outside `browser/`, with lavapipe so the startup device exists) and `browser` (lavapipe, the `browser` group and Playwright's Chromium, `tests/web/browser`). `web` and `browser` fail on any skip, so a missing tool shows as a red job, not a quiet pass. Read the `browser` job's log for the lock-probe line.

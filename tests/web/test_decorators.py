@@ -24,7 +24,7 @@ def turn(query, dt: float):
 
 
 @engine.on("bump")
-def bump(payload):
+def bump(payload: dict):
     \"\"\"Turn the camera: {"by": degrees}.\"\"\"
     by: float = payload["by"]
     yaw: float = engine.state.yaw
@@ -37,10 +37,10 @@ if __name__ == "__main__":
 
 RUN = """
 import { load } from %s;
-import { fire, fromJSON, step } from %s;
+import { advance } from %s;
 const app = await load(new URL(%s));
-step(app, 1 / 60);
-fire(app, "bump", fromJSON({ by: 10 }));
+const idle = { keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [64, 64] };
+advance(app, { ...idle, events: [["bump", { by: 10 }]] }, 1 / 60);
 console.log(JSON.stringify({ roots: app.roots.map((r) => r.label), yaw: app.engine.state.get("yaw") }));
 """
 

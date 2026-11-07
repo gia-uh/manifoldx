@@ -78,7 +78,7 @@ engine = mx.Engine("handler", width=64, height=64)
 engine.spawn(Transform(), Velocity(v=(1.0, 0.0, 0.0)))
 
 
-def bump(payload, q: mx.Query[Velocity]):
+def bump(payload: dict, q: mx.Query[Velocity]):
     q[Velocity].v += np.array([0.0, 1.0, 0.0], np.float32)
 
 

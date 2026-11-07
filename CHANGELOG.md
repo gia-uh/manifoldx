@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A Joystick widget.** `manifoldx.gui.Joystick(name=...)`: a drag gives a value in the unit
+  disc, y up, emitting `gui:joystick:<name>:change`; release returns it to (0, 0) (#140).
+
 - **export --web: the entity store in the page.** The export writes the store's arrays as
   `ecs.bin` and their layouts in `state.json`; the page keeps them in a `Store` with the
   desktop's slot rules and its flush after the systems. Transpiled systems use their
@@ -28,9 +31,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   batches when the store's membership moves, so a frame draws one call per non-empty batch.
 - **`_FieldView[:, j]`**, a one-column view of a query field on the desktop:
   `engine.destroy(q[Transform].pos[:, 1] < -10.0)` destroys the entities below -10.
+- **export --web: events in the page.** `engine.emit` and `@engine.on` handlers run in the page
+  and in both replays in the desktop's order: the `frame` event first, then what was emitted
+  since the last delivery, then the frame's own events; an emit waits for the next frame. The
+  seven input events (`key_down`, `key_up`, `pointer_down`, `pointer_up`, `pointer_move`,
+  `wheel`, `resize`) reach handlers with the desktop's payload fields, `pointer_id` included.
+  `engine.elapsed` and the `frame` event's `{"dt", "elapsed", "frame"}`. A handler of an app's
+  own event annotates its payload (`def on_ping(p: dict)`). Replay frames gain `events` and
+  `clock`, and the trace the names delivered each frame (#140).
+- **export --web: `time.time()` in frame code** reads the frame's clock, which the page takes
+  once per frame and never lets run backwards (#140).
+- **export --web: `random.Random` in frame code**, made and seeded at setup: `random`,
+  `uniform`, `randrange`, `randint`, `choice` and `getrandbits` (up to 53 bits) draw bit for bit
+  as CPython's MT19937, and the module functions of the same names use the module's generator
+  (#140).
+- **export --web: `Button`, `Slider`, `Toggle`, `Joystick` and `Image` in the page.** HTML
+  elements drawn from the widgets' styles, with ARIA roles and `touch-action: none`; the page
+  records which widget each pointer event went to, and the desktop's widget code runs in the
+  Python replay and its port in the page, so values, latches and events agree. A Slider and a
+  Joystick keep their pointer, one per finger. A pointer down on the GUI is also a click, and
+  `engine.gui.pointer_over_gui` comes from the widgets an event hit, as on the desktop (#140).
+- **export --web: a host page talks to the export.** A page that frames it posts
+  `{mx: "emit", name, payload}` into the app's next frame, and gets every event the app or its
+  widgets emit back as the same message and as the `mx:emit` DOM event. An agent's
+  `manifoldx emit` under `run --web` is recorded in the tab's frames too (#140).
 - **`examples/web_crowd.py`**: boxes spawned by Space, drifting by a query system, destroyed
-  when they fall, picked and painted gold; it replays with no mismatch in Node and in
-  Chromium.
+  when they fall, picked and painted gold; a controls panel with a Button that throws a wave,
+  a gravity Slider, a spin Toggle, a wind Joystick and a compass Image, a handler per event,
+  `random.Random` and the clock. It replays with no mismatch in Node and in Chromium, under the
+  mouse and under two fingers.
 - **`benchmarks` suite `web`**, case `web-crowd`: the exported page's work per frame in
   headless Chromium for 1,000 and 10,000 boxes, and its draw calls.
 
@@ -240,6 +269,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails if any frame takes more than twice the median (#85).
 
 ### Changed
+
+- **A pointer capture per pointer.** `PointerEvent.pointer_id` is new, always 0 on the desktop;
+  the GUI keeps one pointer capture per pointer, so a pointer going down no longer ends another
+  pointer's drag on a Slider or a Joystick (#140).
+- **The arrow keys step a clicked Slider.** After a pointer goes down on a Slider, the arrow keys
+  step it by a twentieth of its range (Left and Down lower it, Right and Up raise it), emitting
+  change and commit, until a pointer goes down outside every widget. An app that steers with the
+  arrow keys and has a Slider sees the Slider move too once the user has clicked it (#140).
 
 - **A query returns only the entities that have its components.** A system's query returns
   only the alive entities that have every component it names, as its docstring said; before,

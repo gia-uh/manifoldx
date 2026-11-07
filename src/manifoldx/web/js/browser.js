@@ -1,6 +1,10 @@
 // The page's bootstrap: load the export (state, the app's modules, the scene with a progress
 // line), draw it with three.js, and run the app's systems every animation frame on the input
-// the DOM gave, through the same Frame the replay feeds. window.__mx is how tests drive it:
+// the DOM gave, through the same Frame the replay feeds. A host page that frames the export
+// talks to it through events: it posts {mx: "emit", name, payload} (payload plain JSON) to the
+// frame, which records it in the next frame it takes; the page posts each event the app or its
+// widgets emit back to window.parent as {mx: "emit", name, payload} (payload as encodeState
+// writes it) and dispatches it on its own window as the CustomEvent "mx:emit". window.__mx is how tests drive it:
 // {ready, app, scene, renderer, gui, frames, trace, error, paths, manual(on), tick(dt), loadStats}, and
 // under manifoldx run --web (<meta name="mx-dev">) also {version, swaps, dev, status, swap(info)}.
 //
@@ -13,7 +17,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import { buildGui } from "./gui.js";
 import { FrameBuilder, PointerLock, attachDom } from "./input.js";
-import { encodeState, fire, fromJSON, guiValues, loadApp, mergePatch, stateView, step, traceEntry } from "./manifoldx.js";
+import { advance, encodeState, fromJSON, guiValues, loadApp, mergePatch, stateView, traceEntry } from "./manifoldx.js";
 import { RateMeter, frameDt, progressLine } from "./progress.js";
 import { buildScene } from "./scene.js";
 import { describe, lineTable } from "./sourcemap.js";
@@ -45,6 +49,24 @@ const mx = {
 };
 mx.ready.catch(() => {}); // a load error is shown on the page; a test reads the rejection
 window.__mx = mx;
+
+// The frame builder lives as long as the page and exists before the app loads, so a host's
+// message posted while the page loads waits in it for the first frame. Only window.parent's
+// messages are taken.
+const builder = new FrameBuilder({ devicePixelRatio: window.devicePixelRatio || 1 });
+window.addEventListener("message", (ev) => {
+  if (window.parent === window || ev.source !== window.parent) return;
+  const m = ev.data;
+  if (m === null || typeof m !== "object" || m.mx !== "emit" || typeof m.name !== "string") return;
+  builder.emit(m.name, m.payload ?? null);
+});
+
+// What the app emitted, as delivery reaches it: to the page's window, and to the host's.
+function delivered(name, payload) {
+  const json = encodeState(payload);
+  window.dispatchEvent(new CustomEvent("mx:emit", { detail: { name, payload: json } }));
+  if (window.parent !== window) window.parent.postMessage({ mx: "emit", name, payload: json }, "*");
+}
 
 // The error panel: the message, also in __mx.error and the console.
 function showError(text) {
@@ -137,22 +159,24 @@ async function start() {
 
   let scene = await buildScene(THREE, gltf, renderer);
   let gui = buildGui($("mx-gui"), running.state.gui);
-  const builder = new FrameBuilder({ devicePixelRatio: window.devicePixelRatio || 1 });
   const lock = new PointerLock(canvas, document, builder);
   const hooks = {
     capture: (on) => lock.request(on),
     log: (text) => mx.dev?.appLog(text), // engine.log: to the dev server's log, nowhere in an export
+    delivered,
   };
   const makeApp = (version) => ({ ...loadApp(version.state, version.modules, { hooks, ecs: version.ecs }), modules: version.modules });
   running.app = makeApp(running);
   lock.input = running.app.engine.input;
-  attachDom(canvas, builder);
+  // The GUI the pointer events are routed through: the running version's, which a swap replaces.
+  attachDom(canvas, builder, {
+    gui: { layer: $("mx-gui"), targetOf: (ev) => gui.targetOf(ev), release: (id) => gui.release(id) },
+  });
   Object.assign(mx, { app: running.app, scene, renderer, gui, version: info ? info.version : null });
 
   let size = [0, 0], guiH = null;
   let frozen = null; // while a reload builds (Q2): the timer that unfreezes after FREEZE_MAX
   let manual = false;
-  const events = []; // [name, payload] an agent emitted, fired at the start of the next frame
   let onPause = () => {}; // dev mode: an exception in a frame pauses until the next edit
 
   // One frame as the loop runs it: the frame the DOM built, the systems, the GUI, the camera,
@@ -166,10 +190,7 @@ async function start() {
     const frame = builder.take([w, h]);
     engine.calls.length = 0; // the trace's record of one frame
     try {
-      engine.gui.pointer_over_gui = gui.pointerOver;
-      engine.input.setFrame(frame);
-      for (const [name, payload] of events.splice(0)) fire(app, name, payload);
-      step(app, dt);
+      advance(app, frame, dt);
       gui.sync(engine.gui.widgets);
       gui.update(guiValues(app));
     } catch (err) {
@@ -325,7 +346,7 @@ async function start() {
             mergePatch(engine.state, fromJSON(body));
             return reply(stateView(engine.state));
           case "emit":
-            events.push([body.name, fromJSON(body.payload)]);
+            builder.emit(body.name, body.payload ?? null); // in the next frame's events, as a host's
             return reply(null);
           case "look":
             return dev.lookPng(canvas, $("mx-gui"), () => {
