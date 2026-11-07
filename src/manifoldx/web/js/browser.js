@@ -98,13 +98,14 @@ async function fetchScene(url, bytes, gzipBytes) {
 // "v4/" under run --web). The app is made when the version runs (makeApp).
 export async function loadVersion(base, info = null) {
   const state = await (await fetchOk(`${base}state.json`)).json();
+  const ecs = await (await fetchOk(`${base}ecs.bin`)).arrayBuffer();
   const modules = {}, maps = {};
   for (const name of state.modules) {
     modules[name] = await import(new URL(`${base}app/${name}.js`, import.meta.url).href);
     const map = await (await fetchOk(`${base}app/${name}.js.map`)).json();
     maps[`app/${name}.js`] = { source: map.sources[0], lines: lineTable(map) };
   }
-  return { state, modules, maps, app: null, info };
+  return { state, ecs, modules, maps, app: null, info };
 }
 
 async function start() {
@@ -141,7 +142,7 @@ async function start() {
     capture: (on) => lock.request(on),
     log: (text) => mx.dev?.appLog(text), // engine.log: to the dev server's log, nowhere in an export
   };
-  const makeApp = (version) => ({ ...loadApp(version.state, version.modules, { hooks }), modules: version.modules });
+  const makeApp = (version) => ({ ...loadApp(version.state, version.modules, { hooks, ecs: version.ecs }), modules: version.modules });
   running.app = makeApp(running);
   lock.input = running.app.engine.input;
   attachDom(canvas, builder);

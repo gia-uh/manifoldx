@@ -111,13 +111,238 @@ function load(state, modules, resolve) {
 
 // loadApp(state, modules, options): the app as an export left it, {engine, roots}, ready for
 // step(). The engine is createEngine(state.engine) with options over it (options.hooks are the
-// browser's scene hooks, see createEngine); engine.state is the
-// snapshot's, set once the state is loaded, because its handles resolve through the engine.
+// browser's scene hooks, see createEngine; options.ecs is ecs.bin's ArrayBuffer); engine.store
+// is the Store state.ecs and options.ecs describe (null for a state without one); engine.state
+// is the snapshot's, set once the state is loaded, because its handles resolve through the engine.
 export function loadApp(state, modules, options = {}) {
-  const engine = createEngine({ ...state.engine, gui: state.gui ?? null, ...options });
+  const { ecs, ...rest } = options;
+  const engine = createEngine({ ...state.engine, gui: state.gui ?? null, ...rest });
+  engine.store = state.ecs === undefined ? null : Store.load(state.ecs, ecs);
   const loaded = load(state, modules, engine.resolve);
   if (loaded.state !== undefined) engine.state = loaded.state;
   return { engine, roots: loaded.roots };
+}
+
+// ---------------------------------------------------------------- the entity store
+
+const TYPED = { f4: Float32Array, u4: Uint32Array };
+
+// The page's entity store, as manifoldx.ecs.EntityStore holds it: per component a row-major
+// typed array of `cols` columns and a member bit per slot, an alive bit per slot and the free
+// list. The arrays hold `capacity` slots and grow by doubling up to maxEntities; a slot at or
+// past capacity is dead. Slots, membership and the free list follow EntityStore's rules, so
+// the same spawns and destroys give the same indices. version moves on every spawn and
+// destroy and on a write to Mesh or Material; dirty is [lo, hi), the slots whose Transform
+// rows changed since takeDirty(), or null.
+export class Store {
+  // header: state.json's "ecs"; buffer: ecs.bin, laid out by it.
+  static load(header, buffer) {
+    const store = new Store(header.max_entities, Math.max(header.high_water, 1));
+    const hw = header.high_water;
+    store.highWater = hw;
+    store.free = [...header.free];
+    store.alive.set(new Uint8Array(buffer, header.alive[0], hw));
+    for (const c of header.components) {
+      const Typed = TYPED[c.dtype];
+      if (Typed === undefined) throw new Error(`the component ${c.name} has the dtype ${c.dtype}, which the page does not hold`);
+      store._layouts.set(c.name, { dtype: c.dtype, cols: c.cols, fields: c.fields });
+      const rows = new Typed(store.capacity * c.cols);
+      rows.set(new Typed(buffer.slice(c.rows[0], c.rows[0] + c.rows[1])));
+      store._columns.set(c.name, rows);
+      const members = new Uint8Array(store.capacity);
+      members.set(new Uint8Array(buffer, c.members[0], hw));
+      store._members.set(c.name, members);
+    }
+    return store;
+  }
+
+  constructor(maxEntities, capacity) {
+    this.maxEntities = maxEntities;
+    this.capacity = Math.min(capacity, maxEntities);
+    this.highWater = 0;
+    this.alive = new Uint8Array(this.capacity);
+    this.free = [];
+    this.version = 0;
+    this.dirty = null;
+    this._layouts = new Map();
+    this._columns = new Map();
+    this._members = new Map();
+    this._queue = [];
+  }
+
+  layout(name) { return this._layouts.get(name); }
+  column(name) { return this._columns.get(name); }
+  member(name) { return this._members.get(name); }
+
+  // Room for slot `index`: double the arrays (at most maxEntities), keeping rows and bits.
+  _grow(index) {
+    if (index < this.capacity) return;
+    let cap = this.capacity;
+    while (cap <= index) cap = Math.min(cap * 2, this.maxEntities);
+    const widen = (a, n) => {
+      const b = new a.constructor(n);
+      b.set(a);
+      return b;
+    };
+    this.alive = widen(this.alive, cap);
+    for (const [name, rows] of this._columns) this._columns.set(name, widen(rows, cap * this._layouts.get(name).cols));
+    for (const [name, bits] of this._members) this._members.set(name, widen(bits, cap));
+    this.capacity = cap;
+  }
+
+  _touch(name, lo, hi) {
+    if (name === "Transform") this.dirty = this.dirty === null ? [lo, hi] : [Math.min(this.dirty[0], lo), Math.max(this.dirty[1], hi)];
+    else if (name === "Mesh" || name === "Material") this.version++;
+  }
+
+  // n entities, the free list first (popped from its end), then the lowest dead slots; rows
+  // maps a component name to its n × cols values (or one value for all). The slots get the
+  // components given and Transform as members, and lose the others.
+  spawn(n, rows = new Map()) {
+    const k = Math.min(n, this.free.length);
+    const reused = this.free.slice(this.free.length - k).reverse();
+    let alive = 0;
+    for (let i = 0; i < this.capacity; i++) alive += this.alive[i];
+    const dead = this.maxEntities - alive;
+    if (dead < n) {
+      throw new Error(
+        `RuntimeError: Max entities ${this.maxEntities} reached: spawning ${n} with ${dead} free slots; raise it with Engine(max_entities=...)`,
+      );
+    }
+    for (const name of rows.keys()) {
+      if (!this._layouts.has(name)) throw new Error(`ValueError: Component ${name} not registered`);
+    }
+    const indices = new Int32Array(n);
+    indices.set(reused);
+    const taken = new Set(reused);
+    for (let i = 0, j = k; j < n; i++) {
+      if (i >= this.capacity || (!this.alive[i] && !taken.has(i))) indices[j++] = i;
+    }
+    this.free.length -= k;
+    if (!n) return indices;
+    let lo = Infinity, hi = -1;
+    for (const i of indices) {
+      lo = Math.min(lo, i);
+      hi = Math.max(hi, i + 1);
+    }
+    this._grow(hi - 1);
+    for (const i of indices) this.alive[i] = 1;
+    this.highWater = Math.max(this.highWater, hi);
+    for (const [name, bits] of this._members) {
+      const on = rows.has(name) || name === "Transform" ? 1 : 0;
+      for (const i of indices) bits[i] = on;
+    }
+    for (const [name, values] of rows) {
+      const { cols } = this._layouts.get(name), col = this._columns.get(name);
+      if (values.length !== 1 && values.length !== n * cols) {
+        throw new Error(`ValueError: Component ${name}: expected ${n} rows, got ${values.length / cols}`);
+      }
+      indices.forEach((i, r) => {
+        if (values.length === 1) col.fill(values[0], i * cols, (i + 1) * cols);
+        else for (let c = 0; c < cols; c++) col[i * cols + c] = values[r * cols + c];
+      });
+      this._touch(name, lo, hi);
+    }
+    this.version++;
+    return indices;
+  }
+
+  // Each index once and only if alive, then to the free list, ascending.
+  destroy(indices) {
+    const gone = [...new Set(Array.from(indices, Number))]
+      .sort((a, b) => a - b)
+      .filter((i) => i < this.capacity && this.alive[i]);
+    if (!gone.length) return;
+    for (const i of gone) this.alive[i] = 0;
+    this.free.push(...gone);
+    this.version++;
+  }
+
+  // The alive slots below highWater that have every named component, ascending.
+  query(names) {
+    const bits = names.map((n) => this._members.get(n));
+    if (bits.includes(undefined)) return new Int32Array(0);
+    const out = [];
+    for (let i = 0; i < this.highWater; i++) {
+      if (this.alive[i] && bits.every((b) => b[i])) out.push(i);
+    }
+    return Int32Array.from(out);
+  }
+
+  // values into columns [col, col + values.length) of slot index's row, now.
+  write(name, index, col, values) {
+    const { cols } = this._layouts.get(name);
+    this._columns.get(name).set(values, index * cols + col);
+    this._touch(name, index, index + 1);
+  }
+
+  // At the flush: data (one row of colEnd - colStart values per index, or one row for all)
+  // into those columns of each index's row, as CommandBuffer's UPDATE_COMPONENT writes.
+  queueUpdate(name, indices, colStart, colEnd, data) {
+    this._queue.push(["update", name, Array.from(indices), colStart, colEnd, data]);
+  }
+
+  queueDestroy(indices) {
+    this._queue.push(["destroy", Array.from(indices)]);
+  }
+
+  // The queue applied in order, then cleared, as the engine executes its commands after the
+  // systems.
+  flush() {
+    const queue = this._queue;
+    this._queue = [];
+    for (const [op, ...args] of queue) {
+      if (op === "destroy") {
+        this.destroy(args[0]);
+        continue;
+      }
+      const [name, indices, colStart, colEnd, data] = args;
+      const { cols } = this._layouts.get(name), col = this._columns.get(name);
+      const w = colEnd - colStart, row = data.length === w;
+      let lo = Infinity, hi = -1;
+      indices.forEach((i, r) => {
+        if (i >= this.capacity) return; // a dead slot
+        for (let c = 0; c < w; c++) col[i * cols + colStart + c] = data.length === 1 ? data[0] : data[(row ? 0 : r * w) + c];
+        lo = Math.min(lo, i);
+        hi = Math.max(hi, i + 1);
+      });
+      if (hi > 0) this._touch(name, lo, hi);
+    }
+  }
+
+  takeDirty() {
+    const d = this.dirty;
+    this.dirty = null;
+    return d;
+  }
+}
+
+// Past this many alive entities the trace carries a digest of each component's rows.
+const DIGEST_PAST = 1000;
+
+// A float as the trace writes it: NaN and the infinities as strings, which JSON can hold.
+const traceFloat = (x) => (Number.isNaN(x) ? "nan" : x === Infinity ? "inf" : x === -Infinity ? "-inf" : x);
+
+// The store as the trace writes it (manifoldx.web.replay.store_trace's form): {alive: the
+// alive slots, free, high_water, rows: {component: the alive slots' rows}}, a component's
+// rows being {digest, n} past 1,000 alive entities: the rows' uint32 words w[i], row-major,
+// d = Σ w[i]·(i + 1) mod 2^32.
+export function traceStore(store) {
+  const alive = [];
+  for (let i = 0; i < store.highWater; i++) if (store.alive[i]) alive.push(i);
+  const rows = {};
+  for (const [name, col] of store._columns) {
+    const { cols } = store._layouts.get(name);
+    if (alive.length > DIGEST_PAST) {
+      const words = new Uint32Array(col.buffer, col.byteOffset, col.length);
+      let d = 0, w = 0;
+      for (const i of alive) for (let c = 0; c < cols; c++) d = (d + Math.imul(words[i * cols + c], ++w)) >>> 0;
+      rows[name] = { digest: d, n: alive.length };
+    } else {
+      rows[name] = alive.map((i) => Array.from(col.subarray(i * cols, (i + 1) * cols), traceFloat));
+    }
+  }
+  return { alive, free: [...store.free], high_water: store.highWater, rows };
 }
 
 // ---------------------------------------------------------------- the engine, headless
@@ -260,6 +485,7 @@ export function createEngine({ w, h, camera, gui = null, materials = {}, calls =
   engine.set_material = (entity, material) => {
     const index = typeof entity === "number" ? entity : entity.index;
     calls.push(["material", index, material.id]);
+    engine.store?.write("Material", index, 0, [material.id]); // the column, now, as the desktop's
     setMaterial(index, material.id);
   };
   engine.resolve = (kind, value) => {
@@ -306,9 +532,11 @@ function guiWidgets(spec) {
 // ---------------------------------------------------------------- frames
 
 // app: {engine, roots}, roots as loadState returns them. One frame: every system, in the
-// order the app registered them, called as the engine calls them, with (query, dt).
+// order the app registered them, called as the engine calls them, with (query, dt); then the
+// store's queued writes and destroys land, as the engine executes its commands.
 export function step(app, dt) {
   for (const r of app.roots) if (r.kind === "system") r.fn(null, dt);
+  app.engine.store?.flush();
 }
 
 // An event, as engine.emit delivers it: every handler root of that event, in the order the
@@ -360,8 +588,8 @@ export function pathValue(app, path) {
 }
 
 // The trace entry of the frame just run, as plain JSON values (the form is
-// manifoldx.web.replay's): {camera, gui, log, state, paths}, log being what engine.calls
-// gained since logStart.
+// manifoldx.web.replay's): {camera, gui, log, state, paths, store}, log being what
+// engine.calls gained since logStart, store traceStore's (null without a store).
 export function traceEntry(app, paths, logStart) {
   const { engine } = app;
   const entry = {
@@ -370,6 +598,7 @@ export function traceEntry(app, paths, logStart) {
     log: engine.calls.slice(logStart),
     state: engine.state,
     paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
+    store: engine.store === null || engine.store === undefined ? null : traceStore(engine.store),
   };
   return JSON.parse(toJSON(entry));
 }

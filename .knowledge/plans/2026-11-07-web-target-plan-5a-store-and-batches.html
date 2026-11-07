@@ -391,7 +391,7 @@ def test_without_library_nothing_changes(engine, tmp_path):
 </details>
 
 <!-- ============================================================ TASK 4 -->
-<details class="task" id="task-4" data-state="pending">
+<details class="task" id="task-4" data-state="done">
 <summary><span class="num">4</span><span><span class="ttl">The page's Store, its flush, and the store in the trace</span><span class="files">js/manifoldx.js · js/replay.mjs · js/browser.js · web/replay.py · tests/web/test_store.py</span></span><span class="state"></span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -836,6 +836,9 @@ def test_the_batched_scene_is_drawn_as_the_desktop():
 <li><b>Library mode reports the materials its entities draw</b> (task 3). With no nodes, the notes <code>node()</code> adds per drawn entity (<code>PhongMaterial</code> approximated, a material with no glTF equivalent dropped) were gone from <code>scene.export-report.json</code>; <code>build_glb</code> takes <code>drawn_materials</code>, each meshed entity's material, and reports their notes as a node's (<code>src/manifoldx/gltf/engine_export.py:132</code>, <code>tests/test_gltf_library.py:101</code>). An entity with no Material is not among them: the page draws it white itself.</li>
 <li><b>Task 3's tests read the glb through pygltflib's objects</b> (task 3). <code>tests/gltf_helpers.py</code>'s <code>load</code> returns a <code>GLTF2</code>, so the tests read <code>g.scenes[0].extras</code> and <code>prim.attributes.COLOR_0</code>, not dicts. The fixture also draws the coloured geometry, so the no-library case counts 4 entity nodes, not 3, and a seventh test checks that a point cloud's entities are still reported as dropped.</li>
 <li><b>From task 3 to task 10 the page draws no entities</b> (task 3). <code>build_export</code> writes the library, which <code>scene.js</code> reads only from task 10, so three Node tests fail in between: <code>tests/web/js/scene.test.mjs:56</code>, <code>:67</code> and <code>:249</code>, the ones task 10 rewrites. <code>tests/web/test_node_suites.py</code> is red on this branch until then; the rest of <code>tests/web</code> outside <code>browser/</code> passes.</li>
+<li><b>The page's <code>set_material</code> writes the Material column from task 4</b> (task 4). Once both traces carried the store, web_walk's replay differed at frame 41 (<code>store.rows.Material[4][0]: 8 != 5</code>): the desktop writes the column at once and the page only logged. <code>engine.set_material</code> now calls <code>store.write("Material", ...)</code> (<code>src/manifoldx/web/js/manifoldx.js:488</code>), which bumps <code>version</code>; task 8 still owns the handle form and the <code>not alive</code> error.</li>
+<li><b>A state without <code>"ecs"</code> loads with <code>engine.store</code> null</b> (task 4). The hand-built states of <code>tests/web/js/runtime.test.mjs</code> have no store; <code>loadApp</code> sets <code>null</code> for them (<code>manifoldx.js:120</code>), <code>step</code> skips the flush and <code>traceEntry</code> writes <code>store: null</code> (<code>:601</code>). The web_walk entry test now expects <code>store</code> (<code>tests/web/js/runtime.test.mjs:317</code>).</li>
+<li><b>The page's starting capacity is the export's high-water mark</b> (task 4), at least 1 so doubling moves (<code>manifoldx.js:140</code>); <code>dirty</code> is half-open, <code>[lo, hi)</code>. <code>tests/web/test_store.py:197</code> adds a sixth test: a query takes the alive members, an unknown name matches nothing.</li>
 <li><b>Verify against <code>origin/main</code></b> (tasks 1 and 3). A local <code>main</code> ref may lag the remote; the audit's before run and task 3's <code>git diff main</code> used <code>origin/main</code>.</li>
 </ul>
 

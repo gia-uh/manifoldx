@@ -18,6 +18,7 @@ import {
   step,
   toJSON,
   traceEntry,
+  traceStore,
 } from "../../../src/manifoldx/web/js/manifoldx.js";
 
 const CORE = new URL("../../../src/manifoldx/web/js/manifoldx.js", import.meta.url);
@@ -313,6 +314,7 @@ test("traceEntry is the entry replay.mjs built, for a frame of the web_walk expo
       log: e.calls.slice(start),
       state: e.state,
       paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
+      store: traceStore(e.store),
     };
     assert.deepEqual(entry, JSON.parse(toJSON(before)));
   }
