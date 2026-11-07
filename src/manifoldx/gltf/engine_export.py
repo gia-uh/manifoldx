@@ -107,12 +107,13 @@ def nodes(engine, names, extras, report):
     return out
 
 
-def export_engine(engine, path, *, names=None, extras=None, strict=False, transpiled=()):
+def export_engine(engine, path, *, names=None, extras=None, strict=False, transpiled=(), camera=True):
+    """camera=False leaves the camera out, for run --web: the page has its own, from the snapshot."""
     if engine._device is None and engine._event_bus._handlers.get("startup"):
         engine._ensure_offscreen(1)  # startup handlers may need the device (load_texture)
     report = code_report(engine, transpiled)
     lights = [light for light in (engine._sun, engine._spot) if light is not None] + list(engine._lights)
-    data, written = build_glb(nodes(engine, names, extras, report), camera=engine.camera, lights=lights,
+    data, written = build_glb(nodes(engine, names, extras, report), camera=engine.camera if camera else None, lights=lights,
                               environment=engine._environment, scene_extras=scene_extras(engine),
                               extra_materials=list(engine._material_registry._materials.items()))
     report.extend(written)

@@ -65,6 +65,7 @@ class HotReloader:
         self.poll = poll  # seconds between checks for changed files
         self.state = State()
         self.engine = None
+        self.main = None  # the app's __main__ module when it called engine.run()
         self._root = (os.path.dirname(self.script) if script else os.getcwd()) + os.sep
         self._mtimes = {}
         self._last_poll = time.monotonic()
@@ -85,7 +86,7 @@ class HotReloader:
 
         captured = []
         original, saved_argv, saved_path = Engine.run, sys.argv, list(sys.path)
-        Engine.run = lambda engine: captured.append(engine)
+        Engine.run = lambda engine: captured.append((engine, sys.modules.get("__main__")))
         sys.argv = [self.module or self.script, *self.argv]
         sys.path.insert(0, self._root.rstrip(os.sep))
         _state = self.state
@@ -103,7 +104,10 @@ class HotReloader:
             files = set(self._mtimes) | entry
             files |= {m.__file__ for m in list(sys.modules.values()) if getattr(m, "__file__", None) and self._owned(m.__file__)}
             self._mtimes = {f: _mtime(f) for f in files}
-        return captured[-1] if captured else None
+        if not captured:
+            return None
+        engine, self.main = captured[-1]  # the app's __main__ module, for export --web
+        return engine
 
     def _entry(self):
         """The file the app starts from: the script, or the -m module's, which runs as __main__
@@ -136,8 +140,8 @@ class HotReloader:
     def changed(self):
         return any(_mtime(f) != t for f, t in self._mtimes.items())
 
-    def reload(self):
-        """Rerun the app on the open window; on failure keep the running version."""
+    def _drop_modules(self):
+        """Forget the app's modules, so the next _load imports them afresh."""
         dropped = [name for name, m in list(sys.modules.items())
                    if getattr(m, "__file__", None) and self._owned(m.__file__)]
         for name in dropped:
@@ -147,6 +151,10 @@ class HotReloader:
             parent, _, child = name.rpartition(".")
             if parent in sys.modules and getattr(sys.modules[parent], child, None) is module:
                 delattr(sys.modules[parent], child)
+
+    def reload(self):
+        """Rerun the app on the open window; on failure keep the running version."""
+        self._drop_modules()
         try:
             engine = self._load()
         except Exception as e:

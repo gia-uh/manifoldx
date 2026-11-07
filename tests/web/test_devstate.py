@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from manifoldx.hot import State
-from manifoldx.web.devstate import decode, merge_tab_state
+from manifoldx.web.devstate import decode, encode, merge_tab_state, state_sha
 from manifoldx.web.export import capture_engine, export_web
 
 # Every value form the state takes on its way to the tab, and a key that cannot cross.
@@ -86,3 +86,7 @@ def test_round_trip_of_the_snapshot_state(tmp_path):
     tab = json.loads(done.stdout)
     started = {k: v for k, v in engine.state.items() if isinstance(k, str)}
     assert _same(decode(tab, like=started), started)
+    # the server tells a tab's state from the version's by this hash
+    assert state_sha(tab) == state_sha(encode(started))
+    started["cam"]["yaw"] = 0.75
+    assert state_sha(tab) != state_sha(encode(started))

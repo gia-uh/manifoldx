@@ -9,6 +9,9 @@ one kind of array, so decode reads each value against what Python had at the sam
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import numpy as np
 
 FLOATS = {"nan": float("nan"), "inf": float("inf"), "-inf": float("-inf")}
@@ -74,3 +77,62 @@ def merge_tab_state(state, tab: dict, crossed: frozenset[str]) -> list[str]:
         else:
             state[k] = decode(v, state.get(k))
     return kept
+
+
+def encode(value):
+    """A Python state value in the forms the tab's encodeState writes, for state_sha: what is
+    not plain data is a __skip, as in the tab."""
+    path: set[int] = set()
+
+    def enc(v):
+        if v is None or isinstance(v, (bool, int, str)):
+            return v
+        if isinstance(v, float):
+            return v if v == v and abs(v) != float("inf") else {"__float": _float_name(v)}
+        if isinstance(v, np.ndarray) and v.ndim == 1 and v.dtype in (np.float32, np.float64):
+            key = "__f32" if v.dtype == np.float32 else "__f64"
+            return {key: [enc(float(x)) for x in v]}
+        if not isinstance(v, (dict, list, tuple, set)):
+            return {"__skip": f"an object of {type(v).__name__}"}
+        if id(v) in path:
+            return {"__skip": "a cycle"}
+        path.add(id(v))
+        try:
+            if isinstance(v, dict):
+                return {"__dict": [[k, enc(x)] for k, x in v.items()]}
+            if isinstance(v, set):
+                return {"__set": [enc(x) for x in v]}
+            return [enc(x) for x in v]
+        finally:
+            path.discard(id(v))
+
+    return enc(value)
+
+
+def _float_name(v: float) -> str:
+    return "nan" if v != v else ("inf" if v > 0 else "-inf")
+
+
+def state_sha(encoded) -> str:
+    """A hash of an encoded state that both sides agree on: numbers as floats (the tab writes
+    6.0 as 6), a dict's keys and a set's items in sorted order, every __skip alike."""
+
+    def canon(v):
+        if isinstance(v, bool) or v is None or isinstance(v, str):
+            return v
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, list):
+            return [canon(x) for x in v]
+        if "__skip" in v:
+            return {"__skip": ""}
+        if "__dict" in v:
+            return {
+                "__dict": sorted(([k, canon(x)] for k, x in v["__dict"]), key=lambda p: str(p[0]))
+            }
+        if "__set" in v:
+            return {"__set": sorted((canon(x) for x in v["__set"]), key=json.dumps)}
+        return {k: canon(x) for k, x in v.items()}
+
+    text = json.dumps(canon(encoded), sort_keys=True, allow_nan=False)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]

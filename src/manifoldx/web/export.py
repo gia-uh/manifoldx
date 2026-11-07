@@ -82,10 +82,13 @@ class Built:
     timings: dict[str, float]  # seconds: startup reach snapshot transpile gui scene
 
 
-def build_export(engine, main, root, *, app_label, runtime="../pyrt.js", gpu=None) -> Built:
+def build_export(
+    engine, main, root, *, app_label, runtime="../pyrt.js", gpu=None, scene_camera=True
+) -> Built:
     """Build the app's version from the engine its setup left; raises TranspileError (naming
     the file's real path), SnapshotError or GuiUnsupported. gpu is (adapter, device, format)
-    of an engine to reuse the device of, for the startup on a headless frame."""
+    of an engine to reuse the device of, for the startup on a headless frame. scene_camera=False
+    leaves the camera out of the glb, so a camera that moved keeps the scene's hash."""
     from manifoldx.gltf.engine_export import export_engine
 
     from .gui import gui_spec
@@ -144,7 +147,9 @@ def build_export(engine, main, root, *, app_label, runtime="../pyrt.js", gpu=Non
         modules[name] = (mod.code, json.dumps(smap))
     with tempfile.TemporaryDirectory() as tmp:
         # Not engine.export_gltf: its report would call the transpiled roots dropped.
-        scene = export_engine(engine, Path(tmp) / "scene.glb", transpiled=[r.func for r in roots])
+        scene = export_engine(
+            engine, Path(tmp) / "scene.glb", transpiled=[r.func for r in roots], camera=scene_camera
+        )
         glb = (Path(tmp) / "scene.glb").read_bytes()
     report["scene_report"] = scene.to_dict()
     lap("scene")

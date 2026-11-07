@@ -353,7 +353,7 @@ def test_round_trip_of_the_snapshot_state(tmp_path):
 </details>
 
 <!-- ============================================================ TASK 3 -->
-<details class="task" id="task-3" data-state="pending">
+<details class="task" id="task-3" data-state="done">
 <summary><span class="num">3</span><span><span class="ttl">WebReloader: rebuild on save into version folders</span><span class="files">web/dev.py · hot.py · tests/web/test_dev_web.py · tests/web/apps/dev_orbit.py</span></span><span class="state"></span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -578,6 +578,12 @@ In <code>test_agent_commands</code>, run the real CLI in the app's folder: <code
 <li><b>The dev page moves to <code>/dev</code> under <code>--web</code></b> (Q8): the app takes <code>/</code>, so the printed URL opens the app.</li>
 <li><b>Task 2's round trip exports its own app, not <code>dev_orbit.py</code></b>. Task 3 writes <code>dev_orbit.py</code>, after task 2, so <code>test_round_trip_of_the_snapshot_state</code> exports <code>ORBIT</code> (<code>tests/web/test_devstate.py:16</code>): a nested dict of floats, a tuple, a list of tuples, a set, a float32 array, an infinity and a tuple key that cannot cross.</li>
 <li><b><code>decode</code> also restores floats against <code>like</code></b>. The tab's JSON writes <code>6.0</code> as <code>6</code>, so without this rule the round trip came back with ints where Python had floats; a whole number decodes to a float where the previous value was a float (<code>src/manifoldx/web/devstate.py:21</code>).</li>
+<li><b>The scene under <code>run --web</code> has no camera node</b> (task 3). The glTF export writes <code>engine.camera</code> into the glb, and the camera follows <code>engine.state</code>, so with it every save after the view moved hashed as a new scene. The page never reads the glTF's camera (it builds its own from the snapshot), so <code>build_export(scene_camera=False)</code> leaves it out through a new <code>camera</code> flag of <code>export_engine</code> (<code>src/manifoldx/web/export.py:86</code>, <code>src/manifoldx/gltf/engine_export.py:116</code>); <code>export --web</code> still writes it.</li>
+<li><b>The old engine is detached after the new version is built</b> (task 3). The plan detaches before the build; building first lets a failed build keep the running engine whole, with its shutdown handlers not yet fired (<code>src/manifoldx/web/dev.py:229</code>). The device is shared either way.</li>
+<li><b><code>state_sha</code> is a hash both sides agree on</b> (task 3, for Q4). The version message's <code>state_sha</code> hashes Python's crossed state in the tab's encoded forms (<code>devstate.encode</code>), with numbers as floats, dict keys and set items sorted and every <code>__skip</code> alike, so the tab's <code>encodeState</code> of an unchanged state hashes the same (<code>src/manifoldx/web/devstate.py:82</code>, <code>:116</code>; the round-trip test asserts it).</li>
+<li><b>A save during a reload is caught from the reload's start</b> (task 3). <code>HotReloader._load</code> records mtimes after the app ran, which would miss a save during the tab's state request or the setup; the WebReloader records them before asking the tab (<code>src/manifoldx/web/dev.py:190</code>).</li>
+<li><b><code>dev_orbit.py</code> registers <code>bump</code> with <code>engine.on("bump")(bump)</code></b> (task 3). The decorator form fails the export (<code>the decorator @engine.on('bump') is outside the subset</code>), so the test app uses the call form (<code>tests/web/apps/dev_orbit.py:56</code>). An app that decorates its handlers cannot export yet.</li>
+<li><b><code>error_line</code> prints a <code>GuiUnsupported</code> as its text</b>, like a <code>TranspileError</code>: it names the widget's place, and its traceback has no app frame (<code>src/manifoldx/web/dev.py:57</code>).</li>
 </ul>
 
 <h2>Self-review</h2>
