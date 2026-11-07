@@ -19,7 +19,7 @@ uv run python -m benchmarks frame --case sprites --profile  # adds a cProfile to
 uv run python -m benchmarks frame --case sprites --against main
 ```
 
-Suites: `frame` (whole scenes, CPU per `Engine._draw_frame`), `ecs`, `compute`, `skinning`, `modeling`, `loaders`. `--sizes` replaces every selected case's sizes, so select cases of one kind with it: a modeling size is a subdivision level, and 1000 there runs out of memory.
+Suites: `frame` (whole scenes, CPU per `Engine._draw_frame`), `ecs`, `compute`, `skinning`, `modeling`, `loaders`, `web` (the exported page in headless Chromium, see below). `--sizes` replaces every selected case's sizes, so select cases of one kind with it: a modeling size is a subdivision level, and 1000 there runs out of memory.
 
 `--against REF` extracts `src/` of that git ref to a temp folder and runs the selected cases twice in fresh processes, on REF's code and on this checkout's, then prints a Markdown table with the speed-up. It refuses a run that imported manifoldx from anywhere else. The suites themselves come from this checkout, so a new case shows `n/a` or `error` on the old code, which is expected for a new API.
 
@@ -36,6 +36,7 @@ Suites: `frame` (whole scenes, CPU per `Engine._draw_frame`), `ecs`, `compute`, 
 - On a shared or GPU-less machine, run-to-run noise is about ±10 %; a speed-up under 1.3× needs a second run before it counts.
 - Without a GPU, wgpu runs on a software Vulkan driver: CPU-side costs are real, GPU-side costs (raster, uploads, readbacks) are not those of a real GPU. Say so when a fix is about GPU transfers.
 - `matrix_recomputes` on frame cases counts `TransformCache._recompute_matrices` calls in one frame.
+- `web web-crowd` exports an app of `n` boxes in one batch with a query system moving all of them, opens it in headless Chromium (SwiftShader) and reports the median of 60 ticks' `__mx.frameMs.work`: the transpiled systems, the flush and the batches' sync, not the render. `calls` is the last frame's draw calls (1, the one batch). It needs `uv sync --group browser` and a Chromium Playwright can launch; without them the case reports `RuntimeError: playwright not installed` or `chromium not installed`. It reports and gates nothing.
 
 ## Writing a case
 

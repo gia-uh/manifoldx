@@ -791,7 +791,7 @@ def test_the_batched_scene_is_drawn_as_the_desktop():
 </details>
 
 <!-- ============================================================ TASK 13 -->
-<details class="task" id="task-13" data-state="pending">
+<details class="task" id="task-13" data-state="doing">
 <summary><span class="num">13</span><span><span class="ttl">The web-crowd bench case and the docs</span><span class="files">benchmarks/suites/web.py · js/browser.js · know-how/web-export.md · know-how/benchmarking.md · CHANGELOG.md · AGENTS.md</span></span><span class="state"></span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -877,6 +877,9 @@ def test_the_batched_scene_is_drawn_as_the_desktop():
 <li><b>test_page.py's swapped-entities break became a batch-key break</b> (task 12). The page has no map from entities to meshes to swap; <code>test_break_batches_ignore_materials</code> (<code>tests/web/browser/test_page.py:207</code>) serves a <code>scene.js</code> whose batches all key on material 0, so every box draws white while the trace and <code>materialOf</code> still match, and the material check fails.</li>
 <li><b>The identity break needs equal versions in Chromium</b> (task 12). Dropping <code>store !== seen</code> from <code>sync</code> is not seen by the run --web test as written: the old store is at version 1 after the <code>h</code> write, the new one at 0, so the version test alone rebuilds. <code>runtime_material_reset(same_version=True)</code> sets the old store's version back to 0 after the write, and the kept-scene test runs both ways (<code>tests/web/browser/test_run_web.py:162</code>); <code>test_break_batches_kept_across_stores</code> (<code>:166</code>) serves the damaged <code>scene.js</code> and fails on <code>material</code>.</li>
 <li><b>#153's browser test runs on handles.py</b> (task 12). <code>tests/web/apps/handles.py</code> already writes <code>engine.camera.up</code> each frame; <code>test_a_system_writes_camera_up_and_three_follows</code> (<code>tests/web/browser/test_page.py:367</code>) checks the three.js camera's <code>up</code> after each of 20 ticks against the Python replay of the page's frames.</li>
+<li><b>The web-crowd case draws one call, not two</b> (task 13). The step expects <code>calls</code> 2 and gives the reason "the batch and nothing else; the app has no ground", which is one call; the run prints <code>calls=1</code>. The bench app has no sun, so no shadow pass either.</li>
+<li><b>The smoke test runs the web case through the harness</b> (task 13). <code>test_case_runs_at_smoke_size</code> calls each case directly, and the <code>test</code> CI job has no browser group, so for the <code>web</code> suite it goes through <code>run([c], smoke=True)</code> and accepts a time or the error <code>RuntimeError: playwright not installed</code> or <code>chromium not installed</code> (<code>tests/test_benchmarks.py:25</code>). <code>SUITES</code> gains <code>web</code> (<code>benchmarks/__main__.py:28</code>), so <code>test_every_suite_has_cases</code> sees it. The case keeps its own copy of the browser conftest's SwiftShader flags and manual-mode init script: <code>benchmarks/</code> does not import tests.</li>
+<li><b><code>__mx.frameMs</code> starts as null</b> (task 13), set by each frame <code>runFrame</code> runs (<code>src/manifoldx/web/js/browser.js:39</code>, <code>:193</code>); a frame that throws or is frozen leaves the last value.</li>
 </ul>
 
 <h2>Self-review</h2>

@@ -36,6 +36,7 @@ const mx = {
   error: null,
   paths: [],
   loadStats: { bytes: 0 },
+  frameMs: null, // {work, render} of the last frame, ms
   manual: () => {},
   tick: () => null,
   version: null,
@@ -159,6 +160,7 @@ async function start() {
   // app's code threw, which pauses the page, or while a reload holds the tab frozen.
   function runFrame(dt) {
     if (mx.error !== null || frozen !== null) return null;
+    const t0 = performance.now();
     const { app } = running, { engine } = app;
     const w = canvas.clientWidth, h = canvas.clientHeight;
     const frame = builder.take([w, h]);
@@ -185,7 +187,10 @@ async function start() {
       size = [w, h];
     }
     scene.sync(engine);
+    const t1 = performance.now();
     renderer.render(scene.scene, scene.camera);
+    // The bench's numbers (benchmarks/suites/web.py): the frame up to the batches, the render call.
+    mx.frameMs = { work: t1 - t0, render: performance.now() - t1 };
     return { frame, start: 0 };
   }
 
