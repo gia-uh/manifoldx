@@ -18,6 +18,7 @@ HERE = Path(__file__).parent / "js"
 FORWARD = HERE / "forward.json"
 WEB_WALK = Path(__file__).parents[2] / "examples" / "web_walk.py"
 SPAWNER = Path(__file__).parent / "apps" / "spawner.py"
+SKINNED = Path(__file__).parent / "apps" / "skinned.py"
 
 # A two-module app whose system calls a helper that reads an attribute of None, for
 # sourcemap.test.mjs: the error must name the helper's line, then the system's call.
@@ -106,6 +107,14 @@ def spawner_export(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
+def skinned_export(tmp_path_factory) -> Path:
+    """tests/web/apps/skinned.py exported, for scene.test.mjs: three figures and a box."""
+    out = tmp_path_factory.mktemp("skinned_export") / "out"
+    assert export_web(None, str(SKINNED), out, []) == 0
+    return out
+
+
+@pytest.fixture(scope="session")
 def skinned_glb_path(tmp_path_factory) -> Path:
     """A posed skinned figure through Engine.export_gltf, for gltf_skin.test.mjs, with
     expected.json beside it: each vertex where the desktop draws it, in float64."""
@@ -153,7 +162,9 @@ def _run(suites: list[str], env: dict[str, str]) -> None:
     assert "# skipped 0" in done.stdout, done.stdout
 
 
-def test_node_suites_pass(web_walk_export, spawner_export, sourcemap_export, skinned_glb_path):
+def test_node_suites_pass(
+    web_walk_export, spawner_export, skinned_export, sourcemap_export, skinned_glb_path
+):
     # Node 22's --test takes files or globs, not a folder.
     suites = sorted(str(f) for f in HERE.glob("*.test.mjs"))
     assert suites
@@ -161,6 +172,7 @@ def test_node_suites_pass(web_walk_export, spawner_export, sourcemap_export, ski
         **os.environ,
         "MX_WEB_WALK_EXPORT": str(web_walk_export),
         "MX_SPAWNER_EXPORT": str(spawner_export),
+        "MX_SKINNED_EXPORT": str(skinned_export),
         "MX_SOURCEMAP_EXPORT": str(sourcemap_export),
         "MX_SKIN_GLB": str(skinned_glb_path),
     }

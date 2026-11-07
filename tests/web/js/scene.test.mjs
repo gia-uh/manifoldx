@@ -26,12 +26,14 @@ const THREE = await import("three");
 const { GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js");
 const { CALIBRATION, buildScene, equirectTexture } = await import("../../../src/manifoldx/web/js/scene.js");
 
-// The folders export --web wrote for examples/web_walk.py and tests/web/apps/spawner.py, set
-// by tests/web/test_node_suites.py.
+// The folders export --web wrote for examples/web_walk.py, tests/web/apps/spawner.py and
+// tests/web/apps/skinned.py, set by tests/web/test_node_suites.py.
 const WEB_WALK = process.env.MX_WEB_WALK_EXPORT;
 const SPAWNER = process.env.MX_SPAWNER_EXPORT;
+const SKINNED = process.env.MX_SKINNED_EXPORT;
 const skip = !WEB_WALK && "MX_WEB_WALK_EXPORT not set";
 const skipSpawner = !SPAWNER && "MX_SPAWNER_EXPORT not set";
+const skipSkinned = !SKINNED && "MX_SKINNED_EXPORT not set";
 
 const stubRenderer = () => ({ capabilities: { maxTextureSize: 4096 }, shadowMap: { enabled: false } });
 
@@ -466,4 +468,167 @@ test("dispose frees every geometry, material and texture of the scene once", { s
   mx.dispose();
   assert.ok(freed.size > 2);
   assert.deepEqual([...new Set(freed.values())], [1]);
+});
+
+// ---------------------------------------------------------------- skinned entities
+
+// skinned.py: figures in slots 0 to 2 (figure 0 posed at setup), the box in slot 3. Frame 0
+// poses nothing; frame 1 poses the crowd.
+const IDLE = { keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [320, 200] };
+const FIGURES = [0, 1, 2], BOX = 3;
+
+// Joint m of a row-major pose as a three.js Matrix4.
+const poseMatrix = (pose, m) => new THREE.Matrix4().set(...pose.subarray(m * 16, m * 16 + 16));
+
+// A bone matrix (column-major) equals the row-major pose matrix, transposed.
+function assertBones(mesh, pose, j) {
+  const bm = mesh.skeleton.boneMatrices;
+  for (let m = 0; m < j; m++) {
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 4; c++) {
+        const want = pose === undefined ? (r === c ? 1 : 0) : pose[m * 16 + r * 4 + c];
+        assert.equal(bm[m * 16 + c * 4 + r], want, `joint ${m} row ${r} col ${c}`);
+      }
+    }
+  }
+}
+
+// The app runs on its folder's own runtime (replay.mjs, manifoldx.js), whose NdArray its
+// modules build: the source's would not take them for arrays.
+async function skinnedScene(frames = 0) {
+  const folder = pathToFileURL(`${SKINNED}/`);
+  const { load: loadFolder } = await import(new URL("replay.mjs", folder).href);
+  const { advance } = await import(new URL("manifoldx.js", folder).href);
+  const gltf = await parse(SKINNED);
+  const app = await loadFolder(folder);
+  const scene = await buildScene(THREE, gltf, stubRenderer());
+  const step = () => advance(app, IDLE, 1 / 60);
+  for (let f = 0; f < frames; f++) step();
+  scene.sync(app.engine);
+  return { gltf, app, scene, step };
+}
+
+test("a skinned entity draws as its own SkinnedMesh, not in a batch", { skip: skipSkinned }, async () => {
+  const { scene, app } = await skinnedScene();
+  const { store } = app.engine;
+  assert.equal(scene.skinned.size, 3);
+  assert.deepEqual([...scene.skinned.keys()].sort(), FIGURES);
+  const fig = store.column("Mesh")[0];
+  for (const i of FIGURES) {
+    const mesh = scene.skinned.get(i);
+    assert.ok(mesh.isSkinnedMesh);
+    assert.equal(mesh.geometry, scene.geometries.get(fig));
+    assert.ok(mesh.parent !== null, "the mesh is in the scene");
+    assert.equal(mesh.skeleton.bones.length, store.skinned.get(fig));
+    assert.ok(mesh.skeleton.bones.every((b) => b.parent === null && !b.matrixAutoUpdate));
+  }
+  assert.equal(scene.batches.get(batchKey(store, BOX)).count, 1);
+  const drawn = [...scene.batches.values()].reduce((n, b) => n + b.count, 0);
+  assert.equal(drawn, 1, "only the box is batched");
+  for (const b of scene.batches.values()) assert.notEqual(b.geometry, scene.geometries.get(fig));
+});
+
+test("bone matrices are the store's pose", { skip: skipSkinned }, async () => {
+  const { scene, app, step } = await skinnedScene(2);
+  const { store } = app.engine;
+  for (const i of FIGURES) {
+    assert.ok(store.joints.has(i), `figure ${i} is posed by frame 1`);
+    assertBones(scene.skinned.get(i), store.joints.get(i), 3);
+  }
+  const before = Float32Array.from(scene.skinned.get(0).skeleton.boneMatrices);
+  step();
+  scene.sync(app.engine);
+  assert.notDeepEqual(Array.from(scene.skinned.get(0).skeleton.boneMatrices), Array.from(before));
+  assertBones(scene.skinned.get(0), store.joints.get(0), 3);
+});
+
+test("a vertex lands at TRS times its joint's matrix", { skip: skipSkinned }, async () => {
+  const { scene, app } = await skinnedScene(2);
+  const { store } = app.engine;
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, -0.7, 1.1));
+  store.write("Transform", 0, 0, [1, 2, 3, q.x, q.y, q.z, q.w, 2, 1, 0.5]);
+  scene.sync(app.engine);
+  scene.scene.updateMatrixWorld(true);
+  const mesh = scene.skinned.get(0), pose = store.joints.get(0);
+  const t = store.column("Transform").subarray(0, 10);
+  const trs = new THREE.Matrix4().compose(
+    new THREE.Vector3(t[0], t[1], t[2]), new THREE.Quaternion(t[3], t[4], t[5], t[6]), new THREE.Vector3(t[7], t[8], t[9]));
+  const skinIndex = mesh.geometry.getAttribute("skinIndex"), position = mesh.geometry.getAttribute("position");
+  const seen = new Set();
+  for (let i = 0; i < position.count; i++) {
+    const j = skinIndex.getX(i);
+    seen.add(j);
+    const want = new THREE.Vector3().fromBufferAttribute(position, i).applyMatrix4(poseMatrix(pose, j)).applyMatrix4(trs);
+    const got = mesh.getVertexPosition(i, new THREE.Vector3()).applyMatrix4(mesh.matrixWorld);
+    assert.ok(got.distanceTo(want) < 1e-5, `vertex ${i}: ${got.toArray()} vs ${want.toArray()}`);
+  }
+  assert.deepEqual([...seen].sort(), [0, 1, 2]);
+});
+
+test("a pose set at setup is drawn at the first sync", { skip: skipSkinned }, async () => {
+  const { scene, app } = await skinnedScene(0);
+  const { store } = app.engine;
+  assert.deepEqual([...store.joints.keys()], [0], "only figure 0 is posed at export");
+  const pose = store.joints.get(0);
+  assert.ok(pose.some((x, k) => x !== [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1][k % 16]), "not the identity");
+  assertBones(scene.skinned.get(0), pose, 3);
+  assertBones(scene.skinned.get(1), undefined, 3);
+});
+
+test("a destroyed figure's mesh leaves; its slot respawned draws at rest", { skip: skipSkinned }, async () => {
+  const { scene, app } = await skinnedScene(2);
+  const { store } = app.engine;
+  const old = scene.skinned.get(2);
+  assert.ok(store.joints.has(2));
+  store.destroy([2]);
+  scene.sync(app.engine);
+  assert.equal(scene.skinned.has(2), false);
+  assert.equal(old.parent, null);
+  const t = Float32Array.of(0, 0, 0, 0, 0, 0, 1, 1, 1, 1);
+  const rows = new Map([["Mesh", Uint32Array.of(store.column("Mesh")[0])], ["Material", Uint32Array.of(store.column("Material")[0])], ["Transform", t]]);
+  const [i] = store.spawn(1, rows);
+  assert.equal(i, 2);
+  scene.sync(app.engine);
+  assertBones(scene.skinned.get(2), undefined, 3);
+  // Posed, then destroyed and respawned between two syncs: at rest too.
+  store.setJoints([2], store.joints.get(0) ?? new Float32Array(48), 3);
+  scene.sync(app.engine);
+  store.destroy([2]);
+  store.spawn(1, rows);
+  scene.sync(app.engine);
+  assertBones(scene.skinned.get(2), undefined, 3);
+});
+
+test("set_material on a skinned entity swaps its mesh's material", { skip: skipSkinned }, async () => {
+  const { scene, app } = await skinnedScene(1);
+  const { engine } = app, { store } = engine;
+  const grey = store.column("Material")[BOX], skin = store.column("Material")[0];
+  assert.notEqual(grey, skin);
+  assert.equal(scene.skinned.get(0).material, scene.materials.get(skin));
+  const mesh = scene.skinned.get(0);
+  engine.set_material(engine.resolve("entity", 0), engine.resolve("material", grey));
+  scene.sync(engine);
+  assert.equal(scene.skinned.get(0), mesh, "the same mesh, its material swapped");
+  assert.equal(mesh.material, scene.materials.get(grey));
+  assert.equal(scene.materialOf(0), grey);
+  assert.equal(scene.batches.get(batchKey(store, BOX)).count, 1, "no batch gained the figure");
+});
+
+test("the bounding sphere is the desktop's padded sphere", { skip: skipSkinned }, async () => {
+  const { scene } = await skinnedScene(0);
+  const mesh = scene.skinned.get(0), position = mesh.geometry.getAttribute("position");
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < position.count; i++) {
+    for (let a = 0; a < 3; a++) {
+      lo[a] = Math.min(lo[a], position.getComponent(i, a));
+      hi[a] = Math.max(hi[a], position.getComponent(i, a));
+    }
+  }
+  const c = lo.map((x, a) => (x + hi[a]) / 2);
+  let r = 0;
+  for (let i = 0; i < position.count; i++) {
+    r = Math.max(r, Math.hypot(...[0, 1, 2].map((a) => position.getComponent(i, a) - c[a])));
+  }
+  assert.deepEqual(mesh.boundingSphere.center.toArray(), c);
+  assert.ok(Math.abs(mesh.boundingSphere.radius - (r * 1.5 + 0.5)) < 1e-12);
 });
