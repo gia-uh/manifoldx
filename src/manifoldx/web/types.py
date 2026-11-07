@@ -31,6 +31,7 @@ KINDS = frozenset(
         "dict",
         "set",
         "vec",
+        "nd",
         "obj",
         "fn",
         "union",
@@ -43,7 +44,8 @@ KINDS = frozenset(
 class Ty:
     """A type. `args` holds the element types: list[elem], set[elem], tuple[*items],
     dict[key, value], union[*members], fn[return] (empty when the return is unknown).
-    `dtype` is a vec's "f64" or "f32". A num carries one when it is a numpy scalar, which
+    `dtype` is a vec's "f64" or "f32", an nd's "f64", "f32", "bool" or "i32". An nd is a
+    numpy array of `rank` dimensions (a bare vec is rank 1 of a float). A num carries one when it is a numpy scalar, which
     numpy keeps at its precision ("f32": np.float32, float32 arithmetic; "f64":
     np.float64); a Python float or int has none and takes the other operand's precision
     (NEP 50). `name` is an obj's class ("module.Qualname") or a
@@ -58,16 +60,21 @@ class Ty:
     args: tuple[Ty, ...] = ()
     dtype: str | None = None
     name: str | None = None
+    rank: int | None = None
 
     def __post_init__(self):
         if self.kind not in KINDS:
             raise ValueError(f"unknown type kind {self.kind!r}")
         if self.kind == "vec" and self.dtype not in ("f64", "f32"):
             raise ValueError(f"a vec's dtype is f64 or f32, not {self.dtype!r}")
+        if self.kind == "nd" and (self.dtype not in ND_DTYPES or not self.rank):
+            raise ValueError(f"an nd has a dtype among {ND_DTYPES} and a rank, not {self.dtype!r}")
         if self.kind == "num" and self.dtype not in (None, "f64", "f32"):
             raise ValueError(f"a num's dtype is None, f64 or f32, not {self.dtype!r}")
-        if self.kind not in ("vec", "num") and self.dtype is not None:
+        if self.kind not in ("vec", "num", "nd") and self.dtype is not None:
             raise ValueError(f"a {self.kind} has no dtype")
+        if self.kind != "nd" and self.rank is not None:
+            raise ValueError(f"a {self.kind} has no rank")
 
     def __str__(self) -> str:
         k, a = self.kind, self.args
@@ -77,6 +84,8 @@ class Ty:
             return f"{k}[{', '.join(map(str, a))}]"
         if k == "vec" or (k == "num" and self.dtype):
             return f"{k}[{self.dtype}]"
+        if k == "nd":
+            return f"nd[{self.dtype}, {self.rank}]"
         if k in ("obj", "fn") and self.name:
             return f"{k} {self.name}"
         return k
@@ -107,6 +116,7 @@ class Ty:
         return self.all("num", "int", "bool", "str", "none")
 
 
+ND_DTYPES = ("f64", "f32", "bool", "i32")
 NUM, INT, BOOL, STR, NONE = Ty("num"), Ty("int"), Ty("bool"), Ty("str"), Ty("none")
 UNKNOWN = Ty("unknown")
 NEVER = Ty("union")
@@ -134,6 +144,60 @@ def dict_of(key: Ty, value: Ty) -> Ty:
 
 def vec(dtype: str = "f64") -> Ty:
     return Ty("vec", dtype=dtype)
+
+
+def nd(dtype: str, rank: int) -> Ty:
+    return Ty("nd", dtype=dtype, rank=rank)
+
+
+def is_array(t: Ty) -> bool:
+    """t is one numpy array: a vec or an nd."""
+    return t.kind in ("vec", "nd")
+
+
+def array_rank(t: Ty) -> int:
+    """The rank of an operand: an nd's, 1 for a vec, 0 for a number."""
+    return t.rank if t.kind == "nd" else 1 if t.kind == "vec" else 0
+
+
+def nd_dtype(op: ast.AST, a: Ty, b: Ty) -> str | None:
+    """The dtype numpy 2 gives `a op b` when an array is on a side (NEP 50), or None when
+    the subset has no such operation: float32 with float32 or a Python number stays float32,
+    float64 anywhere is float64, int32 with a Python int is int32 (but / gives float64), with
+    a Python float or a float32 it is float64; a bool array takes no arithmetic, and a side of
+    several types gives None."""
+    kinds = []
+    for t in (a, b):
+        if len(t.members) != 1 or not t.known:
+            return None
+        if t.kind in ("vec", "nd"):
+            kinds.append(("array", t.dtype))
+        elif t.kind == "num" and t.dtype:
+            kinds.append(("scalar", t.dtype))  # a numpy scalar keeps its dtype
+        elif t.kind == "num":
+            kinds.append(("py", "float"))
+        elif t.kind in ("int", "bool"):
+            kinds.append(("py", "int"))
+        else:
+            return None
+    dtypes = {d for k, d in kinds if k != "py"}
+    if "bool" in dtypes:
+        return None
+    if "f64" in dtypes:
+        return "f64"
+    if "i32" in dtypes:
+        if "f32" in dtypes or ("py", "float") in kinds or isinstance(op, ast.Div):
+            return "f64"
+        return "i32"
+    return "f32"
+
+
+def nd_compare_dtype(a: Ty, b: Ty) -> str | None:
+    """The dtype numpy compares a and b in (both cast to it), or None outside the subset: as
+    arithmetic, with two bool arrays compared as bool."""
+    if a.kind in ("vec", "nd") and b.kind in ("vec", "nd") and a.dtype == b.dtype == "bool":
+        return "bool"
+    return nd_dtype(ast.Add(), a, b)
 
 
 def obj(name: str) -> Ty:
@@ -178,7 +242,7 @@ def _merge(a: Ty, b: Ty) -> Ty | None:
     """a and b as one type when they have the same shape, else None."""
     if a == b:
         return a
-    if a.kind != b.kind or a.kind in ("vec", "obj"):
+    if a.kind != b.kind or a.kind in ("vec", "nd", "obj"):
         return None
     if a.kind in ("list", "set", "dict") or (a.kind == "tuple" and len(a.args) == len(b.args)):
         return Ty(a.kind, tuple(union(x, y) for x, y in zip(a.args, b.args)))
@@ -224,9 +288,26 @@ def elem(t: Ty) -> Ty:
             out.append(STR)
         elif m.kind == "vec":
             out.append(Ty("num", dtype=m.dtype))
+        elif m.kind == "nd":
+            out.append(nd_item(m))
         else:
             return UNKNOWN
     return union(*out)
+
+
+def nd_item(t: Ty) -> Ty:
+    """What indexing an nd's first axis by an int gives: an nd of one rank less, or a
+    number of its dtype."""
+    if t.rank > 1:
+        return nd(t.dtype, t.rank - 1)
+    return {"f32": NUM32, "f64": NUM64, "i32": INT, "bool": BOOL}[t.dtype]
+
+
+def nd_list(t: Ty) -> Ty:
+    """The type of an array's .tolist(): nested lists of Python numbers."""
+    if t.kind == "vec" or t.rank == 1:
+        return list_of({"i32": INT, "bool": BOOL}.get(t.dtype, NUM))
+    return list_of(nd_list(nd(t.dtype, t.rank - 1)))
 
 
 # ---------------------------------------------------------------- live types
@@ -459,13 +540,25 @@ STR_METHODS = {
 }
 
 LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
+# The numpy dtypes an array constructor may name, by their dotted names.
+NP_DTYPES = {
+    "numpy.float32": "f32",
+    "numpy.float64": "f64",
+    "numpy.bool_": "bool",
+    "numpy.bool": "bool",
+    "numpy.int32": "i32",
+}
 
 # The manifoldx objects the headless runtime (js/manifoldx.js) implements, by class: each
 # attribute's type, a method's as fn(name, return), by the names class_name gives the
 # classes. What is not here types as unknown.
 _INPUT, _CAMERA = "manifoldx.input.InputState", "manifoldx.Camera"
 _GUI = "manifoldx.gui.widgets._GuiRoot"
-_PANEL, _TEXT, _VALUE_DISPLAY = "manifoldx.gui.Panel", "manifoldx.gui.Text", "manifoldx.gui.ValueDisplay"
+_PANEL, _TEXT, _VALUE_DISPLAY = (
+    "manifoldx.gui.Panel",
+    "manifoldx.gui.Text",
+    "manifoldx.gui.ValueDisplay",
+)
 RUNTIME_SURFACE = {
     "manifoldx.Engine": {
         "input": obj(_INPUT),
@@ -838,22 +931,41 @@ class TypeEnv:
             return None
         return ".".join([sym.target, *reversed(parts)])
 
-    def np_dtype(self, n: ast.Call, ctx: Ctx) -> str | None:
-        """The dtype an np.array or np.zeros call asks for: "f64" by default, "f32" for
-        np.float32, None for any other."""
-        given = [k.value for k in n.keywords if k.arg == "dtype"] + n.args[1:2]
+    def np_dtype(
+        self, n: ast.Call, ctx: Ctx, at: int = 1, default: str | None = "f64"
+    ) -> str | None:
+        """The dtype a numpy constructor asks for, by keyword or as its positional argument
+        `at`: `default` when none is given; "f32", "f64", "bool" or "i32" for np.float32,
+        np.float64, np.bool_ (np.bool) and np.int32; None for any other."""
+        given = [k.value for k in n.keywords if k.arg == "dtype"] + n.args[at : at + 1]
         if not given:
-            return "f64"
-        return {"numpy.float32": "f32", "numpy.float64": "f64"}.get(
-            self.lib_name(given[0], ctx) or ""
-        )
+            return default
+        return NP_DTYPES.get(self.lib_name(given[0], ctx) or "")
 
     def lib_call(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
-        if name in ("numpy.array", "numpy.zeros"):
+        if name in ("numpy.zeros", "numpy.ones", "numpy.full") and n.args:
+            if name == "numpy.full":
+                fill = self.expr(n.args[1], ctx) if len(n.args) > 1 else UNKNOWN
+                d = self.np_dtype(n, ctx, 2, "f64" if fill.all("num") else None)
+            else:
+                d = self.np_dtype(n, ctx)
+            shape = self.expr(n.args[0], ctx)
+            if d is None:
+                return UNKNOWN
+            if shape.all("tuple") and len(shape.members) == 1 and shape.args:
+                return nd(d, len(shape.args))
+            if shape.all("int"):
+                return vec(d) if d in ("f32", "f64") else nd(d, 1)
+            return UNKNOWN
+        if name == "numpy.array":
             d = self.np_dtype(n, ctx)
-            return vec(d) if d else UNKNOWN
+            return vec(d) if d in ("f32", "f64") else UNKNOWN
         if name == "numpy.arange":
-            return vec("f64")
+            given = any(k.arg == "dtype" for k in n.keywords) or len(n.args) > 3
+            if not given:
+                return vec("f64")
+            d = self.np_dtype(n, ctx, 3)
+            return nd(d, 1) if d in ("f32", "f64", "i32") else UNKNOWN
         if name == "numpy.linalg.norm" and n.args:
             t = self.expr(n.args[0], ctx)
             return Ty("num", dtype=t.dtype) if t.kind == "vec" else UNKNOWN
@@ -974,6 +1086,15 @@ class TypeEnv:
                 return INT
             return t
         if isinstance(n, ast.Compare):
+            if len(n.ops) == 1 and not isinstance(n.ops[0], (ast.In, ast.NotIn, ast.Is, ast.IsNot)):
+                a, b = self.expr(n.left, ctx), self.expr(n.comparators[0], ctx)
+                if any(is_array(m) for m in a.members + b.members):
+                    rank = (
+                        max(array_rank(a), array_rank(b))
+                        if len(a.members) == len(b.members) == 1
+                        else 0
+                    )
+                    return nd("bool", rank) if rank and nd_compare_dtype(a, b) else UNKNOWN
             return BOOL
         if isinstance(n, ast.BoolOp):
             return union(*(self.expr(v, ctx) for v in n.values))
@@ -1028,6 +1149,9 @@ class TypeEnv:
             return NEVER
         if not (a.known and b.known):
             return UNKNOWN
+        arrays = [m.kind for m in a.members + b.members if m.kind in ("vec", "nd")]
+        if "nd" in arrays or (arrays and isinstance(op, (ast.Pow, ast.BitAnd, ast.BitOr))):
+            return TypeEnv.nd_binop(op, a, b)
         if a.is_numeric and b.is_numeric:
             d = arith_dtype(a, b)
             if d == "mixed":
@@ -1059,6 +1183,20 @@ class TypeEnv:
             d = arith_dtype(a, b)
             return vec(d or "f64") if d != "mixed" else UNKNOWN
         return UNKNOWN
+
+    @staticmethod
+    def nd_binop(op: ast.operator, a: Ty, b: Ty) -> Ty:
+        """`a op b` with a numpy array on a side and an nd among them (or **, & and | on
+        any array): an nd of numpy 2's dtype and the larger rank."""
+        rank = max(array_rank(a), array_rank(b)) if len(a.members) == len(b.members) == 1 else 0
+        if not rank:
+            return UNKNOWN
+        if isinstance(op, (ast.BitAnd, ast.BitOr)):
+            return nd("bool", rank) if a.dtype == b.dtype == "bool" else UNKNOWN
+        if not isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
+            return UNKNOWN
+        d = nd_dtype(op, a, b)
+        return nd(d, rank) if d else UNKNOWN
 
     def subscript(self, n: ast.Subscript, ctx: Ctx) -> Ty:
         t = self.expr(n.value, ctx)
@@ -1131,6 +1269,8 @@ class TypeEnv:
                 }.get(f.attr, UNKNOWN)
             if recv.all("str") and f.attr in STR_METHODS:
                 return STR_METHODS[f.attr]
+            if len(recv.members) == 1 and is_array(recv) and f.attr == "tolist":
+                return nd_list(recv)
             methods = self.methods(recv, f.attr)
             if methods:
                 return union(*(m.returns for m in methods))
@@ -1428,14 +1568,14 @@ class TypeEnv:
                 field_(st.target, self.annotation(st.annotation, info.key[0]))
             elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Attribute):
                 old = self.expr(st.target, ctx)
-                if old.kind != "vec":
+                if old.kind not in ("vec", "nd"):
                     field_(st.target, self.binop(st.op, old, self.expr(st.value, ctx)))
             elif isinstance(st, ast.FunctionDef):
                 inner = self.functions[(info.key[0], f"{info.key[1]}.<locals>.{st.name}")]
                 assign({st.name: fn(key_label(inner.key), inner.returns)})
             elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Name):
                 old = self.expr(st.target, ctx)
-                if old.kind == "vec":
+                if old.kind in ("vec", "nd"):
                     continue  # numpy's += writes into the array: its dtype stays
                 assign({st.target.id: self.binop(st.op, old, self.expr(st.value, ctx))})
             elif isinstance(st, ast.For):

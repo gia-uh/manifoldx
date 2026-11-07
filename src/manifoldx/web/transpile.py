@@ -35,6 +35,8 @@ from .types import (
     TranspileError,
     arith_dtype,
     elem,
+    is_array,
+    nd_compare_dtype,
     key_label,
     module_path,
     own_statements,
@@ -97,6 +99,16 @@ def js_name(name: str) -> str:
 
 # numpy's arithmetic as runtime helpers; a "32" suffix gives a Float32Array.
 VECTOR_OPS = {ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div"}
+# Operators on numpy arrays of any rank, as $rt.nd's functions.
+ND_OPS = {**VECTOR_OPS, ast.BitAnd: "and", ast.BitOr: "or"}
+ND_COMPARE = {
+    ast.Lt: "lt",
+    ast.LtE: "le",
+    ast.Gt: "gt",
+    ast.GtE: "ge",
+    ast.Eq: "eq",
+    ast.NotEq: "ne",
+}
 SCALAR_OPS = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
 MATH_JS = {"fabs": "Math.abs", "radians": "$rt.radians", "degrees": "$rt.degrees"}
 
@@ -110,6 +122,16 @@ def _simple(n: ast.expr) -> bool:
     if isinstance(n, (ast.Name, ast.Constant)):
         return True
     return isinstance(n, ast.Attribute) and _simple(n.value)
+
+
+def _const_number(n: ast.expr) -> float | None:
+    """The number a constant (or a negated constant) spells, else None."""
+    if isinstance(n, ast.Constant) and type(n.value) in (int, float):
+        return n.value
+    if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.USub):
+        v = _const_number(n.operand)
+        return None if v is None else -v
+    return None
 
 
 def _const_int(n: ast.expr) -> int | None:
@@ -603,6 +625,12 @@ class _Module:
                 self.fail(n, "this augmented assignment")
             if self.ty(t).kind == "vec":
                 return [(f"{p}{self.vector_inplace(n)};", line)]
+            if self.ty(t).kind == "nd":
+                value = ast.unparse(ast.BinOp(t, n.op, n.value))
+                self.fail(
+                    n,
+                    f"`{ast.unparse(n)}`, a write into a numpy array (build a new one: `{ast.unparse(t)} = {value}`)",
+                )
             value = ast.copy_location(ast.BinOp(t, n.op, n.value), n)
             load = ast.copy_location(type(t)(**{**vars(t), "ctx": ast.Load()}), t)
             value.left = load
@@ -895,7 +923,10 @@ class _Module:
             for side, t in ((n.left, a_t), (n.right, b_t)):
                 if not t.known:
                     self.unknown(n, side)
-        if any(m.kind == "vec" for m in a_t.members + b_t.members):
+        arrays = [m.kind for m in a_t.members + b_t.members if m.kind in ("vec", "nd")]
+        if "nd" in arrays or (arrays and isinstance(op, (ast.Pow, ast.BitAnd, ast.BitOr))):
+            return self.nd_op(n, a_t, b_t)
+        if arrays:
             return self.vector_op(n, a_t, b_t)
         a, b = self.e(n.left), self.e(n.right)
         num = a_t.is_numeric and b_t.is_numeric
@@ -941,6 +972,35 @@ class _Module:
         helper = f"v{VECTOR_OPS[type(n.op)]}{'32' if d == 'f32' else ''}"
         return f"{self.rt(helper)}({self.e(n.left)}, {self.e(n.right)})"
 
+    def nd_op(self, n: ast.BinOp, a_t: Ty, b_t: Ty) -> str:
+        """An operator on numpy arrays of any rank: $rt.nd's function with the dtype numpy 2
+        computes in, which the page cannot tell from the values (2 and 2.0 are one number)."""
+        t = self.ty(n)
+        if isinstance(n.op, ast.Pow):
+            return self.nd_pow(n, t)
+        if type(n.op) not in ND_OPS or t.kind != "nd":
+            self.fail(n, f"`{ast.unparse(n)}` on a {a_t} and a {b_t}")
+        a, b = self.e(n.left), self.e(n.right)
+        return f'{self.rt("nd." + ND_OPS[type(n.op)])}({a}, {b}, "{t.dtype}")'
+
+    def nd_pow(self, n: ast.BinOp, t: Ty) -> str:
+        """numpy computes a ** 2, a ** 0.5 and a ** -1 exactly, as square, sqrt and
+        reciprocal; any other power goes through powf, which the page cannot match."""
+        k = _const_number(n.right)
+        if t.kind != "nd" or k not in (2, 0.5, -1) or (k == -1 and t.dtype == "i32"):
+            a = ast.unparse(n.left)
+            self.fail(
+                n,
+                f"`{ast.unparse(n)}`, a power numpy does not compute exactly in the page "
+                f"(2, 0.5 and -1 are in; use {a} * {a} * {a})",
+            )
+        a, d = self.e(n.left), f'"{t.dtype}"'
+        if k == 2:
+            return f"{self.rt('nd.square')}({a}, {d})"
+        if k == 0.5:
+            return f"{self.rt('nd.sqrt')}({a}, {d})"
+        return f"{self.rt('nd.div')}(1, {a}, {d})"
+
     def numpy_scalar_op(self, n: ast.BinOp, a_t: Ty, b_t: Ty, a: str, b: str) -> str:
         """Arithmetic on a numpy scalar: float64 is JS's own; float32 rounds each operand
         and the result, which gives float32's result for + - * /."""
@@ -961,6 +1021,12 @@ class _Module:
         if isinstance(n.op, ast.Not):
             return f"!{self.test(n.operand)}"
         t = self.ty(n.operand)
+        if t.kind == "nd":
+            if isinstance(n.op, ast.USub) and t.dtype != "bool":
+                return f"{self.rt('nd.neg')}({self.e(n.operand)})"
+            if isinstance(n.op, ast.Invert) and t.dtype == "bool":
+                return f"{self.rt('nd.not')}({self.e(n.operand)})"
+            self.fail(n, f"`{ast.unparse(n)}` on a {t}")
         if t.kind == "vec" and isinstance(n.op, ast.USub):
             return f"{self.rt('vneg')}({self.e(n.operand)})"
         if t.known and not t.is_numeric:
@@ -983,9 +1049,13 @@ class _Module:
     def compare(self, op: ast.cmpop, ln: ast.expr, rn: ast.expr, a: str, b: str, n) -> str:
         lt, rt_ = self.ty(ln), self.ty(rn)
         if not isinstance(op, (ast.In, ast.NotIn)) and any(
-            m.kind == "vec" for m in lt.members + rt_.members
+            m.kind in ("vec", "nd") for m in lt.members + rt_.members
         ):
-            self.fail(n, "comparing numpy arrays, which numpy does item by item,")
+            d = nd_compare_dtype(lt, rt_) if type(op) in ND_COMPARE else None
+            if d is None or len(n.ops) > 1:
+                self.fail(n, f"`{ast.unparse(n)}` on a {lt} and a {rt_}")
+            return f'{self.rt("nd." + ND_COMPARE[type(op)])}({a}, {b}, "{d}")'
+
         if isinstance(op, (ast.Is, ast.IsNot)):
             if not (lt.all("none") or rt_.all("none")):
                 self.fail(n, "`is` against anything but None")
@@ -1178,6 +1248,8 @@ class _Module:
                 if n.keywords and len(sigs) > 1:
                     self.fail(n, f"keyword arguments to .{f.attr}(), whose classes differ in it,")
                 return self.place(n, methods[0], f"{self.e(f.value)}.{f.attr}", skip=1)
+            if f.attr == "tolist" and not (n.args or n.keywords) and is_array(self.ty(f.value)):
+                return f"{self.rt('nd.tolist')}({self.e(f.value)})"
             method = self.method(n, f)
             if method is not None:
                 return method
@@ -1189,11 +1261,22 @@ class _Module:
         """A call into math or numpy."""
         what = f"{ast.unparse(n.func)}()"
         args, kw = n.args, {k.arg for k in n.keywords}
+        if name in ("numpy.ones", "numpy.full") or (
+            name == "numpy.zeros" and self.ty(n).kind != "vec"
+        ):
+            return self.nd_full(name, n, what)
+        if name == "numpy.arange" and self.ty(n).kind == "nd":
+            if kw - {"dtype"} or len(args) != 4 - len(kw):
+                self.fail(n, f"{what} with a dtype and other than start, stop and step")
+            for x in args[:3]:
+                self.numeric(n, x, what)
+            start, stop, step = (self.e(x) for x in args[:3])
+            return f'{self.rt("nd.arange")}({start}, {stop}, {step}, "{self.ty(n).dtype}")'
         if name in ("numpy.array", "numpy.zeros"):
             if kw - {"dtype"} or not 1 <= len(args) + len(kw) <= 2:
                 self.fail(n, f"this call to {what}")
             d = self.env.np_dtype(n, self.ctx)
-            if d is None:
+            if d not in ("f32", "f64"):
                 self.fail(n, f"the dtype in `{ast.unparse(n)}` (float32 and float64 are in)")
             cls = "Float32Array" if d == "f32" else "Float64Array"
             x, t = args[0], self.ty(args[0])
@@ -1235,6 +1318,25 @@ class _Module:
                 js = self.rt(js[4:])
             return f"{js}({', '.join(self.e(x) for x in args)})"
         self.fail(n, what)
+
+    def nd_full(self, name: str, n: ast.Call, what: str) -> str:
+        """np.zeros, np.ones and np.full: a float vector for an int shape, else an NdArray."""
+        args, kw = n.args, {k.arg for k in n.keywords}
+        given = 2 if name == "numpy.full" else 1
+        if kw - {"dtype"} or not given <= len(args) <= given + 1 - len(kw):
+            self.fail(n, f"this call to {what}")
+        t = self.ty(n)
+        if t.kind not in ("vec", "nd"):
+            self.fail(
+                n,
+                f"`{ast.unparse(n)}`, whose shape is not an int or a tuple of ints or whose dtype "
+                "is not among float32, float64, bool_ and int32,",
+            )
+        fill = self.e(args[1]) if name == "numpy.full" else "1" if name == "numpy.ones" else "0"
+        if t.kind == "vec":
+            cls = "Float32Array" if t.dtype == "f32" else "Float64Array"
+            return f"new {cls}({self.e(args[0])}).fill({fill})"
+        return f'{self.rt("nd.full")}({self.e(args[0])}, {fill}, "{t.dtype}")'
 
     def method(self, n: ast.Call, f: ast.Attribute) -> str | None:
         """A method call on a typed builtin value; None for an app object's method."""
@@ -1303,9 +1405,7 @@ class _Module:
     def set_method(self, n: ast.Call, f: ast.Attribute, obj: str, args: list[str]) -> str:
         """add, discard, remove, clear and update, each None as in Python. A JS Set compares
         items by identity, so an item that is not a str, number, bool or None is refused."""
-        items = (
-            [elem(self.ty(a)) for a in n.args] if f.attr == "update" else map(self.ty, n.args)
-        )
+        items = [elem(self.ty(a)) for a in n.args] if f.attr == "update" else map(self.ty, n.args)
         for it in items:
             if it.known and not it.is_scalar:
                 self.fail(n, f"`{ast.unparse(n)}`, .{f.attr}() of a {it},")
@@ -1401,6 +1501,8 @@ class _Module:
             return self.test(x)
         if name in ("any", "all"):
             return f"{self.rt(name + '_')}({self.e(x)})"
+        if name == "abs" and t.kind == "nd":
+            return f"{self.rt('nd.abs')}({self.e(x)})"
         if name in ("abs", "int", "float"):
             if not t.is_numeric:
                 self.fail(

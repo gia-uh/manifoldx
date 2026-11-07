@@ -203,6 +203,140 @@ export function arange(start, stop, step = 1) {
   return out;
 }
 
+// ---------------------------------------------------------------- numpy arrays of any rank
+
+// An NdArray is a C-contiguous numpy array: data a typed array of its dtype ("f64", "f32",
+// "i32" or "bool", held as 0 and 1), shape its dimensions. A bare Float32Array or
+// Float64Array (the small vectors above) is a rank-1 array wherever $rt.nd takes an array.
+// Every operation writes a new typed array of its result's dtype, so each element rounds
+// as numpy's does; the transpiler passes the dtype numpy 2 computes in, which the page
+// cannot tell from the values (a Python 2 and 2.0 are one number here).
+const TYPED = { f64: Float64Array, f32: Float32Array, i32: Int32Array, bool: Uint8Array };
+// A value cast to a dtype, as numpy casts each operand before it computes: a Python int
+// against int32 wraps, as numpy's does.
+const CAST = { f64: Number, f32: Math.fround, i32: (x) => x | 0, bool: (x) => (x ? 1 : 0) };
+
+export class NdArray {
+  constructor(data, shape, dtype) {
+    this.data = data;
+    this.shape = shape;
+    this.dtype = dtype;
+  }
+
+  // The trace writes an array as its nested lists, as Python's json writes tolist().
+  toJSON() {
+    return tolist(this);
+  }
+}
+
+const asnd = (x) =>
+  x instanceof NdArray ? x
+  : x instanceof Float32Array ? new NdArray(x, [x.length], "f32")
+  : x instanceof Float64Array ? new NdArray(x, [x.length], "f64")
+  : x;
+
+const shapeText = (s) => `(${s.join(",")}${s.length === 1 ? "," : ""})`;
+const sizeOf = (shape) => shape.reduce((n, d) => n * d, 1);
+
+// The shape of a op b: a scalar against anything, equal shapes, or a shape against one that
+// ends with it (a (c,) row against (k, c) rows). Other shapes numpy may broadcast (a 1
+// dimension) are outside the subset and throw numpy's message too.
+function broadcast(a, b) {
+  if (!(a instanceof NdArray)) return b.shape;
+  if (!(b instanceof NdArray)) return a.shape;
+  const [long, short] = a.shape.length >= b.shape.length ? [a.shape, b.shape] : [b.shape, a.shape];
+  const tail = long.slice(long.length - short.length);
+  if (tail.some((d, i) => d !== short[i])) {
+    throw new Error(`ValueError: operands could not be broadcast together with shapes ${shapeText(a.shape)} ${shapeText(b.shape)}`);
+  }
+  return long;
+}
+
+// f over a and b broadcast, both cast to dtype; the result of dtype `out` (dtype's own when
+// null). An operand that is shorter than the result repeats, as a trailing row does.
+function binary(f, out = null, fi32 = null) {
+  return (x, y, dtype) => {
+    const a = asnd(x), b = asnd(y), cast = CAST[dtype];
+    const g = dtype === "i32" && fi32 ? fi32 : f;
+    const shape = broadcast(a, b), n = sizeOf(shape);
+    const res = new TYPED[out ?? dtype](n);
+    const A = a instanceof NdArray ? a.data : null, B = b instanceof NdArray ? b.data : null;
+    const sa = A ? null : cast(a), sb = B ? null : cast(b);
+    const na = A ? A.length : 1, nb = B ? B.length : 1;
+    for (let i = 0; i < n; i++) {
+      res[i] = g(A ? cast(A[i % na]) : sa, B ? cast(B[i % nb]) : sb);
+    }
+    return new NdArray(res, [...shape], out ?? dtype);
+  };
+}
+
+// f over each element of a, cast to dtype, into an array of dtype.
+function unary(f) {
+  return (x, dtype) => {
+    const a = asnd(x), d = dtype ?? a.dtype, cast = CAST[d];
+    const res = new TYPED[d](a.data.length);
+    for (let i = 0; i < res.length; i++) res[i] = f(cast(a.data[i]));
+    return new NdArray(res, [...a.shape], d);
+  };
+}
+
+const full = (shape, value, dtype) => {
+  const dims = typeof shape === "number" ? [shape] : [...shape];
+  return new NdArray(new TYPED[dtype](sizeOf(dims)).fill(CAST[dtype](value)), dims, dtype);
+};
+
+// np.arange with a dtype: numpy writes start and start + step cast to it, then fills
+// start + i * delta in the dtype, delta being the difference of those two.
+function ndArange(start, stop, step, dtype) {
+  if (step === 0) throw new Error("ZeroDivisionError: arange() step is zero");
+  const n = Math.max(0, Math.ceil((stop - start) / step)), cast = CAST[dtype];
+  const out = new TYPED[dtype](n);
+  if (n > 0) out[0] = cast(start);
+  if (n > 1) out[1] = cast(start + step);
+  const delta = cast(out[1] - out[0]);
+  for (let i = 2; i < n; i++) out[i] = dtype === "i32" ? out[0] + i * delta : cast(out[0] + cast(i * delta));
+  return new NdArray(out, [n], dtype);
+}
+
+// a.tolist(): nested lists of numbers, booleans for a bool array.
+function tolist(x) {
+  const a = asnd(x);
+  const item = a.dtype === "bool" ? (v) => v === 1 : Number;
+  const rows = (start, dims) => {
+    if (dims.length === 1) return Array.from(a.data.subarray(start, start + dims[0]), item);
+    const step = sizeOf(dims.slice(1));
+    return Array.from({ length: dims[0] }, (_, i) => rows(start + i * step, dims.slice(1)));
+  };
+  return rows(0, a.shape);
+}
+
+const plus = (x, y) => x + y, minus = (x, y) => x - y, times = (x, y) => x * y;
+export const nd = {
+  asnd,
+  add: binary(plus),
+  sub: binary(minus),
+  mul: binary(times, null, Math.imul),
+  div: binary((x, y) => x / y),
+  square: (a, dtype) => nd.mul(a, a, dtype),
+  sqrt: unary(Math.sqrt),
+  neg: unary((x) => -x),
+  abs: unary(Math.abs),
+  not: unary((x) => 1 - x),
+  and: binary((x, y) => x & y),
+  or: binary((x, y) => x | y),
+  lt: binary((x, y) => x < y, "bool"),
+  le: binary((x, y) => x <= y, "bool"),
+  gt: binary((x, y) => x > y, "bool"),
+  ge: binary((x, y) => x >= y, "bool"),
+  eq: binary((x, y) => x === y, "bool"),
+  ne: binary((x, y) => x !== y, "bool"),
+  zeros: (shape, dtype) => full(shape, 0, dtype),
+  ones: (shape, dtype) => full(shape, 1, dtype),
+  full,
+  arange: ndArange,
+  tolist,
+};
+
 // ---------------------------------------------------------------- objects and collections
 
 // An instance of a class with __call__: a function that carries the object, so that
