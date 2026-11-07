@@ -22,7 +22,9 @@ replays in `tests/web/` check that the page runs them as Python does:
 
 - `web_walk.py`: walk a yard in first person and pick boxes; plain Python per frame.
 - `web_crowd.py`: rings of boxes spawned, drifted, destroyed and picked by query systems;
-  the entity store in the page end to end.
+  the entity store in the page end to end. Its controls panel has a Button that throws a wave,
+  a gravity Slider (the arrow keys step it once clicked), a spin Toggle, a wind Joystick and a
+  compass Image, each with a handler of its event.
 
 ```bash
 uv run manifoldx export --web examples/web_crowd.py out/ && cd out && python -m http.server 8000
