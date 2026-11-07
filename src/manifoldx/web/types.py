@@ -13,6 +13,7 @@ joined at call sites (`solve`).
 from __future__ import annotations
 
 import ast
+import fnmatch
 import sys
 import types
 from dataclasses import dataclass, field
@@ -678,6 +679,13 @@ _PANEL, _TEXT, _VALUE_DISPLAY = (
     "manifoldx.gui.Text",
     "manifoldx.gui.ValueDisplay",
 )
+_BUTTON, _SLIDER, _TOGGLE, _JOYSTICK, _IMAGE = (
+    "manifoldx.gui.Button",
+    "manifoldx.gui.Slider",
+    "manifoldx.gui.Toggle",
+    "manifoldx.gui.Joystick",
+    "manifoldx.gui.Image",
+)
 RUNTIME_SURFACE = {
     "manifoldx.Engine": {
         "input": obj(_INPUT),
@@ -762,6 +770,34 @@ RUNTIME_SURFACE = {
     _PANEL: {"offset": tuple_of(NUM, NUM), "style_overrides": dict_of(STR, UNKNOWN)},
     _TEXT: {"text": STR, "style_overrides": dict_of(STR, UNKNOWN)},
     _VALUE_DISPLAY: {"style_overrides": dict_of(STR, UNKNOWN)},
+    # The interactive widgets, whose state the runtime's port of their code keeps
+    # (js/manifoldx.js's GuiBridge and WIDGET_HOOKS); was_clicked consumes the Button's latch.
+    _BUTTON: {
+        "name": STR,
+        "label": STR,
+        "was_clicked": fn(f"{_BUTTON}.was_clicked", BOOL),
+        "style_overrides": dict_of(STR, UNKNOWN),
+    },
+    _SLIDER: {
+        "name": STR,
+        "value": NUM,
+        "min": NUM,
+        "max": NUM,
+        "label": union(STR, NONE),
+        "style_overrides": dict_of(STR, UNKNOWN),
+    },
+    _TOGGLE: {
+        "name": STR,
+        "value": BOOL,
+        "label": STR,
+        "style_overrides": dict_of(STR, UNKNOWN),
+    },
+    _JOYSTICK: {
+        "name": STR,
+        "value": tuple_of(NUM, NUM),
+        "style_overrides": dict_of(STR, UNKNOWN),
+    },
+    _IMAGE: {"style_overrides": dict_of(STR, UNKNOWN)},
     # A random.Random made at setup: pyrt's Random draws as CPython's (choice types as the
     # element of its argument, TypeEnv.call).
     RANDOM.name: {m: fn(f"{RANDOM.name}.{m}", t) for m, t in RANDOM_METHODS.items()},
@@ -778,7 +814,25 @@ EVENT_PAYLOADS = {
     "pointer_move": obj(_POINTER_EVENT),
     "wheel": obj(_WHEEL_EVENT),
     "resize": obj(_RESIZE_EVENT),
+    # The widgets' events, by pattern (event_payload matches them).
+    "gui:button:*:click": dict_of(STR, UNKNOWN),
+    "gui:slider:*:change": dict_of(STR, NUM),
+    "gui:slider:*:commit": dict_of(STR, NUM),
+    "gui:toggle:*:change": dict_of(STR, BOOL),
+    "gui:joystick:*:change": dict_of(STR, tuple_of(NUM, NUM)),
 }
+
+
+def event_payload(event: str) -> Ty | None:
+    """The payload type of a handler of event: its EVENT_PAYLOADS entry, by name or pattern
+    (a widget's event, "gui:slider:speed:change"), or None for an app's own event."""
+    if event in EVENT_PAYLOADS:
+        return EVENT_PAYLOADS[event]
+    for pattern, t in EVENT_PAYLOADS.items():
+        if "*" in pattern and fnmatch.fnmatchcase(event, pattern):
+            return t
+    return None
+
 
 # The fields of manifoldx objects reached code may write: those the page applies each frame
 # (gui.js's sync for the widgets, scene.js's sync for the camera). A write of any other field
@@ -789,6 +843,11 @@ WRITABLE = {
     _PANEL: {"offset", "style_overrides"},
     _TEXT: {"text", "style_overrides"},
     _VALUE_DISPLAY: {"style_overrides"},
+    _BUTTON: {"label", "style_overrides"},
+    _SLIDER: {"value", "min", "max", "style_overrides"},
+    _TOGGLE: {"value", "style_overrides"},
+    _JOYSTICK: {"value", "style_overrides"},
+    _IMAGE: {"style_overrides"},
 }
 
 # The runtime-surface functions that take keywords, and which: the call passes them as a final
@@ -806,6 +865,11 @@ RUNTIME_NAMES = {
     _PANEL: "a Panel",
     _TEXT: "a Text",
     _VALUE_DISPLAY: "a ValueDisplay",
+    _BUTTON: "a Button",
+    _SLIDER: "a Slider",
+    _TOGGLE: "a Toggle",
+    _JOYSTICK: "a Joystick",
+    _IMAGE: "an Image",
     _KEY_EVENT: "a KeyEvent",
     _POINTER_EVENT: "a PointerEvent",
     _WHEEL_EVENT: "a WheelEvent",

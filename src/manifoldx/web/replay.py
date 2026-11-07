@@ -19,10 +19,15 @@ they came, the page's input events with the fields of the desktop's classes,
     ["wheel", {"dx", "dy", "x", "y", "buttons", "modifiers"}]
     ["resize", {"width", "height", "pixel_ratio"}]
 
-delivered as KeyEvent, PointerEvent, WheelEvent and ResizeEvent (event_of), and any other event
-with its JSON payload. "clock", optional, is the wall clock the page read for the frame, in
-seconds since the epoch: time.time() in frame code returns it (0.0 when the frame has none). Each side reads one frame, delivers the event queue, then runs the app's
-systems once with a fixed dt and traces:
+and a pointer event the page routed to a widget also has "gui": [widget, fx, fy], the widget's
+index in state.json's gui and the pointer's place in its box as fractions of its width and
+height; the GUI bridge then dispatches to that widget (_routed). They are delivered as
+KeyEvent, PointerEvent, WheelEvent and ResizeEvent (event_of), and any other event with its
+JSON payload. "clock", optional, is the wall clock the page read for the frame, in seconds
+since the epoch: time.time() in frame code returns it (0.0 when the frame has none).
+
+Each side reads one frame, delivers the event queue, then runs the app's systems once with a
+fixed dt and traces:
 
     {"camera": {"position", "target"}, "gui": [str], "log": [...], "state": engine.state,
      "paths": {path: value}, "store": store_trace(engine.store), "events": [name]}
@@ -52,11 +57,12 @@ import os
 import subprocess
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
+from manifoldx.gui.layout import LayoutBox
 from manifoldx.input import KeyEvent, PointerEvent, ResizeEvent, WheelEvent, _key_name
 
 DT = 1 / 60
@@ -170,6 +176,7 @@ def replay_python(
     with app_args as its sys.argv[1:] (give the export's, so both take the same branch), then
     run through frames: one trace entry per frame, as JSON reads it back."""
     from .export import _as_main, _sources, capture_engine
+    from .gui import widget_list
     from .reach import find_roots
     from .snapshot import snapshot
     from .transpile import reach_app
@@ -208,6 +215,11 @@ def replay_python(
             deliver(engine, event, payload)
 
         bus._deliver = recorded_delivery
+        # The page's DOM is the GUI's hit test: a pointer event it routed to a widget carries
+        # "gui": [widget, fx, fy], and the desktop's bridge reads that in place of its own.
+        widgets = widget_list(engine)
+        routes: dict[int, tuple] = {}
+        engine._gui_bridge._locate = _routed(engine, routes)
         trace = []
         for i, frame in enumerate(frames):
             start = len(log)
@@ -220,8 +232,13 @@ def replay_python(
                 if i > 0:
                     engine.elapsed += dt
                 engine._gui_bridge.begin_frame()
+                routes.clear()  # each frame's events are delivered in that frame
                 for name, payload in frame.get("events", ()):
-                    engine.emit(name, event_of(name, payload))
+                    ev = event_of(name, payload)
+                    if name in POINTER_EVENTS and "gui" in payload:
+                        i, fx, fy = payload["gui"]
+                        routes[id(ev)] = (widgets[i], fx, fy)
+                    engine.emit(name, ev)
                 payload = {"dt": dt, "elapsed": engine.elapsed, "frame": engine._frame_index}
                 bus._pending.insert(0, ("frame", payload))
                 bus.dispatch_pending(engine)
@@ -253,6 +270,24 @@ def _clock(seconds: float):
         yield
     finally:
         time.time = real
+
+
+UNIT = LayoutBox(0.0, 0.0, 1.0, 1.0)
+
+
+def _routed(engine, routes: dict[int, tuple]):
+    """engine._gui_bridge._locate for a replay: an event in routes (by id, as the replay
+    emitted it) is at (fx, fy) in its widget's box, which is the unit box; any other is on no
+    widget. The rest of the bridge and the widgets' code runs as on the desktop."""
+
+    def locate(ev):
+        hit = routes.pop(id(ev), None)
+        if hit is None:
+            return ev, None
+        widget, fx, fy = hit
+        return replace(ev, x=fx, y=fy), (widget, UNIT)
+
+    return locate
 
 
 KEY_EVENTS = ("key_down", "key_up")

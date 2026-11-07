@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from manifoldx.gltf.engine_export import _internal, _label, _widgets
 
 from .types import (
-    EVENT_PAYLOADS,
     NEVER,
     NUM,
     RANDOM,
@@ -30,6 +29,7 @@ from .types import (
     LiveTypes,
     TranspileError,
     TypeEnv,
+    event_payload,
     is_material,
     key_label,
     module_path,
@@ -266,8 +266,9 @@ class Reach:
             and not info.declared[positional[0]].known
         ):
             p = positional[0]
-            if r.event in EVENT_PAYLOADS:
-                info.declared[p] = EVENT_PAYLOADS[r.event]
+            payload = event_payload(r.event)
+            if payload is not None:
+                info.declared[p] = payload
             elif not any(
                 a.arg == p and a.annotation
                 for a in info.node.args.posonlyargs + info.node.args.args
