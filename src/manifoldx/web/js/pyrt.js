@@ -231,6 +231,17 @@ export function hasattr_(x, name) {
 export const isinstance_ = (x, classes) => classes.some((c) => x instanceof c);
 
 export const dget = (d, k, dflt = null) => (d.has(k) ? d.get(k) : dflt);
+// set.remove and set.update, None as in Python; remove of a missing item is a KeyError.
+export function sremove(s, x) {
+  if (!s.has(x)) throw new Error(`KeyError: '${x}'`);
+  s.delete(x);
+  return null;
+}
+export function supdate(s, ...iterables) {
+  for (const it of iterables) for (const x of it) s.add(x);
+  return null;
+}
+
 export const dsetdefault = (d, k, dflt = null) => (d.has(k) ? d.get(k) : (d.set(k, dflt), dflt));
 
 // What next() of an exhausted generator gives: its default, or StopIteration.

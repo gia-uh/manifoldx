@@ -1273,7 +1273,31 @@ class _Module:
                 return f"{obj}.push(...{self.iterable(n.args[0])})"
             if f.attr == "insert" and len(args) == 2:
                 return f"{obj}.splice({args[0]}, 0, {args[1]})"
+        if t.all("set"):
+            return self.set_method(n, f, obj, args)
         self.fail(n, f"the method {t}.{f.attr}()")
+
+    def set_method(self, n: ast.Call, f: ast.Attribute, obj: str, args: list[str]) -> str:
+        """add, discard, remove, clear and update, each None as in Python. A JS Set compares
+        items by identity, so an item that is not a str, number, bool or None is refused."""
+        items = (
+            [elem(self.ty(a)) for a in n.args] if f.attr == "update" else map(self.ty, n.args)
+        )
+        for it in items:
+            if it.known and not it.is_scalar:
+                self.fail(n, f"`{ast.unparse(n)}`, .{f.attr}() of a {it},")
+        if f.attr == "add" and len(args) == 1:
+            return f"({obj}.add({args[0]}), null)"
+        if f.attr == "discard" and len(args) == 1:
+            return f"({obj}.delete({args[0]}), null)"
+        if f.attr == "remove" and len(args) == 1:
+            return f"{self.rt('sremove')}({obj}, {args[0]})"
+        if f.attr == "clear" and not args:
+            return f"({obj}.clear(), null)"
+        if f.attr == "update":
+            its = ", ".join(self.iterable(a) for a in n.args)
+            return f"{self.rt('supdate')}({obj}{', ' if its else ''}{its})"
+        self.fail(n, f"the method {self.ty(f.value)}.{f.attr}()")
 
     def place(self, n: ast.Call, info: FuncInfo, callee: str, skip: int = 0) -> str:
         """Arguments placed by the callee's signature; keywords become positions. `skip`

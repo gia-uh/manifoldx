@@ -1069,6 +1069,8 @@ class TypeEnv:
                 return elem(recv)
             if recv.all("list") and f.attr in ("append", "extend", "insert"):
                 return NONE
+            if recv.all("set") and f.attr in ("add", "discard", "remove", "clear", "update"):
+                return NONE
             if recv.all("dict"):
                 k, v = (union(*(m.args[i] for m in recv.members)) for i in (0, 1))
                 if f.attr in ("get", "setdefault"):
@@ -1404,7 +1406,7 @@ class TypeEnv:
         return (info.locals, info.returns, dict(cls.fields) if cls else None) != before
 
     def _mutation(self, call: ast.Call, ctx: Ctx, assign) -> None:
-        """`xs.append(v)` widens a local list's element type to v's."""
+        """`xs.append(v)` widens a local list's element type to v's, `s.add(v)` a set's."""
         f = call.func
         if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and call.args:
             name = f.value.id
@@ -1413,6 +1415,10 @@ class TypeEnv:
                 assign({name: list_of(self.expr(call.args[-1], ctx))})
             elif recv.all("list") and f.attr == "extend":
                 assign({name: list_of(elem(self.expr(call.args[0], ctx)))})
+            elif recv.all("set") and f.attr == "add":
+                assign({name: set_of(self.expr(call.args[0], ctx))})
+            elif recv.all("set") and f.attr == "update":
+                assign({name: set_of(union(*(elem(self.expr(a, ctx)) for a in call.args)))})
 
 
 def _is_ellipsis(n: ast.expr) -> bool:
