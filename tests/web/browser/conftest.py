@@ -9,6 +9,8 @@ pages get FAKE_LOCK, an init script that keeps the lock in a field of the docume
 whether each request came with a user activation. The result is printed at the end of the run.
 """
 
+import json
+import signal
 import socket
 import subprocess
 import sys
@@ -202,3 +204,43 @@ def open_page(chromium, fake_lock):
     yield open_
     for ctx in contexts:
         ctx.close()
+
+
+@pytest.fixture
+def run_web():
+    """run_web(app) -> the URL of `manifoldx run --web` of the script app (a path in a tmp_path
+    folder), run in its folder on a free port. The URL is read from .manifoldx/server.json; the
+    server's stderr goes to .manifoldx/run.err beside it. Each server is stopped by its PID."""
+    procs = []
+
+    def start(app: Path) -> str:
+        cli = Path(sys.executable).parent / "manifoldx"
+        folder = app.parent / ".manifoldx"
+        folder.mkdir(exist_ok=True)
+        err = (folder / "run.err").open("w")
+        proc = subprocess.Popen(
+            [str(cli), "run", "--web", "--port", "0", app.name],
+            cwd=app.parent,
+            stdout=subprocess.DEVNULL,
+            stderr=err,
+        )
+        procs.append(proc)
+        server = folder / "server.json"
+        for _ in range(600):
+            if server.exists():
+                return json.loads(server.read_text())["url"] + "/"
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"run --web exited with {proc.returncode}:\n{(folder / 'run.err').read_text()}"
+                )
+            time.sleep(0.05)
+        raise RuntimeError(f"run --web did not start:\n{(folder / 'run.err').read_text()}")
+
+    yield start
+    for proc in procs:
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)

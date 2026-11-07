@@ -1,7 +1,8 @@
 """An orbit camera for the dev loop of manifoldx run --web: its yaw, pitch and dist live in
 engine.state.cam, so a save keeps the view. A and D turn it, the bump event turns it too, the
-box's colour is a constant to edit, and the panel shows SPEED. ("cache", 1) holds what cannot
-cross to the browser, as a texture cache would."""
+box's colour is a constant to edit, H paints the box with LIT at runtime, a click captures the
+pointer, and the panel shows SPEED. ("cache", 1) holds what cannot cross to the browser, as a
+texture cache would."""
 
 import math
 
@@ -18,7 +19,8 @@ engine = mx.Engine("Dev orbit", width=320, height=200)
 engine.state.setdefault("cam", {"yaw": 0.0, "pitch": 0.3, "dist": 6.0})
 engine.state.setdefault(("cache", 1), np.zeros((4, 4)))
 
-engine.spawn(
+LIT = mx.material.phong("#f2c14e")
+CUBE = engine.spawn(
     Mesh(mx.geometry.cube(1, 1, 1)), Material(mx.material.phong(BOX)), Transform(pos=(0, 0, 0))
 )
 
@@ -39,6 +41,10 @@ def orbit(query, dt: float):
     turn = float(engine.input.is_pressed("d")) - float(engine.input.is_pressed("a"))
     yaw: float = engine.state.cam["yaw"]
     engine.state.cam["yaw"] = yaw + turn * SPEED * dt
+    if engine.input.just_pressed("h"):
+        engine.set_material(CUBE, LIT)
+    if engine.input.just_mouse_pressed(1):
+        engine.input.capture_pointer(True)
     place_camera(engine.camera)
 
 
