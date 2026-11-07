@@ -97,3 +97,5 @@ jobs:
           set -o pipefail
           uv run pytest tests/web/browser -v --tb=short -rs | tee browser-tests.log
           if grep -q SKIPPED browser-tests.log; then echo "browser tests skipped on CI"; exit 1; fi
+          # run --web drives the real CLI, the manifoldx script beside sys.executable.
+          if ! grep -q "test_run_web.py::.* PASSED" browser-tests.log; then echo "test_run_web.py did not run"; exit 1; fi

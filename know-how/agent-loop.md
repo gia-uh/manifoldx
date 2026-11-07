@@ -1,6 +1,6 @@
 ---
 when: building or debugging an app, game or simulation together with an agent; using `manifoldx look`, `state`, `set`, `emit`, `events` or `log`; giving an app events an agent can fire; following a person who plays
-triggers: ["agent", "--debug", "metrics", "fps", "frame rate", "memory", "gc", "dev server", "dev page", "manifoldx look", "manifoldx state", "manifoldx set", "manifoldx emit", "manifoldx events", "manifoldx log", "engine.log", "/api/state", "/api/events", "/api/log", "monitor", "follow the player"]
+triggers: ["agent", "run --web", "tab: ", "--debug", "metrics", "fps", "frame rate", "memory", "gc", "dev server", "dev page", "manifoldx look", "manifoldx state", "manifoldx set", "manifoldx emit", "manifoldx events", "manifoldx log", "engine.log", "/api/state", "/api/events", "/api/log", "monitor", "follow the player"]
 ---
 
 # Working with an agent: the dev server of `manifoldx run`
@@ -51,6 +51,28 @@ Plain `manifoldx run` keeps the dev server light: the log has only the runner's 
 A slow frame line says only how long; log where the person was from the app (`engine.log`) so the two lines meet in the log. To find what makes frames slow, watch for them: `manifoldx log --match 'slow frame' --wait 120`, then `manifoldx log -n 20` for what happened around them.
 
 **A look costs a little, so ask for one when you need it.** The frame that takes it only queues a copy; the next frame reads it back and a thread encodes the PNG, but each look still costs a GPU copy and a readback. The page's "live frame" box (off by default) asks for one every 1.5 s.
+
+## Against a tab: `manifoldx run --web`
+
+Under `manifoldx run --web` (`know-how/web-export.md`, "While you edit") the app runs in a browser tab, the app's page is `/` and the dev page moves to `/dev`. The same commands work, and the server forwards them to the tab:
+
+- `look` is the tab's frame with the GUI painted over it (the HTML panels' backgrounds and text, drawn into the PNG at the drawing buffer's size), also while the tab is paused or reloading.
+- `state`, `set` and `emit` act on the tab's `engine.state` and handlers; emitted events run at the start of the tab's next frame. `events` answers from the Python engine (the handlers' docstrings are there), without `startup`, `shutdown` and manifoldx's own GUI handlers, which the tab does not run.
+- `log` holds the runner's lines, the app's `engine.log` lines from frame code, and the tab's console warnings and errors, uncaught errors and unhandled rejections with the prefix `tab: `, sent every 250 ms.
+- `metrics` does not exist (404 `metrics are not measured under --web`), and `--debug` is refused.
+
+With no tab open, the forwarded requests answer 503 `no tab is open: open http://127.0.0.1:8770/`; open the URL first (a Playwright page counts). With several tabs open, the one that connected last answers; when it closes, the one before it takes over within 0.25 s. A tab that takes more than 5 s gives 504 `the tab did not answer`, and a tab that fails gives 500 with its error.
+
+The log lines a reload writes, which `manifoldx log --match` can wait on:
+
+```text
+reloaded v4 in 2.41 s (state 0.02, setup 0.08, startup 0.97, reach 0.95, snapshot 0.09, transpile 0.03, gui 0.00, scene kept 0.05, write 0.04)
+tab: v4 in 84 ms (scene kept)
+reload failed, kept v3: app.py:12: SyntaxError: '(' was never closed
+paused until the next edit: app.py:26 in tick: TypeError: Cannot read properties of null (reading 'x')
+```
+
+The first line is Python's rebuild, by phase (`scene new` in place of `scene kept` when the scene's hash changed; `, reason tab` when a newly opened tab with a newer state caused it), the second the tab's swap. Save to swap is about the two summed plus up to 0.25 s for the poll. A frame error pauses the tab until the next edit and names the Python file, line and function.
 
 ## Writing an app an agent can drive
 

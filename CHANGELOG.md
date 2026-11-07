@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`manifoldx run --web [-m module | app.py] [--port N]`: the dev loop in a browser tab.**
+  It serves the app's page on 127.0.0.1 (the app at `/`, the dev page at `/dev`), and on
+  every save reruns setup in Python, exports again and pushes the new version over
+  Server-Sent Events; the tab loads the new modules and snapshot in place, without a page
+  reload. `engine.state` survives as plain data sent back from the tab (keys holding app
+  objects, handles or functions keep Python's value), the three.js scene is kept when its
+  hash is unchanged, and the pointer lock and held keys survive. The tab freezes while the
+  reload builds, and a tab opened later gets a rebuild with the last state any tab sent.
+  Versions live under `.manifoldx/web/` beside static files written once; the glb is written
+  only when its hash is new. Each reload logs its time by phase. `--debug` is refused.
+  `manifoldx.web.export.build_export` builds an export in memory, which `export --web` and
+  `run --web` both write (#140).
+
+- **The dev overlay of `run --web`.** A status line at the bottom right says `v3 · live`,
+  `v4 · reloading`, `v3 · reload failed, running v3`, `v3 · paused until the next edit` or
+  `v3 · dev server gone, retrying`; an edit that fails to load or transpile keeps the
+  running version and shows its Python file and line, and an exception in a frame pauses
+  the tab until the next save, as on the desktop (#140).
+
+- **`manifoldx look`, `state`, `set`, `emit`, `events` and `log` against the tab.** Under
+  `run --web` the dev server forwards them to the tab that connected last: `look` is the
+  WebGL frame with the HTML GUI painted over it, `emit` fires the app's handlers at the
+  start of the tab's next frame, and the log takes the tab's console warnings and errors as
+  `tab: ` lines. With no tab open they answer 503; `events` answers from Python and
+  `metrics` does not exist under `--web` (#140).
+
+- **`engine.log(text)` in the web subset.** Frame code may log: under `run --web` the line
+  reaches the dev server's log, an exported page drops it, and a replay in Node collects it
+  in `engine.lines`. The runtime's record of engine calls is now `engine.calls`; the trace's
+  JSON key stays `log` (#140).
+
 - **`manifoldx export --web` writes a browser page.** Serve the folder over HTTP and open
   `index.html`: the app's systems run every animation frame on the browser's input, built
   into the replay's frame form (releases, pointer position, wheel and modifiers included),
@@ -296,6 +327,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   50 s to 0.7 s, with flat memory (#85).
 
 ### Fixed
+
+- **export --web: handlers and systems registered with decorators export.**
+  `@engine.on("name")` and `@engine.system` on a module function, `engine` a module global
+  holding the Engine, export as the call forms `engine.on("name")(fn)` and
+  `engine.system(fn)` do, where they failed with "the decorator ... is outside the subset".
+  Any other decorator still fails the export (#157).
 
 - **export --web: a widget field that reached code writes reaches the page.** A Panel's
   `offset`, a Text's `text` and any widget's `style_overrides` written every frame move,

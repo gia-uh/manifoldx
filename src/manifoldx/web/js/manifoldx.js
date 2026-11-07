@@ -199,6 +199,12 @@ export class ScriptInput {
   lockLost() {
     this._captured = false;
   }
+
+  // The pointer is still locked from the version before this one (manifoldx run --web swapped
+  // versions under the lock): pointer_captured reads true, as it did.
+  lockHeld() {
+    this._captured = true;
+  }
 }
 
 // engine.camera: position, target and up are float32, as manifoldx.camera.Camera holds
@@ -223,21 +229,27 @@ export class Camera {
   }
 }
 
-// createEngine({w, h, camera: {position, target, fov, up, near, far}, gui, materials, log,
+// createEngine({w, h, camera: {position, target, fov, up, near, far}, gui, materials, calls,
 // state, hooks}): the engine object transpiled code reaches. gui is state.json's "gui": each
 // widget it names becomes engine.gui.widgets[n] with the fields reached code may write (a
 // Panel's offset, a Text's text, every widget's style_overrides), which the page applies. materials maps a material id to the
-// renderer's material (none, headless); log receives ["material", entity, material_id] and
-// ["capture", on] as reached code asks for them, the trace's record; state is engine.state, a
-// Map as every dict. hooks are where the browser acts, both optional:
-// setMaterial(entityIndex, materialId) after the log, and capture(on) -> boolean, whether the
-// capture took (headless: a no-op and () => true). resolve(kind, value) is loadState's
+// renderer's material (none, headless); calls receives ["material", entity, material_id] and
+// ["capture", on] as reached code asks for them, the trace's record (its "log"); state is
+// engine.state, a Map as every dict. hooks are where the browser acts, all optional:
+// setMaterial(entityIndex, materialId) after the record, capture(on) -> boolean, whether the
+// capture took (headless: a no-op and () => true), and log(text), where engine.log(text)
+// sends the app's lines (headless: they collect in engine.lines). resolve(kind, value) is loadState's
 // resolver for this engine.
-export function createEngine({ w, h, camera, gui = null, materials = {}, log = [], state = new Map(), hooks = {} }) {
-  const { setMaterial = () => {}, capture = () => true } = hooks;
-  const engine = { w, h, state, log };
+export function createEngine({ w, h, camera, gui = null, materials = {}, calls = [], state = new Map(), hooks = {} }) {
+  const { setMaterial = () => {}, capture = () => true, log = null } = hooks;
+  const engine = { w, h, state, calls, lines: [] };
+  engine.log = (text) => {
+    const line = typeof text === "string" ? text : str_(text);
+    if (log) log(line);
+    else engine.lines.push(line);
+  };
   engine.input = new ScriptInput((nw, nh) => { engine.w = nw; engine.h = nh; });
-  engine.input._log = log;
+  engine.input._log = calls;
   engine.input._capture = capture;
   engine.input._viewport = [w, h];
   engine.camera = new Camera(camera);
@@ -246,7 +258,7 @@ export function createEngine({ w, h, camera, gui = null, materials = {}, log = [
   const entities = new Map(), mats = new Map();
   engine.set_material = (entity, material) => {
     const index = typeof entity === "number" ? entity : entity.index;
-    log.push(["material", index, material.id]);
+    calls.push(["material", index, material.id]);
     setMaterial(index, material.id);
   };
   engine.resolve = (kind, value) => {
@@ -294,6 +306,12 @@ export function step(app, dt) {
   for (const r of app.roots) if (r.kind === "system") r.fn(null, dt);
 }
 
+// An event, as engine.emit delivers it: every handler root of that event, in the order the
+// app registered them, called with the payload (runtime values: a dict is a Map).
+export function fire(app, event, payload) {
+  for (const r of app.roots) if (r.kind === "handler" && r.event === event) r.fn(payload);
+}
+
 // What each ValueDisplay shows: its getter's value, as str() makes it.
 export function guiValues(app) {
   return app.roots
@@ -337,16 +355,105 @@ export function pathValue(app, path) {
 }
 
 // The trace entry of the frame just run, as plain JSON values (the form is
-// manifoldx.web.replay's): {camera, gui, log, state, paths}, log being what the engine's log
+// manifoldx.web.replay's): {camera, gui, log, state, paths}, log being what engine.calls
 // gained since logStart.
 export function traceEntry(app, paths, logStart) {
   const { engine } = app;
   const entry = {
     camera: { position: engine.camera.position, target: engine.camera.target },
     gui: guiValues(app),
-    log: engine.log.slice(logStart),
+    log: engine.calls.slice(logStart),
     state: engine.state,
     paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
   };
   return JSON.parse(toJSON(entry));
+}
+
+// ---------------------------------------------------------------- the state, both ways
+
+// A number as the snapshot writes it: NaN and the infinities as {"__float": ...}.
+const number = (x) =>
+  Number.isNaN(x) ? { __float: "nan" } : x === Infinity ? { __float: "inf" } : x === -Infinity ? { __float: "-inf" } : x;
+
+// A handle's name, as the desktop's repr fallback shows it; null when v is not a handle.
+function handleName(v) {
+  if (v instanceof Camera) return "<camera>";
+  if (v instanceof ScriptInput) return "<input>";
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return null;
+  if ("resolve" in v) return "<engine>";
+  if ("pointer_over_gui" in v) return "<gui>";
+  if ("style_overrides" in v) return `<widget ${v.index}>`;
+  if ("id" in v) return `<material ${v.id}>`;
+  if ("index" in v) return `<entity ${v.index}>`;
+  return "<an object>";
+}
+
+// encodeState(value): engine.state (a Map) as the snapshot's value forms, in plain JSON, for
+// Python to decode: {"__dict": [[k, v], ...]}, {"__set": [...]}, {"__f32": [...]},
+// {"__f64": [...]}, {"__float": ...}, arrays as arrays. What is not plain data (an object of a
+// transpiled class, a handle, a function, a cycle) is {"__skip": what}.
+export function encodeState(value) {
+  const path = new Set(); // the containers above the value being written
+  const enc = (v) => {
+    if (typeof v === "number") return number(v);
+    if (v === null || v === undefined) return null;
+    if (typeof v === "function") return { __skip: "a function" };
+    if (typeof v !== "object") return v;
+    if (path.has(v)) return { __skip: "a cycle" };
+    if (v instanceof Float32Array) return { __f32: Array.from(v, number) };
+    if (v instanceof Float64Array) return { __f64: Array.from(v, number) };
+    const inside = (f) => {
+      path.add(v);
+      try {
+        return f();
+      } finally {
+        path.delete(v);
+      }
+    };
+    if (v instanceof Map) return inside(() => ({ __dict: [...v].map(([k, x]) => [k, enc(x)]) }));
+    if (v instanceof Set) return inside(() => ({ __set: [...v].map(enc) }));
+    if (Array.isArray(v)) return inside(() => v.map(enc));
+    const handle = handleName(v);
+    if (handle !== null) return { __skip: handle };
+    return { __skip: `an object of ${Object.getPrototypeOf(v).constructor.name}` };
+  };
+  return enc(value);
+}
+
+// fromJSON(value): a JSON value (an agent's patch or event payload) as runtime values: every
+// object a Map, recursively.
+export function fromJSON(value) {
+  if (Array.isArray(value)) return value.map(fromJSON);
+  if (value === null || typeof value !== "object") return value;
+  return new Map(Object.entries(value).map(([k, v]) => [k, fromJSON(v)]));
+}
+
+// mergePatch(target, patch): RFC 7386 merge patch on Maps, the patch through fromJSON first: a
+// Map merges key by key (in place when the target is a Map), null deletes, anything else
+// replaces. Returns the merged value.
+export function mergePatch(target, patch) {
+  if (!(patch instanceof Map)) return patch;
+  const out = target instanceof Map ? target : new Map();
+  for (const [k, v] of patch) {
+    if (v === null) out.delete(k);
+    else out.set(k, mergePatch(out.get(k), v));
+  }
+  return out;
+}
+
+// stateView(value): engine.state as GET /api/state shows it, plain JSON: a Map as an object,
+// typed arrays and Sets as arrays, what encodeState skips as its what string.
+export function stateView(value) {
+  const view = (v) => {
+    if (v === null || typeof v !== "object") return v;
+    if ("__skip" in v) return v.__skip;
+    if ("__float" in v) return FLOATS[v.__float];
+    if ("__dict" in v) return Object.fromEntries(v.__dict.map(([k, x]) => [k, view(x)]));
+    if ("__set" in v) return v.__set.map(view);
+    if ("__f32" in v) return v.__f32.map(view);
+    if ("__f64" in v) return v.__f64.map(view);
+    return v.map(view);
+  };
+  return view(encodeState(value));
 }

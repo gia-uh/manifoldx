@@ -76,6 +76,10 @@ Rules:
 
 `manifoldx run` also serves a dev page and an HTTP API on 127.0.0.1 (the frame on screen, the log, `engine.state`, the app's events), and the commands `manifoldx look`, `state`, `set`, `emit`, `events` and `log` that use them. `know-how/agent-loop.md` says how to work with them and how to write an app an agent can drive.
 
+## In the browser: `run --web`
+
+`manifoldx run --web app.py` (or `-m mygame.main`) runs the app in a browser tab instead of a window: each save reruns setup in Python, exports again and swaps the new version into the open tab without a page reload. `engine.state` survives as here, through the tab: what the tab holds comes back as plain data, and keys holding app objects, handles or functions keep Python's value. The tab freezes while the reload builds, as the window blocks here. `know-how/web-export.md` ("While you edit: `run --web`") says what a save does, what survives, the status line's texts and what `.manifoldx/web/` holds; `know-how/agent-loop.md` the commands against the tab and the reload's timing line.
+
 ## Performance
 
 Watching is cheap: one `stat` per source file every 0.25 s (about 0.4 ms for 100 files). A reload costs what the app's startup costs, minus opening the window and the GPU device; a one-cube app reloads in 25-30 ms, against about 3 s for a cold start. To keep reloads fast:

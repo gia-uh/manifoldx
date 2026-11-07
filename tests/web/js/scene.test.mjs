@@ -245,3 +245,38 @@ test("the environment: the float32 rows, zenith first, to a half-float texture w
   const texels = Array.from(tex.image.data, (h) => THREE.DataUtils.fromHalfFloat(h));
   assert.deepEqual(texels, [3, 3, 3, 1, 4, 4, 4, 1, 1, 1, 1, 1, 2, 2, 2, 1]);
 });
+
+test("resetMaterials puts the glTF's material back on every mesh, as a rebuilt scene has it", { skip }, async () => {
+  const { gltf, mx } = await webWalk();
+  const nodes = marked(gltf.scene);
+  const [box, { material }] = [...nodes].at(-1);
+  const before = mx.entities.get(box).map((m) => m.material);
+  const other = [...mx.materials.keys()].find((id) => id !== material);
+  mx.setMaterial(box, other);
+  assert.equal(mx.materialOf(box), other);
+  mx.resetMaterials();
+  assert.equal(mx.materialOf(box), material);
+  assert.deepEqual(mx.entities.get(box).map((m) => m.material), before);
+});
+
+test("dispose frees every geometry, material and texture of the scene once", { skip }, async () => {
+  const { mx } = await webWalk();
+  const freed = new Map();
+  mx.scene.traverse((o) => {
+    for (const thing of [o.geometry, ...[o.material ?? []].flat()]) {
+      if (thing && !freed.has(thing)) {
+        freed.set(thing, 0);
+        thing.dispose = () => freed.set(thing, freed.get(thing) + 1);
+      }
+    }
+  });
+  for (const m of mx.materials.values()) {
+    if (!freed.has(m)) {
+      freed.set(m, 0);
+      m.dispose = () => freed.set(m, freed.get(m) + 1);
+    }
+  }
+  mx.dispose();
+  assert.ok(freed.size > 2);
+  assert.deepEqual([...new Set(freed.values())], [1]);
+});

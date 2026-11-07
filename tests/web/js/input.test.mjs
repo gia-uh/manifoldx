@@ -206,7 +206,7 @@ test("the engine's capture_pointer goes through request: refused, the flag stays
   const engine = createEngine({ w: 800, h: 500, camera: { position: [0, 1, 2], target: [0, 0, 0] }, hooks: { capture: (on) => lock.request(on) } });
   assert.equal(engine.input.capture_pointer(true), false);
   assert.equal(engine.input.pointer_captured, false);
-  assert.deepEqual(engine.log, []);
+  assert.deepEqual(engine.calls, []);
 });
 
 test("a lock the app did not end: Escape in the next frame and pointer_captured false", () => {
@@ -257,7 +257,7 @@ test("request(false) exits only when locked, and the release it asked for is no 
   assert.equal(doc.exits, 1);
   assert.equal(lock.locked, false);
   assert.deepEqual(b.take(vp).just, []);
-  assert.deepEqual(engine.log, [["capture", false], ["capture", true], ["capture", false]]);
+  assert.deepEqual(engine.calls, [["capture", false], ["capture", true], ["capture", false]]);
 });
 
 test("request(false) disarms a pending gesture request", () => {

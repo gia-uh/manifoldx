@@ -1497,13 +1497,14 @@ class Engine:
 
         return export_engine(self, path, names=names, extras=extras, strict=strict)
 
-    def _ensure_offscreen(self, supersample: int):
+    def _ensure_offscreen(self, supersample: int, gpu=None):
+        """gpu is (adapter, device, texture_format) to reuse, as _init_canvas takes it."""
         size = (self.w * supersample, self.h * supersample)
         if self._still_size is None:
             from manifoldx.backends import get_headless_canvas
 
             self._follow_resize = False
-            self._init_canvas(get_headless_canvas(width=size[0], height=size[1]))
+            self._init_canvas(get_headless_canvas(width=size[0], height=size[1]), gpu=gpu)
             self._running = True
             self._fire_startup()
             self._settle()

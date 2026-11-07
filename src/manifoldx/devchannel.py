@@ -14,6 +14,10 @@
   garbage collections, the last METRICS_KEEP seconds. Debug also logs the keys pressed, a frame slower than
   SLOW_FRAME, a collection slower than SLOW_GC, and the metrics every METRICS_LOG seconds.
 
+Under `manifoldx run --web` the app runs in a browser tab (manifoldx.web.dev): `/` and every other path
+serve the web root, the dev page moves to `/dev`, `/api/web/*` is the tab's stream and its answers, and
+state, set, emit and look are forwarded to the tab.
+
 Everything that reads or changes the app runs on the engine's thread between frames, so a request
 never races the app. The log is also written to `.manifoldx/log.txt` (rotated at 256 KB, one old file
 kept), and `.manifoldx/server.json` holds the URL the `manifoldx` commands use.
@@ -26,6 +30,8 @@ import logging
 import os
 import queue
 import re
+import select
+import socket
 import struct
 import threading
 import time
@@ -179,7 +185,8 @@ class Meter:
 class Channel:
     """The dev channel of one `manifoldx run`: the log, the server, and the jobs the engine's thread runs."""
 
-    def __init__(self, root, hot, port=PORT, debug=False):
+    def __init__(self, root, hot, port=PORT, debug=False, web=None):
+        self.web = web  # under --web, the WebReloader: its tab runs the app
         self.dir = Path(root) / FOLDER
         self.dir.mkdir(parents=True, exist_ok=True)
         self.hot = hot  # the HotReloader: its engine is the one running now, across reloads
@@ -199,6 +206,8 @@ class Channel:
     def close(self):
         if self.meter is not None:
             self.meter.close()
+        if self.web is not None:
+            self.web.tab.close()
         self.server.shutdown()
         self.server.server_close()
         (self.dir / "server.json").unlink(missing_ok=True)
@@ -251,6 +260,39 @@ def events(engine):
             for name, handlers in sorted(engine._event_bus._handlers.items()) if handlers}
 
 
+def tab_events(engine):
+    """The events a tab can be asked to fire, as events() lists them: the app's own handlers, but
+    not startup (it ran in Python) or shutdown, and not manifoldx's (the GUI's pointer handlers),
+    which the tab does not run."""
+    return {name: [((h.func.__doc__ or "").strip().splitlines() or [""])[0] for h in app]
+            for name, handlers in sorted(engine._event_bus._handlers.items())
+            if name not in ("startup", "shutdown")
+            and (app := [h for h in handlers if not getattr(h.func, "__module__", "").startswith("manifoldx.")])}
+
+
+TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
+         ".json": "application/json", ".map": "application/json", ".glb": "model/gltf-binary",
+         ".ttf": "font/ttf"}
+KEEPALIVE = 15.0  # seconds between the comment lines that keep a tab's stream open
+
+
+class _NoTabOpen(Exception):
+    """Under --web, a request the tab answers, with no tab open."""
+
+
+class _TabError(Exception):
+    """Under --web, the tab's answer was an error."""
+
+
+def _closed(conn) -> bool:
+    """Whether the peer of a socket that sends nothing has hung up."""
+    try:
+        readable, _, _ = select.select([conn], [], [], 0)
+        return bool(readable) and conn.recv(1, socket.MSG_PEEK) == b""
+    except OSError:
+        return True
+
+
 class _Handler(BaseHTTPRequestHandler):
     channel = None  # set per server
 
@@ -273,8 +315,13 @@ class _Handler(BaseHTTPRequestHandler):
     def _answer(self, fn):
         try:
             self._send(*fn())
+        except _NoTabOpen as e:
+            self._send(503, {"error": str(e)})
+        except _TabError as e:
+            self._send(500, {"error": str(e)})
         except (FutureTimeout, TimeoutError):
-            self._send(504, {"error": "the app did not answer: is it paused on an error?"})
+            who = "the tab did not answer" if self.channel.web else "the app did not answer: is it paused on an error?"
+            self._send(504, {"error": who})
         except json.JSONDecodeError as e:
             self._send(400, {"error": f"the body is not JSON: {e}"})
         except Exception as e:  # noqa: BLE001
@@ -284,6 +331,8 @@ class _Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         q = {k: v[-1] for k, v in parse_qs(url.query).items()}
         ch = self.channel
+        if ch.web is not None:
+            return self._web_get(url, q)
         if url.path == "/":
             return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
         if url.path == "/api/state":
@@ -303,9 +352,115 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, list(ch.meter.history))
         self._send(404, {"error": f"no {url.path}"})
 
+    # -- under --web: the tab runs the app --
+
+    def _web_get(self, url, q):
+        ch, path = self.channel, url.path
+        if path == "/dev":
+            return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+        if path == "/api/web/current":
+            return self._send(200, ch.web.current)
+        if path == "/api/web/stream":
+            return self._stream(q.get("tab") or f"anon-{id(self)}")
+        if path == "/api/state":
+            return self._answer(lambda: (200, self._tab("state")))
+        if path == "/api/events":
+            return self._answer(lambda: (200, ch.on_engine(tab_events)))
+        if path == "/api/look":
+            return self._answer(lambda: (200, self._tab("look"), "image/png"))
+        if path == "/api/metrics":
+            return self._send(404, {"error": "metrics are not measured under --web"})
+        if path == "/api/log":
+            return self._answer(lambda: (200, ch.lines.read(
+                after=int(q["after"]) if "after" in q else None, match=q.get("match"),
+                wait=float(q.get("wait", 0)), last=int(q.get("last", 50)))))
+        self._file(unquote(path))
+
+    def _file(self, path):
+        root = ch_root = self.channel.web.web_root.resolve()
+        f = (root / path.lstrip("/")).resolve()
+        if f.is_dir():
+            f = f / "index.html"
+        if not f.is_relative_to(ch_root) or not f.is_file():
+            return self._send(404, {"error": f"no {path}"})
+        self._send(200, f.read_bytes(), TYPES.get(f.suffix, "application/octet-stream"))
+
+    def _tab(self, kind, body=None):
+        """Ask the answering tab and return its value; raises _NoTabOpen without a tab."""
+        from manifoldx.web.dev import NoTab
+
+        try:
+            reply = self.channel.web.tab.call(kind, body)
+        except NoTab:
+            raise _NoTabOpen(f"no tab is open: open {self.channel.url}/") from None
+        if isinstance(reply, bytes):
+            return reply
+        if not reply.get("ok"):
+            raise _TabError(reply.get("error") or "the tab failed")
+        return reply.get("value")
+
+    def _stream(self, tab_id):
+        """Server-Sent Events to one tab: the current version, then every push and every call to it."""
+        tab = self.channel.web.tab
+        q = tab.connect(tab_id)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        last = time.monotonic()
+        try:
+            while True:
+                try:
+                    msg = q.get(timeout=0.25)
+                except queue.Empty:
+                    if _closed(self.connection):
+                        return
+                    if time.monotonic() - last < KEEPALIVE:
+                        continue
+                    data = b": keep\n\n"
+                else:
+                    if msg is None:  # the server closes
+                        return
+                    data = b"data: " + json.dumps(msg, allow_nan=False).encode() + b"\n\n"
+                self.wfile.write(data)
+                self.wfile.flush()
+                last = time.monotonic()
+        except OSError:
+            pass
+        finally:
+            tab.disconnect(tab_id, q)
+
+    def _web_post(self, path):
+        tab = self.channel.web.tab
+        if path.startswith("/api/web/reply/"):
+            n = int(path.removeprefix("/api/web/reply/"))
+            if self.headers.get("Content-Type", "").startswith("image/png"):
+                payload = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            else:
+                payload = self._body()
+            return self._send(200 if tab.reply(n, payload) else 404, {})
+        if path == "/api/web/state":
+            return self._answer(lambda: (tab.beacon(self._body()), (200, {}))[1])
+        if path == "/api/web/log":
+            def log():
+                for line in self._body() or []:
+                    LOG.info("%s", line["text"])
+                return 200, {}
+            return self._answer(log)
+        return self._send(404, {"error": f"no {path}"})
+
     def do_PATCH(self):
         if urlparse(self.path).path != "/api/state":
             return self._send(404, {"error": f"no {self.path}"})
+        if self.channel.web is not None:
+            def forward():
+                body = self._body()
+                if not isinstance(body, dict):
+                    return 400, {"error": "a merge patch is a JSON object"}
+                value = self._tab("patch", body)
+                LOG.info("state patched: %s", json.dumps(body)[:200])
+                return 200, value
+            return self._answer(forward)
 
         def patch():
             body = self._body()
@@ -321,12 +476,21 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if self.channel.web is not None and path.startswith("/api/web/"):
+            return self._web_post(path)
         if not path.startswith("/api/events/"):
             return self._send(404, {"error": f"no {path}"})
         name = unquote(path.removeprefix("/api/events/"))
 
         def emit():
             payload = self._body()
+            if self.channel.web is not None:
+                known = self.channel.on_engine(tab_events)
+                if name not in known:
+                    return 404, {"error": f"no handler for {name!r}", "events": sorted(known)}
+                self._tab("emit", {"name": name, "payload": payload})
+                LOG.info("event %s %s", name, json.dumps(payload)[:200])
+                return 200, {"emitted": name, "handlers": len(known[name])}
 
             def fire(engine):
                 known = events(engine)

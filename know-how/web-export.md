@@ -1,6 +1,6 @@
 ---
-when: exporting an app with `manifoldx export --web`, fixing an error it reports, annotating app code so it transpiles, serving or debugging the browser page it writes, re-measuring its calibration, or checking with a replay that the browser runs an app as Python does
-triggers: ["export --web", "web export", "transpile", "transpiler", "browser", "manifoldx.web", "replay", "replay_node", "outside the subset", "cannot cross to the browser", "annotate", "index.html", "three.js", "pointer lock", "CALIBRATION", "playwright"]
+when: exporting an app with `manifoldx export --web` or running it in a tab with `manifoldx run --web`, fixing an error it reports, annotating app code so it transpiles, serving or debugging the browser page it writes, re-measuring its calibration, or checking with a replay that the browser runs an app as Python does
+triggers: ["export --web", "run --web", "web export", "transpile", "transpiler", "browser", "manifoldx.web", "replay", "replay_node", "outside the subset", "cannot cross to the browser", "annotate", "index.html", "three.js", "pointer lock", "CALIBRATION", "playwright"]
 ---
 
 # Exporting an app to the web with `manifoldx export --web`
@@ -9,7 +9,7 @@ triggers: ["export --web", "web export", "transpile", "transpiler", "browser", "
 
 Reach for this when you export an app for the browser, when the export refuses an app and you have to change its code, when the page draws or behaves differently from the desktop, or when you want proof that the exported app behaves as the Python one does. The code is `src/manifoldx/web/` (the page's modules in `js/`, three.js in `vendor/three/`); the tests in `tests/web/` show every behaviour below, and `examples/web_walk.py` is an app that exports, replays and runs in the page.
 
-The export writes a folder with a page: the transpiled app runs its systems every animation frame on the browser's input, three.js draws the exported scene, and the GUI is HTML. The same folder replays in Node. `run --web` is not there yet. Spec: `.knowledge/analysis/2026-11-06-web-target-design.html`. Plans: `.knowledge/plans/2026-11-06-web-target-plan-1-transpiler-and-replay.html` (transpiler, snapshot, replay) and `.knowledge/plans/2026-11-06-web-target-plan-2-browser-page.html` (the page); each plan's "where this plan departs" section explains the choices that differ from the spec.
+The export writes a folder with a page: the transpiled app runs its systems every animation frame on the browser's input, three.js draws the exported scene, and the GUI is HTML. The same folder replays in Node. `manifoldx run --web` serves the same page and swaps each save into the open tab (see "While you edit: `run --web`"). Spec: `.knowledge/analysis/2026-11-06-web-target-design.html`. Plans: `.knowledge/plans/2026-11-06-web-target-plan-1-transpiler-and-replay.html` (transpiler, snapshot, replay), `.knowledge/plans/2026-11-06-web-target-plan-2-browser-page.html` (the page) and `.knowledge/plans/2026-11-07-web-target-plan-3-run-web.html` (`run --web`); each plan's "where this plan departs" section explains the choices that differ from the spec.
 
 ## Running it
 
@@ -99,7 +99,7 @@ When the app's code throws, the page stops its loop and shows the error panel (`
 raises.py:26 in tick: TypeError: Cannot read properties of null (reading 'x')
 ```
 
-Nothing runs after it; reload to start again. A load error (a missing file, no WebGL2) shows in the same panel.
+Nothing runs after it; reload to start again (under `run --web`, the next save resumes it). A load error (a missing file, no WebGL2) shows in the same panel.
 
 ### The scene and its calibration
 
@@ -112,6 +112,42 @@ three.js and the desktop light the same scene differently, so `CALIBRATION` at t
 3. Keep the factor whose worst channel is smallest, write it and the measured means in the comment beside `CALIBRATION`, and set `THRESHOLD` in `test_visual.py` to the worst case plus 2 points (today 0.3% + 2 = 2.3%; the floor of 4.0 in 0-255 is the bound for scenes near 130).
 
 The breaking tests (`test_break_sky_uncalibrated`, `test_break_plain_standard_for_basic`) must still exceed the threshold; if one passes, the threshold is too loose.
+
+### While you edit: `run --web`
+
+```bash
+uv run manifoldx run --web app.py                  # a script
+uv run manifoldx run --web -m mygame.main          # a module
+uv run manifoldx run --web app.py --port 8800 -- --level 3
+```
+
+It exports the app, serves it on 127.0.0.1 and prints `manifoldx run --web: open http://127.0.0.1:8770/ (dev page at /dev)`. `/` is the app's page, `/dev` the dev page that `/` is under plain `run` (`know-how/agent-loop.md`). The same reloader watches the app's files as `manifoldx run` does (`know-how/hot-reload.md`), and a save:
+
+1. asks the tab for its `engine.state`; the tab freezes (no systems run, the last frame stays) until the new version, a failure, or 30 s;
+2. merges what the tab sent into Python's `engine.state`, reruns the app's setup until `engine.run()` and its startup handlers on the same headless device, and builds the export again;
+3. writes it as a new version and pushes it to every open tab, which loads the new modules and snapshot in place, without a page reload, and resumes.
+
+What survives a save:
+
+- **`engine.state`, as plain data.** The tab sends its state in the snapshot's forms; numbers, strings, lists, tuples, dicts, sets and float vectors come back and replace Python's values, a whole number comes back a float where Python had a float, and a list a tuple where Python had a tuple. A key whose value holds an object of an app class, a handle or a function, and a key that never crossed (`state_left_out`), keeps Python's value; the log says `kept from Python: ...` once per key. This is the desktop's rule: store plain data.
+- **The three.js scene, when the scene's hash did not change.** Materials the app set at runtime (`set_material`) go back to the glTF's, as a rebuilt scene would have them; the new version sets them again. A changed scene is fetched, built and swapped in, then the old one is freed.
+- **The pointer lock and held keys.** The input listeners live for the page's life, so a key held across the save is still held, and the new `engine.input` learns that the lock is on.
+
+The GUI is rebuilt from the new snapshot every time. A tab that opens later, or an F5, gets a rebuild with the last state any tab sent (on `pagehide` and with every reply), so the camera stays where it was. Several tabs all receive every version.
+
+The status line at the bottom right says where the reload is:
+
+| status line | when | error panel |
+|---|---|---|
+| `v3 · live` | running | hidden |
+| `v4 · reloading` | from the state request to the swap | unchanged |
+| `v3 · reload failed, running v3` | an edit failed to load or transpile | the error, e.g. `dev_orbit.py:12: SyntaxError: '(' was never closed`, then `Fix it and save: the tab keeps running v3.` |
+| `v3 · paused until the next edit` | an exception in a frame | the Python file, line and callers, as in Errors above |
+| `v3 · dev server gone, retrying` | the server stopped; the stream reconnects by itself | unchanged |
+
+An exception in a frame pauses the tab until the next save, even an unrelated one, as on the desktop. A version that fails to load in the tab (a module that throws on import) shows its error with `The tab keeps running v3.` and the running version goes on.
+
+`.manifoldx/web/` holds what the server serves: the page's modules, the runtime, `vendor/three/` and the font once at the root, `v{n}/` per version (`app/`, `state.json`, `report.json`, the last three kept), and `scenes/<sha>.glb`, written only when the hash is new. Under `--web` the glTF has no camera node, so moving the view does not change the scene's hash. `--debug` is refused (`--debug measures the window's frames; under --web the tab runs them`, exit 2).
 
 ### Upgrading three.js
 
@@ -197,7 +233,7 @@ The annotations understood are `int`, `float`, `bool`, `str`, `None`, app classe
 
 Reached code may use exactly what `RUNTIME_SURFACE` in `src/manifoldx/web/types.py` lists; anything else of a manifoldx object types as unknown:
 
-- `engine.input`, `engine.camera`, `engine.gui.pointer_over_gui` (whether the pointer is over a root panel, so a click there is the GUI's), `engine.w`, `engine.h`, `engine.set_material(entity, material)`, and `engine.state` (subscripts or attributes, see above);
+- `engine.input`, `engine.camera`, `engine.gui.pointer_over_gui` (whether the pointer is over a root panel, so a click there is the GUI's), `engine.w`, `engine.h`, `engine.set_material(entity, material)`, `engine.log(text)` (under `run --web` the line goes to the dev server's log; an exported page drops it, as the desktop does outside `run`, and a replay in Node collects it in `engine.lines`), and `engine.state` (subscripts or attributes, see above);
 - `engine.input`: `pressed_keys`, `modifiers`, `mouse_pos`, `mouse_delta`, `wheel_delta`, `pressed_buttons`, `viewport_size`, `pointer_captured`, `is_pressed(key)`, `just_pressed(key)`, `just_released(key)`, `is_mouse_pressed(button)`, `just_mouse_pressed(button)`, `just_mouse_released(button)`, `capture_pointer(on)`;
 - `engine.camera`: `position` and `target` (float32 vectors), `fov` (vertical, in degrees: with `mouse_pos` and `engine.w`/`engine.h` it turns a tap into a ray), `near`, `far`, `get_forward()`;
 - the GUI's widgets (see The GUI): a Panel's `offset`, a Text's `text`, every widget's `style_overrides`, to read and to write.
@@ -211,7 +247,9 @@ app.py:9: writing a vec[f64] to `engine.camera.position`, a float32 vector (buil
 
 Fields of app objects are written freely, through a global, a field or a typed local (`r: Rig = engine.state["rig"]`, then `r.x = 2.0`).
 
-Spawning, destroying, component queries, transforms and events are not there yet. Event handlers are transpiled but neither the page nor a replay fires them: read input by polling `engine.input` in a system. Do the scene's building in a `startup` handler or at module level: that is setup.
+Spawning, destroying, component queries, transforms and `engine.emit` from transpiled code are not there yet. Event handlers are transpiled, and under `run --web` the tab fires them when an agent emits (`manifoldx emit`, at the start of the next frame, as the desktop does); an exported page has no one to emit and a replay does not fire them, so read input by polling `engine.input` in a system. Handlers and systems registered with the decorators (`@engine.on("bump")`, `@engine.system` on a module function, `engine` a module global) export as the call forms `engine.on("bump")(bump)` and `engine.system(orbit)` do; any other decorator fails the export. Do the scene's building in a `startup` handler or at module level: that is setup.
+
+The runtime's record of the engine calls a frame made (`["material", ...]`, `["capture", ...]`) is `engine.calls`; the trace's JSON keeps the key `log` for it, so fixtures and `replay.py` read it as before.
 
 ## Replaying: proof that both sides agree
 
@@ -260,6 +298,7 @@ Each construct of the subset has a parity test that runs a `main()` in Python an
 `tests/web/browser/` serves an export with `python -m http.server` and opens it in headless Chromium through Playwright. Without the `browser` group it skips with "playwright not installed", without a Chromium Playwright can launch with "chromium not installed". On a shared machine, reuse the Chromium in `~/.cache/ms-playwright` by keeping playwright at the version `uv.lock` pins (1.63.0) rather than downloading another.
 
 - `test_page.py` drives `examples/web_walk.py` through Playwright's real keyboard, mouse, wheel and viewport, one `__mx.tick(1/60)` after each step, then replays the frames the page built in Python and asserts `compare` is None. It also checks the error panel, `file://`, a device scale of 2, the progress count and the lock lost on Escape.
+- `test_run_web.py` runs `manifoldx run --web` of `tests/web/apps/dev_orbit.py` in a temporary copy (the `run_web` fixture, which needs the `manifoldx` script beside `sys.executable`) and edits it: a save keeps the state, a colour edit rebuilds the scene, a broken edit and a frame error show their lines, the lock and a reopened tab's camera survive, and the agent commands answer from the tab. Two breaking tests damage the tab (an empty state answer, a no-op `resetMaterials`) and assert that the check then fails.
 - `test_visual.py` compares the page's first frame with the desktop's `Engine.render_frame` by mean colour per channel (see the calibration above).
 
 **The fake pointer lock.** Headless Chromium grants the lock, but under it each synthetic mouse move arrives as two cancelling movements, so mouse look nets zero. The session probes the lock once (granted, and does a 10 px move net 10 px?) and prints `pointer lock probe: ...` at the end of the run. When the probe fails, as it does in headless Chromium, every page gets `FAKE_LOCK` from `tests/web/browser/conftest.py`: an init script that keeps the lock in a field and records whether each request came with a user activation, which the replay test asserts.

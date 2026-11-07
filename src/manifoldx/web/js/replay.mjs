@@ -22,7 +22,7 @@ export function replay(app, frames, paths, dt = 1 / 60) {
   const { engine } = app;
   const trace = [];
   for (const frame of frames) {
-    const start = engine.log.length;
+    const start = engine.calls.length;
     engine.input.setFrame(frame);
     step(app, dt);
     trace.push(traceEntry(app, paths, start));

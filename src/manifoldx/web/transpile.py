@@ -384,7 +384,9 @@ class _Module:
         if a.vararg or a.kwarg:
             self.fail(n, "*args or **kwargs")
         for d in n.decorator_list:
-            if not (kind == "getter" and ast.unparse(d) == "property"):
+            if kind == "getter" and ast.unparse(d) == "property":
+                continue
+            if not (kind == "function" and self.env.is_registration(d, self.name)):
                 self.fail(n, f"the decorator @{ast.unparse(d)}")
         method = kind in ("method", "getter", "constructor")
         if method and not a.args:

@@ -106,8 +106,9 @@ function fitShadow(THREE, scene, root, sun, cfg, renderer) {
 
 // The glTF the loader parsed, as an MxScene: .scene and .camera to render, .entities (entity
 // index to its meshes), .materials (material id to its three.js material), .setMaterial(entity,
-// id) (the engine's setMaterial hook), .materialOf(entity), .sync(engine) each frame, and
-// .setCalibration(partial) over a copy of CALIBRATION. The renderer is used for its
+// id) (the engine's setMaterial hook), .materialOf(entity), .resetMaterials() (every entity back
+// to the glTF's material, as a rebuilt scene has it), .sync(engine) each frame,
+// .setCalibration(partial) over a copy of CALIBRATION, and .dispose() (frees its GPU resources). The renderer is used for its
 // capabilities, the shadow map switch and, when the scene has an environment, PMREM.
 export async function buildScene(THREE, gltf, renderer) {
   const extras = gltf.scene.userData.manifoldx ?? {};
@@ -127,7 +128,7 @@ export async function buildScene(THREE, gltf, renderer) {
     materials.set(Number(id), drawn(await gltf.parser.getDependency("material", index)));
   }
 
-  const entities = new Map(), current = new Map();
+  const entities = new Map(), current = new Map(), original = new Map();
   gltf.scene.traverse((o) => {
     const mx = o.userData.mx;
     if (!mx) return;
@@ -139,6 +140,7 @@ export async function buildScene(THREE, gltf, renderer) {
     });
     entities.set(mx.entity, meshes);
     current.set(mx.entity, mx.material);
+    original.set(mx.entity, [mx.material, meshes.map((m) => m.material)]);
   });
 
   if (extras.environment) {
@@ -181,6 +183,28 @@ export async function buildScene(THREE, gltf, renderer) {
     },
     materialOf(entity) {
       return current.get(entity) ?? null;
+    },
+    resetMaterials() {
+      for (const [entity, [id, mats]] of original) {
+        entities.get(entity).forEach((m, i) => { m.material = mats[i]; });
+        current.set(entity, id);
+      }
+    },
+    dispose() {
+      const done = new Set();
+      const free = (thing) => {
+        if (!thing || done.has(thing)) return;
+        done.add(thing);
+        if (thing.isMaterial) for (const v of Object.values(thing)) if (v?.isTexture) free(v);
+        thing.dispose();
+      };
+      scene.traverse((o) => {
+        free(o.geometry);
+        for (const m of [o.material ?? []].flat()) free(m);
+      });
+      for (const m of materials.values()) free(m);
+      for (const m of converted.values()) free(m);
+      free(scene.environment);
     },
     sync(engine) {
       const c = engine.camera;

@@ -7,9 +7,14 @@ import test from "node:test";
 
 import {
   createEngine,
+  encodeState,
+  fire,
+  fromJSON,
   guiValues,
   loadApp,
+  mergePatch,
   pathValue,
+  stateView,
   step,
   toJSON,
   traceEntry,
@@ -135,7 +140,7 @@ test("engine.gui.pointer_over_gui is the flag the state's gui handle resolves to
 
 test("set_material and capture_pointer append to the log", () => {
   const log = [];
-  const e = engine({ log });
+  const e = engine({ calls: log });
   const box = e.resolve("entity", 4);
   const red = e.resolve("material", 7);
   assert.equal(e.resolve("entity", 4), box);
@@ -146,7 +151,7 @@ test("set_material and capture_pointer append to the log", () => {
   assert.equal(e.input.pointer_captured, true);
   e.input.capture_pointer(false);
   assert.deepEqual(log, [["material", 4, 7], ["material", 5, 2], ["capture", true], ["capture", false]]);
-  assert.equal(e.log, log);
+  assert.equal(e.calls, log);
   assert.equal(e.gui.pointer_over_gui, false);
   assert.equal(e.resolve("engine", "Engine"), e);
   assert.equal(e.resolve("engine", "input"), e.input);
@@ -187,7 +192,7 @@ test("guiValues returns each getter's text in order", () => {
 test("set_material calls the setMaterial hook with the entity's index and the material's id", () => {
   const calls = [];
   const log = [];
-  const e = engine({ log, hooks: { setMaterial: (entity, id) => calls.push([entity, id]) } });
+  const e = engine({ calls: log, hooks: { setMaterial: (entity, id) => calls.push([entity, id]) } });
   e.set_material(e.resolve("entity", 4), e.resolve("material", 7));
   e.set_material(5, e.resolve("material", 2));
   assert.deepEqual(calls, [[4, 7], [5, 2]]);
@@ -197,7 +202,7 @@ test("set_material calls the setMaterial hook with the entity's index and the ma
 test("a capture hook that refuses leaves the flag false and the log unchanged", () => {
   const asked = [];
   const log = [];
-  const e = engine({ log, hooks: { capture: (on) => (asked.push(on), false) } });
+  const e = engine({ calls: log, hooks: { capture: (on) => (asked.push(on), false) } });
   assert.equal(e.input.capture_pointer(true), false);
   assert.equal(e.input.pointer_captured, false);
   assert.deepEqual(asked, [true]);
@@ -206,7 +211,7 @@ test("a capture hook that refuses leaves the flag false and the log unchanged", 
 
 test("a capture hook that takes sets the flag and logs, as headless does", () => {
   const log = [];
-  const e = engine({ log, hooks: { capture: () => true } });
+  const e = engine({ calls: log, hooks: { capture: () => true } });
   assert.equal(e.input.capture_pointer(true), true);
   assert.equal(e.input.pointer_captured, true);
   assert.equal(e.input.capture_pointer(false), true);
@@ -233,6 +238,57 @@ test("loadApp passes options.hooks to the engine", () => {
   assert.deepEqual(calls, [[3, 1]]);
 });
 
+test("engine.log collects the app's lines in engine.lines, or hands them to hooks.log", () => {
+  const e = engine();
+  e.log("yaw 1.0");
+  e.log("yaw 2.0");
+  assert.deepEqual(e.lines, ["yaw 1.0", "yaw 2.0"]);
+  assert.deepEqual(e.calls, []);
+  const said = [];
+  const t = engine({ hooks: { log: (text) => said.push(text) } });
+  t.log("hello");
+  assert.deepEqual(said, ["hello"]);
+  assert.deepEqual(t.lines, []);
+});
+
+// An app whose module holds one system and two handlers, as loadApp builds it.
+function handlerApp() {
+  const seen = [];
+  const mod = {
+    tick: () => seen.push("tick"),
+    bump: (payload) => seen.push(["bump", payload]),
+    bump2: (payload) => seen.push(["bump2", payload]),
+    __set_globals: () => {},
+  };
+  const fn = (name) => ({ __function: `__main__:${name}` });
+  const state = {
+    table: [],
+    roots: [
+      { kind: "system", label: "system tick", fn: fn("tick") },
+      { kind: "handler", label: 'on("bump") bump', event: "bump", fn: fn("bump") },
+      { kind: "handler", label: 'on("other") bump2', event: "other", fn: fn("bump2") },
+    ],
+    engine: { w: 10, h: 10, camera: { position: [0, 0, 1], target: [0, 0, 0] } },
+  };
+  return { app: loadApp(state, { __main__: mod }), seen };
+}
+
+test("fire runs every handler root of the event once, with the payload as a Map", () => {
+  const { app, seen } = handlerApp();
+  fire(app, "bump", fromJSON({ by: 10 }));
+  assert.equal(seen.length, 1);
+  const [name, payload] = seen[0];
+  assert.equal(name, "bump");
+  assert.ok(payload instanceof Map);
+  assert.equal(payload.get("by"), 10);
+});
+
+test("fire of an event no root handles does nothing", () => {
+  const { app, seen } = handlerApp();
+  fire(app, "nobody", null);
+  assert.deepEqual(seen, []);
+});
+
 // ---------------------------------------------------------------- the trace helpers
 
 test("traceEntry is the entry replay.mjs built, for a frame of the web_walk export", { skip: !WEB_WALK && "MX_WEB_WALK_EXPORT not set" }, async () => {
@@ -245,7 +301,7 @@ test("traceEntry is the entry replay.mjs built, for a frame of the web_walk expo
   const upto = frames.findIndex((f) => f.clicks.length) + 1;
   let entry;
   for (const frame of frames.slice(0, upto)) {
-    const start = app.engine.log.length;
+    const start = app.engine.calls.length;
     app.engine.input.setFrame(frame);
     step(app, 1 / 60);
     entry = traceEntry(app, paths, start);
@@ -254,7 +310,7 @@ test("traceEntry is the entry replay.mjs built, for a frame of the web_walk expo
     const before = {
       camera: { position: e.camera.position, target: e.camera.target },
       gui: guiValues(app),
-      log: e.log.slice(start),
+      log: e.calls.slice(start),
       state: e.state,
       paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
     };
@@ -285,4 +341,77 @@ test("the core imports only pyrt.js and names no DOM or three.js", () => {
   assert.deepEqual(specifiers, ["./pyrt.js"]);
   assert.doesNotMatch(src, /\bimport\s*\(/);
   assert.doesNotMatch(src, /\b(document|window|three|THREE)\b/);
+});
+
+// ---------------------------------------------------------------- the state, both ways
+
+test("encodeState writes the snapshot's value forms and skips what is not plain data", () => {
+  class Viewer {}
+  const loop = new Map();
+  loop.set("self", loop);
+  const state = new Map([
+    ["cam", new Map([["yaw", 0.5]])],
+    ["v", Float32Array.from([1.5, 2])],
+    ["tags", new Set(["a"])],
+    ["bad", NaN],
+    ["pos", [1, -Infinity]],
+    ["viewer", Object.create(Viewer.prototype)],
+    ["loop", loop],
+  ]);
+  assert.deepEqual(encodeState(state), {
+    __dict: [
+      ["cam", { __dict: [["yaw", 0.5]] }],
+      ["v", { __f32: [1.5, 2] }],
+      ["tags", { __set: ["a"] }],
+      ["bad", { __float: "nan" }],
+      ["pos", [1, { __float: "-inf" }]],
+      ["viewer", { __skip: "an object of Viewer" }],
+      ["loop", { __dict: [["self", { __skip: "a cycle" }]] }],
+    ],
+  });
+  assert.deepEqual(encodeState(new Map([["d", Float64Array.from([0.25])]])), { __dict: [["d", { __f64: [0.25] }]] });
+  assert.deepEqual(encodeState(new Map([["f", () => 1]])), { __dict: [["f", { __skip: "a function" }]] });
+});
+
+test("a value two keys share is not a cycle", () => {
+  const shared = [1, 2];
+  assert.deepEqual(encodeState(new Map([["a", shared], ["b", shared]])), { __dict: [["a", [1, 2]], ["b", [1, 2]]] });
+});
+
+test("fromJSON makes every object a Map", () => {
+  const v = fromJSON({ cam: { yaw: 1 }, list: [{ a: 2 }], n: null });
+  assert.ok(v instanceof Map && v.get("cam") instanceof Map);
+  assert.equal(v.get("cam").get("yaw"), 1);
+  assert.ok(v.get("list")[0] instanceof Map);
+  assert.equal(v.get("n"), null);
+});
+
+test("mergePatch merges nested Maps, deletes on null and replaces arrays whole", () => {
+  const state = new Map([
+    ["cam", new Map([["yaw", 1], ["pitch", 2]])],
+    ["gone", 3],
+    ["path", [1, 2, 3]],
+  ]);
+  const out = mergePatch(state, fromJSON({ cam: { yaw: 0 }, gone: null, path: [9], extra: { a: 1 } }));
+  assert.equal(out, state); // in place: engine.state stays one object
+  assert.deepEqual(toJSON(state), JSON.stringify({ cam: { yaw: 0, pitch: 2 }, path: [9], extra: { a: 1 } }));
+  assert.equal(mergePatch(state, 5), 5);
+});
+
+test("stateView is plain JSON, a handle as the desktop's repr would name it", () => {
+  const e = engine();
+  const state = new Map([
+    ["cam", new Map([["yaw", 1]])],
+    ["v", Float32Array.from([0.5])],
+    ["tags", new Set(["a"])],
+    ["m", e.resolve("material", 3)],
+    ["box", e.resolve("entity", 7)],
+  ]);
+  assert.deepEqual(stateView(state), {
+    cam: { yaw: 1 },
+    v: [0.5],
+    tags: ["a"],
+    m: "<material 3>",
+    box: "<entity 7>",
+  });
 });

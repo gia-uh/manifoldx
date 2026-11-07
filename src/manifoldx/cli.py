@@ -1,6 +1,7 @@
 """The manifoldx command.
 
-`manifoldx run` runs an app and reloads it in the same window whenever its source changes.
+`manifoldx run` runs an app and reloads it in the same window whenever its source changes;
+with --web, in a browser tab instead (manifoldx.web.dev).
 `manifoldx export` runs an app and writes its scene to glTF instead of a window; with --web, a
 folder the browser runs (manifoldx.web.export).
 `manifoldx look`, `state`, `set`, `emit`, `events` and `log` talk to the dev server of the app
@@ -8,6 +9,7 @@ running under `manifoldx run` in this folder (see manifoldx.devchannel).
 
     manifoldx run app.py [-- <app args>]
     manifoldx run -m package.module [-- <app args>]
+    manifoldx run --web [-m package.module | app.py] [--port N] [-- <app args>]
     manifoldx export app.py scene.glb [--strict] [-- <app args>]
     manifoldx export -m package.module scene.glb [--strict] [-- <app args>]
     manifoldx export --web [-m package.module | app.py] OUTDIR [-- <app args>]
@@ -41,6 +43,8 @@ def main(argv=None):
     run.add_argument("--port", type=int, default=None, help="the dev server's port (default 8770 or the next free)")
     run.add_argument("--debug", action="store_true",
                      help="also measure each frame, memory and garbage collection, and log slow ones and keys")
+    run.add_argument("--web", action="store_true",
+                     help="run the app in a browser tab and swap each save into it, keeping engine.state")
     sub.add_parser("look", help="save the frame on screen to .manifoldx/look.png and print its path")
     st = sub.add_parser("state", help="print engine.state as JSON")
     st.add_argument("path", nargs="?", help="a dotted key path inside the state, e.g. player.x")
@@ -63,9 +67,16 @@ def main(argv=None):
     if args.command == "run":
         if (args.module is None) == (args.script is None):
             parser.error("give app.py or -m module")
+        port = {} if args.port is None else {"port": args.port}
+        if args.web:
+            if args.debug:
+                parser.error("--debug measures the window's frames; under --web the tab runs them")
+            from manifoldx.web.dev import WebReloader
+
+            WebReloader(script=args.script, module=args.module, argv=app_args, **port).run()
+            return 0
         from manifoldx.hot import HotReloader
 
-        port = {} if args.port is None else {"port": args.port}
         HotReloader(script=args.script, module=args.module, argv=app_args, debug=args.debug, **port).run()
         return 0
     out = "OUTDIR" if args.web else "out.glb"
