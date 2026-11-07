@@ -6,7 +6,7 @@ op kinds; the pass draws each run of same-kind ops as one draw.
 
 Painting walks the tree top-down, emitting:
 
-- One `RectOp` per Panel (and, in Plan 2, per Button/Slider/Toggle).
+- One `RectOp` per Panel (and, in Plan 2, per Button/Slider/Toggle; two per Joystick).
 - One `TextOp` per Text / ValueDisplay glyph batch.
 - One `ImageOp` per Image.
 
@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from manifoldx.gui.button import Button
 from manifoldx.gui.layout import LayoutBox
+from manifoldx.gui.joystick import Joystick
 from manifoldx.gui.slider import Slider
 from manifoldx.gui.style import parse_color
 from manifoldx.gui.toggle import Toggle
@@ -290,3 +291,23 @@ def paint(
                 fill=parse_color(s["fg"]),
                 radius=float(s["radius"]),
             )
+    elif isinstance(widget, Joystick):
+        # A round pad and a knob moved from its centre by the value, y up.
+        s = widget.effective_style()
+        r = min(box.w, box.h) * 0.5
+        painter.draw_rect(
+            box=box,
+            fill=parse_color(s["bg"]),
+            border_color=parse_color(s["border_color"]),
+            border=float(s["border"]),
+            radius=r,
+        )
+        knob = 0.8 * r
+        vx, vy = widget.value
+        cx = box.x + box.w * 0.5 + vx * (r - knob * 0.5)
+        cy = box.y + box.h * 0.5 - vy * (r - knob * 0.5)
+        painter.draw_rect(
+            box=LayoutBox(cx - knob * 0.5, cy - knob * 0.5, knob, knob),
+            fill=parse_color(s["fg"]),
+            radius=knob * 0.5,
+        )

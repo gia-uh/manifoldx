@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A Joystick widget.** `manifoldx.gui.Joystick(name=...)`: a drag gives a value in the unit
+  disc, y up, emitting `gui:joystick:<name>:change`; release returns it to (0, 0) (#140).
 - **A pointer capture per pointer.** `PointerEvent.pointer_id`, 0 on the desktop; the GUI keeps one
   pointer capture per pointer (#140).
 

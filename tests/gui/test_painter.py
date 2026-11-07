@@ -80,3 +80,28 @@ def test_paint_value_display_emits_text_op():
     p = Painter()
     paint(panel, spec, boxes, p)
     assert any(op.text == "fps: 60" for op in p.text_ops)
+
+
+def test_joystick_paints_a_pad_and_a_knob():
+    from manifoldx.gui import Joystick
+    from manifoldx.gui.style import parse_color
+
+    j = Joystick(name="wind")
+    j.value = (0.5, 0.5)
+    spec = {}
+    box = LayoutBox(10.0, 20.0, 100.0, 100.0)
+    p = Painter()
+    paint(j, spec, {id(spec): box}, p)
+    s = j.effective_style()
+    assert len(p.rect_ops) == 2
+    pad, knob = p.rect_ops
+    assert pad.box == box
+    assert pad.radius == box.w / 2
+    assert pad.fill == parse_color(s["bg"])
+    k = 0.4 * box.w
+    r = box.w / 2
+    cx = box.x + r + 0.5 * (r - k / 2)
+    cy = box.y + r - 0.5 * (r - k / 2)  # y down on screen for a positive value[1]
+    assert knob.box == LayoutBox(cx - k / 2, cy - k / 2, k, k)
+    assert knob.radius == k / 2
+    assert knob.fill == parse_color(s["fg"])
