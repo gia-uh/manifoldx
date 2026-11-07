@@ -34,6 +34,7 @@ def place_camera(cam):
         cam.target[i] = 0.0
 
 
+@engine.system
 def orbit(query, dt: float):
     turn = float(engine.input.is_pressed("d")) - float(engine.input.is_pressed("a"))
     yaw: float = engine.state.cam["yaw"]
@@ -41,6 +42,7 @@ def orbit(query, dt: float):
     place_camera(engine.camera)
 
 
+@engine.on("bump")
 def bump(payload):
     """Turn the camera: {"by": degrees}."""
     by: float = payload["by"]
@@ -52,8 +54,6 @@ def speed_line() -> str:
     return f"SPEED = {SPEED:.1f}"
 
 
-engine.system(orbit)
-engine.on("bump")(bump)  # the decorator form does not transpile yet
 place_camera(engine.camera)
 engine.gui.append(
     Panel(

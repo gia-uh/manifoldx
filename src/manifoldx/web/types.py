@@ -684,6 +684,22 @@ class TypeEnv:
         d = d.func if isinstance(d, ast.Call) else d
         return self.from_stdlib(d, module, "dataclasses", "dataclass")
 
+    def is_registration(self, d: ast.expr, module: str) -> bool:
+        """d is @engine.on(...) or @engine.system, engine a module global holding the Engine:
+        both register the function at setup and return it unchanged, so the browser gets the
+        plain function."""
+        call = d.func if isinstance(d, ast.Call) else d
+        if not (isinstance(call, ast.Attribute) and isinstance(call.value, ast.Name)):
+            return False
+        if (call.attr, isinstance(d, ast.Call)) not in {("on", True), ("system", False)}:
+            return False
+        sym = self.resolve(module, call.value.id)
+        return (
+            sym is not None
+            and sym.kind == "const"
+            and self.globals.get(sym.target) == obj("manifoldx.Engine")
+        )
+
     def from_stdlib(self, n: ast.expr, module: str, lib: str, name: str) -> bool:
         """n names `lib.name`, imported either way."""
         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
