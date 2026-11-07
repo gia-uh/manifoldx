@@ -729,3 +729,55 @@ def test_a_widget_write_the_page_does_not_apply_fails_the_export(
     assert f"app.py:{line}: writing {what} the page does not apply, is outside the subset" in err
     assert "(reached from system tick)" in err
     assert not out.exists()
+
+
+RUNTIME_WRITE = """
+import manifoldx as mx
+import numpy as np
+
+engine = mx.Engine("writes", width=320, height=200)
+mat = mx.material.basic("#ff0000")
+
+
+class Rig:
+    def __init__(self):
+        self.x = 0.0
+
+
+engine.state["rig"] = Rig()
+
+
+def tick(query, dt: float):
+    cam = engine.camera
+    x = engine.state["rig"]
+    {write}
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def _write_error(app_dir, tmp_path, capsys, write: str) -> tuple[str, int]:
+    out = tmp_path / "out"
+    src = RUNTIME_WRITE.replace("{write}", write)
+    assert _export(app_dir, out, src) == 1
+    assert not out.exists()
+    return capsys.readouterr().err, src.splitlines().index(f"    {write}") + 1
+
+
+@pytest.mark.parametrize(
+    "write, field, name",
+    [("x.x = 1.0", "x.x", "x"), ("x.x += 1.0", "x.x", "x"), ('mat.color = "#00ff00"', "mat.color", "mat")],
+)
+def test_a_write_through_a_value_of_unknown_type_fails_the_export(
+    app_dir, tmp_path, capsys, write, field, name
+):
+    """gia-uh/manifoldx#151: the export cannot tell whether `x` is a widget, the engine or an
+    app object (a material types as unknown too), so it asks for the annotation rather than
+    guess."""
+    err, line = _write_error(app_dir, tmp_path, capsys, write)
+    assert (
+        f"app.py:{line}: writing `{field}`, a field of a value of unknown type (annotate `{name}`), "
+        "is outside the subset (reached from system tick)"
+    ) in err
