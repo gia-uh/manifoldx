@@ -19,7 +19,10 @@ from manifoldx.gltf.engine_export import _internal, _label, _widgets
 from .types import (
     NEVER,
     NUM,
+    RANDOM,
+    RANDOM_FUNCTIONS,
     RUNTIME_NAMES,
+    RUNTIME_SURFACE,
     WRITABLE,
     Ctx,
     FunctionKey,
@@ -111,7 +114,8 @@ class Reach:
     (module, name) · fields: {"module.Class": set of the field names reached code reads}
     · components: {store name: class} of the Component subclasses reached code constructs,
     which the page registers when it first spawns one, as Engine.spawn does
-    · chain(key): the root's label, then each function from the root down to key."""
+    · random_module: reached code calls a function of the random module, so the snapshot
+    writes the module's generator · chain(key): the root's label, then each function from the root down to key."""
 
     def __init__(self, roots, env: TypeEnv):
         self.env = env
@@ -122,6 +126,7 @@ class Reach:
         self.globals: set[tuple[str, str]] = set()
         self.fields: dict[str, set[str]] = {}
         self.components: dict[str, type] = {}
+        self.random_module = False  # reached code calls random.random() and its kin
         self._via: dict[object, FunctionKey | None] = {}  # what reached a thing first
         self._root: dict[FunctionKey, str] = {}  # a root function's label
         if self.everything:
@@ -309,7 +314,9 @@ class Reach:
         if isinstance(n, ast.Name) and not env.is_local(n.id, ctx):
             self._symbol(env.resolve(ctx.module, n.id), key)
         elif isinstance(n, ast.Attribute):
-            if env.lib_name(n, ctx) is not None:
+            lib = env.lib_name(n, ctx)
+            if lib is not None:
+                self.random_module |= lib in RANDOM_FUNCTIONS
                 return
             if isinstance(n.value, ast.Name) and not env.is_local(n.value.id, ctx):
                 sym = env.resolve(ctx.module, n.value.id)
@@ -369,6 +376,8 @@ class Reach:
                         f"apply{hint},",
                         self.root(key),
                     )
+                if m.name == RANDOM.name and read and attr in RUNTIME_SURFACE[RANDOM.name]:
+                    continue
                 if check and not manifoldx:
                     raise TranspileError(
                         module_path(key[0]),

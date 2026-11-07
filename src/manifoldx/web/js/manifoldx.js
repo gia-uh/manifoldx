@@ -1,6 +1,6 @@
 // The engine surface the transpiled modules call, the state loader and the frame step.
 
-import { NdArray, callable_, nd, str_, vnorm32 } from "./pyrt.js";
+import { NdArray, Random, callable_, nd, setRandom, str_, vnorm32 } from "./pyrt.js";
 
 // ---------------------------------------------------------------- state
 
@@ -30,7 +30,8 @@ const FLOATS = { nan: NaN, inf: Infinity, "-inf": -Infinity };
 // resolve(kind, value) turns a handle into the runtime's object: kind "engine" (value
 // "Engine", "input", "camera" or "gui"), "material" (an id), "entity" (an index),
 // "widget" (an index) or "geometry" (an id in the engine's geometry registry). An object is built without its constructor, from its class's
-// prototype; an object of a class with __call__ is callable; a shared object stays one.
+// prototype; an object of a class with __call__ is callable; a shared object stays one. A
+// random.Random is pyrt's, and the state's "random" becomes the random module's ($rt.random).
 export function loadState(state, modules, resolve) {
   return load(state, modules, resolve).roots;
 }
@@ -45,6 +46,7 @@ function load(state, modules, resolve) {
     if ("__set" in e) return new Set();
     if ("__f32" in e) return Float32Array.from(e.__f32, value);
     if ("__f64" in e) return Float64Array.from(e.__f64, value);
+    if ("__random" in e) return Random.fromState(e.__random);
     if ("__type" in e) {
       const proto = classOf(modules, e.__type).prototype;
       const obj = Object.create(proto);
@@ -98,6 +100,7 @@ function load(state, modules, resolve) {
     }
   });
 
+  if (state.random !== undefined) setRandom(Random.fromState(state.random));
   for (const [name, globals] of Object.entries(state.globals ?? {})) {
     const values = Object.create(null);
     for (const [k, x] of Object.entries(globals)) values[k] = value(x);

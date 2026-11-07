@@ -627,7 +627,7 @@ STR_METHODS = {
     "join": STR,
 }
 
-LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
+LIBS = {"math": "math", "numpy": "numpy", "random": "random", "textwrap": "textwrap"}
 # The numpy functions on arrays of any rank (TypeEnv.nd_function types them).
 ND_FUNCTIONS = frozenset(
     f"numpy.{f}"
@@ -644,6 +644,18 @@ NP_DTYPES = {
     "numpy.bool": "bool",
     "numpy.int32": "i32",
 }
+
+# random.Random's methods the page has, and what they return; the module functions of the
+# same names draw from the module's own generator ($rt.random).
+RANDOM = obj("random.Random")
+RANDOM_METHODS = {
+    "random": NUM,
+    "uniform": NUM,
+    "randrange": INT,
+    "randint": INT,
+    "choice": UNKNOWN,
+}
+RANDOM_FUNCTIONS = frozenset(f"random.{m}" for m in RANDOM_METHODS)
 
 # The manifoldx objects the headless runtime (js/manifoldx.js) implements, by class: each
 # attribute's type, a method's as fn(name, return), by the names class_name gives the
@@ -715,6 +727,9 @@ RUNTIME_SURFACE = {
     _PANEL: {"offset": tuple_of(NUM, NUM), "style_overrides": dict_of(STR, UNKNOWN)},
     _TEXT: {"text": STR, "style_overrides": dict_of(STR, UNKNOWN)},
     _VALUE_DISPLAY: {"style_overrides": dict_of(STR, UNKNOWN)},
+    # A random.Random made at setup: pyrt's Random draws as CPython's (choice types as the
+    # element of its argument, TypeEnv.call).
+    RANDOM.name: {m: fn(f"{RANDOM.name}.{m}", t) for m, t in RANDOM_METHODS.items()},
 }
 
 # The fields of manifoldx objects reached code may write: those the page applies each frame
@@ -1179,6 +1194,12 @@ class TypeEnv:
             return NUM
         if name == "textwrap.wrap":
             return list_of(STR)
+        if name == "random.choice" and n.args:
+            return elem(self.expr(n.args[0], ctx))
+        if name in RANDOM_FUNCTIONS:
+            return RANDOM_METHODS[name[7:]]
+        if name == "random.Random":
+            return RANDOM
         return UNKNOWN
 
     @staticmethod
@@ -1629,6 +1650,12 @@ class TypeEnv:
                 }.get(f.attr, UNKNOWN)
             if recv.all("str") and f.attr in STR_METHODS:
                 return STR_METHODS[f.attr]
+            if (
+                f.attr == "choice"
+                and n.args
+                and [m for m in recv.members if m.kind != "none"] == [RANDOM]
+            ):
+                return elem(self.expr(n.args[0], ctx))
             if len(recv.members) == 1 and is_array(recv) and f.attr == "tolist":
                 return nd_list(recv)
             methods = self.methods(recv, f.attr)

@@ -7,6 +7,9 @@ closure's cells and defaults) and the module globals reached code reads, and wri
      "state": value, "engine": {"w", "h", "origin": [x, z],
                                 "camera": {"position", "target", "fov", "up", "near", "far"}}}
 
+With reached code calling random.random() or its kin, "random" holds the random module's
+own generator as {"key", "pos", "gauss"}, below.
+
 A root is {"kind", "label", "event", "components", "fn": value}, in the order find_roots gave
 them; components names its query (a system's, or a handler's that takes one), else null.
 "state" is engine.state as a dict entry; "engine" is what the runtime's createEngine takes.
@@ -25,8 +28,9 @@ A value is null, a bool, a number, a str, a tuple as a JSON array, or one of
 
 A table entry is a list (a JSON array), {"__dict": [[key, value], ...]} (str keys, in
 order), {"__set": [value, ...]}, {"__f32": [...]} or {"__f64": [...]} (a 1-d float numpy
-array), or {"__type": "module.Class", "fields": {name: value}} with only the fields
-reached code reads.
+array), {"__random": {"key": [624 ints], "pos": int, "gauss": float | null}} (a
+random.Random, its MT19937 words as getstate() gives them), or {"__type": "module.Class",
+"fields": {name: value}} with only the fields reached code reads.
 
 ecs_bytes(engine) writes the entity store as the header build_export puts under "ecs" and
 the bytes of ecs.bin:
@@ -49,6 +53,7 @@ its membership as uint8. Every block starts on a multiple of 4.
 from __future__ import annotations
 
 import math
+import random
 import sys
 import types
 
@@ -136,13 +141,16 @@ class _Writer:
                 "far": float(cam.far),
             },
         }
-        return {
+        snap = {
             "table": self.table,
             "roots": out,
             "globals": globals_,
             "state": state,
             "engine": engine,
         }
+        if self.reach.random_module:
+            snap["random"] = _random_state(random._inst)
+        return snap
 
     def state(self, left_out: list | None):
         """engine.state as a dict entry, written first so what roots share with it stays
@@ -200,7 +208,9 @@ class _Writer:
             return {"__geometry": geometries.register(v)}
         if id(v) in self.refs:
             return {"__ref": self.refs[id(v)]}
-        if isinstance(v, (list, dict, set, frozenset, np.ndarray)) or self.app_object(v, path):
+        if isinstance(
+            v, (list, dict, set, frozenset, np.ndarray, random.Random)
+        ) or self.app_object(v, path):
             n = len(self.table)
             self.table.append(None)
             self.refs[id(v)] = n
@@ -231,6 +241,8 @@ class _Writer:
             return {"__set": [self.value(x, f"{path}{{}}") for x in v]}
         if isinstance(v, np.ndarray):
             return self.array(v, path)
+        if isinstance(v, random.Random):
+            return {"__random": _random_state(v)}
         name = class_name(type(v))
         own = vars(v) if hasattr(v, "__dict__") else {}
         fields = {
@@ -346,6 +358,12 @@ def _defaults(cls) -> dict:
     """A Component subclass's class-level field defaults as float32 values (none for others)."""
     found = getattr(cls, "_field_defaults", None) or {}
     return {f: np.asarray(v, np.float32).tolist() for f, v in found.items()}
+
+
+def _random_state(r: random.Random) -> dict:
+    """A generator's state as pyrt's Random.fromState takes it."""
+    _, words, gauss = r.getstate()
+    return {"key": list(words[:-1]), "pos": words[-1], "gauss": gauss}
 
 
 def _float(x: float):
