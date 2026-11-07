@@ -213,6 +213,11 @@ def field_compare_dtype(b: Ty) -> str | None:
     return nd_compare_dtype(nd("f32", 2), b)
 
 
+def _vague(t: Ty) -> bool:
+    """t is unknown or holds an unknown (list[unknown], the elements of a list of calls)."""
+    return not t.known or any(_vague(a) for a in t.args)
+
+
 def is_material(name: str | None) -> bool:
     """name ("manifoldx.resources.PhongMaterial") is a material class: the page builds its
     materials once from the glTF, so their fields do not change at runtime."""
@@ -1892,7 +1897,7 @@ class TypeEnv:
                             bind_target(t, self.expr(n.value, ctx), found)
                     live = self.live.globals if self.live is not None else {}
                     for name, t in found.items():
-                        if not t.known and (module, name) in live:
+                        if _vague(t) and (module, name) in live:
                             continue  # setup's value crosses: what it holds is its type
                         new = join(self.globals.get((module, name), NEVER), t)
                         if new != self.globals.get((module, name)):

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -151,16 +152,26 @@ def replay_python(
     """The app (a script, or a module as python -m runs it) started as export --web starts it,
     with app_args as its sys.argv[1:] (give the export's, so both take the same branch), then
     run through frames: one trace entry per frame, as JSON reads it back."""
-    from .export import _as_main, capture_engine
+    from .export import _as_main, _sources, capture_engine
     from .reach import find_roots
+    from .snapshot import snapshot
+    from .transpile import reach_app
+    from .types import LiveTypes
 
     engine, main = capture_engine(module, script, list(app_args or []))
     if engine is None:
         raise ValueError(f"{module or script} finished without calling engine.run()")
+    root = os.getcwd() if module else os.path.dirname(os.path.abspath(script))
     with _as_main(main):
         if engine._device is None and engine._event_bus._handlers.get("startup"):
             engine._ensure_offscreen(1)  # startup runs as export --web runs it
-        getters = [r.func for r in find_roots(engine) if r.kind == "getter"]
+        roots = find_roots(engine)
+        # The export's snapshot registers every material and geometry it meets, in its walk
+        # order, before any frame; frame code that first uses one later would otherwise give
+        # it another id here than the page has.
+        sources, _ = _sources(main, root)
+        snapshot(roots, reach_app(sources, roots, LiveTypes(set(sources))), engine, [])
+        getters = [r.func for r in roots if r.kind == "getter"]
         log: list = []
         engine.input = ScriptInput(engine, log)
         set_material = engine.set_material
