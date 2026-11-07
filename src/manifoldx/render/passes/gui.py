@@ -25,7 +25,7 @@ from dataclasses import replace
 import numpy as np
 import wgpu
 
-from manifoldx.gui.layout import LayoutBox, compute_layout
+from manifoldx.gui.layout import LayoutBox, anchored_slot, compute_layout
 from manifoldx.gui.material import RectMaterial
 from manifoldx.gui.painter import Painter, paint
 from manifoldx.gui.widgets import Panel, _measure_text
@@ -301,7 +301,8 @@ def layout_gui(engine) -> Painter:
     painter = Painter()
     for panel in engine.gui:
         spec = panel.build_layout_spec()
-        boxes = compute_layout(spec, viewport=_anchored(panel, viewport))
+        slot = anchored_slot(panel.anchor, panel.offset, spec, viewport)
+        boxes = compute_layout(spec, viewport=slot)
         paint(panel, spec, boxes, painter)
     if scale != 1.0:
         _scale_ops(painter, scale)
@@ -396,21 +397,9 @@ def _ensure_globals_viewport(rp, engine) -> None:
 
 
 def _anchored(panel: Panel, viewport: LayoutBox) -> LayoutBox:
-    """Resolve the panel's root slot from its anchor, offset, and explicit size.
-
-    The returned box is the *layout slot* that compute_layout assigns to the
-    panel root. For panels with explicit width/height the slot is bounded to
-    those dimensions; otherwise the full available viewport area is used so
-    flex children can fill it.
-
-    For now we anchor top-left only; the full anchor map lands here as the
-    GUI accumulates examples that need it (`top-right`, `bottom-right`, ...).
-    """
-    ox, oy = panel.offset
-    s = panel.effective_style()
-    w = float(s["width"]) if s.get("width") is not None else viewport.w
-    h = float(s["height"]) if s.get("height") is not None else viewport.h
-    return LayoutBox(viewport.x + ox, viewport.y + oy, w, h)
+    """The panel's root slot from its anchor, offset and size (gui.layout.anchored_slot).
+    The hit test places panels through the same function, so paint and hit agree."""
+    return anchored_slot(panel.anchor, panel.offset, panel.build_layout_spec(), viewport)
 
 
 def _ensure_gui_pipeline(rp, engine) -> None:

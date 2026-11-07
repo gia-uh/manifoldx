@@ -103,3 +103,74 @@ def _layout_node(
             child_box = LayoutBox(inner.x + cursor, inner.y, size, inner.h)
         _layout_node(child, child_box, out)
         cursor += size + gap
+
+
+# Where an anchor puts a root panel, per axis: "start", "end" or "center" (the page's AXES
+# in web/js/gui.js).
+AXES = {
+    "top-left": ("start", "start"),
+    "top-center": ("center", "start"),
+    "top-right": ("end", "start"),
+    "center-left": ("start", "center"),
+    "center": ("center", "center"),
+    "center-right": ("end", "center"),
+    "bottom-left": ("start", "end"),
+    "bottom-center": ("center", "end"),
+    "bottom-right": ("end", "end"),
+}
+
+
+def anchored_slot(
+    anchor: str,
+    offset: tuple[float, float],
+    root: dict[str, Any],
+    viewport: LayoutBox,
+) -> LayoutBox:
+    """The slot of a root panel's spec: placed by its anchor, the offset measured inward
+    from the anchored edges and, on a centred axis, rightward or downward, as the page's
+    panelCss places it. An explicit width or height sizes the slot. Without one, a top-left
+    panel fills the viewport, as it always has, and any other fits its content, as CSS sizes
+    an absolute box, so the panel touches its edges."""
+    content = content_size(root)
+    fill = anchor == "top-left"
+    slot = []
+    for i, (place, start, extent, off) in enumerate(
+        zip(AXES[anchor], (viewport.x, viewport.y), (viewport.w, viewport.h), offset)
+    ):
+        explicit = root.get("width" if i == 0 else "height")
+        if explicit is not None:
+            size = float(explicit)
+        else:
+            size = extent if fill else content[i]
+        if place == "start":
+            pos = start + off
+        elif place == "end":
+            pos = start + extent - size - off
+        else:
+            pos = start + (extent - size) / 2 + off
+        slot.append((pos, size))
+    (x, w), (y, h) = slot
+    return LayoutBox(x, y, w, h)
+
+
+def content_size(node: dict[str, Any]) -> tuple[float, float]:
+    """The (w, h) a spec needs for its content: explicit sizes, leaves' intrinsic sizes, and
+    a container's children stacked with its gap and padding. Flex children count at their
+    own content size."""
+    children = node.get("children") or []
+    if children:
+        top, right, bottom, left = node["padding"]
+        sizes = [content_size(c) for c in children]
+        gaps = node["gap"] * (len(children) - 1)
+        if node["direction"] == "v":
+            w = max(s[0] for s in sizes) + left + right
+            h = sum(s[1] for s in sizes) + gaps + top + bottom
+        else:
+            w = sum(s[0] for s in sizes) + gaps + left + right
+            h = max(s[1] for s in sizes) + top + bottom
+    else:
+        w, h = node["intrinsic"]
+    return (
+        float(node["width"]) if node.get("width") is not None else float(w),
+        float(node["height"]) if node.get("height") is not None else float(h),
+    )

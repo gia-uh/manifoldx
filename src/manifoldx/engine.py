@@ -904,7 +904,7 @@ class Engine:
             if self._loading_panel is None:
                 self._loading_panel = Panel(
                     children=[ValueDisplay(getter=self._loading_line, min_width=200)],
-                    anchor="top-left",
+                    anchor="center",
                     style_overrides={
                         "width": 230,
                         "height": 40,
@@ -914,10 +914,6 @@ class Engine:
                     },
                 )
                 self.gui.append(self._loading_panel)
-            # anchors other than top-left paint top-left (manifoldx#13): centre by offset
-            # offsets are in UI pixels, so centre in the scaled viewport
-            s = self.gui.effective_scale(self.h)
-            self._loading_panel.offset = (self.w / s / 2 - 115, self.h / s / 2 - 20)
         elif self._loading_panel is not None:
             self.gui.remove(self._loading_panel)
             self._loading_panel = None
