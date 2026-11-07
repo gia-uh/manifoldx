@@ -233,7 +233,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 <h2>Tasks</h2>
 
 <!-- ============================================================ TASK 1 -->
-<details class="task" id="task-1" data-state="pending">
+<details class="task" id="task-1" data-state="done">
 <summary><span class="num">1</span><span><span class="ttl">Desktop: the glTF writer writes joints, a skin and the current pose (#82; changes behaviour)</span><span class="files">skinning.py · gltf/writer.py · gltf/glb.py · gltf/engine_export.py · tests/test_gltf_skin.py · tests/web/js/gltf_skin.test.mjs · tests/web/test_node_suites.py · CHANGELOG.md</span></span><span class="state"></span></summary>
 <div class="body">
 <p class="note">This task changes what <code>Engine.export_gltf</code> writes for an entity spawned from a geometry with joints. Today it writes the rest positions as a plain mesh node and reports nothing (#82). After it, the node carries <code>JOINTS_0</code>, <code>WEIGHTS_0</code> and a skin posed as the entity is drawn, so a viewer that ignored joints now poses the figure, and the file holds more nodes (one per joint and one skeleton node per skinned entity). Unskinned entities are written as before.</p>

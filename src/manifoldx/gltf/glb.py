@@ -5,10 +5,11 @@ import struct
 
 import numpy as np
 
-FLOAT, UINT16, UINT32 = 5126, 5123, 5125
+FLOAT, UINT8, UINT16, UINT32 = 5126, 5121, 5123, 5125
 ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER = 34962, 34963
-_COMPONENT = {np.dtype(np.float32): FLOAT, np.dtype(np.uint16): UINT16, np.dtype(np.uint32): UINT32}
-_TYPE = {1: "SCALAR", 2: "VEC2", 3: "VEC3", 4: "VEC4"}
+_COMPONENT = {np.dtype(np.float32): FLOAT, np.dtype(np.uint8): UINT8, np.dtype(np.uint16): UINT16,
+              np.dtype(np.uint32): UINT32}
+_TYPE = {1: "SCALAR", 2: "VEC2", 3: "VEC3", 4: "VEC4", 16: "MAT4"}
 
 
 class GlbBuilder:

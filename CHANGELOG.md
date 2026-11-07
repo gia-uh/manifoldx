@@ -270,6 +270,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **glTF export writes a skinned entity posed.** `Engine.export_gltf` writes a skinned entity
+  with its joints and its current pose: `JOINTS_0` and `WEIGHTS_0` on its mesh, a skin with
+  identity inverse binds, and one joint node per joint under a node carrying the entity's
+  `Transform`. Viewers that ignored the joints now pose the figure, and the file holds one
+  more node per joint and per skinned entity. Lifts the 0.10.0 known limitation (#82).
+
 - **A pointer capture per pointer.** `PointerEvent.pointer_id` is new, always 0 on the desktop;
   the GUI keeps one pointer capture per pointer, so a pointer going down no longer ends another
   pointer's drag on a Slider or a Joystick (#140).

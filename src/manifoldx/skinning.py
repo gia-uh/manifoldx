@@ -32,6 +32,11 @@ def validate_joints(joints, n_vertices: int) -> np.ndarray:
     return np.ascontiguousarray(j, dtype=np.uint32)
 
 
+def joint_count(geometry: dict) -> int:
+    """Joints a skinned geometry uses: its largest joint index plus one."""
+    return int(np.max(geometry["joints"])) + 1
+
+
 def append_joint_column(interleaved: np.ndarray, joints) -> np.ndarray:
     """(N, k) float32 vertex rows -> (N, k + 1), the last column the uint32 joint bits."""
     out = np.empty((len(interleaved), interleaved.shape[1] + 1), dtype=np.float32)
@@ -93,6 +98,10 @@ class JointStore:
         if self._current():
             lo, hi = int(blocks.min()), int(blocks.max()) + 1
             self._device.queue.write_buffer(self.buffer, lo * _BLOCK_BYTES, self.mirror[lo:hi].tobytes())
+
+    def pose(self, entity: int, j: int) -> np.ndarray:
+        """The entity's first j joint matrices, (j, 4, 4) float32 row-major; identity when never posed."""
+        return self.mirror[self.block_of[entity], :j].transpose(0, 2, 1).copy()
 
     def release(self, entities):
         """Free the blocks of destroyed or respawned entities, reset to identity."""

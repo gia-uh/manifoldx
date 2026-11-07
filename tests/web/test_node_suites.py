@@ -12,6 +12,8 @@ import pytest
 from manifoldx.camera import Camera
 from manifoldx.web.export import export_web
 
+from gltf_helpers import posed_positions, skinned_figure
+
 HERE = Path(__file__).parent / "js"
 FORWARD = HERE / "forward.json"
 WEB_WALK = Path(__file__).parents[2] / "examples" / "web_walk.py"
@@ -104,6 +106,17 @@ def spawner_export(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
+def skinned_glb_path(tmp_path_factory) -> Path:
+    """A posed skinned figure through Engine.export_gltf, for gltf_skin.test.mjs, with
+    expected.json beside it: each vertex where the desktop draws it, in float64."""
+    base = tmp_path_factory.mktemp("skinned_glb")
+    e, h, geo, P = skinned_figure()
+    e.export_gltf(base / "skinned.glb")
+    (base / "expected.json").write_text(json.dumps(posed_positions(e, h, geo, P).tolist()))
+    return base / "skinned.glb"
+
+
+@pytest.fixture(scope="session")
 def sourcemap_export(tmp_path_factory) -> Path:
     """FAILING exported, with expect.json beside it: the Python lines the error must name."""
     import sys
@@ -140,7 +153,7 @@ def _run(suites: list[str], env: dict[str, str]) -> None:
     assert "# skipped 0" in done.stdout, done.stdout
 
 
-def test_node_suites_pass(web_walk_export, spawner_export, sourcemap_export):
+def test_node_suites_pass(web_walk_export, spawner_export, sourcemap_export, skinned_glb_path):
     # Node 22's --test takes files or globs, not a folder.
     suites = sorted(str(f) for f in HERE.glob("*.test.mjs"))
     assert suites
@@ -149,6 +162,7 @@ def test_node_suites_pass(web_walk_export, spawner_export, sourcemap_export):
         "MX_WEB_WALK_EXPORT": str(web_walk_export),
         "MX_SPAWNER_EXPORT": str(spawner_export),
         "MX_SOURCEMAP_EXPORT": str(sourcemap_export),
+        "MX_SKIN_GLB": str(skinned_glb_path),
     }
     _run(suites, env)
 
