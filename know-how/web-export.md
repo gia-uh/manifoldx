@@ -89,7 +89,7 @@ Reached code may write three widget fields, and the page applies them every fram
 app.py:21: writing `hud.panel.visible`, a field of a Panel the page does not apply, is outside the subset (reached from system tick)
 ```
 
-The check needs the receiver's type: a widget held in an app object's field or a global types from the live object, but a write through a value of unknown type is not caught.
+The check needs the receiver's type: a widget held in an app object's field or a global types from the live object, and a write through a value of unknown type fails the export, naming what to annotate (see Annotating).
 
 ### Errors
 
@@ -178,7 +178,13 @@ An attribute read on a value the transpiler could not type fails the same way, s
 app.py:8: `p.x`, an attribute of a value of unknown type (annotate `p`), is outside the subset (reached from system tick)
 ```
 
-The operations that need a type are attribute reads,  `+`, `*`, `%` (and their `+=` forms), `==` and `!=` unless the other side is a known number, bool or None, f-string fields with no format spec and `str()` (JS cannot tell `3.0` from `3`), method calls, slicing, `len`/`abs`/`int`/`float`/`hasattr` and keyword arguments. Annotate the name it gives, and nothing else:
+So does a write, `x.attr = v` or `x.attr += v`, since the export cannot tell whether `x` is a widget, the engine or an app object (a material or an entity handle types as unknown too):
+
+```text
+app.py:8: writing `x.attr`, a field of a value of unknown type (annotate `x`), is outside the subset (reached from system tick)
+```
+
+The operations that need a type are attribute reads and writes, `+`, `*`, `%` (and their `+=` forms), `==` and `!=` unless the other side is a known number, bool or None, f-string fields with no format spec and `str()` (JS cannot tell `3.0` from `3`), method calls, slicing, `len`/`abs`/`int`/`float`/`hasattr` and keyword arguments. Annotate the name it gives, and nothing else:
 
 - a parameter: `def add(a: float, b: float)`;
 - a local, typically a read of `engine.state`, which always types as unknown: `name: str | None = engine.state["selected"]`;
@@ -195,6 +201,15 @@ Reached code may use exactly what `RUNTIME_SURFACE` in `src/manifoldx/web/types.
 - `engine.input`: `pressed_keys`, `modifiers`, `mouse_pos`, `mouse_delta`, `wheel_delta`, `pressed_buttons`, `viewport_size`, `pointer_captured`, `is_pressed(key)`, `just_pressed(key)`, `just_released(key)`, `is_mouse_pressed(button)`, `just_mouse_pressed(button)`, `just_mouse_released(button)`, `capture_pointer(on)`;
 - `engine.camera`: `position` and `target` (float32 vectors), `fov` (vertical, in degrees: with `mouse_pos` and `engine.w`/`engine.h` it turns a tap into a ray), `near`, `far`, `get_forward()`;
 - the GUI's widgets (see The GUI): a Panel's `offset`, a Text's `text`, every widget's `style_overrides`, to read and to write.
+
+Reached code may write only the fields the page applies each frame: the camera's `position`, `target`, `fov`, `near` and `far`, which `scene.js`'s `sync` copies to the three.js camera before each render, the widget fields above, and `engine.state`'s keys. `position` and `target` take a float32 vector (`np.array(x, np.float32)`, or float32 arithmetic such as `cam.position + forward`; `cam.position += v` and `cam.position[i] = x` write in place) and `fov`, `near` and `far` a number: numpy would keep a float64 array or a tuple where the runtime rounds to float32. A write of any other field of the engine, its `input`, `camera` or `gui`, or another manifoldx object moves the desktop and not the page, so it fails the export:
+
+```text
+app.py:9: writing `engine.camera.up`, a field of the camera the page does not apply, is outside the subset (reached from system tick)
+app.py:9: writing a vec[f64] to `engine.camera.position`, a float32 vector (build it with np.array(x, np.float32)), is outside the subset (reached from system tick)
+```
+
+Fields of app objects are written freely, through a global, a field or a typed local (`r: Rig = engine.state["rig"]`, then `r.x = 2.0`).
 
 Spawning, destroying, component queries, transforms and events are not there yet. Event handlers are transpiled but neither the page nor a replay fires them: read input by polling `engine.input` in a system. Do the scene's building in a `startup` handler or at module level: that is setup.
 

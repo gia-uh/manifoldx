@@ -304,6 +304,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `anchor`, `style`, `scale`) fails the export with its file and line instead of differing
   in silence (#147).
 
+- **export --web: every attribute write the page cannot apply fails the export.** A write
+  through a value of unknown type (`x.attr = v`, `x.attr += v`) names what to annotate,
+  and a write to a field of the engine, `engine.input`, `engine.camera` or any other
+  manifoldx object fails as outside the subset unless the page applies it each frame: the
+  camera's `position`, `target`, `fov`, `near` and `far`, and the widget fields above.
+  `position` and `target` take a float32 vector, `fov`, `near` and `far` a number (#151).
+
 - **`replay_python` takes `app_args`**, the app's `sys.argv[1:]` as `export_web` takes
   them, so an app that branches on its arguments replays the branch its export took (#148).
 

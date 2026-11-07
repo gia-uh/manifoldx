@@ -332,3 +332,33 @@ def test_a_system_moves_a_panel_and_the_dom_follows(open_page, served, moving_ex
     assert page.evaluate(box) == {"left": 60, "top": 20, "width": 110, "text": "frame 10"}
     ticks(page, 1)
     assert page.evaluate(box) == {"left": 65, "top": 20, "width": 111, "text": "frame 11"}
+
+
+@pytest.fixture(scope="module")
+def camera_export(tmp_path_factory):
+    return _export(APPS / "camera_writes.py", tmp_path_factory.mktemp("camera"))
+
+
+def test_a_system_moves_the_camera_and_three_follows(open_page, served, camera_export):
+    """gia-uh/manifoldx#151: position, target, fov, near and far a system writes reach the
+    three.js camera the page renders with."""
+    page = open_page(served(camera_export), width=800, height=500)
+    seen = """() => {
+      const c = __mx.scene.camera, e = __mx.app.engine.camera;
+      const d = c.getWorldDirection(new c.position.constructor());
+      return {
+        position: c.position.toArray(), forward: d.toArray(),
+        fov: c.fov, near: c.near, far: c.far,
+        want: { position: [...e.position], forward: [...e.get_forward()] },
+      };
+    }"""
+    ticks(page, 5)
+    got = page.evaluate(seen)
+    assert got["position"] == pytest.approx([0.5, 2.0, 7.0], abs=1e-6)
+    assert got["position"] == pytest.approx(got["want"]["position"])
+    assert got["forward"] == pytest.approx(got["want"]["forward"], abs=1e-6)
+    assert got["forward"][2] == pytest.approx(-3 / (0.3**2 + 0.5**2 + 3.0**2) ** 0.5, abs=1e-6)
+    assert (got["fov"], got["far"]) == (55, 1050.0)
+    assert got["near"] == pytest.approx(0.15)
+    ticks(page, 1)
+    assert page.evaluate(seen)["fov"] == 56
