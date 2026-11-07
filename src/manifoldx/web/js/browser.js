@@ -13,7 +13,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 import { buildGui } from "./gui.js";
 import { FrameBuilder, PointerLock, attachDom } from "./input.js";
-import { encodeState, fire, fromJSON, guiValues, loadApp, mergePatch, stateView, step, traceEntry } from "./manifoldx.js";
+import { advance, encodeState, fromJSON, guiValues, loadApp, mergePatch, stateView, traceEntry } from "./manifoldx.js";
 import { RateMeter, frameDt, progressLine } from "./progress.js";
 import { buildScene } from "./scene.js";
 import { describe, lineTable } from "./sourcemap.js";
@@ -152,7 +152,7 @@ async function start() {
   let size = [0, 0], guiH = null;
   let frozen = null; // while a reload builds (Q2): the timer that unfreezes after FREEZE_MAX
   let manual = false;
-  const events = []; // [name, payload] an agent emitted, fired at the start of the next frame
+  const events = []; // [name, payload] an agent emitted, delivered in the next frame's queue
   let onPause = () => {}; // dev mode: an exception in a frame pauses until the next edit
 
   // One frame as the loop runs it: the frame the DOM built, the systems, the GUI, the camera,
@@ -167,9 +167,7 @@ async function start() {
     engine.calls.length = 0; // the trace's record of one frame
     try {
       engine.gui.pointer_over_gui = gui.pointerOver;
-      engine.input.setFrame(frame);
-      for (const [name, payload] of events.splice(0)) fire(app, name, payload);
-      step(app, dt);
+      advance(app, { ...frame, events: [...(frame.events ?? []), ...events.splice(0)] }, dt);
       gui.sync(engine.gui.widgets);
       gui.update(guiValues(app));
     } catch (err) {

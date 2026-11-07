@@ -746,7 +746,9 @@ export class Camera {
 // resolver for this engine.
 export function createEngine({ w, h, camera, origin = [0, 0], gui = null, materials = {}, calls = [], state = new Map(), hooks = {} }) {
   const { setMaterial = () => {}, capture = () => true, log = null } = hooks;
-  const engine = { w, h, origin, state, calls, lines: [] };
+  const engine = { w, h, origin, state, calls, lines: [], elapsed: 0.0, frame: 0 };
+  engine.bus = new EventBus();
+  engine.emit = (name, payload = null) => engine.bus.emit(name, payload);
   engine.log = (text) => {
     const line = typeof text === "string" ? text : str_(text);
     if (log) log(line);
@@ -858,9 +860,48 @@ function guiWidgets(spec) {
 
 // ---------------------------------------------------------------- frames
 
-// app: {engine, roots}, roots as loadState returns them. One frame: every system, in the
-// order the app registered them, called as the engine calls them, with (query, dt), the query
-// of the components it registered (null without a store); then the
+// The engine's event queue, as manifoldx.events.EventBus: emit appends, drain swaps the
+// queue for a new one before delivering, so an emit during delivery waits for the next drain.
+// delivered: the names drained since the trace last read them.
+export class EventBus {
+  constructor() {
+    this.pending = [];
+    this.delivered = [];
+  }
+
+  emit(name, payload = null) {
+    this.pending.push([name, payload]);
+  }
+
+  drain(deliver) {
+    const drained = this.pending;
+    this.pending = [];
+    for (const [name, payload] of drained) {
+      this.delivered.push(name);
+      deliver(name, payload);
+    }
+  }
+}
+
+// app: {engine, roots}, roots as loadState returns them. One frame as Engine._draw_frame runs
+// it: the frame to engine.input; elapsed, 0 on the first frame and dt more on each later one;
+// the queue, with the frame event ({dt, elapsed, frame}) first, then what was emitted during
+// the previous frame, then the frame's events ([name, payload], runtime values); delivery; the
+// systems and the flush (step).
+export function advance(app, frame, dt) {
+  const { engine } = app;
+  engine.input.setFrame(frame);
+  if (engine.frame > 0) engine.elapsed += dt;
+  for (const [name, payload] of frame.events ?? []) engine.emit(name, payload);
+  const payload = new Map([["dt", dt], ["elapsed", engine.elapsed], ["frame", engine.frame]]);
+  engine.bus.pending.unshift(["frame", payload]);
+  engine.bus.drain((name, p) => deliver(app, name, p));
+  step(app, dt);
+  engine.frame += 1;
+}
+
+// Every system, in the order the app registered them, called as the engine calls them, with
+// (query, dt), the query of the components it registered (null without a store); then the
 // store's queued writes and destroys land, as the engine executes its commands.
 export function step(app, dt) {
   const store = app.engine.store ?? null;
@@ -870,9 +911,10 @@ export function step(app, dt) {
   store?.flush();
 }
 
-// An event, as engine.emit delivers it: every handler root of that event, in the order the
-// app registered them, called with the payload (runtime values: a dict is a Map).
-export function fire(app, event, payload) {
+// An event delivered: every handler root of that event, in the order the app registered
+// them, called with the payload (runtime values: a dict is a Map) and, when it registered
+// components, a read-only query.
+function deliver(app, event, payload) {
   const store = app.engine.store ?? null;
   for (const r of app.roots) {
     if (r.kind !== "handler" || r.event !== event) continue;
@@ -924,8 +966,9 @@ export function pathValue(app, path) {
 }
 
 // The trace entry of the frame just run, as plain JSON values (the form is
-// manifoldx.web.replay's): {camera, gui, log, state, paths, store}, log being what
-// engine.calls gained since logStart, store traceStore's (null without a store).
+// manifoldx.web.replay's): {camera, gui, log, state, paths, store, events}, log being what
+// engine.calls gained since logStart, store traceStore's (null without a store), events the
+// names the queue delivered since the last entry.
 export function traceEntry(app, paths, logStart) {
   const { engine } = app;
   const entry = {
@@ -935,6 +978,7 @@ export function traceEntry(app, paths, logStart) {
     state: engine.state,
     paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
     store: engine.store === null || engine.store === undefined ? null : traceStore(engine.store),
+    events: engine.bus.delivered.splice(0),
   };
   return JSON.parse(toJSON(entry));
 }

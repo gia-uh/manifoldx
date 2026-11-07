@@ -49,7 +49,7 @@ def orbit(query, dt: float):
 
 
 @engine.on("bump")
-def bump(payload):
+def bump(payload: dict):
     """Turn the camera: {"by": degrees}."""
     by: float = payload["by"]
     yaw: float = engine.state.cam["yaw"]

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from manifoldx.gltf.engine_export import _internal, _label, _widgets
 
 from .types import (
+    EVENT_PAYLOADS,
     NEVER,
     NUM,
     RANDOM,
@@ -257,6 +258,27 @@ class Reach:
             info.declared[positional[0]] = query(r.components or ())
         if r.kind == "handler" and r.components and len(positional) >= 2:
             info.declared[positional[1]] = query(r.components, readonly=True)
+        # The payload, from its annotation or its event; an app's own event has no type.
+        if (
+            r.kind == "handler"
+            and r.event is not None
+            and positional
+            and not info.declared[positional[0]].known
+        ):
+            p = positional[0]
+            if r.event in EVENT_PAYLOADS:
+                info.declared[p] = EVENT_PAYLOADS[r.event]
+            elif not any(
+                a.arg == p and a.annotation
+                for a in info.node.args.posonlyargs + info.node.args.args
+            ):
+                name = info.node.name
+                raise TranspileError(
+                    module_path(key[0]),
+                    info.node.lineno,
+                    f'the payload of on("{r.event}") {name}, with no type '
+                    f"(annotate it: def {name}({p}: dict)),",
+                )
 
     # ---------------------------------------------------------- reach
     def _add(self, key: FunctionKey, via: FunctionKey | None) -> None:

@@ -680,6 +680,8 @@ RUNTIME_SURFACE = {
         "log": fn("manifoldx.Engine.log", NONE),
         "spawn": fn("manifoldx.Engine.spawn", union(obj(_HANDLE), NONE)),
         "destroy": fn("manifoldx.Engine.destroy", NONE),
+        "emit": fn("manifoldx.Engine.emit", NONE),
+        "elapsed": NUM,
     },
     _INPUT: {
         "pressed_keys": set_of(STR),
@@ -735,6 +737,10 @@ RUNTIME_SURFACE = {
 # The fields of manifoldx objects reached code may write: those the page applies each frame
 # (gui.js's sync for the widgets, scene.js's sync for the camera). A write of any other field
 # of a manifoldx object moves the desktop and not the page, so it fails the export.
+# The payload type of a handler of each engine event, for a payload parameter without an
+# annotation the transpiler reads; a handler of another event annotates it.
+EVENT_PAYLOADS = {"frame": dict_of(STR, NUM)}
+
 WRITABLE = {
     _CAMERA: {"position", "target", "up", "fov", "near", "far"},
     _PROXY: {"pos", "rot", "scale"},

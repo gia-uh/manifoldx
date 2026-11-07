@@ -6,9 +6,9 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
+  advance,
   createEngine,
   encodeState,
-  fire,
   fromJSON,
   guiValues,
   loadApp,
@@ -274,20 +274,35 @@ function handlerApp() {
   return { app: loadApp(state, { __main__: mod }), seen };
 }
 
-test("fire runs every handler root of the event once, with the payload as a Map", () => {
+const IDLE = { keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [10, 10] };
+
+test("advance delivers a frame's event to every handler root of it once, with the payload as a Map, before the systems", () => {
   const { app, seen } = handlerApp();
-  fire(app, "bump", fromJSON({ by: 10 }));
-  assert.equal(seen.length, 1);
+  advance(app, { ...IDLE, events: [["bump", fromJSON({ by: 10 })]] }, 1 / 60);
+  assert.equal(seen.length, 2);
   const [name, payload] = seen[0];
   assert.equal(name, "bump");
   assert.ok(payload instanceof Map);
   assert.equal(payload.get("by"), 10);
+  assert.equal(seen[1], "tick");
+  assert.deepEqual(app.engine.bus.delivered, ["frame", "bump"]);
 });
 
-test("fire of an event no root handles does nothing", () => {
+test("an event no root handles is delivered to nobody", () => {
   const { app, seen } = handlerApp();
-  fire(app, "nobody", null);
-  assert.deepEqual(seen, []);
+  advance(app, { ...IDLE, events: [["nobody", null]] }, 1 / 60);
+  assert.deepEqual(seen, ["tick"]);
+});
+
+test("an emit during a frame waits for the next frame, after the frame event", () => {
+  const { app, seen } = handlerApp();
+  app.engine.emit("bump", null);
+  advance(app, IDLE, 0.5);
+  advance(app, IDLE, 0.5);
+  assert.deepEqual(seen, [["bump", null], "tick", "tick"]);
+  assert.deepEqual(app.engine.bus.delivered, ["frame", "bump", "frame"]);
+  assert.equal(app.engine.elapsed, 0.5);
+  assert.equal(app.engine.frame, 2);
 });
 
 // ---------------------------------------------------------------- the trace helpers
@@ -303,8 +318,8 @@ test("traceEntry is the entry replay.mjs built, for a frame of the web_walk expo
   let entry;
   for (const frame of frames.slice(0, upto)) {
     const start = app.engine.calls.length;
-    app.engine.input.setFrame(frame);
-    step(app, 1 / 60);
+    advance(app, frame, 1 / 60);
+    const events = [...app.engine.bus.delivered];
     entry = traceEntry(app, paths, start);
     // What replay() built before the helpers moved into the core.
     const { engine: e } = app;
@@ -315,6 +330,7 @@ test("traceEntry is the entry replay.mjs built, for a frame of the web_walk expo
       state: e.state,
       paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
       store: traceStore(e.store),
+      events,
     };
     assert.deepEqual(entry, JSON.parse(toJSON(before)));
   }
