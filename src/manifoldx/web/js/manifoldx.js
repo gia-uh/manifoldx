@@ -350,3 +350,92 @@ export function traceEntry(app, paths, logStart) {
   };
   return JSON.parse(toJSON(entry));
 }
+
+// ---------------------------------------------------------------- the state, both ways
+
+// A number as the snapshot writes it: NaN and the infinities as {"__float": ...}.
+const number = (x) =>
+  Number.isNaN(x) ? { __float: "nan" } : x === Infinity ? { __float: "inf" } : x === -Infinity ? { __float: "-inf" } : x;
+
+// A handle's name, as the desktop's repr fallback shows it; null when v is not a handle.
+function handleName(v) {
+  if (v instanceof Camera) return "<camera>";
+  if (v instanceof ScriptInput) return "<input>";
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return null;
+  if ("resolve" in v) return "<engine>";
+  if ("pointer_over_gui" in v) return "<gui>";
+  if ("style_overrides" in v) return `<widget ${v.index}>`;
+  if ("id" in v) return `<material ${v.id}>`;
+  if ("index" in v) return `<entity ${v.index}>`;
+  return "<an object>";
+}
+
+// encodeState(value): engine.state (a Map) as the snapshot's value forms, in plain JSON, for
+// Python to decode: {"__dict": [[k, v], ...]}, {"__set": [...]}, {"__f32": [...]},
+// {"__f64": [...]}, {"__float": ...}, arrays as arrays. What is not plain data (an object of a
+// transpiled class, a handle, a function, a cycle) is {"__skip": what}.
+export function encodeState(value) {
+  const path = new Set(); // the containers above the value being written
+  const enc = (v) => {
+    if (typeof v === "number") return number(v);
+    if (v === null || v === undefined) return null;
+    if (typeof v === "function") return { __skip: "a function" };
+    if (typeof v !== "object") return v;
+    if (path.has(v)) return { __skip: "a cycle" };
+    if (v instanceof Float32Array) return { __f32: Array.from(v, number) };
+    if (v instanceof Float64Array) return { __f64: Array.from(v, number) };
+    const inside = (f) => {
+      path.add(v);
+      try {
+        return f();
+      } finally {
+        path.delete(v);
+      }
+    };
+    if (v instanceof Map) return inside(() => ({ __dict: [...v].map(([k, x]) => [k, enc(x)]) }));
+    if (v instanceof Set) return inside(() => ({ __set: [...v].map(enc) }));
+    if (Array.isArray(v)) return inside(() => v.map(enc));
+    const handle = handleName(v);
+    if (handle !== null) return { __skip: handle };
+    return { __skip: `an object of ${Object.getPrototypeOf(v).constructor.name}` };
+  };
+  return enc(value);
+}
+
+// fromJSON(value): a JSON value (an agent's patch or event payload) as runtime values: every
+// object a Map, recursively.
+export function fromJSON(value) {
+  if (Array.isArray(value)) return value.map(fromJSON);
+  if (value === null || typeof value !== "object") return value;
+  return new Map(Object.entries(value).map(([k, v]) => [k, fromJSON(v)]));
+}
+
+// mergePatch(target, patch): RFC 7386 merge patch on Maps, the patch through fromJSON first: a
+// Map merges key by key (in place when the target is a Map), null deletes, anything else
+// replaces. Returns the merged value.
+export function mergePatch(target, patch) {
+  if (!(patch instanceof Map)) return patch;
+  const out = target instanceof Map ? target : new Map();
+  for (const [k, v] of patch) {
+    if (v === null) out.delete(k);
+    else out.set(k, mergePatch(out.get(k), v));
+  }
+  return out;
+}
+
+// stateView(value): engine.state as GET /api/state shows it, plain JSON: a Map as an object,
+// typed arrays and Sets as arrays, what encodeState skips as its what string.
+export function stateView(value) {
+  const view = (v) => {
+    if (v === null || typeof v !== "object") return v;
+    if ("__skip" in v) return v.__skip;
+    if ("__float" in v) return FLOATS[v.__float];
+    if ("__dict" in v) return Object.fromEntries(v.__dict.map(([k, x]) => [k, view(x)]));
+    if ("__set" in v) return v.__set.map(view);
+    if ("__f32" in v) return v.__f32.map(view);
+    if ("__f64" in v) return v.__f64.map(view);
+    return v.map(view);
+  };
+  return view(encodeState(value));
+}

@@ -7,9 +7,13 @@ import test from "node:test";
 
 import {
   createEngine,
+  encodeState,
+  fromJSON,
   guiValues,
   loadApp,
+  mergePatch,
   pathValue,
+  stateView,
   step,
   toJSON,
   traceEntry,
@@ -285,4 +289,77 @@ test("the core imports only pyrt.js and names no DOM or three.js", () => {
   assert.deepEqual(specifiers, ["./pyrt.js"]);
   assert.doesNotMatch(src, /\bimport\s*\(/);
   assert.doesNotMatch(src, /\b(document|window|three|THREE)\b/);
+});
+
+// ---------------------------------------------------------------- the state, both ways
+
+test("encodeState writes the snapshot's value forms and skips what is not plain data", () => {
+  class Viewer {}
+  const loop = new Map();
+  loop.set("self", loop);
+  const state = new Map([
+    ["cam", new Map([["yaw", 0.5]])],
+    ["v", Float32Array.from([1.5, 2])],
+    ["tags", new Set(["a"])],
+    ["bad", NaN],
+    ["pos", [1, -Infinity]],
+    ["viewer", Object.create(Viewer.prototype)],
+    ["loop", loop],
+  ]);
+  assert.deepEqual(encodeState(state), {
+    __dict: [
+      ["cam", { __dict: [["yaw", 0.5]] }],
+      ["v", { __f32: [1.5, 2] }],
+      ["tags", { __set: ["a"] }],
+      ["bad", { __float: "nan" }],
+      ["pos", [1, { __float: "-inf" }]],
+      ["viewer", { __skip: "an object of Viewer" }],
+      ["loop", { __dict: [["self", { __skip: "a cycle" }]] }],
+    ],
+  });
+  assert.deepEqual(encodeState(new Map([["d", Float64Array.from([0.25])]])), { __dict: [["d", { __f64: [0.25] }]] });
+  assert.deepEqual(encodeState(new Map([["f", () => 1]])), { __dict: [["f", { __skip: "a function" }]] });
+});
+
+test("a value two keys share is not a cycle", () => {
+  const shared = [1, 2];
+  assert.deepEqual(encodeState(new Map([["a", shared], ["b", shared]])), { __dict: [["a", [1, 2]], ["b", [1, 2]]] });
+});
+
+test("fromJSON makes every object a Map", () => {
+  const v = fromJSON({ cam: { yaw: 1 }, list: [{ a: 2 }], n: null });
+  assert.ok(v instanceof Map && v.get("cam") instanceof Map);
+  assert.equal(v.get("cam").get("yaw"), 1);
+  assert.ok(v.get("list")[0] instanceof Map);
+  assert.equal(v.get("n"), null);
+});
+
+test("mergePatch merges nested Maps, deletes on null and replaces arrays whole", () => {
+  const state = new Map([
+    ["cam", new Map([["yaw", 1], ["pitch", 2]])],
+    ["gone", 3],
+    ["path", [1, 2, 3]],
+  ]);
+  const out = mergePatch(state, fromJSON({ cam: { yaw: 0 }, gone: null, path: [9], extra: { a: 1 } }));
+  assert.equal(out, state); // in place: engine.state stays one object
+  assert.deepEqual(toJSON(state), JSON.stringify({ cam: { yaw: 0, pitch: 2 }, path: [9], extra: { a: 1 } }));
+  assert.equal(mergePatch(state, 5), 5);
+});
+
+test("stateView is plain JSON, a handle as the desktop's repr would name it", () => {
+  const e = engine();
+  const state = new Map([
+    ["cam", new Map([["yaw", 1]])],
+    ["v", Float32Array.from([0.5])],
+    ["tags", new Set(["a"])],
+    ["m", e.resolve("material", 3)],
+    ["box", e.resolve("entity", 7)],
+  ]);
+  assert.deepEqual(stateView(state), {
+    cam: { yaw: 1 },
+    v: [0.5],
+    tags: ["a"],
+    m: "<material 3>",
+    box: "<entity 7>",
+  });
 });
