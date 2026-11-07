@@ -511,6 +511,22 @@ class ComponentAccessor:
                 self._store, self._indices, "Radius", 0, 1, "radius", self._commands
             )
 
+        # A Component subclass's fields, from the layout its annotations give
+        from manifoldx.components import _COMPONENT_CLASSES
+
+        layout = getattr(_COMPONENT_CLASSES.get(self._component_name), "_layout", {})
+        if name in layout:
+            col, size = layout[name]
+            return _FieldView(
+                self._store,
+                self._indices,
+                self._component_name,
+                col,
+                col + size,
+                name,
+                self._commands,
+            )
+
         # Check if component class has field positions
         comp_class = _COMPONENT_REGISTRY.get(self._component_name)
         if comp_class and hasattr(comp_class, "_component_start_idx"):

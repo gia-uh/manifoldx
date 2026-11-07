@@ -382,3 +382,18 @@ def test_a_system_skips_entities_without_its_component():
     engine.commands.execute(engine.store)
     assert engine.store._components["Transform"][moving.index, 0] == 1.0
     assert engine.store._components["Transform"][still.index, 0] == 0.0
+
+
+def test_a_query_reads_and_writes_a_component_subclass_field():
+    import manifoldx as mx
+
+    engine = mx.Engine("subclass fields")
+    moving = engine.spawn(Transform(pos=(0, 0, 0)), _Drift(v=(1.0, 2.0, 3.0)))
+
+    @engine.system
+    def push(q: mx.Query[_Drift], dt: float):
+        q[_Drift].v += np.array([1.0, 0.0, 0.0], np.float32)
+
+    engine.systems.run_all(engine, 1 / 60)
+    engine.commands.execute(engine.store)
+    assert engine.store._components["_Drift"][moving.index].tolist() == [2.0, 2.0, 3.0]
