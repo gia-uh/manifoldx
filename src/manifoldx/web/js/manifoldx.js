@@ -113,7 +113,7 @@ function load(state, modules, resolve) {
 // browser's scene hooks, see createEngine); engine.state is the
 // snapshot's, set once the state is loaded, because its handles resolve through the engine.
 export function loadApp(state, modules, options = {}) {
-  const engine = createEngine({ ...state.engine, ...options });
+  const engine = createEngine({ ...state.engine, gui: state.gui ?? null, ...options });
   const loaded = load(state, modules, engine.resolve);
   if (loaded.state !== undefined) engine.state = loaded.state;
   return { engine, roots: loaded.roots };
@@ -223,15 +223,17 @@ export class Camera {
   }
 }
 
-// createEngine({w, h, camera: {position, target, fov, up, near, far}, materials, log, state,
-// hooks}): the engine object transpiled code reaches. materials maps a material id to the
+// createEngine({w, h, camera: {position, target, fov, up, near, far}, gui, materials, log,
+// state, hooks}): the engine object transpiled code reaches. gui is state.json's "gui": each
+// widget it names becomes engine.gui.widgets[n] with the fields reached code may write (a
+// Panel's offset, a Text's text, every widget's style_overrides), which the page applies. materials maps a material id to the
 // renderer's material (none, headless); log receives ["material", entity, material_id] and
 // ["capture", on] as reached code asks for them, the trace's record; state is engine.state, a
 // Map as every dict. hooks are where the browser acts, both optional:
 // setMaterial(entityIndex, materialId) after the log, and capture(on) -> boolean, whether the
 // capture took (headless: a no-op and () => true). resolve(kind, value) is loadState's
 // resolver for this engine.
-export function createEngine({ w, h, camera, materials = {}, log = [], state = new Map(), hooks = {} }) {
+export function createEngine({ w, h, camera, gui = null, materials = {}, log = [], state = new Map(), hooks = {} }) {
   const { setMaterial = () => {}, capture = () => true } = hooks;
   const engine = { w, h, state, log };
   engine.input = new ScriptInput((nw, nh) => { engine.w = nw; engine.h = nh; });
@@ -239,7 +241,7 @@ export function createEngine({ w, h, camera, materials = {}, log = [], state = n
   engine.input._capture = capture;
   engine.input._viewport = [w, h];
   engine.camera = new Camera(camera);
-  engine.gui = { pointer_over_gui: false, widgets: [] };
+  engine.gui = { pointer_over_gui: false, widgets: gui === null ? [] : guiWidgets(gui) };
 
   const entities = new Map(), mats = new Map();
   engine.set_material = (entity, material) => {
@@ -268,6 +270,20 @@ export function createEngine({ w, h, camera, materials = {}, log = [], state = n
     throw new Error(`a state handle of unknown kind: ${kind}`);
   };
   return engine;
+}
+
+// The widget objects of a gui spec, by their index in the snapshot's walk.
+function guiWidgets(spec) {
+  const widgets = [];
+  const walk = (node) => {
+    const w = { index: node.widget, style_overrides: new Map(Object.entries(node.overrides)) };
+    if (node.kind === "Panel") w.offset = [...node.offset];
+    if (node.kind === "Text") w.text = node.text;
+    widgets[node.widget] = w;
+    for (const c of node.children ?? []) walk(c);
+  };
+  spec.panels.forEach(walk);
+  return widgets;
 }
 
 // ---------------------------------------------------------------- frames

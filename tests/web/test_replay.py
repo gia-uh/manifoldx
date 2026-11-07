@@ -144,3 +144,47 @@ def test_boxes_dropped_from_the_snapshot_are_a_mismatch(exported, python_trace, 
     state["globals"]["__main__"]["boxes"] = []
     (out / "state.json").write_text(json.dumps(state))
     _mismatch(python_trace, out, frames)
+
+
+BRANCHES = """
+import sys
+
+import manifoldx as mx
+
+engine = mx.Engine("branches", width=320, height=200)
+
+
+class Rig:
+    def __init__(self, speed):
+        self.x = 0.0
+        self.speed = speed
+
+
+rig = Rig(5.0 if "--fast" in sys.argv else 1.0)
+
+
+def tick(query, dt: float):
+    rig.x = rig.x + rig.speed * dt
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_replay_python_passes_app_args_as_the_export_does(tmp_path):
+    """gia-uh/manifoldx#148: an app that branches on its arguments replays the branch the
+    export took when replay_python gets the same app_args."""
+    app = tmp_path / "branches.py"
+    app.write_text(BRANCHES)
+    out = tmp_path / "out"
+    assert export_web(None, str(app), out, ["--fast"]) == 0
+    frame = {"keys": [], "just": [], "d": [0, 0], "buttons": [], "clicks": [], "vp": [320, 200]}
+    frames, paths = [frame] * 3, ["rig.speed", "rig.x"]
+    node = replay_node(out, frames, paths)
+    fast = replay_python(None, str(app), frames, paths, app_args=["--fast"])
+    assert fast[-1]["paths"]["rig.speed"] == 5.0
+    assert compare(fast, node) is None
+    slow = replay_python(None, str(app), frames, paths)
+    assert slow[-1]["paths"]["rig.speed"] == 1.0
+    assert compare(slow, node) is not None

@@ -141,6 +141,7 @@ async function start() {
       engine.gui.pointer_over_gui = gui.pointerOver;
       engine.input.setFrame(frame);
       step(app, dt);
+      gui.sync(engine.gui.widgets);
       gui.update(guiValues(app));
     } catch (err) {
       renderer.setAnimationLoop(null);

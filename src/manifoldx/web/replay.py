@@ -133,14 +133,20 @@ class ScriptInput:
 
 
 def replay_python(
-    module: str | None, script: str | None, frames: list[Frame], paths: list[str], dt: float = DT
+    module: str | None,
+    script: str | None,
+    frames: list[Frame],
+    paths: list[str],
+    dt: float = DT,
+    app_args: list[str] | None = None,
 ) -> list[dict]:
     """The app (a script, or a module as python -m runs it) started as export --web starts it,
-    then run through frames: one trace entry per frame, as JSON reads it back."""
+    with app_args as its sys.argv[1:] (give the export's, so both take the same branch), then
+    run through frames: one trace entry per frame, as JSON reads it back."""
     from .export import _as_main, capture_engine
     from .reach import find_roots
 
-    engine, main = capture_engine(module, script, [])
+    engine, main = capture_engine(module, script, list(app_args or []))
     if engine is None:
         raise ValueError(f"{module or script} finished without calling engine.run()")
     with _as_main(main):

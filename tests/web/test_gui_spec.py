@@ -46,7 +46,8 @@ def _theme():
 
 def test_web_walk_panel():
     engine, _ = capture_engine(None, str(WEB_WALK), [])
-    vd = {"kind": "ValueDisplay", "min_width": None, "style": THEME}
+    vd = {"kind": "ValueDisplay", "min_width": None, "style": THEME, "base": THEME}
+    overrides = {"width": 240, "height": 76, "padding": 8, "bg": "#1a1a1aC0"}
     assert gui_spec(engine) == {
         "scale": 1.0,
         "design_height": None,
@@ -55,8 +56,13 @@ def test_web_walk_panel():
                 "kind": "Panel",
                 "anchor": "top-left",
                 "offset": [16, 16],
-                "style": {**THEME, "width": 240, "height": 76, "padding": 8, "bg": "#1a1a1aC0"},
-                "children": [{**vd, "value": 0}, {**vd, "value": 1}, {**vd, "value": 2}],
+                "widget": 0,
+                "style": {**THEME, **overrides},
+                "base": THEME,
+                "overrides": overrides,
+                "children": [
+                    {**vd, "value": v, "widget": v + 1, "overrides": {}} for v in (0, 1, 2)
+                ],
             }
         ],
     }
@@ -81,12 +87,23 @@ def test_a_style_class_is_resolved_and_values_count_across_panels():
         "kind": "ValueDisplay",
         "value": 0,
         "min_width": 80,
+        "widget": 1,
         "style": THEME,
+        "base": THEME,
+        "overrides": {},
     }
     assert second["anchor"] == "bottom-right" and second["offset"] == [4, 6]
     nested = second["children"][0]
-    assert nested["style"] == {**THEME, "bg": "#000000", "direction": "h", "gap": 10}
-    assert nested["children"][0] == {"kind": "Text", "text": "x", "style": THEME}
+    hud = {**THEME, "bg": "#000000", "direction": "h", "gap": 10}
+    assert nested["style"] == nested["base"] == hud
+    assert nested["children"][0] == {
+        "kind": "Text",
+        "text": "x",
+        "widget": 4,
+        "style": THEME,
+        "base": THEME,
+        "overrides": {},
+    }
     assert nested["children"][1]["value"] == 1
     json.dumps(spec)  # it goes into state.json as it is
 

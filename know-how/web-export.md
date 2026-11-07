@@ -63,7 +63,7 @@ Serve the folder over HTTP: opened as a `file://` URL the page cannot load its E
 
 ### What it does each frame
 
-`browser.js` loads `state.json`, imports the app's modules, streams `scene.glb` behind a progress bar (`#mx-progress`, hidden once loaded) and builds the scene and the GUI. Then, every animation frame, it takes one frame from the DOM's input, sets `engine.gui.pointer_over_gui`, runs the systems with the frame's real dt, updates the ValueDisplays, follows the canvas's size, syncs the three.js camera to `engine.camera` and renders. The canvas fills the window; `engine.w` and `engine.h` are its CSS size, and the drawing buffer is that times the device pixel ratio, capped at 2.
+`browser.js` loads `state.json`, imports the app's modules, streams `scene.glb` behind a progress bar (`#mx-progress`, hidden once loaded) and builds the scene and the GUI. Then, every animation frame, it takes one frame from the DOM's input, sets `engine.gui.pointer_over_gui`, runs the systems with the frame's real dt, applies the widget fields they wrote, updates the ValueDisplays, follows the canvas's size, syncs the three.js camera to `engine.camera` and renders. The canvas fills the window; `engine.w` and `engine.h` are its CSS size, and the drawing buffer is that times the device pixel ratio, capped at 2.
 
 ### Input
 
@@ -82,6 +82,14 @@ Serve the folder over HTTP: opened as a `file://` URL the page cannot load its E
 ```text
 manifoldx export --web: the GUI widget Button is not supported by export --web yet (panel 0, child 2)
 ```
+
+Reached code may write three widget fields, and the page applies them every frame as the desktop does: a Panel's `offset` (`hud.panel.offset = (x, y)` moves it), a Text's `text`, and any widget's `style_overrides` (`panel.style_overrides["width"] = 120`, or a new dict), resolved over the widget's theme and class. Each frame `gui.js`'s `sync` compares the widget objects (`engine.gui.widgets`, one per widget in `state.json`'s `gui`, by its `widget` index) with what it last applied, and writes only the CSS properties that changed. A write of any other field of a widget or of `engine.gui` would move the desktop and not the page, so it fails the export:
+
+```text
+app.py:21: writing `hud.panel.visible`, a field of a Panel the page does not apply, is outside the subset (reached from system tick)
+```
+
+The check needs the receiver's type: a widget held in an app object's field or a global types from the live object, but a write through a value of unknown type is not caught.
 
 ### Errors
 
@@ -139,7 +147,7 @@ app.py:6: `Path('x').exists` on a pathlib.Path, a library object the browser doe
 app.py:6: `query`, the system's component query (component queries are not supported in the browser yet), is outside the subset (reached from system tick)
 ```
 
-What is in: functions with positional and keyword arguments and defaults, nested functions and lambdas (closures), classes (dataclasses with `field(default_factory=...)`, `@property`, `__call__`, a value that may be one of several app classes), `if`/`for`/`while`/`break`/`continue`, comprehensions, f-strings with or without a format spec, `%` with Python's sign, `and`/`or` on any values, lists, tuples, dicts with str keys, sets, `math` (`sin cos tan asin acos atan atan2 sqrt exp log floor ceil fabs hypot radians degrees`, `pi e tau inf nan`), numpy 1-d float vectors (`np.array`, `np.zeros`, `np.arange`, `np.linalg.norm`, `+ - * /` and in-place `+=` that aliases see; float32 stays float32), `textwrap.wrap(s, width)`, and the builtins `len str bool int float abs min max any all range list tuple set next hasattr isinstance`. Strings count code points, as Python does.
+What is in: functions with positional and keyword arguments and defaults, nested functions and lambdas (closures), classes (dataclasses with `field(default_factory=...)`, `@property`, `__call__`, a value that may be one of several app classes), `if`/`for`/`while`/`break`/`continue`, comprehensions, f-strings with or without a format spec, `%` with Python's sign, `and`/`or` on any values, lists, tuples, dicts with str keys, sets, `math` (`sin cos tan asin acos atan atan2 sqrt exp log floor ceil fabs hypot radians degrees`, `pi e tau inf nan`), numpy 1-d float vectors (`np.array`, `np.zeros`, `np.arange`, `np.linalg.norm`, `+ - * /` and in-place `+=` that aliases see; float32 stays float32), `textwrap.wrap(s, width)`, the set methods `add`, `discard`, `remove` (KeyError when the item is missing), `clear` and `update` (any number of iterables), each returning None, and the builtins `len str bool int float abs min max any all range list tuple set next hasattr isinstance`. A JS Set compares items by identity, so `add`, `discard`, `remove` or `update` of a tuple, a list or an object fails the export: keep set items to strings, numbers, bools and None. Strings count code points, as Python does.
 
 What is out, among others: `try`, `raise`, `with`, `global`, `nonlocal`, `del`, `assert`, `async`/`await`, `yield`, `match`, `:=`, `for`/`else` and `while`/`else`, imports inside functions, `*args`/`**kwargs`, slices with a step or assigned to, dict comprehensions, imports of libraries other than `math`, `numpy` and `textwrap`, and a system that uses its query (component queries in the browser are not done yet). A builtin or library function not listed above fails as `app.py:5: enumerate() is outside the subset (reached from system tick)`.
 
@@ -185,7 +193,8 @@ Reached code may use exactly what `RUNTIME_SURFACE` in `src/manifoldx/web/types.
 
 - `engine.input`, `engine.camera`, `engine.gui.pointer_over_gui` (whether the pointer is over a root panel, so a click there is the GUI's), `engine.w`, `engine.h`, `engine.set_material(entity, material)`, and `engine.state` (subscripts or attributes, see above);
 - `engine.input`: `pressed_keys`, `modifiers`, `mouse_pos`, `mouse_delta`, `wheel_delta`, `pressed_buttons`, `viewport_size`, `pointer_captured`, `is_pressed(key)`, `just_pressed(key)`, `just_released(key)`, `is_mouse_pressed(button)`, `just_mouse_pressed(button)`, `just_mouse_released(button)`, `capture_pointer(on)`;
-- `engine.camera`: `position` and `target` (float32 vectors), `fov` (vertical, in degrees: with `mouse_pos` and `engine.w`/`engine.h` it turns a tap into a ray), `near`, `far`, `get_forward()`.
+- `engine.camera`: `position` and `target` (float32 vectors), `fov` (vertical, in degrees: with `mouse_pos` and `engine.w`/`engine.h` it turns a tap into a ray), `near`, `far`, `get_forward()`;
+- the GUI's widgets (see The GUI): a Panel's `offset`, a Text's `text`, every widget's `style_overrides`, to read and to write.
 
 Spawning, destroying, component queries, transforms and events are not there yet. Event handlers are transpiled but neither the page nor a replay fires them: read input by polling `engine.input` in a system. Do the scene's building in a `startup` handler or at module level: that is setup.
 
@@ -199,10 +208,13 @@ from manifoldx.web.replay import compare, replay_node, replay_python
 
 frames = [{"keys": ["w"], "just": [], "d": [4.0, 0.0], "buttons": [], "clicks": [], "vp": [800, 500]}] * 60
 paths = ["rig.pos", "rig.yaw", "selected"]
-assert export_web(None, "app.py", out, []) == 0
-mismatch = compare(replay_python(None, "app.py", frames, paths), replay_node(out, frames, paths))
+assert export_web(None, "app.py", out, ["--level", "3"]) == 0
+python = replay_python(None, "app.py", frames, paths, app_args=["--level", "3"])
+mismatch = compare(python, replay_node(out, frames, paths))
 assert mismatch is None, str(mismatch)          # "frame 41, paths.rig.yaw: 0.12 != 0.13"
 ```
+
+Give `replay_python` the `app_args` the export got: the app starts with them as its `sys.argv[1:]`, so it takes the branch the export took. A path can read a widget's fields (`hud.panel.offset`) as any object's.
 
 A frame is what `engine.input` reports for one frame: `keys` held, `just` pressed this frame, `d` the mouse motion, `buttons` held, `clicks` pressed this frame, `vp` the viewport size (a new size resizes the engine). Five more fields are optional and read as empty when absent: `up` and `released` (keys and buttons released this frame), `pos` (the pointer in CSS pixels from the canvas's top-left), `wheel` and `mods` (held modifiers among Alt, Control, Meta, Shift, sorted). The page builds every field; `src/manifoldx/web/replay.py`'s docstring is the reference. In a replay `capture_pointer` always succeeds, as in a headless browser.
 

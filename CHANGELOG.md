@@ -297,6 +297,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **export --web: a widget field that reached code writes reaches the page.** A Panel's
+  `offset`, a Text's `text` and any widget's `style_overrides` written every frame move,
+  rewrite or restyle the HTML GUI as they do the desktop's; the page writes only the CSS
+  that changed. A write of any other field of a widget or of `engine.gui` (`visible`,
+  `anchor`, `style`, `scale`) fails the export with its file and line instead of differing
+  in silence (#147).
+
+- **`replay_python` takes `app_args`**, the app's `sys.argv[1:]` as `export_web` takes
+  them, so an app that branches on its arguments replays the branch its export took (#148).
+
+- **Sets in transpiled code have `add`, `discard`, `remove`, `clear` and `update`.** Each
+  returns None, `remove` of a missing item throws KeyError, and an item a JS Set compares
+  by identity (a tuple, a list, an object) fails the export (#149).
+
 - **`export --web` types what it used to leave unknown.** An attribute read on a value of
   unknown type fails the export, naming what to annotate, instead of leaving the field out
   of the snapshot; an annotation the transpiler cannot read (a bare `tuple`) gives way to
