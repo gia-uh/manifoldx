@@ -310,3 +310,25 @@ def test_lock_lost_releases(open_page, served, web_walk_export):
     ran = tick(page)
     assert "Escape" in ran["frame"]["just"]
     assert page.evaluate("__mx.app.engine.input.pointer_captured") is False
+
+
+@pytest.fixture(scope="module")
+def moving_export(tmp_path_factory):
+    return _export(APPS / "moving_panel.py", tmp_path_factory.mktemp("moving"))
+
+
+def test_a_system_moves_a_panel_and_the_dom_follows(open_page, served, moving_export):
+    """gia-uh/manifoldx#147: the offset, text and width a system writes each frame reach the
+    panel's div, as the desktop paints them."""
+    page = open_page(served(moving_export), width=800, height=500)
+    box = """() => {
+      const el = document.getElementById("mx-gui").children[0];
+      const r = el.getBoundingClientRect();
+      return { left: r.left, top: r.top, width: r.width, text: el.innerText };
+    }"""
+    first = page.evaluate(box)
+    assert (first["left"], first["top"], first["text"]) == (10, 20, "frame 0")
+    ticks(page, 10)
+    assert page.evaluate(box) == {"left": 60, "top": 20, "width": 110, "text": "frame 10"}
+    ticks(page, 1)
+    assert page.evaluate(box) == {"left": 65, "top": 20, "width": 111, "text": "frame 11"}

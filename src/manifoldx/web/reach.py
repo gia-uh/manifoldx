@@ -17,8 +17,10 @@ from dataclasses import dataclass
 from manifoldx.gltf.engine_export import _internal, _label, _widgets
 
 from .types import (
+    GUI_CLASSES,
     NEVER,
     NUM,
+    RUNTIME_SURFACE,
     Ctx,
     FuncInfo,
     FunctionKey,
@@ -327,6 +329,15 @@ class Reach:
                 continue
             c = self.env.classes.get(m.name)
             if c is None:
+                if check and not read and m.name in GUI_CLASSES:
+                    if attr not in RUNTIME_SURFACE[m.name]:
+                        raise TranspileError(
+                            module_path(key[0]),
+                            n.lineno,
+                            f"writing `{ast.unparse(n)}`, a field of {GUI_CLASSES[m.name]} "
+                            "the page does not apply,",
+                            self.root(key),
+                        )
                 if check and not (m.name or "").startswith("manifoldx."):
                     raise TranspileError(
                         module_path(key[0]),

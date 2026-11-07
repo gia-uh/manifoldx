@@ -451,6 +451,7 @@ LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
 # classes. What is not here types as unknown.
 _INPUT, _CAMERA = "manifoldx.input.InputState", "manifoldx.Camera"
 _GUI = "manifoldx.gui.widgets._GuiRoot"
+_PANEL, _TEXT, _VALUE_DISPLAY = "manifoldx.gui.Panel", "manifoldx.gui.Text", "manifoldx.gui.ValueDisplay"
 RUNTIME_SURFACE = {
     "manifoldx.Engine": {
         "input": obj(_INPUT),
@@ -492,7 +493,16 @@ RUNTIME_SURFACE = {
         "get_forward": fn(f"{_CAMERA}.get_forward", vec("f32")),
     },
     _GUI: {"pointer_over_gui": BOOL},
+    # The widgets gui.js draws: the fields the page applies each frame when reached code
+    # writes them (gui.js's sync), and nothing else.
+    _PANEL: {"offset": tuple_of(NUM, NUM), "style_overrides": dict_of(STR, UNKNOWN)},
+    _TEXT: {"text": STR, "style_overrides": dict_of(STR, UNKNOWN)},
+    _VALUE_DISPLAY: {"style_overrides": dict_of(STR, UNKNOWN)},
 }
+
+# The classes whose every field write must be one the page applies: a write of a field not
+# in RUNTIME_SURFACE moves the desktop and not the page, so it fails the export.
+GUI_CLASSES = {_GUI: "the GUI", _PANEL: "a Panel", _TEXT: "a Text", _VALUE_DISPLAY: "a ValueDisplay"}
 
 # math's functions the subset has, and its constants.
 MATH_FUNCTIONS = frozenset(

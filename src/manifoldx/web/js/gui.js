@@ -71,21 +71,34 @@ export function panelCss(node, scale, isRoot) {
   return css;
 }
 
-// buildGui(layer, spec) -> {update(values), rescale(engineH), pointerOver}: the panels as divs
-// in layer. update writes each ValueDisplay's text (values in getter order, guiValues')
-// only when it changed; rescale recomputes the sizes when the GUI scales with the window
-// (design_height). pointerOver is whether the pointer is over a root panel; browser.js copies
-// it into engine.gui.pointer_over_gui each frame.
+// Whether a widget's style_overrides (a Map, as every dict of transpiled code) holds what the
+// node last applied (a plain object).
+function sameOverrides(map, applied) {
+  const keys = Object.keys(applied);
+  if (map.size !== keys.length) return false;
+  for (const k of keys) if (!map.has(k) || map.get(k) !== applied[k]) return false;
+  return true;
+}
+
+// buildGui(layer, spec) -> {update(values), sync(widgets), rescale(engineH), pointerOver}: the
+// panels as divs in layer. update writes each ValueDisplay's text (values in getter order,
+// guiValues') only when it changed; sync applies what reached code wrote into the widget
+// objects (engine.gui.widgets: a Panel's offset, a Text's text, any widget's style_overrides,
+// resolved over its base style), writing the DOM only where a value changed; rescale
+// recomputes the sizes when the GUI scales with the window (design_height). pointerOver is
+// whether the pointer is over a root panel; browser.js copies it into
+// engine.gui.pointer_over_gui each frame.
 export function buildGui(layer, spec) {
   const doc = layer.ownerDocument;
-  const all = []; // [element, node, isRoot]
+  const all = []; // [element, node, isRoot, the CSS it has]
   const displays = []; // the ValueDisplays' elements, by getter index
   const shown = [];
   let over = 0;
+  let scale = spec.scale;
 
   function make(node, isRoot) {
     const el = doc.createElement("div");
-    all.push([el, node, isRoot]);
+    all.push([el, node, isRoot, {}]);
     el.style.setProperty("white-space", "pre");
     if (node.kind === "Panel") for (const c of node.children) el.appendChild(make(c, false));
     else if (node.kind === "Text") el.textContent = node.text;
@@ -97,14 +110,30 @@ export function buildGui(layer, spec) {
     return el;
   }
 
-  function apply(scale) {
-    for (const [el, node, isRoot] of all) {
-      for (const [k, v] of Object.entries(panelCss(node, scale, isRoot))) el.style.setProperty(k, v);
+  // Write one element's CSS: only the properties that changed, and remove those it lost.
+  function css(entry) {
+    const [el, node, isRoot, had] = entry;
+    const want = panelCss(node, scale, isRoot);
+    for (const k of Object.keys(had)) {
+      if (!(k in want)) {
+        el.style.removeProperty(k);
+        delete had[k];
+      }
+    }
+    for (const [k, v] of Object.entries(want)) {
+      if (had[k] !== v) {
+        el.style.setProperty(k, v);
+        had[k] = v;
+      }
     }
   }
 
+  function apply() {
+    for (const entry of all) css(entry);
+  }
+
   for (const p of spec.panels) layer.appendChild(make(p, true));
-  apply(spec.scale);
+  apply();
 
   return {
     update(values) {
@@ -115,8 +144,33 @@ export function buildGui(layer, spec) {
         }
       });
     },
+    sync(widgets) {
+      for (const entry of all) {
+        const [el, node] = entry;
+        const w = widgets[node.widget];
+        if (w === undefined) continue;
+        let changed = false;
+        if (node.kind === "Panel" && (w.offset[0] !== node.offset[0] || w.offset[1] !== node.offset[1])) {
+          node.offset = [w.offset[0], w.offset[1]];
+          changed = true;
+        }
+        if (node.kind === "Text" && w.text !== node.text) {
+          node.text = w.text;
+          el.textContent = w.text;
+        }
+        if (!sameOverrides(w.style_overrides, node.overrides)) {
+          node.overrides = Object.fromEntries(w.style_overrides);
+          node.style = { ...node.base, ...node.overrides };
+          changed = true;
+        }
+        if (changed) css(entry);
+      }
+    },
     rescale(engineH) {
-      if (spec.design_height) apply(engineH / spec.design_height);
+      if (spec.design_height) {
+        scale = engineH / spec.design_height;
+        apply();
+      }
     },
     get pointerOver() { return over > 0; },
   };

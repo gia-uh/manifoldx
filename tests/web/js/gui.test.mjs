@@ -168,3 +168,80 @@ test("rescale follows engine.h when design_height is set, and does nothing other
   g2.rescale(1000);
   assert.equal(fixed.children[0].props.width, "240px");
 });
+
+// ---------------------------------------------------------------- widget writes (#147)
+
+// A root panel (widget 0) holding a Text (widget 1), as gui_spec writes them, and the widget
+// objects reached code writes, as loadApp builds them from the spec.
+const MOVING = () => ({
+  scale: 1, design_height: null,
+  panels: [panel({}, {
+    widget: 0, base: THEME, overrides: {}, offset: [10, 20],
+    children: [{ kind: "Text", widget: 1, text: "hi", style: THEME, base: THEME, overrides: {} }],
+  })],
+});
+const widgetsOf = () => [
+  { index: 0, offset: [10, 20], style_overrides: new Map() },
+  { index: 1, text: "hi", style_overrides: new Map() },
+];
+const countWrites = (el) => {
+  let n = 0;
+  const { setProperty, removeProperty } = el.style;
+  el.style.setProperty = (k, v) => { n++; setProperty(k, v); };
+  el.style.removeProperty = (k) => { n++; removeProperty(k); };
+  return () => n;
+};
+
+test("sync moves a root panel when reached code writes its offset", () => {
+  const layer = fakeLayer();
+  const gui = buildGui(layer, MOVING());
+  const widgets = widgetsOf();
+  widgets[0].offset = [55, 30];
+  gui.sync(widgets);
+  assert.equal(layer.children[0].props.left, "55px");
+  assert.equal(layer.children[0].props.top, "30px");
+});
+
+test("sync writes a Text's new text and a style override, and drops a removed one", () => {
+  const layer = fakeLayer();
+  const gui = buildGui(layer, MOVING());
+  const widgets = widgetsOf();
+  widgets[1].text = "bye";
+  widgets[0].style_overrides.set("width", 100);
+  widgets[0].style_overrides.set("bg", "#ff0000");
+  gui.sync(widgets);
+  const root = layer.children[0];
+  assert.equal(root.children[0].textContent, "bye");
+  assert.equal(root.props.width, "100px");
+  assert.equal(root.props["background-color"], "#ff0000");
+  widgets[0].style_overrides.delete("width");
+  gui.sync(widgets);
+  assert.equal("width" in root.props, false);
+  assert.equal(root.props["background-color"], "#ff0000");
+});
+
+test("sync writes nothing to the DOM when no widget field changed", () => {
+  const layer = fakeLayer();
+  const gui = buildGui(layer, MOVING());
+  const widgets = widgetsOf();
+  const root = layer.children[0], text = root.children[0];
+  const writes = countWrites(root), textWrites = text.writes;
+  gui.sync(widgets);
+  widgets[0].offset = [10, 20]; // a new tuple, the same value
+  gui.sync(widgets);
+  assert.equal(writes(), 0);
+  assert.equal(text.writes, textWrites);
+  widgets[0].offset = [11, 20];
+  gui.sync(widgets);
+  assert.ok(writes() > 0);
+});
+
+test("a rescale keeps the offset reached code wrote", () => {
+  const layer = fakeLayer();
+  const gui = buildGui(layer, { ...MOVING(), design_height: 100 });
+  const widgets = widgetsOf();
+  widgets[0].offset = [40, 20];
+  gui.sync(widgets);
+  gui.rescale(200);
+  assert.equal(layer.children[0].props.left, "80px");
+});

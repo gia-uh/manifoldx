@@ -621,3 +621,111 @@ def test_a_return_annotation_wins_over_an_unknown_inferred_return(app_dir, tmp_p
     py, node = _replay_both(app_dir, tmp_path / "out", READ)
     assert py[0]["state"]["s"] == 3.5
     assert compare(py, node) is None, str(compare(py, node))
+
+
+MOVING = """
+import manifoldx as mx
+from manifoldx.gui import Panel, Text
+
+engine = mx.Engine("moving", width=320, height=200)
+
+
+class Hud:
+    def __init__(self):
+        self.label = Text("frame 0")
+        self.panel = Panel(children=[self.label], offset=(10, 20))
+        self.n = 0
+
+
+hud = Hud()
+engine.gui.append(hud.panel)
+
+
+def tick(query, dt: float):
+    hud.n += 1
+    x, y = hud.panel.offset
+    hud.panel.offset = (x + 3, y)
+    hud.label.text = f"frame {hud.n}"
+    hud.panel.style_overrides["width"] = 100 + hud.n
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_widget_writes_replay_in_node_as_in_python(app_dir, tmp_path):
+    """gia-uh/manifoldx#147: a panel's offset, a Text's text and a style override written by
+    a system are fields of the widget objects the page reads, the same values as in Python."""
+    out = tmp_path / "out"
+    assert _export(app_dir, out, MOVING) == 0
+    from manifoldx.web.replay import replay_node, replay_python
+
+    frame = {"keys": [], "just": [], "d": [0, 0], "buttons": [], "clicks": [], "vp": [320, 200]}
+    paths = ["hud.panel.offset", "hud.label.text", "hud.panel.style_overrides"]
+    py = replay_python(None, str(app_dir / "app.py"), [frame] * 4, paths)
+    assert py[-1]["paths"] == {
+        "hud.panel.offset": [22, 20],
+        "hud.label.text": "frame 4",
+        "hud.panel.style_overrides": {"width": 104},
+    }
+    mismatch = compare(py, replay_node(out, [frame] * 4, paths))
+    assert mismatch is None, str(mismatch)
+
+
+def test_the_gui_spec_names_each_widget_and_its_base_style(app_dir, tmp_path):
+    out = tmp_path / "out"
+    assert _export(app_dir, out, MOVING) == 0
+    panel = json.loads((out / "state.json").read_text())["gui"]["panels"][0]
+    assert (panel["widget"], panel["overrides"]) == (0, {})
+    assert panel["children"][0]["widget"] == 1
+    assert panel["base"] == panel["style"]
+
+
+UNAPPLIED = """
+import manifoldx as mx
+from manifoldx.gui import Panel, Text
+
+engine = mx.Engine("unapplied", width=320, height=200)
+
+
+class Hud:
+    def __init__(self):
+        self.panel = Panel(children=[Text("hi")])
+
+
+hud = Hud()
+engine.gui.append(hud.panel)
+
+
+def tick(query, dt: float):
+    {write}
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+@pytest.mark.parametrize(
+    "write, what",
+    [
+        ("hud.panel.visible = False", "`hud.panel.visible`, a field of a Panel"),
+        ('hud.panel.anchor = "center"', "`hud.panel.anchor`, a field of a Panel"),
+        ('hud.panel.style = "hud"', "`hud.panel.style`, a field of a Panel"),
+        ("engine.gui.scale = 2.0", "`engine.gui.scale`, a field of the GUI"),
+    ],
+)
+def test_a_widget_write_the_page_does_not_apply_fails_the_export(
+    app_dir, tmp_path, capsys, write, what
+):
+    """gia-uh/manifoldx#147: the desktop applies the write and the page would not, so the
+    export stops at its line rather than differ in silence."""
+    out = tmp_path / "out"
+    src = UNAPPLIED.replace("{write}", write)
+    assert _export(app_dir, out, src) == 1
+    line = src.splitlines().index(f"    {write}") + 1
+    err = capsys.readouterr().err
+    assert f"app.py:{line}: writing {what} the page does not apply, is outside the subset" in err
+    assert "(reached from system tick)" in err
+    assert not out.exists()
