@@ -17,10 +17,10 @@ from dataclasses import dataclass
 from manifoldx.gltf.engine_export import _internal, _label, _widgets
 
 from .types import (
-    GUI_CLASSES,
     NEVER,
     NUM,
-    RUNTIME_SURFACE,
+    RUNTIME_NAMES,
+    WRITABLE,
     Ctx,
     FuncInfo,
     FunctionKey,
@@ -301,9 +301,17 @@ class Reach:
                 if sym is not None and sym.kind == "module":
                     self._symbol(env.resolve(sym.target, n.attr), key)
                     return
-            self._attribute(
-                n, env.expr(n.value, ctx), n.attr, key, check, isinstance(n.ctx, ast.Load)
-            )
+            recv = env.expr(n.value, ctx)
+            if check and not isinstance(n.ctx, ast.Load) and not recv.known:
+                # a widget, the engine or an app object: which field it writes, nobody knows
+                raise TranspileError(
+                    module_path(key[0]),
+                    n.lineno,
+                    f"writing `{ast.unparse(n)}`, a field of a value of unknown type "
+                    f"(annotate `{ast.unparse(n.value)}`),",
+                    self.root(key),
+                )
+            self._attribute(n, recv, n.attr, key, check, isinstance(n.ctx, ast.Load))
         elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Attribute):
             self._attribute(
                 n.target, env.expr(n.target.value, ctx), n.target.attr, key, check, True
@@ -329,16 +337,16 @@ class Reach:
                 continue
             c = self.env.classes.get(m.name)
             if c is None:
-                if check and not read and m.name in GUI_CLASSES:
-                    if attr not in RUNTIME_SURFACE[m.name]:
-                        raise TranspileError(
-                            module_path(key[0]),
-                            n.lineno,
-                            f"writing `{ast.unparse(n)}`, a field of {GUI_CLASSES[m.name]} "
-                            "the page does not apply,",
-                            self.root(key),
-                        )
-                if check and not (m.name or "").startswith("manifoldx."):
+                manifoldx = (m.name or "").startswith("manifoldx.")
+                if check and not read and manifoldx and attr not in WRITABLE.get(m.name, ()):
+                    what = RUNTIME_NAMES.get(m.name, f"a {m.name.rsplit('.', 1)[-1]}")
+                    raise TranspileError(
+                        module_path(key[0]),
+                        n.lineno,
+                        f"writing `{ast.unparse(n)}`, a field of {what} the page does not apply,",
+                        self.root(key),
+                    )
+                if check and not manifoldx:
                     raise TranspileError(
                         module_path(key[0]),
                         n.lineno,

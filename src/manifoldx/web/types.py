@@ -500,9 +500,26 @@ RUNTIME_SURFACE = {
     _VALUE_DISPLAY: {"style_overrides": dict_of(STR, UNKNOWN)},
 }
 
-# The classes whose every field write must be one the page applies: a write of a field not
-# in RUNTIME_SURFACE moves the desktop and not the page, so it fails the export.
-GUI_CLASSES = {_GUI: "the GUI", _PANEL: "a Panel", _TEXT: "a Text", _VALUE_DISPLAY: "a ValueDisplay"}
+# The fields of manifoldx objects reached code may write: those the page applies each frame
+# (gui.js's sync for the widgets, scene.js's sync for the camera). A write of any other field
+# of a manifoldx object moves the desktop and not the page, so it fails the export.
+WRITABLE = {
+    _CAMERA: {"position", "target", "fov", "near", "far"},
+    _PANEL: {"offset", "style_overrides"},
+    _TEXT: {"text", "style_overrides"},
+    _VALUE_DISPLAY: {"style_overrides"},
+}
+
+# How an error names an object of each manifoldx class; another goes by its class name.
+RUNTIME_NAMES = {
+    "manifoldx.Engine": "the engine",
+    _INPUT: "the input",
+    _CAMERA: "the camera",
+    _GUI: "the GUI",
+    _PANEL: "a Panel",
+    _TEXT: "a Text",
+    _VALUE_DISPLAY: "a ValueDisplay",
+}
 
 # math's functions the subset has, and its constants.
 MATH_FUNCTIONS = frozenset(

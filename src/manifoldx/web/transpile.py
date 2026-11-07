@@ -22,6 +22,7 @@ from .reach import Reach, closure_site
 from .types import (
     LIB_CONSTANTS,
     MATH_FUNCTIONS,
+    RUNTIME_SURFACE,
     STATE,
     STR_METHODS,
     ClassInfo,
@@ -662,9 +663,29 @@ class _Module:
             return self.setitem(t, self.e(value))
         if isinstance(t, ast.Attribute) and self.ty(t.value) == STATE:
             return f"{self.e(t.value)}.set({json.dumps(t.attr)}, {self.e(value)})"
+        if isinstance(t, ast.Attribute):
+            self.runtime_field(t, value)
         if isinstance(t, (ast.Tuple, ast.List)):
             return f"{self.target(t)} = {self.iterable(value, destructure=True)}"
         return f"{self.target(t)} = {self.e(value)}"
+
+    def runtime_field(self, t: ast.Attribute, value: ast.expr) -> None:
+        """A write of a camera's vector or number must keep its type: numpy would keep a
+        float64 array, or a tuple, where the runtime rounds to float32 (get_forward, +=)."""
+        v = self.ty(value)
+        for m in self.ty(t.value).members:
+            field = RUNTIME_SURFACE.get(m.name, {}).get(t.attr) if m.kind == "obj" else None
+            if field is None or field.kind not in ("vec", "num"):
+                continue
+            same = v.all("vec") and all(x.dtype == field.dtype for x in v.members)
+            if field.kind == "vec" and not same:  # every vector field is float32
+                self.fail(
+                    value,
+                    f"writing a {v} to `{ast.unparse(t)}`, a float32 vector "
+                    "(build it with np.array(x, np.float32)),",
+                )
+            if field.kind == "num" and not v.all("num", "int"):
+                self.fail(value, f"writing a {v} to `{ast.unparse(t)}`, a number,")
 
     def target(self, t: ast.expr) -> str:
         if isinstance(t, ast.Name):
