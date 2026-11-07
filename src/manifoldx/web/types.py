@@ -700,6 +700,7 @@ RUNTIME_SURFACE = {
         "log": fn("manifoldx.Engine.log", NONE),
         "spawn": fn("manifoldx.Engine.spawn", union(obj(_HANDLE), NONE)),
         "destroy": fn("manifoldx.Engine.destroy", NONE),
+        "set_joints": fn("manifoldx.Engine.set_joints", NONE),
         "emit": fn("manifoldx.Engine.emit", NONE),
         "elapsed": NUM,
     },
@@ -736,11 +737,13 @@ RUNTIME_SURFACE = {
     },
     _GUI: {"pointer_over_gui": BOOL},
     # An entity handle: its transform reads and writes the entity's row at once (pos in world
-    # coordinates, float64), set_material writes its Material column, destroy queues it.
+    # coordinates, float64), set_material writes its Material column, set_joints its pose,
+    # destroy queues it.
     _HANDLE: {
         "index": INT,
         "transform": obj(_PROXY),
         "set_material": fn(f"{_HANDLE}.set_material", NONE),
+        "set_joints": fn(f"{_HANDLE}.set_joints", NONE),
         "destroy": fn(f"{_HANDLE}.destroy", NONE),
     },
     _PROXY: {"pos": vec("f64"), "rot": vec("f32"), "scale": vec("f32")},
@@ -1357,11 +1360,15 @@ class TypeEnv:
         """The type of a numpy function of ND_FUNCTIONS on arrays; unknown outside the subset."""
         f = name.removeprefix("numpy.")
         args = [self.expr(a, ctx) for a in n.args]
+        if args and any(not t.members for t in args):  # not typed yet (a call's return): wait
+            return NEVER
         if not args or any(len(t.members) != 1 for t in args):
             return UNKNOWN
         a = args[0]
         if f in ("stack", "column_stack"):
             items = elem(a)
+            if a.all("list", "tuple") and not items.members:
+                return NEVER
             if not (a.all("list", "tuple") and len(items.members) == 1 and is_array(items)):
                 return UNKNOWN
             rank = array_rank(items)

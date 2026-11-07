@@ -30,7 +30,8 @@ Each side reads one frame, delivers the event queue, then runs the app's systems
 fixed dt and traces:
 
     {"camera": {"position", "target"}, "gui": [str], "log": [...], "state": engine.state,
-     "paths": {path: value}, "store": store_trace(engine.store), "events": [name]}
+     "paths": {path: value}, "store": store_trace(engine.store), "joints": joints_trace(engine),
+     "events": [name]}
 
 gui is what each ValueDisplay shows; log the ["material", entity, material_id] and
 ["capture", on] entries this frame added; a path ("rig.pos", "selected") starts at a global of
@@ -46,7 +47,13 @@ as the engine runs them after its systems:
 
 rows are the alive slots' rows, ascending, a float32 NaN or infinity written "nan", "inf" or
 "-inf"; past 1,000 alive entities a component's rows are {"digest": d, "n": alive}, d being
-the sum of the rows' uint32 words w[i] (row-major) times i + 1, mod 2^32.
+the sum of the rows' uint32 words w[i] (row-major) times i + 1, mod 2^32. joints holds each
+posed alive entity's pose, its geometry's joint count J of float32 matrices row-major:
+
+    {str(entity): [[16 floats] × J]}
+
+ascending, or past 8 posed entities {"digest": d, "n": posed}, the same sum over the float32
+words of all the J-joint blocks in entity order.
 """
 
 from __future__ import annotations
@@ -254,6 +261,7 @@ def replay_python(
                 "state": engine.state,
                 "paths": {p: _path(vars(main), engine.state, p) for p in paths},
                 "store": store_trace(engine.store),
+                "joints": joints_trace(engine),
                 "events": list(delivered),
             }
             trace.append(json.loads(json.dumps(entry, default=_plain)))
@@ -346,6 +354,33 @@ def store_trace(store) -> dict:
         "high_water": int(store._high_water),
         "rows": rows,
     }
+
+
+JOINTS_DIGEST_PAST = 8  # posed entities past which the trace carries a digest of their joints
+
+
+def joints_trace(engine) -> dict:
+    """The posed alive entities' joints as the trace writes them (the module docstring's
+    form), as js/manifoldx.js's traceJoints writes the page's."""
+    from manifoldx.skinning import joint_count
+
+    store, joints = engine.store, engine._render_pipeline._joints
+    hw = store._high_water
+    posed = np.flatnonzero(store._alive[:hw] & (joints.block_of[:hw] != 0))
+    if len(posed) == 0:
+        return {}
+    meshes = store._components["Mesh"]
+    geometries = engine._geometry_registry
+    blocks = [
+        joints.pose(int(i), joint_count(geometries.get(int(meshes[i, 0])))).reshape(-1, 16)
+        for i in posed
+    ]
+    if len(posed) > JOINTS_DIGEST_PAST:
+        words = np.concatenate(blocks).view(np.uint32).ravel().astype(np.uint64)
+        weights = np.arange(1, len(words) + 1, dtype=np.uint64)
+        d = int(((words * weights) & 0xFFFFFFFF).sum() % 2**32)
+        return {"digest": d, "n": len(posed)}
+    return {str(int(i)): b.tolist() for i, b in zip(posed, blocks)}
 
 
 def _trace_float(x):
