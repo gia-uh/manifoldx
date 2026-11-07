@@ -2,7 +2,7 @@
 // line), draw it with three.js, and run the app's systems every animation frame on the input
 // the DOM gave, through the same Frame the replay feeds. window.__mx is how tests drive it:
 // {ready, app, scene, gui, frames, trace, error, paths, manual(on), tick(dt), loadStats}, and
-// under manifoldx run --web (<meta name="mx-dev">) also {version, swaps, dev, swap(info)}.
+// under manifoldx run --web (<meta name="mx-dev">) also {version, swaps, dev, status, swap(info)}.
 //
 // The renderer, the canvas, the input (FrameBuilder, PointerLock, the DOM listeners) live as
 // long as the page; a Version (the state, the app's modules and their maps, the app) is what a
@@ -149,6 +149,7 @@ async function start() {
   let size = [0, 0], guiH = null;
   let frozen = null; // while a reload builds (Q2): the timer that unfreezes after FREEZE_MAX
   let manual = false;
+  let onPause = () => {}; // dev mode: an exception in a frame pauses until the next edit
 
   // One frame as the loop runs it: the frame the DOM built, the systems, the GUI, the camera,
   // the render. Returns {frame, start} (start: where this frame's log begins), or null when the
@@ -167,7 +168,9 @@ async function start() {
       gui.update(guiValues(app));
     } catch (err) {
       renderer.setAnimationLoop(null);
-      showError(describe(err, running.maps));
+      const text = describe(err, running.maps);
+      showError(text);
+      onPause(text);
       return null;
     }
     if (engine.h !== guiH) gui.rescale((guiH = engine.h));
@@ -265,8 +268,25 @@ async function start() {
   if (DEV) {
     const dev = await import("./dev.js");
     mx.dev = dev;
-    mx.status = dev.status(dev.INITIAL, { type: "version", version: mx.version });
-    const say = (message) => { mx.status = dev.status(mx.status, message); };
+    const overlay = $("mx-dev");
+    overlay.hidden = false;
+    // The status line and the error panel follow the model (overlayText's rows).
+    const say = (message) => {
+      mx.status = dev.status(mx.status, message);
+      const { status, panel } = dev.overlayText(mx.status);
+      overlay.textContent = status;
+      if (panel === null) $("mx-error").hidden = true;
+      else if (panel !== undefined) {
+        $("mx-error").textContent = panel;
+        $("mx-error").hidden = false;
+      }
+    };
+    mx.status = dev.INITIAL;
+    say({ type: "version", version: mx.version });
+    onPause = (text) => {
+      say({ type: "paused", text });
+      dev.log(`paused until the next edit: ${text.split("\n")[0]}`);
+    };
     // A swap waits for the one before it, so versions apply in order.
     let swapping = Promise.resolve();
     dev.connect(mx, {

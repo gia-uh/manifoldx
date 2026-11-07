@@ -22,6 +22,9 @@
   #mx-error { position: fixed; left: 16px; right: 16px; bottom: 16px; max-height: 50vh; overflow: auto; margin: 0;
               padding: 10px 12px; border-radius: 4px; background: #2a1512f0; color: #ffb4a3;
               font: 13px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
+  #mx-dev { position: fixed; right: 8px; bottom: 8px; padding: 3px 8px; border-radius: 3px; pointer-events: none;
+            background: #1a1a1ad0; color: #ddd; font: 12px/1.4 ui-monospace, monospace; }
+  #mx-dev:not([hidden]) ~ #mx-error { bottom: 36px; }
   [hidden] { display: none !important; }
 </style>
 <script type="importmap">
@@ -36,6 +39,7 @@
   <div class="text">Loading. If this stays, serve this folder over HTTP (python -m http.server) and open
   it from there: a page opened as a file cannot load its modules.</div>
 </div>
+<div id="mx-dev" hidden></div>
 <pre id="mx-error" hidden></pre>
 <script type="module" src="browser.js"></script>
 </body>

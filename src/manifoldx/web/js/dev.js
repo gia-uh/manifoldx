@@ -31,6 +31,24 @@ export function status(model, message) {
   }
 }
 
+// overlayText(model) -> {status, panel}: the overlay's status line (#mx-dev) and the error
+// panel's text (#mx-error): null hides the panel, undefined leaves it as it is.
+export function overlayText(model) {
+  const v = model.version;
+  switch (model.phase) {
+    case "reloading":
+      return { status: `v${v + 1} · reloading`, panel: undefined };
+    case "failed":
+      return { status: `v${v} · reload failed, running v${v}`, panel: `${model.text}\nFix it and save: the tab keeps running v${v}.` };
+    case "paused":
+      return { status: `v${v} · paused until the next edit`, panel: model.text };
+    case "offline":
+      return { status: `v${v} · dev server gone, retrying`, panel: undefined };
+    default:
+      return { status: `v${v} · live`, panel: null };
+  }
+}
+
 // POST a JSON body to the dev server; errors are dropped (the server may be gone).
 export function post(path, body) {
   return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })

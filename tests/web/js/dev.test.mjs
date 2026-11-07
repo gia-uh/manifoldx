@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { INITIAL, status } from "../../../src/manifoldx/web/js/dev.js";
+import { INITIAL, overlayText, status } from "../../../src/manifoldx/web/js/dev.js";
 
 const run = (...messages) => messages.reduce(status, INITIAL);
 const v = (version) => ({ type: "version", version });
@@ -37,4 +37,38 @@ test("a stream error is offline; the next version clears it, the same one too", 
   assert.deepEqual(m, { version: 3, phase: "offline", text: null });
   assert.deepEqual(status(m, v(3)), { version: 3, phase: "live", text: null }); // the stream came back
   assert.deepEqual(status(m, v(5)), { version: 5, phase: "live", text: null });
+});
+
+// overlayText(model) -> {status, panel}: the status line, and the error panel's text (null:
+// hidden, undefined: left as it is).
+test("running: the version is live and the panel hidden", () => {
+  assert.deepEqual(overlayText(run(v(3))), { status: "v3 · live", panel: null });
+});
+
+test("from the state request to the swap: the next version is reloading, the panel unchanged", () => {
+  assert.deepEqual(overlayText(run(v(3), { type: "reloading" })), { status: "v4 · reloading", panel: undefined });
+});
+
+test("an edit that failed: the running version, the failure's line and what to do", () => {
+  const text = "dev_orbit.py:12: SyntaxError: '(' was never closed";
+  const m = run(v(3), { type: "reloading" }, { type: "failed", running: 3, text });
+  assert.deepEqual(overlayText(m), {
+    status: "v3 · reload failed, running v3",
+    panel: "dev_orbit.py:12: SyntaxError: '(' was never closed\nFix it and save: the tab keeps running v3.",
+  });
+});
+
+test("an exception in a frame: paused, the panel shows describe's text", () => {
+  const text = "raises.py:26 in tick: TypeError: x is null\n  called from raises.py:30 in walk";
+  assert.deepEqual(overlayText(run(v(3), { type: "paused", text })), {
+    status: "v3 · paused until the next edit",
+    panel: text,
+  });
+});
+
+test("the stream is down: the server is gone, the panel unchanged", () => {
+  assert.deepEqual(overlayText(run(v(3), { type: "offline" })), {
+    status: "v3 · dev server gone, retrying",
+    panel: undefined,
+  });
 });
