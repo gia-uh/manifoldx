@@ -22,13 +22,13 @@ from .types import (
     RUNTIME_NAMES,
     WRITABLE,
     Ctx,
-    FuncInfo,
     FunctionKey,
     LiveTypes,
     TranspileError,
     TypeEnv,
     key_label,
     module_path,
+    query,
 )
 
 
@@ -36,12 +36,15 @@ from .types import (
 class Root:
     """A function the engine calls. kind: "system" (called with its query and dt),
     "handler" (with the event's payload; `event` names it) or "getter" (a ValueDisplay's,
-    with nothing). `label` names it in errors and reports."""
+    with nothing). `label` names it in errors and reports. `components` names a system's
+    query, or a handler's when it takes one (a read-only query after the payload), as the
+    engine parsed them at registration; None for a handler without one and a getter."""
 
     kind: str
     label: str
     func: object
     event: str | None = None
+    components: tuple[str, ...] | None = None
 
     @property
     def function(self):
@@ -75,13 +78,18 @@ def find_roots(engine) -> list[Root]:
     GUI's panels and their children."""
     from manifoldx.gui import ValueDisplay
 
-    roots = [Root("system", f"system {_label(s.func)}", s.func) for s in engine.systems._systems]
+    roots = [
+        Root("system", f"system {_label(s.func)}", s.func, components=tuple(s.component_names))
+        for s in engine.systems._systems
+    ]
     for event, handlers in engine._event_bus._handlers.items():
         if event == "startup":
             continue
         for h in handlers:
             if not _internal(h.func):
-                roots.append(Root("handler", f'on("{event}") {_label(h.func)}', h.func, event))
+                label = f'on("{event}") {_label(h.func)}'
+                comps = tuple(h.query_components) if h.query_components else None
+                roots.append(Root("handler", label, h.func, event, comps))
     for panel in engine.gui._panels:
         for w in _widgets(panel):
             if isinstance(w, ValueDisplay):
@@ -235,6 +243,11 @@ class Reach:
                 info.declared[p] = live.observe(d)
         if r.kind == "system" and len(positional) >= 2 and not info.declared[positional[1]].known:
             info.declared[positional[1]] = NUM
+        # The query, from what the engine registered: Query[...], mx.Query[...] or nothing.
+        if r.kind == "system" and positional:
+            info.declared[positional[0]] = query(r.components or ())
+        if r.kind == "handler" and r.components and len(positional) >= 2:
+            info.declared[positional[1]] = query(r.components, readonly=True)
 
     # ---------------------------------------------------------- reach
     def _add(self, key: FunctionKey, via: FunctionKey | None) -> None:
@@ -284,8 +297,6 @@ class Reach:
             key = self._order[i]
             i += 1
             info = self.env.function(key)
-            if check:
-                self._query(key, info)
             for n, ctx in self.env.walk(info):
                 self._node(n, ctx, key, check)
 
@@ -363,31 +374,6 @@ class Reach:
                 for t in self.env.attribute(m, attr).members:
                     if t.kind == "obj":
                         self._class(t.name, key)
-
-    def _query(self, key: FunctionKey, info: FuncInfo) -> None:
-        """A system's first parameter is its component query, which the browser has not."""
-        r = self._kinds.get(key)
-        if not isinstance(r, Root) or r.kind != "system":
-            return
-        params = info.params[1:] if info.cls else info.params
-        if not params:
-            return
-        q = params[0]
-        for n, ctx in self.env.walk(info):
-            if isinstance(n, ast.Name) and n.id == q:
-                binder = ctx.binder(q)
-                if (
-                    binder is not None
-                    and binder.func is info
-                    and not any(k == q for k, _ in binder.extra)
-                ):
-                    raise TranspileError(
-                        module_path(key[0]),
-                        n.lineno,
-                        f"`{q}`, the system's component query (component queries are not "
-                        "supported in the browser yet),",
-                        self.root(key),
-                    )
 
     # ---------------------------------------------------------- reports
     def chain(self, key) -> list[str]:

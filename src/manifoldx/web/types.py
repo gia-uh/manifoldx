@@ -34,6 +34,9 @@ KINDS = frozenset(
         "nd",
         "obj",
         "fn",
+        "query",
+        "accessor",
+        "field",
         "union",
         "unknown",
     }
@@ -202,8 +205,73 @@ def nd_compare_dtype(a: Ty, b: Ty) -> str | None:
     return nd_dtype(ast.Add(), a, b)
 
 
+def field_compare_dtype(b: Ty) -> str | None:
+    """The dtype a float32 field's rows compare against b in, numpy 2's."""
+    if b.kind == "field":
+        return "f32"
+    return nd_compare_dtype(nd("f32", 2), b)
+
+
 def obj(name: str) -> Ty:
     return Ty("obj", name=name)
+
+
+# A system's component query, q[X] its accessor of component X, and an accessor's attribute
+# a field view: columns [start, start + size) of X's rows for the query's entities. Each is
+# read-only when the query is an event handler's. The name carries what the type knows.
+def query(components, readonly: bool = False) -> Ty:
+    return Ty("query", name=("ro:" if readonly else "") + ",".join(components))
+
+
+def accessor(component: str, readonly: bool = False) -> Ty:
+    return Ty("accessor", name=("ro:" if readonly else "") + component)
+
+
+def field_view(component: str, name: str, start: int, size: int, readonly: bool = False) -> Ty:
+    return Ty("field", name=f"{'ro:' if readonly else ''}{component}.{name}:{start}:{size}")
+
+
+def readonly(t: Ty) -> bool:
+    """A query, accessor or field of an event handler's query, which writes nothing."""
+    return (t.name or "").startswith("ro:")
+
+
+def query_components(t: Ty) -> list[str]:
+    names = t.name.removeprefix("ro:")
+    return names.split(",") if names else []
+
+
+def field_parts(t: Ty) -> tuple[str, str, int, int]:
+    """A field's (component, field name, start column, size)."""
+    head, start, size = t.name.removeprefix("ro:").rsplit(":", 2)
+    component, _, name = head.partition(".")
+    return component, name, int(start), int(size)
+
+
+# The fields a field view reads of each built-in component, under every spelling the
+# accessor takes; a Component subclass's come from its _layout.
+TRANSFORM_FIELDS = {
+    "pos": (0, 3),
+    "position": (0, 3),
+    "rot": (3, 4),
+    "rotation": (3, 4),
+    "scale": (7, 3),
+}
+
+
+def component_fields(name: str, cls=None) -> dict[str, tuple[int, int]]:
+    """{field: (col, size)} of the store's component `name` (its class `cls` when known): a
+    built-in's, a Component subclass's _layout, an @engine.component class's column table."""
+    from manifoldx.components import _COMPONENT_CLASSES, Material, Mesh
+    from manifoldx.ecs import _COMPONENT_REGISTRY
+
+    if name == "Transform":
+        return dict(TRANSFORM_FIELDS)
+    builtin = {"Mesh": Mesh, "Material": Material}.get(name) or cls or _COMPONENT_CLASSES.get(name)
+    if builtin is not None and hasattr(builtin, "_layout"):
+        return dict(builtin._layout)
+    decorated = _COMPONENT_REGISTRY.get(name)
+    return dict(getattr(decorated, "_component_start_idx", {}))
 
 
 # A geometry: a dict with a 2-d "positions" array, or what has to_geometry() (a
@@ -292,6 +360,8 @@ def elem(t: Ty) -> Ty:
             out.append(Ty("num", dtype=m.dtype))
         elif m.kind == "nd":
             out.append(nd_item(m))
+        elif m.kind == "query":  # iterating a query gives its entity indices
+            out.append(INT)
         else:
             return UNKNOWN
     return union(*out)
@@ -674,6 +744,10 @@ class TypeEnv:
         self.globals: dict[tuple[str, str], Ty] = {}
         self.functions: dict[FunctionKey, FuncInfo] = {}
         self.classes: dict[str, ClassInfo] = {}
+        # The app's Component subclasses, which are store layouts and not app classes (never
+        # transpiled): {"module.Qualname": store name}, and each store name's live class.
+        self.components: dict[str, str] = {}
+        self.component_classes: dict[str, type] = {}
         # A closure root's free variables, typed from its live cells: {key: {name: Ty}}.
         self.cells: dict[FunctionKey, dict[str, Ty]] = {}
         for name, tree in modules.items():
@@ -756,6 +830,12 @@ class TypeEnv:
 
     def _class(self, module: str, n: ast.ClassDef) -> None:
         name = f"{module}.{n.name}"
+        if self._is_component(module, n):
+            self.components[name] = n.name
+            live = getattr(sys.modules.get(module), n.name, None)
+            if isinstance(live, type):
+                self.component_classes[n.name] = live
+            return
         info = ClassInfo(name, n, any(self.is_dataclass(d, module) for d in n.decorator_list))
         self.classes[name] = info
         for st in n.body:
@@ -778,6 +858,74 @@ class TypeEnv:
             info.methods["__init__"] = self._register(
                 module, init, f"{n.name}.__init__", cls=name
             ).key
+
+    def _is_component(self, module: str, n: ast.ClassDef) -> bool:
+        """n subclasses manifoldx.components.Component: its live class does, or a base names
+        a library class that does."""
+        from manifoldx.components import Component
+
+        live = getattr(sys.modules.get(module), n.name, None)
+        if isinstance(live, type):
+            return issubclass(live, Component)
+        return any(
+            isinstance(c, type) and issubclass(c, Component)
+            for c in (self.library_object(b, module) for b in n.bases)
+        )
+
+    def library_object(self, n: ast.expr, module: str):
+        """The library object a setup-imported name (`Transform`, `mx.Transform`) holds, as
+        setup imported it; None for anything else."""
+        attr = None
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            n, attr = n.value, n.attr
+        if not isinstance(n, ast.Name):
+            return None
+        sym = self.symbols.get(module, {}).get(n.id)
+        if sym is None or sym.kind != "setup":
+            return None
+        words = sym.target.split()
+        if words[0] == "from":
+            v = getattr(sys.modules.get(words[1]), words[3], None)
+        else:
+            v = sys.modules.get(words[1])
+        return getattr(v, attr, None) if attr is not None else v
+
+    def component_name(self, n: ast.expr, ctx: Ctx) -> str | None:
+        """The store name of the component n names in q[n]: Transform, Mesh, Material, a
+        Component subclass (the app's or a library's), or a str; None for anything else."""
+        from manifoldx.components import Component, Material, Mesh, Transform
+
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            return n.value
+        if isinstance(n, ast.Name) and not self.is_local(n.id, ctx):
+            sym = self.resolve(ctx.module, n.id)
+            if sym is not None and sym.kind == "class":
+                return self.components.get(sym.target)
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            sym = self.resolve(ctx.module, n.value.id)
+            if sym is not None and sym.kind == "module":
+                inner = self.resolve(sym.target, n.attr)
+                return (
+                    self.components.get(inner.target) if inner and inner.kind == "class" else None
+                )
+        v = self.library_object(n, ctx.module)
+        if v in (Transform, Mesh, Material) or (isinstance(v, type) and issubclass(v, Component)):
+            if isinstance(v, type) and issubclass(v, Component):
+                self.component_classes.setdefault(v.__name__, v)
+            return v.__name__
+        return None
+
+    def component_field(self, recv: Ty, attr: str) -> Ty:
+        """The field view recv.attr gives for an accessor recv, unknown when the component
+        has no such field (or is Mesh or Material, whose ids frame code does not read)."""
+        component = recv.name.removeprefix("ro:")
+        if component in ("Mesh", "Material"):
+            return UNKNOWN
+        layout = component_fields(component, self.component_classes.get(component))
+        if attr not in layout:
+            return UNKNOWN
+        start, size = layout[attr]
+        return field_view(component, attr, start, size, readonly(recv))
 
     @staticmethod
     def _dataclass_init(n: ast.ClassDef, fields: list[ast.AnnAssign]) -> ast.FunctionDef:
@@ -1088,6 +1236,10 @@ class TypeEnv:
             return NEVER
         if recv.kind == "nd" and attr == "shape":
             return tuple_of(*[INT] * recv.rank)
+        if recv.kind == "accessor":
+            return self.component_field(recv, attr)
+        if recv.kind == "field":
+            return nd("f32", 2) if attr == "data" else UNKNOWN
         out = []
         for m in recv.members:
             if m.kind == "none":
@@ -1178,6 +1330,8 @@ class TypeEnv:
         if isinstance(n, ast.Compare):
             if len(n.ops) == 1 and not isinstance(n.ops[0], (ast.In, ast.NotIn, ast.Is, ast.IsNot)):
                 a, b = self.expr(n.left, ctx), self.expr(n.comparators[0], ctx)
+                if "field" in (a.kind, b.kind):
+                    return self.field_compare(n.ops[0], a, b)
                 if any(is_array(m) for m in a.members + b.members):
                     rank = (
                         max(array_rank(a), array_rank(b))
@@ -1201,6 +1355,16 @@ class TypeEnv:
         if isinstance(n, ast.JoinedStr):
             return STR
         return UNKNOWN
+
+    @staticmethod
+    def field_compare(op: ast.cmpop, a: Ty, b: Ty) -> Ty:
+        """`field < x`: the entity indices whose one column holds, an int32 array; unknown for
+        a field on the right, a wider field or == and !=."""
+        if a.kind != "field" or field_parts(a)[3] != 1 or len(b.members) != 1:
+            return UNKNOWN
+        if not isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
+            return UNKNOWN
+        return nd("i32", 1) if field_compare_dtype(b) else UNKNOWN
 
     def item(self, e: ast.expr, ctx: Ctx) -> Ty:
         """The type of what an element of a display adds: a starred one, its items."""
@@ -1239,6 +1403,8 @@ class TypeEnv:
             return NEVER
         if not (a.known and b.known):
             return UNKNOWN
+        if "field" in (a.kind, b.kind):
+            return TypeEnv.field_binop(op, a, b)
         arrays = [m.kind for m in a.members + b.members if m.kind in ("vec", "nd")]
         if "nd" in arrays or (arrays and isinstance(op, (ast.Pow, ast.BitAnd, ast.BitOr))):
             return TypeEnv.nd_binop(op, a, b)
@@ -1275,6 +1441,19 @@ class TypeEnv:
         return UNKNOWN
 
     @staticmethod
+    def field_binop(op: ast.operator, a: Ty, b: Ty) -> Ty:
+        """`a op b` with a field view on a side, as _FieldView computes it: the other side cast
+        to float32 first, the result a float32 (k, size) array. A field on the right takes a
+        number on the left (an array on the left would run numpy's operator, not the field's)."""
+        if not isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.Div)) or len(a.members) != 1:
+            return UNKNOWN
+        other = b if a.kind == "field" else a
+        if len(other.members) != 1:
+            return UNKNOWN
+        ok = other.is_numeric or (a.kind == "field" and (is_array(other) or other.kind == "field"))
+        return nd("f32", 2) if ok else UNKNOWN
+
+    @staticmethod
     def nd_binop(op: ast.operator, a: Ty, b: Ty) -> Ty:
         """`a op b` with a numpy array on a side and an nd among them (or **, & and | on
         any array): an nd of numpy 2's dtype and the larger rank."""
@@ -1287,6 +1466,22 @@ class TypeEnv:
             return UNKNOWN
         d = nd_dtype(op, a, b)
         return nd(d, rank) if d else UNKNOWN
+
+    @staticmethod
+    def field_column(t: Ty, key: ast.expr) -> Ty:
+        """field[:, j], j a constant column of the field: a one-column field view."""
+        component, name, start, size = field_parts(t)
+        if not (
+            isinstance(key, ast.Tuple)
+            and len(key.elts) == 2
+            and isinstance(key.elts[0], ast.Slice)
+            and not (key.elts[0].lower or key.elts[0].upper or key.elts[0].step)
+            and isinstance(key.elts[1], ast.Constant)
+            and type(key.elts[1].value) is int
+            and 0 <= key.elts[1].value < size
+        ):
+            return UNKNOWN
+        return field_view(component, name, start + key.elts[1].value, 1, readonly(t))
 
     def nd_subscript(self, t: Ty, key: ast.expr, ctx: Ctx) -> Ty:
         """a[key] of an nd: an int gives an item (an nd of one rank less, or a number), [:, j]
@@ -1311,6 +1506,11 @@ class TypeEnv:
 
     def subscript(self, n: ast.Subscript, ctx: Ctx) -> Ty:
         t = self.expr(n.value, ctx)
+        if t.kind == "query":
+            name = self.component_name(n.slice, ctx)
+            return accessor(name, readonly(t)) if name is not None else UNKNOWN
+        if t.kind == "field":
+            return self.field_column(t, n.slice)
         if t.kind == "nd" or (t.kind == "vec" and self.expr(n.slice, ctx).kind == "nd"):
             return self.nd_subscript(nd(t.dtype, 1) if t.kind == "vec" else t, n.slice, ctx)
         if isinstance(n.slice, ast.Slice):
@@ -1523,7 +1723,7 @@ class TypeEnv:
     def _symbol_callees(self, sym: Symbol | None) -> list[tuple[FuncInfo, int]]:
         if sym is not None and sym.kind == "func":
             return [(self.functions[sym.target], 0)]
-        if sym is not None and sym.kind == "class":
+        if sym is not None and sym.kind == "class" and sym.target in self.classes:
             init = self.classes[sym.target].methods.get("__init__")
             return [(self.functions[init], 1)] if init else []
         return []
@@ -1688,8 +1888,8 @@ class TypeEnv:
                 assign({st.name: fn(key_label(inner.key), inner.returns)})
             elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Name):
                 old = self.expr(st.target, ctx)
-                if old.kind in ("vec", "nd"):
-                    continue  # numpy's += writes into the array: its dtype stays
+                if old.kind in ("vec", "nd", "field"):
+                    continue  # numpy's += writes into the array (a field's queues): it stays
                 assign({st.target.id: self.binop(st.op, old, self.expr(st.value, ctx))})
             elif isinstance(st, ast.For):
                 found = {}

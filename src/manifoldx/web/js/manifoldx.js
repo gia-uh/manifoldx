@@ -1,6 +1,6 @@
 // The engine surface the transpiled modules call, the state loader and the frame step.
 
-import { callable_, str_, vnorm32 } from "./pyrt.js";
+import { NdArray, callable_, nd, str_, vnorm32 } from "./pyrt.js";
 
 // ---------------------------------------------------------------- state
 
@@ -104,7 +104,13 @@ function load(state, modules, resolve) {
     moduleOf(modules, name).__set_globals(values);
   }
   return {
-    roots: state.roots.map((r) => ({ kind: r.kind, label: r.label, event: r.event, fn: value(r.fn) })),
+    roots: state.roots.map((r) => ({
+      kind: r.kind,
+      label: r.label,
+      event: r.event,
+      components: r.components ?? null,
+      fn: value(r.fn),
+    })),
     state: state.state === undefined ? undefined : value(state.state),
   };
 }
@@ -315,6 +321,149 @@ export class Store {
     this.dirty = null;
     return d;
   }
+}
+
+// ---------------------------------------------------------------- queries
+
+// A value as float32 values, as np.asarray(v, np.float32) makes them: a number, a typed array,
+// an NdArray or nested arrays (a tuple).
+function toF32(v) {
+  if (typeof v === "number") return Float32Array.of(v);
+  if (v instanceof NdArray) return Float32Array.from(v.data);
+  if (ArrayBuffer.isView(v)) return Float32Array.from(v);
+  if (Array.isArray(v)) return Float32Array.from(v.flat(Infinity));
+  throw new Error(`TypeError: a ${typeof v} cannot be a component's float32 values`);
+}
+
+// A system's query, as the engine's ComponentView: the alive entities that have every named
+// component when the system runs, ascending. q.get(name) is q[name]; len(q) is q.length, and
+// iterating it gives the entity indices.
+export class Query {
+  constructor(store, names) {
+    this.store = store;
+    this.indices = store.query(names);
+    this.length = this.indices.length;
+  }
+
+  get(name) {
+    return new Accessor(this.store, name, this.indices);
+  }
+
+  [Symbol.iterator]() {
+    return Array.from(this.indices)[Symbol.iterator]();
+  }
+}
+
+// q[X], as ComponentAccessor: .field(name) is q[X].name, a FieldView.
+export class Accessor {
+  constructor(store, component, indices) {
+    this.store = store;
+    this.component = component;
+    this.indices = indices;
+  }
+
+  field(name) {
+    const layout = this.store.layout(this.component);
+    if (layout === undefined) throw new Error(`ValueError: Component ${this.component} not registered`);
+    const f = layout.fields[name];
+    if (f === undefined) throw new Error(`AttributeError: No field '${name}' in component '${this.component}'`);
+    return new FieldView(this.store, this.component, name, this.indices, f[0], f[0] + f[1]);
+  }
+}
+
+const F = Math.fround;
+
+// Columns [c0, c1) of a component's rows for a query's entities, as manifoldx.ecs._FieldView:
+// data reads the rows now, as a float32 (k, c1 - c0) array; arithmetic casts the other side
+// to float32 first and gives a float32 array; a comparison gives the entity indices whose
+// (one) column holds; set and the in-place forms queue the new rows for the flush, so every
+// system this frame reads the old ones. Transform's rotation += composes quaternions.
+export class FieldView {
+  constructor(store, component, name, indices, c0, c1) {
+    this.store = store;
+    this.component = component;
+    this.name = name;
+    this.indices = indices;
+    this.c0 = c0;
+    this.c1 = c1;
+  }
+
+  get data() {
+    const w = this.c1 - this.c0, k = this.indices.length;
+    const { cols } = this.store.layout(this.component), col = this.store.column(this.component);
+    const out = new Float32Array(k * w);
+    this.indices.forEach((i, r) => {
+      for (let c = 0; c < w; c++) out[r * w + c] = col[i * cols + this.c0 + c];
+    });
+    return new NdArray(out, [k, w], "f32");
+  }
+
+  col(j) {
+    return new FieldView(this.store, this.component, this.name, this.indices, this.c0 + j, this.c0 + j + 1);
+  }
+
+  _other(v) {
+    return v instanceof FieldView ? v.data : v;
+  }
+
+  add(v) { return nd.add(this.data, this._other(v), "f32"); }
+  sub(v) { return nd.sub(this.data, this._other(v), "f32"); }
+  mul(v) { return nd.mul(this.data, this._other(v), "f32"); }
+  div(v) { return nd.div(this.data, this._other(v), "f32"); }
+  radd(v) { return nd.add(v, this.data, "f32"); }
+  rsub(v) { return nd.sub(v, this.data, "f32"); }
+  rtruediv(v) { return nd.div(v, this.data, "f32"); }
+
+  _where(mask) {
+    const out = [];
+    mask.data.forEach((m, r) => { if (m) out.push(this.indices[r]); });
+    return new NdArray(Int32Array.from(out), [out.length], "i32");
+  }
+
+  lt(v, dtype) { return this._where(nd.lt(this.data, this._other(v), dtype)); }
+  le(v, dtype) { return this._where(nd.le(this.data, this._other(v), dtype)); }
+  gt(v, dtype) { return this._where(nd.gt(this.data, this._other(v), dtype)); }
+  ge(v, dtype) { return this._where(nd.ge(this.data, this._other(v), dtype)); }
+
+  _write(data) {
+    this.store.queueUpdate(this.component, this.indices, this.c0, this.c1, data);
+  }
+
+  set(v) {
+    this._write(toF32(v));
+    return this;
+  }
+
+  iadd(v) {
+    if (this.component === "Transform" && (this.name === "rot" || this.name === "rotation")) {
+      this._write(quatCompose(toF32(v), this.data.data));
+    } else {
+      this._write(nd.add(this.data, v, "f32").data);
+    }
+    return this;
+  }
+
+  isub(v) { this._write(nd.sub(this.data, v, "f32").data); return this; }
+  imul(v) { this._write(nd.mul(this.data, v, "f32").data); return this; }
+  idiv(v) { return this.set(this.div(v)); }
+}
+
+// manifoldx.ecs._quat_multiply(q1, q2) in float32, each product and sum rounded as numpy
+// rounds them, left to right; then each row normalised, a zero norm kept as 1. q1 is one
+// quaternion or one per row of q2.
+function quatCompose(q1, q2) {
+  const k = q2.length / 4, s = q1.length === 4 ? 0 : 4, out = new Float32Array(q2.length);
+  for (let i = 0; i < k; i++) {
+    const [x1, y1, z1, w1] = q1.subarray(s * i, s * i + 4), [x2, y2, z2, w2] = q2.subarray(4 * i, 4 * i + 4);
+    const x = F(F(F(F(w1 * x2) + F(x1 * w2)) + F(y1 * z2)) - F(z1 * y2));
+    const y = F(F(F(F(w1 * y2) - F(x1 * z2)) + F(y1 * w2)) + F(z1 * x2));
+    const z = F(F(F(F(w1 * z2) + F(x1 * y2)) - F(y1 * x2)) + F(z1 * w2));
+    const w = F(F(F(F(w1 * w2) - F(x1 * x2)) - F(y1 * y2)) - F(z1 * z2));
+    let n = F(Math.sqrt(F(F(F(F(x * x) + F(y * y)) + F(z * z)) + F(w * w))));
+    if (n === 0) n = 1;
+    out.set([F(x / n), F(y / n), F(z / n), F(w / n)], 4 * i);
+  }
+  return out;
 }
 
 // Past this many alive entities the trace carries a digest of each component's rows.
@@ -532,17 +681,26 @@ function guiWidgets(spec) {
 // ---------------------------------------------------------------- frames
 
 // app: {engine, roots}, roots as loadState returns them. One frame: every system, in the
-// order the app registered them, called as the engine calls them, with (query, dt); then the
+// order the app registered them, called as the engine calls them, with (query, dt), the query
+// of the components it registered (null without a store); then the
 // store's queued writes and destroys land, as the engine executes its commands.
 export function step(app, dt) {
-  for (const r of app.roots) if (r.kind === "system") r.fn(null, dt);
-  app.engine.store?.flush();
+  const store = app.engine.store ?? null;
+  for (const r of app.roots) {
+    if (r.kind === "system") r.fn(store === null ? null : new Query(store, r.components ?? []), dt);
+  }
+  store?.flush();
 }
 
 // An event, as engine.emit delivers it: every handler root of that event, in the order the
 // app registered them, called with the payload (runtime values: a dict is a Map).
 export function fire(app, event, payload) {
-  for (const r of app.roots) if (r.kind === "handler" && r.event === event) r.fn(payload);
+  const store = app.engine.store ?? null;
+  for (const r of app.roots) {
+    if (r.kind !== "handler" || r.event !== event) continue;
+    if (r.components && store !== null) r.fn(payload, new Query(store, r.components));
+    else r.fn(payload);
+  }
 }
 
 // What each ValueDisplay shows: its getter's value, as str() makes it.

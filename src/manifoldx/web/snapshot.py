@@ -7,7 +7,8 @@ closure's cells and defaults) and the module globals reached code reads, and wri
      "state": value, "engine": {"w", "h", "origin": [x, z],
                                 "camera": {"position", "target", "fov", "up", "near", "far"}}}
 
-A root is {"kind", "label", "event", "fn": value}, in the order find_roots gave them.
+A root is {"kind", "label", "event", "components", "fn": value}, in the order find_roots gave
+them; components names its query (a system's, or a handler's that takes one), else null.
 "state" is engine.state as a dict entry; "engine" is what the runtime's createEngine takes.
 
 A value is null, a bool, a number, a str, a tuple as a JSON array, or one of
@@ -51,7 +52,7 @@ from manifoldx.gltf.engine_export import _widgets
 
 from .reach import Reach, closure_site, is_closure
 from .transpile import js_name
-from .types import class_name, is_geometry
+from .types import class_name, component_fields, is_geometry
 
 
 class SnapshotError(Exception):
@@ -102,8 +103,10 @@ class _Writer:
         out = []
         for r in roots:
             path = type(r.owner).__name__ if r.owner is not None else ""
+            comps = list(r.components) if r.components is not None else None
+            fn = self.value(r.func, path)
             out.append(
-                {"kind": r.kind, "label": r.label, "event": r.event, "fn": self.value(r.func, path)}
+                {"kind": r.kind, "label": r.label, "event": r.event, "components": comps, "fn": fn}
             )
         globals_: dict[str, dict] = {}
         if not self.reach.everything:
@@ -263,8 +266,6 @@ class _Writer:
         return {"__closure": f"{key[0]}:{line}:{col}", "cells": cells, "defaults": defaults}
 
 
-# Transform's columns under both spellings, as a field view takes them.
-_TRANSFORM_FIELDS = {"pos": (0, 3), "position": (0, 3), "rot": (3, 4), "rotation": (3, 4)}
 _DTYPES = {np.dtype("f4"): "f4", np.dtype("u4"): "u4"}
 
 
@@ -297,7 +298,7 @@ def ecs_bytes(engine) -> tuple[dict, bytes]:
                 "name": name,
                 "dtype": code,
                 "cols": cols,
-                "fields": {f: [int(c), int(n)] for f, (c, n) in _fields(name).items()},
+                "fields": {f: [int(c), int(n)] for f, (c, n) in component_fields(name).items()},
                 "rows": block(rows.tobytes()),
                 "members": block(store._members[name][:hw].astype(np.uint8).tobytes()),
             }
@@ -310,21 +311,6 @@ def ecs_bytes(engine) -> tuple[dict, bytes]:
         "components": components,
     }
     return header, bytes(data)
-
-
-def _fields(name: str) -> dict:
-    """{field: (col, size)} of the store's component `name`: a built-in's or a Component
-    subclass's _layout, an @engine.component class's column table, else none."""
-    from manifoldx.components import _COMPONENT_CLASSES, Material, Mesh, Transform
-    from manifoldx.ecs import _COMPONENT_REGISTRY
-
-    if name == "Transform":
-        return {**_TRANSFORM_FIELDS, **Transform._layout}
-    builtin = {"Mesh": Mesh, "Material": Material}.get(name) or _COMPONENT_CLASSES.get(name)
-    if builtin is not None:
-        return builtin._layout
-    decorated = _COMPONENT_REGISTRY.get(name)
-    return getattr(decorated, "_component_start_idx", {})
 
 
 def _float(x: float):

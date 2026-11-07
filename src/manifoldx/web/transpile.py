@@ -35,9 +35,12 @@ from .types import (
     TypeEnv,
     TranspileError,
     arith_dtype,
+    component_fields,
     elem,
+    field_compare_dtype,
     is_array,
     nd_compare_dtype,
+    readonly,
     key_label,
     module_path,
     own_statements,
@@ -111,6 +114,11 @@ ND_COMPARE = {
     ast.NotEq: "ne",
 }
 SCALAR_OPS = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
+# A field view's operators with the field on the right (a number on the left), as _FieldView's
+# reflected methods compute them; and its in-place forms, which queue a write.
+FIELD_ROPS = {"add": "radd", "sub": "rsub", "mul": "mul", "div": "rtruediv"}
+FIELD_IOPS = {ast.Add: "iadd", ast.Sub: "isub", ast.Mult: "imul", ast.Div: "idiv"}
+OP_TEXT = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
 MATH_JS = {"fabs": "Math.abs", "radians": "$rt.radians", "degrees": "$rt.degrees"}
 
 
@@ -620,6 +628,8 @@ class _Module:
             return [] if n.value is None else [(f"{p}{self.assign([n.target], n.value, n)};", line)]
         if isinstance(n, ast.AugAssign):
             t = n.target
+            if self.component_write(n, t) or self.ty(t).kind == "field":
+                return [(f"{p}{self.field_inplace(n)};", line)]
             if isinstance(t, ast.Subscript) and not (_simple(t.value) and _simple(t.slice)):
                 self.fail(n, f"`{ast.unparse(n)}` on a computed target")
             if not isinstance(t, (ast.Name, ast.Attribute, ast.Subscript)):
@@ -672,6 +682,51 @@ class _Module:
             return [(f"{p}continue;", line)]
         self.fail(n, FRIENDLY.get(type(n).__name__, type(n).__name__))
 
+    def shown(self, n: ast.stmt) -> str:
+        """A write as an error quotes it: `q[Velocity].v += ...`."""
+        if isinstance(n, ast.AugAssign):
+            return f"`{ast.unparse(n.target)} {OP_TEXT.get(type(n.op), '?')}= ...`"
+        return f"`{ast.unparse(n.targets[0] if isinstance(n, ast.Assign) else n.target)} = ...`"
+
+    def component_write(self, n: ast.stmt, t: ast.expr) -> bool:
+        """Fail a write a query cannot take: to a whole component (q[X] += ...), into a column
+        of a field (q[X].f[:, j] += ...), or through an event handler's read-only query. True
+        when t is a field view the write may go to."""
+        if isinstance(t, ast.Subscript):
+            inside = self.ty(t.value)
+            if inside.kind == "query":
+                acc = self.ty(t)
+                fields = list(component_fields(acc.name.removeprefix("ro:"))) if acc.known else []
+                op = OP_TEXT.get(type(n.op), "") if isinstance(n, ast.AugAssign) else ""
+                self.fail(
+                    n,
+                    f"{self.shown(n)}, a write to a whole component (write a field: "
+                    f"{ast.unparse(t)}.{fields[0] if fields else 'field'} {op}= ...)",
+                )
+            if inside.kind == "field":
+                self.fail(n, f"{self.shown(n)}, a write into a column of a field view,")
+        ft = self.ty(t)
+        if isinstance(t, ast.Attribute) and self.ty(t.value).kind == "accessor" and not ft.known:
+            self.fail(t, f"`{ast.unparse(t)}`, not a field of the component,")
+        if ft.kind != "field":
+            return False
+        if readonly(ft):
+            self.fail(
+                n, f"{self.shown(n)}, a write through an event handler's query, which is read-only,"
+            )
+        return True
+
+    def field_inplace(self, n: ast.AugAssign) -> str:
+        """`f += v` (-=, *=) on a field view queues its new rows; `/=` takes the quotient then
+        sets it, as Python falls back to __truediv__ and the accessor's setter."""
+        t, v = n.target, self.ty(n.value)
+        method = FIELD_IOPS.get(type(n.op))
+        if method is None or (method == "idiv" and not isinstance(t, ast.Attribute)):
+            self.fail(n, f"{self.shown(n)} on a field view")
+        if not (v.is_numeric or (is_array(v) and len(v.members) == 1)):
+            self.fail(n, f"{self.shown(n)} with a {v} on the right (a number or an array)")
+        return f"{self.e(t)}.{method}({self.e(n.value)})"
+
     def vector_inplace(self, n: ast.AugAssign) -> str:
         """`a += b` on a numpy array writes into a, which every alias of a sees."""
         if type(n.op) not in VECTOR_OPS:
@@ -690,6 +745,14 @@ class _Module:
                 self.fail(n, "a chained assignment to anything but names")
             return " = ".join(js_name(t.id) for t in targets) + f" = {self.e(value)}"
         t = targets[0]
+        on_query = isinstance(t, ast.Subscript) or (
+            isinstance(t, ast.Attribute) and self.ty(t.value).kind == "accessor"
+        )
+        if on_query and self.component_write(n, t):
+            v = self.ty(value)
+            if not (v.is_numeric or is_array(v) or v.all("list", "tuple")):
+                self.fail(n, f"{self.shown(n)} of a {v} (a number, an array or a tuple)")
+            return f"{self.e(t)}.set({self.e(value)})"
         if isinstance(t, ast.Subscript) and self.ty(t.value).kind == "nd":
             self.fail(
                 n, f"`{ast.unparse(n)}`, a write through an index (build a new array with np.where)"
@@ -890,6 +953,18 @@ class _Module:
             )
         if t.kind == "nd" and n.attr == "shape":
             return f"[...{self.e(n.value)}.shape]"
+        if t.kind == "accessor":
+            if not self.ty(n).known:
+                self.fail(
+                    n,
+                    f"`{ast.unparse(n)}`, which is not a field of the component (Mesh and "
+                    "Material ids are not read in frame code),",
+                )
+            return f"{self.e(n.value)}.field({json.dumps(n.attr)})"
+        if t.kind == "field":
+            if n.attr != "data":
+                self.fail(n, f"`{ast.unparse(n)}`, of a field view (it has .data)")
+            return f"{self.e(n.value)}.data"
         if not t.all("obj", "none"):
             self.fail(n, f"the attribute .{n.attr} of a {t}")
         if self.env.methods(t, n.attr):  # a bound method keeps its object, as in Python
@@ -930,6 +1005,8 @@ class _Module:
             for side, t in ((n.left, a_t), (n.right, b_t)):
                 if not t.known:
                     self.unknown(n, side)
+        if "field" in (a_t.kind, b_t.kind):
+            return self.field_op(n, a_t, b_t)
         arrays = [m.kind for m in a_t.members + b_t.members if m.kind in ("vec", "nd")]
         if "nd" in arrays or (arrays and isinstance(op, (ast.Pow, ast.BitAnd, ast.BitOr))):
             return self.nd_op(n, a_t, b_t)
@@ -978,6 +1055,20 @@ class _Module:
             self.fail(n, f"`{ast.unparse(n)}`, whose float32 or float64 result the run decides,")
         helper = f"v{VECTOR_OPS[type(n.op)]}{'32' if d == 'f32' else ''}"
         return f"{self.rt(helper)}({self.e(n.left)}, {self.e(n.right)})"
+
+    def field_op(self, n: ast.BinOp, a_t: Ty, b_t: Ty) -> str:
+        """Arithmetic with a field view, as _FieldView's operators: a float32 (k, size) array."""
+        if self.ty(n).kind != "nd":
+            self.fail(
+                n,
+                f"`{ast.unparse(n)}` on a {a_t} and a {b_t} (a field view takes + - * / with a "
+                "number, an array or a field on its right, or a number on its left)",
+            )
+        op = VECTOR_OPS[type(n.op)]
+        a, b = self.e(n.left), self.e(n.right)
+        if a_t.kind == "field":
+            return f"{a}.{op}({b})"
+        return f"{b}.{FIELD_ROPS[op]}({a})"
 
     def nd_op(self, n: ast.BinOp, a_t: Ty, b_t: Ty) -> str:
         """An operator on numpy arrays of any rank: $rt.nd's function with the dtype numpy 2
@@ -1028,6 +1119,11 @@ class _Module:
         if isinstance(n.op, ast.Not):
             return f"!{self.test(n.operand)}"
         t = self.ty(n.operand)
+        if t.kind == "field":
+            self.fail(
+                n,
+                f"`{ast.unparse(n)}` on a field view (negate its data: `-{ast.unparse(n.operand)}.data`)",
+            )
         if t.kind == "nd":
             if isinstance(n.op, ast.USub) and t.dtype != "bool":
                 return f"{self.rt('nd.neg')}({self.e(n.operand)})"
@@ -1055,6 +1151,14 @@ class _Module:
 
     def compare(self, op: ast.cmpop, ln: ast.expr, rn: ast.expr, a: str, b: str, n) -> str:
         lt, rt_ = self.ty(ln), self.ty(rn)
+        if "field" in (lt.kind, rt_.kind):
+            if self.ty(n).kind != "nd" or len(n.ops) > 1:
+                self.fail(
+                    n,
+                    f"`{ast.unparse(n)}` (a field view compares one column, on the left, with "
+                    "< <= > >=: q[X].f[:, j] < x)",
+                )
+            return f'{a}.{ND_COMPARE[type(op)]}({b}, "{field_compare_dtype(rt_)}")'
         if not isinstance(op, (ast.In, ast.NotIn)) and any(
             m.kind in ("vec", "nd") for m in lt.members + rt_.members
         ):
@@ -1144,6 +1248,15 @@ class _Module:
     def e_Subscript(self, n: ast.Subscript) -> str:
         t = self.ty(n.value)
         s = n.slice
+        if t.kind == "query":
+            if not self.ty(n).known:
+                self.fail(n, f"`{ast.unparse(n)}`, a query of what is not a component,")
+            name = self.env.component_name(s, self.ctx)
+            return f"{self.e(n.value)}.get({json.dumps(name)})"
+        if t.kind == "field":
+            if not self.ty(n).known:
+                self.fail(n, f"`{ast.unparse(n)}` (a field view takes [:, j], one column)")
+            return f"{self.e(n.value)}.col({s.elts[1].value})"
         if isinstance(s, ast.Slice):
             if s.step is not None:
                 self.fail(n, "a slice with a step")
@@ -1280,6 +1393,7 @@ class _Module:
         """A call into math or numpy."""
         what = f"{ast.unparse(n.func)}()"
         args, kw = n.args, {k.arg for k in n.keywords}
+        self.no_field(n)
         if name in ("numpy.ones", "numpy.full") or (
             name == "numpy.zeros" and self.ty(n).kind != "vec"
         ):
@@ -1345,6 +1459,21 @@ class _Module:
                 js = self.rt(js[4:])
             return f"{js}({', '.join(self.e(x) for x in args)})"
         self.fail(n, what)
+
+    def no_field(self, n: ast.Call) -> None:
+        """A field view is not an array: numpy functions and builtins (here or in a call
+        among n's arguments) take its .data."""
+        for c in ast.walk(n):
+            if not isinstance(c, ast.Call):
+                continue
+            for x in [*c.args, *(k.value for k in c.keywords)]:
+                if self.ty(x).kind in ("field", "accessor"):
+                    inner = f"{ast.unparse(c.func)}()"
+                    self.fail(
+                        n,
+                        f"`{ast.unparse(x)}`, a field view, in {inner} (pass "
+                        f"`{ast.unparse(x)}.data`)",
+                    )
 
     def nd_call(self, name: str, n: ast.Call, what: str) -> str:
         """A numpy function on arrays (ND_FUNCTIONS), given the dtype numpy computes in."""
@@ -1509,6 +1638,7 @@ class _Module:
     def builtin(self, name: str, n: ast.Call) -> str:
         kw = {k.arg: k.value for k in n.keywords}
         args = n.args
+        self.no_field(n)
         if name in ("min", "max"):
             if set(kw) - {"key"} or not args:
                 self.fail(n, f"this call to {name}()")
@@ -1536,6 +1666,8 @@ class _Module:
             self.fail(n, f"this call to {name}()")
         x, t = args[0], self.ty(args[0])
         if name == "len":
+            if t.kind == "query":
+                return f"{self.e(x)}.length"
             if t.kind == "nd":
                 return f"{self.e(x)}.shape[0]"
             if t.all("list", "tuple", "vec"):
