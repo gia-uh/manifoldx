@@ -645,6 +645,8 @@ ND_FUNCTIONS = frozenset(
         "stack column_stack"
     ).split()
 ) | {"numpy.linalg.norm"}
+# Operators that make any numpy operand an nd, a vec included.
+ND_ONLY_OPS = (ast.Pow, ast.BitAnd, ast.BitOr, ast.MatMult)
 # The numpy dtypes an array constructor may name, by their dotted names.
 NP_DTYPES = {
     "numpy.float32": "f32",
@@ -1289,9 +1291,26 @@ class TypeEnv:
             if shape.all("int"):
                 return vec(d) if d in ("f32", "f64") else nd(d, 1)
             return UNKNOWN
+        if name == "numpy.eye":
+            d = self.np_dtype(n, ctx, len(n.args) + 1)
+            return nd(d, 2) if d in ("f32", "f64", "i32") else UNKNOWN
         if name == "numpy.array" and n.args:
             given = any(k.arg == "dtype" for k in n.keywords) or len(n.args) > 1
             items = self.expr(n.args[0], ctx)
+            row = elem(items)
+            if items.all("list", "tuple") and len(row.members) == 1 and (
+                (row.all("list", "tuple") and elem(row).is_numeric)
+                or (is_array(row) and array_rank(row) == 1)
+            ):  # rows: lists of numbers or rank-1 arrays, a matrix
+                if given:
+                    d = self.np_dtype(n, ctx)
+                elif is_array(row):
+                    d = row.dtype
+                elif elem(row).all("int"):
+                    d = "i32"
+                else:  # Python numbers; a numpy scalar's dtype would decide numpy's
+                    d = "f64" if all(m.dtype in (None, "f64") for m in elem(row).members) else None
+                return nd(d, 2) if d else UNKNOWN
             if not given and items.all("list", "tuple") and elem(items).all("int"):
                 return nd("i32", 1)  # numpy's int64, held as int32
             d = self.np_dtype(n, ctx)
@@ -1345,9 +1364,11 @@ class TypeEnv:
             items = elem(a)
             if not (a.all("list", "tuple") and len(items.members) == 1 and is_array(items)):
                 return UNKNOWN
-            if array_rank(items) != 1 or items.dtype == "bool":
-                return UNKNOWN
-            return nd(items.dtype, 2)
+            rank = array_rank(items)
+            axis = 1 if f == "column_stack" else self.axis(n)
+            if axis == "bad" or (axis == 1 and rank != 1) or items.dtype == "bool":
+                return UNKNOWN  # along axis 1, vectors only (as columns)
+            return nd(items.dtype, rank + 1)
         if f == "where" and len(args) == 1:
             return (
                 tuple_of(*[nd("i32", 1)] * a.rank)
@@ -1587,7 +1608,7 @@ class TypeEnv:
         if "field" in (a.kind, b.kind):
             return TypeEnv.field_binop(op, a, b)
         arrays = [m.kind for m in a.members + b.members if m.kind in ("vec", "nd")]
-        if "nd" in arrays or (arrays and isinstance(op, (ast.Pow, ast.BitAnd, ast.BitOr))):
+        if "nd" in arrays or (arrays and isinstance(op, ND_ONLY_OPS)):
             return TypeEnv.nd_binop(op, a, b)
         if a.is_numeric and b.is_numeric:
             d = arith_dtype(a, b)
@@ -1643,7 +1664,13 @@ class TypeEnv:
             return UNKNOWN
         if isinstance(op, (ast.BitAnd, ast.BitOr)):
             return nd("bool", rank) if a.dtype == b.dtype == "bool" else UNKNOWN
-        if not isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
+        if isinstance(op, ast.MatMult):  # matrices or stacks of them
+            if min(array_rank(a), array_rank(b)) < 1 or "bool" in (a.dtype, b.dtype):
+                return UNKNOWN
+            if min(array_rank(a), array_rank(b)) == 1:  # typed, so the export reaches its hint
+                d = nd_dtype(op, a, b)
+                return nd(d, 1) if d else UNKNOWN
+        elif not isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
             return UNKNOWN
         d = nd_dtype(op, a, b)
         return nd(d, rank) if d else UNKNOWN

@@ -295,7 +295,7 @@ Run <code>uv run pytest tests/test_gltf_skin.py tests/web/test_node_suites.py -q
 </details>
 
 <!-- ============================================================ TASK 2 -->
-<details class="task" id="task-2" data-state="pending">
+<details class="task" id="task-2" data-state="done">
 <summary><span class="num">2</span><span><span class="ttl">The array subset gains @ on matrix stacks, np.eye, nested np.array and np.stack of any rank</span><span class="files">web/types.py · web/transpile.py · js/pyrt.js · tests/web/test_matmul.py</span></span><span class="state"></span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -782,6 +782,7 @@ Run <code>uv run pytest tests/world/test_props.py -q</code>: fails.</li>
 <li><b>9 · Static parts are merged per 32 m cell at setup.</b> Batching by (geometry, material) alone would put each colour of the grounds in one batch spanning the grounds, culled whole: the culling Q8 worries about. The consumer's page script already merges static parts per cell; the port does the same in Python, so Q8's measurement compares like with like. Q8's batch split inside <code>scene.js</code> stays for what is not merged (rooms, people, animated props), if task 14 finds it needed.</li>
 <li><b>10 · The labels and the fade overlay stay in the host page, through events.</b> Section 12 lists what the host keeps as the panels, sound and fullscreen; the labels (question 1) and the black fade of a room's entry are DOM the host already draws.</li>
 <li><b>11 · Draw calls count skinned entities.</b> 5a's test asserts one call per batch; with skinned entities outside the batches (spec Q6) the count is the batches plus one per skinned entity (task 6).</li>
+<li><b>12 · @ broadcasts leading dimensions as numpy does, and an <code>np.ndarray</code> annotation is a vector (found in task 2).</b> Task 2 asked for leading dimensions equal or one side of rank 2, anything else throwing. <code>nd.matmul</code> broadcasts them by numpy's rule instead (a dimension of 1 stretches, <code>(1, 4, 4) @ (5, 4, 4)</code> included), so the page throws exactly where numpy throws, with numpy's "remapped shapes" message; the code is the same size as the check would have been. A vector on the left (<code>v @ m</code>, <code>v @ w</code>) fails the export too, with its own hint, for the same reason as a matrix times a vector. int32 <code>@</code> wraps each step as numpy's int32 does; bool is out. In the tests, a helper that returns a matrix leaves its return unannotated: <code>-&gt; np.ndarray</code> types as a float64 vector (<code>types.py</code>, the annotation rule), which tasks 3 and 6 should know when they write <code>about()</code>. Measured with the parity test, numpy 2.4.4 on this host (fma): 0 of 3,200 float32 values differ, as departure 1 says.</li>
 </ul>
 
 <h2>Self-review</h2>
