@@ -22,6 +22,7 @@ import pytest
 HERE = Path(__file__).parent
 ROOT = HERE.parents[2]
 WEB_WALK = ROOT / "examples" / "web_walk.py"
+WEB_CROWD = ROOT / "examples" / "web_crowd.py"
 APPS = HERE.parent / "apps"
 ARGS = ["--enable-unsafe-swiftshader", "--use-angle=swiftshader"]
 
@@ -63,6 +64,21 @@ Object.defineProperty(window, "__mx", {
   },
 });
 """
+
+# The keys of the batches whose drawn instances sit at the entity's Transform row: the
+# instance matrices three.js draws, not the page's own map from slots to instances.
+BATCHES_OF = """(entity) => {
+  const rows = __mx.app.engine.store.column("Transform"), o = entity * 10, keys = [];
+  const m = __mx.scene.camera.matrix.clone();
+  for (const [key, b] of __mx.scene.batches) {
+    if (!b.visible) continue;
+    for (let k = 0; k < b.count; k++) {
+      const e = b.getMatrixAt(k, m).elements;
+      if (Math.abs(e[12] - rows[o]) + Math.abs(e[13] - rows[o + 1]) + Math.abs(e[14] - rows[o + 2]) < 1e-5) keys.push(key);
+    }
+  }
+  return keys;
+}"""
 
 _probe: dict = {}
 
@@ -140,6 +156,11 @@ def _export(script: Path, out: Path) -> Path:
 @pytest.fixture(scope="session")
 def web_walk_export(tmp_path_factory):
     return _export(WEB_WALK, tmp_path_factory.mktemp("web_walk"))
+
+
+@pytest.fixture(scope="session")
+def crowd_export(tmp_path_factory):
+    return _export(WEB_CROWD, tmp_path_factory.mktemp("web_crowd"))
 
 
 @pytest.fixture(scope="module")

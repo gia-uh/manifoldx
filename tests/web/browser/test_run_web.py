@@ -5,6 +5,7 @@ frame error shows the overlay with the Python line; the agent commands answer fr
 
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import APPS
+from .conftest import APPS, BATCHES_OF
 
 ORBIT = APPS / "dev_orbit.py"
 YAW = "__mx.app.engine.state.get('cam').get('yaw')"
@@ -131,7 +132,10 @@ def test_a_colour_edit_rebuilds_the_scene(run_web, open_page, app):
     assert box_colour(page) == "c04020"
 
 
-def runtime_material_reset(page, app: Path):
+def runtime_material_reset(page, app: Path, same_version: bool = False):
+    """same_version: the old store's version is set back to 0, the new store's at its load,
+    so only the store's identity tells the kept scene to rebuild its batches."""
+    tick(page)  # materialOf and the batches read the store the last sync saw
     cube = page.evaluate("__mx.app.modules.__main__.CUBE.index")
     original = page.evaluate(f"__mx.scene.materialOf({cube})")
     lit = page.evaluate("__mx.app.modules.__main__.LIT.id")
@@ -139,26 +143,45 @@ def runtime_material_reset(page, app: Path):
     page.keyboard.press("h")
     tick(page)
     assert page.evaluate(f"__mx.scene.materialOf({cube})") == lit
+    if same_version:
+        page.evaluate("__mx.app.engine.store.version = 0")
+        tick(page)
     edit(app, "SPEED = 1.0", "SPEED = 2.0")
     wait_version(page, 2)
     tick(page)
     assert page.evaluate("__mx.swaps.map((s) => s.scene)") == ["kept"]
     assert page.evaluate(f"__mx.scene.materialOf({cube})") == original, "material"
-    # The meshes themselves, not only the page's map: each holds the glTF's material again.
+    # The batch drawing the cube, not only the store: it holds the glTF's material again.
+    [key] = page.evaluate(BATCHES_OF, cube)
     assert page.evaluate(
-        f"__mx.scene.entities.get({cube}).every((m) => m.material !== __mx.scene.materials.get({lit}))"
-    ), "meshes"
+        f"__mx.scene.batches.get({key!r}).material === __mx.scene.materials.get({original})"
+    ), "batch"
 
 
-def test_a_kept_scene_drops_runtime_materials(run_web, open_page, app):
-    runtime_material_reset(open_page(run_web(app)), app)
+@pytest.mark.parametrize("same_version", [False, True])
+def test_a_kept_scene_drops_runtime_materials(run_web, open_page, app, same_version):
+    runtime_material_reset(open_page(run_web(app)), app, same_version)
 
 
-def test_break_reset_materials_noop(run_web, open_page, app):
-    page = open_page(run_web(app))
-    page.evaluate("__mx.scene.resetMaterials = () => {}")
-    with pytest.raises(AssertionError, match="material"):
-        runtime_material_reset(page, app)
+def test_break_batches_kept_across_stores(run_web, open_page, app):
+    """scene.js patched so batches rebuild only when the store's version moves, not when the
+    store is another one: the kept scene keeps the old version's store and batches."""
+
+    def patch(page):
+        def route(r):
+            body = r.fetch().text()
+            old = "store !== seen || store.version !== seenVersion"
+            assert old in body, "scene.js's rebuild test changed: update this patch"
+            r.fulfill(
+                body=body.replace(old, "store.version !== seenVersion"),
+                content_type="text/javascript",
+            )
+
+        page.route(re.compile(r".*/scene\.js$"), route)
+
+    page = open_page(run_web(app), before=patch)
+    with pytest.raises(AssertionError, match="material|batch"):
+        runtime_material_reset(page, app, same_version=True)
 
 
 def test_broken_edit_keeps_running_with_the_line(run_web, open_page, app):
