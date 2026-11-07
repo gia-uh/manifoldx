@@ -320,6 +320,29 @@ class _FieldView:
         """other / field_view (scalar)."""
         return np.asarray(other, dtype=np.float32) / self._get_data()
 
+    def __getitem__(self, key):
+        """field[:, j]: column j of the field, as a one-column field view, so
+        `q[Transform].pos[:, 1] < -10.0` gives the entity indices."""
+        size = self._col_end - self._col_start
+        if (
+            isinstance(key, tuple)
+            and len(key) == 2
+            and key[0] == slice(None)
+            and isinstance(key[1], (int, np.integer))
+            and 0 <= key[1] < size
+        ):
+            start = self._col_start + int(key[1])
+            return _FieldView(
+                self._store,
+                self._indices,
+                self._component_name,
+                start,
+                start + 1,
+                self._field_name,
+                self._commands,
+            )
+        raise TypeError("a field view takes [:, j], one column")
+
     def __le__(self, other):
         """Comparison returns absolute entity indices where condition is true."""
         mask = (self._get_data() <= other).flatten()

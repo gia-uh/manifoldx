@@ -384,6 +384,36 @@ def test_a_system_skips_entities_without_its_component():
     assert engine.store._components["Transform"][still.index, 0] == 0.0
 
 
+def test_a_column_of_a_field_compares_to_entity_indices():
+    import manifoldx as mx
+
+    engine = mx.Engine("columns")
+    engine.spawn(Transform(pos=(0.0, 0.0, 0.0)))
+    low = engine.spawn(Transform(pos=(0.0, -20.0, 0.0)))
+    engine.spawn(Transform(pos=(0.0, 5.0, 0.0)))
+    seen = {}
+
+    @engine.system
+    def look(q: mx.Query[Transform], dt: float):
+        seen["low"] = q[Transform].pos[:, 1] < -10.0
+        seen["shape"] = q[Transform].pos[:, 1].data.shape
+
+    engine.systems.run_all(engine, 1 / 60)
+    assert low.index != 0
+    assert np.array_equal(seen["low"], np.array([low.index]))
+    assert seen["shape"] == (3, 1)
+
+
+def test_a_field_view_takes_only_one_column():
+    store = _store()
+    store.spawn(2, Transform=Transform.get_default_data(2))
+    pos = store.get_component_view(["Transform"])[Transform].pos
+    with pytest.raises(TypeError, match=r"a field view takes \[:, j\], one column"):
+        pos[0]
+    with pytest.raises(TypeError, match=r"one column"):
+        pos[:, 3]
+
+
 def test_a_query_reads_and_writes_a_component_subclass_field():
     import manifoldx as mx
 
