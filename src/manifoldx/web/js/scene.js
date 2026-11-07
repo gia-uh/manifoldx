@@ -1,7 +1,8 @@
 // The exported scene in three.js: the glTF's manifoldx extras (background, fog, environment,
 // sun, shadows) applied once with manifoldx's calibration, the desktop's fixed light for
-// BasicMaterial and PhongMaterial, and handles from entities and material ids to three.js
-// meshes and materials. THREE is passed in, so this module imports nothing.
+// BasicMaterial and PhongMaterial, the glb's library of geometries and materials by id, and one
+// InstancedMesh per (geometry, material) drawing the entity store. THREE is passed in, so this
+// module imports nothing.
 
 // three.js against the desktop at the same intensities, measured by tests/web/browser/test_visual.py
 // on tests/web/apps/lit_yard.py (sky environment, sun, shadows, fog) at 320x200, lavapipe for the
@@ -24,9 +25,10 @@ function mxBasic(THREE, base) {
     transparent: base.transparent,
     opacity: base.opacity,
     side: base.side,
+    vertexColors: base.vertexColors,
     fog: false, // the desktop fogs only StandardMaterial
   });
-  m.userData.mxBasic = true;
+  m.userData = { ...base.userData, mxBasic: true };
   m.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace("void main() {", "varying vec3 vMxNormal;\nvoid main() {")
@@ -104,11 +106,22 @@ function fitShadow(THREE, scene, root, sun, cfg, renderer) {
   renderer.shadowMap.enabled = true;
 }
 
-// The glTF the loader parsed, as an MxScene: .scene and .camera to render, .entities (entity
-// index to its meshes), .materials (material id to its three.js material), .setMaterial(entity,
-// id) (the engine's setMaterial hook), .materialOf(entity), .resetMaterials() (every entity back
-// to the glTF's material, as a rebuilt scene has it), .sync(engine) each frame,
-// .setCalibration(partial) over a copy of CALIBRATION, and .dispose() (frees its GPU resources). The renderer is used for its
+// The Transform row of slot i (pos, the quaternion x y z w, scale) as the desktop's model
+// matrix, T R S (renderer._recompute_matrices), into instance k of batch b.
+function writeInstance(b, k, rows, i, m, p, q, sc) {
+  const o = i * 10;
+  p.set(rows[o], rows[o + 1], rows[o + 2]);
+  q.set(rows[o + 3], rows[o + 4], rows[o + 5], rows[o + 6]);
+  sc.set(rows[o + 7], rows[o + 8], rows[o + 9]);
+  b.setMatrixAt(k, m.compose(p, q, sc));
+}
+
+// The glTF the loader parsed, as an MxScene: .scene and .camera to render, .geometries
+// (geometry id to its BufferGeometry, the glb's library), .materials (material id to its
+// three.js material), .batches ("gid:mid" to the InstancedMesh drawing those entities),
+// .materialOf(entity) (the store's Material column, or null), .sync(engine) each frame (the
+// camera, then the batches from engine.store), .setCalibration(partial) over a copy of
+// CALIBRATION, and .dispose() (frees its GPU resources). The renderer is used for its
 // capabilities, the shadow map switch and, when the scene has an environment, PMREM.
 export async function buildScene(THREE, gltf, renderer) {
   const extras = gltf.scene.userData.manifoldx ?? {};
@@ -123,25 +136,34 @@ export async function buildScene(THREE, gltf, renderer) {
     if (!converted.has(base)) converted.set(base, convert(THREE, base));
     return converted.get(base);
   };
-  const materials = new Map();
+  const materials = new Map(), bases = new Map();
   for (const [id, index] of Object.entries(extras.mx_materials ?? {})) {
-    materials.set(Number(id), drawn(await gltf.parser.getDependency("material", index)));
+    const base = await gltf.parser.getDependency("material", index);
+    bases.set(Number(id), base);
+    materials.set(Number(id), drawn(base));
   }
+  const geometries = new Map();
+  for (const [id, index] of Object.entries(extras.mx_geometries ?? {})) {
+    geometries.set(Number(id), (await gltf.parser.getDependency("mesh", index)).geometry);
+  }
+  // A mesh without a Material, which the desktop draws white with its basic light.
+  const white = mxBasic(THREE, new THREE.MeshBasicMaterial({ name: "BasicMaterial", color: 0xffffff }));
+  const coloured = new Map(); // material id -> its copy with vertex colours on
 
-  const entities = new Map(), current = new Map(), original = new Map();
-  gltf.scene.traverse((o) => {
-    const mx = o.userData.mx;
-    if (!mx) return;
-    const meshes = [];
-    o.traverse((m) => {
-      if (!m.isMesh) return;
-      m.material = materials.get(mx.material) ?? drawn(m.material);
-      meshes.push(m);
-    });
-    entities.set(mx.entity, meshes);
-    current.set(mx.entity, mx.material);
-    original.set(mx.entity, [mx.material, meshes.map((m) => m.material)]);
-  });
+  // The material batch (gid, mid) draws: the library's, a copy with vertex colours when the
+  // material asks for them and the geometry has them, or white for no Material.
+  const batchMaterial = (gid, mid) => {
+    if (mid === 0) return white;
+    const m = materials.get(mid);
+    if (m === undefined) throw new Error(`material ${mid} is not in the exported scene`);
+    if (!(m.userData.mx?.vertex_colors && geometries.get(gid).hasAttribute("color"))) return m;
+    if (!coloured.has(mid)) {
+      const base = bases.get(mid).clone();
+      base.vertexColors = true;
+      coloured.set(mid, convert(THREE, base));
+    }
+    return coloured.get(mid);
+  };
 
   if (extras.environment) {
     const env = extras.environment;
@@ -156,10 +178,8 @@ export async function buildScene(THREE, gltf, renderer) {
   let sun = null;
   gltf.scene.traverse((o) => { if (!sun && o.isDirectionalLight) sun = o; });
   const sunIntensity = sun ? sun.intensity : 0;
-  if (sun && extras.shadows) {
-    fitShadow(THREE, scene, gltf.scene, sun, extras.shadows, renderer);
-    scene.traverse((o) => { if (o.isMesh) o.castShadow = o.receiveShadow = true; });
-  }
+  const shadows = Boolean(sun && extras.shadows);
+  let fitted = false;
 
   const calibration = { ...CALIBRATION };
   const calibrate = () => {
@@ -168,27 +188,90 @@ export async function buildScene(THREE, gltf, renderer) {
   };
   calibrate();
 
+  // The batches: one InstancedMesh per (geometry, material) under gltf.scene, its members the
+  // store's slots in ascending order; slotOf maps a slot to [batch key, instance].
+  const batches = new Map(), members = new Map();
+  let slotOf = new Map(), seen = null, seenVersion = -1;
+  const m4 = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+
+  const batch = (gid, mid) => {
+    const key = `${gid}:${mid}`;
+    if (!batches.has(key)) {
+      const b = new THREE.InstancedMesh(geometries.get(gid), batchMaterial(gid, mid), 1);
+      b.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      b.count = 0;
+      b.castShadow = b.receiveShadow = shadows;
+      b.name = key;
+      gltf.scene.add(b);
+      batches.set(key, b);
+      members.set(key, []);
+    }
+    return key;
+  };
+
+  // A full pass when the store's membership moved (a spawn, a destroy, a Mesh or Material
+  // write) or the store is another one (a new version's); otherwise the dirty Transform rows.
+  const syncBatches = (store) => {
+    const rows = store.column("Transform");
+    const changed = new Set();
+    if (store !== seen || store.version !== seenVersion) {
+      store.takeDirty();
+      seen = store;
+      seenVersion = store.version;
+      for (const list of members.values()) list.length = 0;
+      slotOf = new Map();
+      const mesh = store.member("Mesh"), gids = store.column("Mesh");
+      const mat = store.member("Material"), mids = store.column("Material");
+      for (let i = 0; i < store.highWater; i++) {
+        if (!store.alive[i] || !mesh?.[i] || !geometries.has(gids[i])) continue;
+        const key = batch(gids[i], mat?.[i] ? mids[i] : 0);
+        const list = members.get(key);
+        slotOf.set(i, [key, list.length]);
+        list.push(i);
+      }
+      for (const [key, b] of batches) {
+        const list = members.get(key);
+        if (list.length > b.instanceMatrix.count) {
+          let cap = b.instanceMatrix.count;
+          while (cap < list.length) cap *= 2;
+          b.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(cap * 16), 16);
+          b.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        }
+        list.forEach((i, k) => writeInstance(b, k, rows, i, m4, p, q, sc));
+        b.count = list.length;
+        b.visible = list.length > 0;
+        changed.add(b);
+      }
+    } else {
+      const dirty = store.takeDirty();
+      if (dirty !== null) {
+        for (let i = dirty[0]; i < dirty[1]; i++) {
+          const at = slotOf.get(i);
+          if (at === undefined) continue;
+          const b = batches.get(at[0]);
+          writeInstance(b, at[1], rows, i, m4, p, q, sc);
+          changed.add(b);
+        }
+      }
+    }
+    for (const b of changed) {
+      b.instanceMatrix.needsUpdate = true;
+      b.boundingBox = null;
+      b.computeBoundingSphere();
+    }
+  };
+
   const camera = new THREE.PerspectiveCamera();
   return {
     scene,
     camera,
-    entities,
+    geometries,
     materials,
-    setMaterial(entity, id) {
-      const meshes = entities.get(entity), material = materials.get(id);
-      if (meshes === undefined) throw new Error(`entity ${entity} is not in the exported scene`);
-      if (material === undefined) throw new Error(`material ${id} is not in the exported scene`);
-      for (const m of meshes) m.material = material;
-      current.set(entity, id);
-    },
+    batches,
     materialOf(entity) {
-      return current.get(entity) ?? null;
-    },
-    resetMaterials() {
-      for (const [entity, [id, mats]] of original) {
-        entities.get(entity).forEach((m, i) => { m.material = mats[i]; });
-        current.set(entity, id);
-      }
+      const store = seen;
+      if (store === null || !(entity < store.capacity && store.alive[entity] && store.member("Material")?.[entity])) return null;
+      return store.column("Material")[entity];
     },
     dispose() {
       const done = new Set();
@@ -202,8 +285,12 @@ export async function buildScene(THREE, gltf, renderer) {
         free(o.geometry);
         for (const m of [o.material ?? []].flat()) free(m);
       });
+      for (const g of geometries.values()) free(g);
       for (const m of materials.values()) free(m);
       for (const m of converted.values()) free(m);
+      for (const m of coloured.values()) free(m);
+      free(white);
+      for (const b of batches.values()) b.dispose(); // the instance buffers
       free(scene.environment);
     },
     sync(engine) {
@@ -216,6 +303,13 @@ export async function buildScene(THREE, gltf, renderer) {
       camera.far = c.far;
       camera.aspect = engine.w / engine.h;
       camera.updateProjectionMatrix();
+      if (engine.store) syncBatches(engine.store);
+      // The desktop fits the shadow once, at its first frame: after the batches, so auto_fit sees them.
+      if (shadows && !fitted) {
+        fitted = true;
+        fitShadow(THREE, scene, gltf.scene, sun, extras.shadows, renderer);
+        scene.traverse((o) => { if (o.isMesh) o.castShadow = o.receiveShadow = true; });
+      }
     },
     setCalibration(partial) {
       Object.assign(calibration, partial);

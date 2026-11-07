@@ -15,6 +15,7 @@ from manifoldx.web.export import export_web
 HERE = Path(__file__).parent / "js"
 FORWARD = HERE / "forward.json"
 WEB_WALK = Path(__file__).parents[2] / "examples" / "web_walk.py"
+SPAWNER = Path(__file__).parent / "apps" / "spawner.py"
 
 # A two-module app whose system calls a helper that reads an attribute of None, for
 # sourcemap.test.mjs: the error must name the helper's line, then the system's call.
@@ -95,6 +96,14 @@ def web_walk_export(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
+def spawner_export(tmp_path_factory) -> Path:
+    """tests/web/apps/spawner.py exported, for scene.test.mjs: a library geometry no entity draws."""
+    out = tmp_path_factory.mktemp("spawner_export") / "out"
+    assert export_web(None, str(SPAWNER), out, []) == 0
+    return out
+
+
+@pytest.fixture(scope="session")
 def sourcemap_export(tmp_path_factory) -> Path:
     """FAILING exported, with expect.json beside it: the Python lines the error must name."""
     import sys
@@ -131,13 +140,14 @@ def _run(suites: list[str], env: dict[str, str]) -> None:
     assert "# skipped 0" in done.stdout, done.stdout
 
 
-def test_node_suites_pass(web_walk_export, sourcemap_export):
+def test_node_suites_pass(web_walk_export, spawner_export, sourcemap_export):
     # Node 22's --test takes files or globs, not a folder.
     suites = sorted(str(f) for f in HERE.glob("*.test.mjs"))
     assert suites
     env = {
         **os.environ,
         "MX_WEB_WALK_EXPORT": str(web_walk_export),
+        "MX_SPAWNER_EXPORT": str(spawner_export),
         "MX_SOURCEMAP_EXPORT": str(sourcemap_export),
     }
     _run(suites, env)

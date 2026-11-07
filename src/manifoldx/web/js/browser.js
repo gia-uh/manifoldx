@@ -1,7 +1,7 @@
 // The page's bootstrap: load the export (state, the app's modules, the scene with a progress
 // line), draw it with three.js, and run the app's systems every animation frame on the input
 // the DOM gave, through the same Frame the replay feeds. window.__mx is how tests drive it:
-// {ready, app, scene, gui, frames, trace, error, paths, manual(on), tick(dt), loadStats}, and
+// {ready, app, scene, renderer, gui, frames, trace, error, paths, manual(on), tick(dt), loadStats}, and
 // under manifoldx run --web (<meta name="mx-dev">) also {version, swaps, dev, status, swap(info)}.
 //
 // The renderer, the canvas, the input (FrameBuilder, PointerLock, the DOM listeners) live as
@@ -29,6 +29,7 @@ const mx = {
   ready: new Promise((res, rej) => { resolveReady = res; rejectReady = rej; }),
   app: null,
   scene: null,
+  renderer: null,
   gui: null,
   frames: [],
   trace: [],
@@ -138,7 +139,6 @@ async function start() {
   const builder = new FrameBuilder({ devicePixelRatio: window.devicePixelRatio || 1 });
   const lock = new PointerLock(canvas, document, builder);
   const hooks = {
-    setMaterial: (entity, id) => scene.setMaterial(entity, id),
     capture: (on) => lock.request(on),
     log: (text) => mx.dev?.appLog(text), // engine.log: to the dev server's log, nowhere in an export
   };
@@ -146,7 +146,7 @@ async function start() {
   running.app = makeApp(running);
   lock.input = running.app.engine.input;
   attachDom(canvas, builder);
-  Object.assign(mx, { app: running.app, scene, gui, version: info ? info.version : null });
+  Object.assign(mx, { app: running.app, scene, renderer, gui, version: info ? info.version : null });
 
   let size = [0, 0], guiH = null;
   let frozen = null; // while a reload builds (Q2): the timer that unfreezes after FREEZE_MAX
@@ -239,8 +239,8 @@ async function start() {
       thaw();
       return false;
     }
-    if (kept) scene.resetMaterials();
-    else {
+    // A kept scene's batches rebuild from the new version's store at the next sync.
+    if (!kept) {
       scene.dispose();
       scene = built;
     }
