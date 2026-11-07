@@ -253,7 +253,7 @@ test("engine.log collects the app's lines in engine.lines, or hands them to hook
 });
 
 // An app whose module holds one system and two handlers, as loadApp builds it.
-function handlerApp() {
+function handlerApp(hooks = {}) {
   const seen = [];
   const mod = {
     tick: () => seen.push("tick"),
@@ -271,7 +271,7 @@ function handlerApp() {
     ],
     engine: { w: 10, h: 10, camera: { position: [0, 0, 1], target: [0, 0, 0] } },
   };
-  return { app: loadApp(state, { __main__: mod }), seen };
+  return { app: loadApp(state, { __main__: mod }, { hooks }), seen };
 }
 
 const IDLE = { keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [10, 10] };
@@ -286,6 +286,18 @@ test("advance delivers a frame's event to every handler root of it once, its JSO
   assert.equal(payload.get("by"), 10);
   assert.equal(seen[1], "tick");
   assert.deepEqual(app.engine.bus.delivered, ["frame", "bump"]);
+});
+
+test("hooks.delivered hears every event but the frame and input events, as delivery reaches it", () => {
+  const heard = [];
+  const { app } = handlerApp({ delivered: (name, payload) => heard.push([name, payload]) });
+  app.engine.emit("other", null);
+  advance(app, {
+    ...IDLE,
+    events: [["key_down", { key: "a", modifiers: [], is_down: true }], ["bump", { by: 1 }], ["nobody", null]],
+  }, 1 / 60);
+  assert.deepEqual(heard.map(([name]) => name), ["other", "bump", "nobody"]);
+  assert.equal(heard[1][1].get("by"), 1); // the runtime value, a Map
 });
 
 test("an event no root handles is delivered to nobody", () => {

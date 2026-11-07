@@ -30,7 +30,9 @@ const sortedNumbers = (set) => [...set].sort((a, b) => a - b);
 // events in the order the DOM gave them, as manifoldx.input._InputBridge builds them:
 // ["key_down" | "key_up", {key, modifiers, is_down}], ["pointer_down" | "pointer_up" |
 // "pointer_move", {x, y, dx, dy, button, buttons, modifiers, phase, pointer_id}], ["wheel",
-// {dx, dy, x, y, buttons, modifiers}] and, at take(), ["resize", {width, height, pixel_ratio}].
+// {dx, dy, x, y, buttons, modifiers}] and, at take(), ["resize", {width, height, pixel_ratio}];
+// an outside event (emit: a host page's message, an agent's manifoldx emit) goes in among them
+// in arrival order, its payload plain JSON.
 // clock is the wall clock at take(), Date.now() / 1000, never less than the last frame's, so
 // time.time() in frame code does not run backwards when the system clock steps back.
 export class FrameBuilder {
@@ -136,6 +138,12 @@ export class FrameBuilder {
     this._wheel[1] += dy;
     const [x, y] = this._pos;
     this._events.push(["wheel", { dx, dy, x, y, buttons: sortedNumbers(this._buttons), modifiers: [...this._mods] }]);
+  }
+
+  // An event from outside the page's input, recorded as it arrives; advance's eventOf reads
+  // its JSON payload.
+  emit(name, payload = null) {
+    this._events.push([name, payload]);
   }
 
   // The page lost focus: nothing is held any more, and the next frame says so, with a key_up

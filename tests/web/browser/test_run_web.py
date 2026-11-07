@@ -277,6 +277,23 @@ def test_agent_commands(run_web, open_page, app):
     assert "tab: v2 in " in out and "(scene kept)" in out
 
 
+def test_an_agent_emit_is_in_the_frame_and_replays(run_web, open_page, app):
+    from manifoldx.web.replay import compare, replay_python
+
+    # The Python trace writes engine.state as JSON, which has no tuple keys.
+    edit(app, 'engine.state.setdefault(("cache", 1), np.zeros((4, 4)))\n', "")
+    page = open_page(run_web(app))
+    page.evaluate('() => { __mx.paths = ["cam.yaw"]; }')
+    tick(page, 2)
+    manifoldx(app, "emit", "bump", '{"by": 10}')
+    tick(page, 2)
+    frames, trace = page.evaluate("__mx.frames"), page.evaluate("__mx.trace")
+    assert frames[2]["events"] == [["bump", {"by": 10}]]
+    assert "bump" in trace[2]["events"]
+    mismatch = compare(replay_python(None, str(app), frames, ["cam.yaw"]), trace)
+    assert mismatch is None, str(mismatch)
+
+
 def test_lock_survives_a_save(run_web, open_page, app):
     page = open_page(run_web(app))
     tick(page)

@@ -742,11 +742,13 @@ export class Camera {
 // engine.state, a Map as every dict. hooks are where the browser acts, all optional:
 // setMaterial(entityIndex, materialId) after the record, capture(on) -> boolean, whether the
 // capture took (headless: a no-op and () => true), and log(text), where engine.log(text)
-// sends the app's lines (headless: they collect in engine.lines). resolve(kind, value) is loadState's
+// sends the app's lines (headless: they collect in engine.lines), and delivered(name, payload),
+// called as delivery reaches each event but the frame event and the seven input events (the
+// page tells a host page). resolve(kind, value) is loadState's
 // resolver for this engine.
 export function createEngine({ w, h, camera, origin = [0, 0], gui = null, materials = {}, calls = [], state = new Map(), hooks = {} }) {
-  const { setMaterial = () => {}, capture = () => true, log = null } = hooks;
-  const engine = { w, h, origin, state, calls, lines: [], elapsed: 0.0, frame: 0 };
+  const { setMaterial = () => {}, capture = () => true, log = null, delivered = null } = hooks;
+  const engine = { w, h, origin, state, calls, lines: [], elapsed: 0.0, frame: 0, delivered };
   engine.bus = new EventBus();
   engine.emit = (name, payload = null) => engine.bus.emit(name, payload);
   engine.log = (text) => {
@@ -1130,7 +1132,8 @@ export function step(app, dt) {
 }
 
 // An event delivered: the GUI bridge first for the pointer events and key_down (its handlers
-// are the engine's own, registered before the app's), then every handler root of that event,
+// are the engine's own, registered before the app's), the delivered hook for any but the frame
+// and input events, then every handler root of that event,
 // in the order the app registered them, called with the payload (runtime values: a dict is a
 // Map) and, when it registered components, a read-only query.
 function deliver(app, event, payload) {
@@ -1139,6 +1142,9 @@ function deliver(app, event, payload) {
   else if (event === "pointer_move") bridge.onPointer(payload, "move");
   else if (event === "pointer_up") bridge.onPointer(payload, "up");
   else if (event === "key_down") bridge.onKey(payload);
+  if (app.engine.delivered !== null && event !== "frame" && EVENT_FIELDS[event] === undefined) {
+    app.engine.delivered(event, payload);
+  }
   const store = app.engine.store ?? null;
   for (const r of app.roots) {
     if (r.kind !== "handler" || r.event !== event) continue;

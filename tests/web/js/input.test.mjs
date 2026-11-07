@@ -487,3 +487,13 @@ test("a pointer down on the canvas asks the GUI too, and detach removes the laye
   detach();
   assert.deepEqual(Object.keys(gui.layer.on), []);
 });
+
+test("emit records an outside event among the input events, in arrival order", () => {
+  const b = new FrameBuilder();
+  b.keyDown({ key: "a", code: "KeyA" });
+  b.emit("host:hello", { n: 2 });
+  b.keyUp({ code: "KeyA" });
+  assert.deepEqual(b.take(vp).events.map(([name]) => name), ["key_down", "host:hello", "key_up"]);
+  b.emit("later");
+  assert.deepEqual(b.take(vp).events, [["later", null]]);
+});
