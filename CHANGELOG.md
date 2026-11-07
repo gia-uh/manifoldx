@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **export --web: skinned entities and matrices in frame code.** Transpiled code may call
+  `set_joints` on the engine and on entity handles, use `@` on matrices and stacks of them
+  (numpy's broadcasting; float32 summed in numpy's order, so the page matches bit for bit),
+  `np.eye`, nested `np.array`, `np.stack` of any rank and `Camera.project`; the page draws
+  each skinned entity posed, a three.js SkinnedMesh of its own, one draw call each.
+  `examples/web_crowd.py` gains a walking figure (#140).
+
 - **A Joystick widget.** `manifoldx.gui.Joystick(name=...)`: a drag gives a value in the unit
   disc, y up, emitting `gui:joystick:<name>:change`; release returns it to (0, 0) (#140).
 
