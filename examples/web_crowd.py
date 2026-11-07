@@ -13,6 +13,10 @@ the spin Toggle turns the spin on and off; the wind Joystick blows the boxes sid
 is held; the compass is an SVG Image. A handler per event keeps a count or the last payload in
 engine.state.
 
+A skinned figure walks a circle about the origin, its legs and arms swinging; F pauses it and
+resumes it. Its system moves it by its handle and poses its six joints with set_joints, from
+matrices built in frame code; the page draws it as a skinned mesh of its own.
+
 Every system is a query over the entity store: the spawn, the drift and the pick are numpy
 expressions on whole columns, which the web export transpiles; the ground and the camera are
 built at setup, which stays in Python.
@@ -29,7 +33,9 @@ import numpy as np
 
 import manifoldx as mx
 from manifoldx.components import Component, Material, Mesh, Transform
+from manifoldx.engine import EntityHandle
 from manifoldx.gui import Button, Image, Joystick, Panel, Slider, Toggle, ValueDisplay
+from manifoldx.modeling import Mesh as Shape
 from manifoldx.types import Float, Vector3
 
 RING = 24  # boxes per wave
@@ -43,6 +49,20 @@ JITTER = 0.3  # each box's radius moves by up to this much, m
 WIND_SPEED = 2.0  # what the Joystick at its rim adds to a box's speed each second, m/s
 ZOOM = 0.002  # the camera's distance change per wheel pixel, as a fraction
 CAMERA = (0.0, 12.0, 22.0)
+WALK_RADIUS = 6.0  # the figure's circle about the origin, m
+WALK_SPEED = 1.2  # m/s
+STRIDE = 2.2  # swing radians per metre walked
+SWING = 0.5  # the legs' and arms' largest swing, rad
+# The figure's parts, (size, centre) in m; joint i moves part i.
+PARTS = [
+    ((0.6, 0.7, 0.35), (0.0, 1.25, 0.0)),  # 0 body
+    ((0.3, 0.3, 0.3), (0.0, 1.8, 0.0)),  # 1 head
+    ((0.25, 0.9, 0.25), (-0.15, 0.45, 0.0)),  # 2 left leg, swings at the hip
+    ((0.25, 0.9, 0.25), (0.15, 0.45, 0.0)),  # 3 right leg
+    ((0.18, 0.7, 0.18), (-0.42, 1.2, 0.0)),  # 4 left arm, swings at the shoulder
+    ((0.18, 0.7, 0.18), (0.42, 1.2, 0.0)),  # 5 right arm
+]
+HIP, SHOULDER = 0.9, 1.55  # the pivots' heights, m
 
 DOWN = np.array([0.0, -1.0, 0.0], np.float32)
 EAST = np.array([1.0, 0.0, 0.0], np.float32)
@@ -65,6 +85,28 @@ class Wave(Component):
     k: Float  # which of COLORS the box wears, so a pick can give it back
 
 
+class Walker:
+    """The figure's handle, and whether F paused it."""
+
+    figure: EntityHandle
+    paused: bool
+
+    def __init__(self, figure: EntityHandle):
+        self.figure = figure
+        self.paused = False
+
+
+def figure() -> Shape:
+    boxes = [Shape.box(*size).translate(centre).recompute_normals() for size, centre in PARTS]
+    offsets = np.cumsum([0] + [len(b.positions) for b in boxes[:-1]])
+    return Shape(
+        positions=np.concatenate([b.positions for b in boxes]),
+        faces=np.concatenate([b.faces + o for b, o in zip(boxes, offsets)]).astype(np.uint32),
+        normals=np.concatenate([b.normals for b in boxes]),
+        joints=np.concatenate([np.full(len(b.positions), i) for i, b in enumerate(boxes)]),
+    )
+
+
 engine = mx.Engine("Web crowd", width=800, height=500)
 engine.state.setdefault("waves", 0)
 engine.state.setdefault("boxes", 0)
@@ -80,6 +122,7 @@ engine.state.setdefault("fallen", 0)  # boxes destroyed below the floor
 engine.state.setdefault("zoom", 1.0)  # the camera's distance over its first one
 engine.state.setdefault("elapsed", 0.0)
 engine.state.setdefault("sec", 0.0)  # the clock's seconds in its minute
+engine.state.setdefault("walked", 0.0)  # how far the figure walked, m
 for name in ("key_down", "key_up"):
     engine.state.setdefault(name, 0)
 for name in ("pointer_down", "pointer_up", "pointer_move"):
@@ -87,6 +130,7 @@ for name in ("pointer_down", "pointer_up", "pointer_move"):
 engine.state.setdefault("resize", [0, 0])
 
 CUBE = mx.geometry.cube(1, 1, 1)
+FIGURE = figure().to_geometry()
 COLORS = [mx.material.phong("#c0392b"), mx.material.phong("#2e86c1"), mx.material.phong("#27ae60")]
 GOLD = mx.material.phong("#f2c14e")
 
@@ -188,6 +232,52 @@ def pick(q: mx.Query[Transform, Velocity, Wave], dt: float):
         engine.set_material(ids[j], GOLD)
         engine.state["picked"] = ids[j]
         engine.state["picked_k"] = int(float(q[Wave].k.data[:, 0][j]))
+
+
+def translation(x: float, y: float, z: float):
+    return np.array(
+        [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, z], [0.0, 0.0, 0.0, 1.0]],
+        np.float32,
+    )
+
+
+def about(px: float, py: float, pz: float, angle: float):
+    """(4, 4) float32 rotation by `angle` about the x axis through (px, py, pz)."""
+    c = math.cos(angle)
+    s = math.sin(angle)
+    r = np.array(
+        [[1.0, 0.0, 0.0, 0.0], [0.0, c, -s, 0.0], [0.0, s, c, 0.0], [0.0, 0.0, 0.0, 1.0]],
+        np.float32,
+    )
+    return translation(px, py, pz) @ r @ translation(-px, -py, -pz)
+
+
+def walk(q, dt: float):
+    """The figure along its circle, facing its way, legs and arms swinging: each leg opposite
+    the other and the arm on its side."""
+    if engine.input.just_pressed("f"):
+        walker.paused = not walker.paused
+    if walker.paused:
+        return
+    walked: float = engine.state["walked"]
+    walked = walked + WALK_SPEED * dt
+    engine.state["walked"] = walked
+    a = walked / WALK_RADIUS
+    walker.figure.transform.pos = (WALK_RADIUS * math.cos(a), 0.0, WALK_RADIUS * math.sin(a))
+    walker.figure.transform.rot = Transform.rotation(y=-a)  # its +z along the circle
+    s = SWING * math.sin(walked * STRIDE)
+    walker.figure.set_joints(
+        np.stack(
+            [
+                np.eye(4, dtype=np.float32),
+                np.eye(4, dtype=np.float32),
+                about(-0.15, HIP, 0.0, s),
+                about(0.15, HIP, 0.0, -s),
+                about(-0.42, SHOULDER, 0.0, -s),
+                about(0.42, SHOULDER, 0.0, s),
+            ]
+        )
+    )
 
 
 def clock(q, dt: float):
@@ -298,6 +388,11 @@ engine.spawn(
     Material(mx.material.phong("#d5d8c8")),
     Transform(pos=(0.0, -0.05, 0.0), scale=(30.0, 0.1, 30.0)),
 )
+walker = Walker(
+    engine.spawn(
+        Mesh(FIGURE), Material(mx.material.phong("#e07a3a")), Transform(pos=(WALK_RADIUS, 0.0, 0.0))
+    )
+)
 Velocity.register(engine.store)  # drift's and pick's queries read them before the first wave
 Wave.register(engine.store)
 for i, x in enumerate(CAMERA):
@@ -308,6 +403,7 @@ engine.system(spawn_wave)
 engine.system(drift)
 engine.system(pick)
 engine.system(clock)
+engine.system(walk)
 engine.on("gui:button:wave:click")(on_wave)
 engine.on("throw")(on_throw)
 engine.on("gui:slider:gravity:change")(on_gravity)
