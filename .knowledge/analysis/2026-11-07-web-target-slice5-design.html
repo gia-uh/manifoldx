@@ -89,6 +89,7 @@ pre{font-family:var(--font-mono);font-size:12px;line-height:1.55;background:var(
 .q{margin:18px 0}
 .q h4{font-family:var(--font-mono);font-weight:500;font-size:12.5px;color:var(--strong);margin:0 0 4px}
 .q p{margin:4px 0}
+.q .settled{font-family:var(--font-mono);font-size:10.5px;color:var(--accent);border:1px solid #5a4430;border-radius:999px;padding:0 7px;margin-left:8px;white-space:nowrap}
 .q .rec{color:var(--ok);font-family:var(--font-mono);font-size:11px;margin-right:6px}
 
 /* the widget mockup: drawn as gui.js would draw them, in the desktop GUI's default theme */
@@ -142,7 +143,7 @@ pre{font-family:var(--font-mono);font-size:12px;line-height:1.55;background:var(
 
 <div class="chrome">
   <span class="tab">spec · web target · slice 5</span>
-  <span class="st"><span class="pill acc">draft</span><span class="pill">2026-11-07</span><span class="pill">#140 #158 #161</span></span>
+  <span class="st"><span class="pill acc">approved</span><span class="pill">2026-11-07</span><span class="pill">#140 #158 #161</span></span>
 </div>
 
 <div class="wrap">
@@ -162,11 +163,11 @@ pre{font-family:var(--font-mono);font-size:12px;line-height:1.55;background:var(
   <a href="#testing">13 testing</a>
   <a href="#after">14 the slices after 5</a>
   <a href="#nongoals">15 non-goals</a>
-  <a href="#open">16 open questions</a>
+  <a href="#open">16 questions, settled</a>
 </nav>
 <main>
 <h1>The web target, slice 5: the second consumer</h1>
-<div class="meta"><span>status: draft</span><span>·</span><span>issue #140, with #82 #153 #154 #158-#161</span><span>·</span><span>follows the slice 1-4 spec of 2026-11-06</span></div>
+<div class="meta"><span>status: approved</span><span>·</span><span>issue #140, with #82 #153 #154 #158-#161</span><span>·</span><span>follows the slice 1-4 spec of 2026-11-06</span></div>
 <p class="lede">Slices 1 to 4 made a walk-and-pick app run in a tab from Python alone. Slice 5 gives the page the rest of manifoldx's runtime model: entities spawned, moved and destroyed by frame code over component arrays, events with payloads, the interactive widgets and posed skinned meshes. The check is the second consumer, a virtual trade fair whose 3D world is today 3,446 lines of hand-written three.js; at the end of slice 5 that world comes from <code>manifoldx export --web</code>.</p>
 
 <h2 id="delivers"><span class="n">01</span>What this delivers</h2>
@@ -193,13 +194,21 @@ pre{font-family:var(--font-mono);font-size:12px;line-height:1.55;background:var(
 <tr><td>numpy over components, one loop per operation</td><td>Each numpy operation on a component array runs as one loop over a typed array into a new typed array, rounding to float32 where numpy does. No fusion of expressions in slice 5.</td><td class="why">Per-operation rounding is what numpy computes, so parity is exact by construction. Measured: 0.48 ms for <code>pos += vel * dt</code> over 10,000 entities with temporaries, 0.09 ms fused; the simple form fits the budget.</td><td><span class="who q">agent</span></td></tr>
 <tr><td>one instanced mesh per batch</td><td>The page draws entities as a three.js <code>InstancedMesh</code> per (geometry, material), the desktop's batch key, rebuilding membership when spawns, destroys or <code>set_material</code> change it and uploading the instance matrices of batches whose transforms moved.</td><td class="why">Measured: 1,000 boxes cost 9.9 ms a tick as meshes and 1.7 ms instanced; 10,000 cost 66 ms and 13.1 ms. Static scenes gain too.</td><td><span class="who q">agent</span></td></tr>
 <tr><td>under --web the glb is a library</td><td><code>export --web</code> writes each registered geometry once and every material, tagged with their ids, and no node per entity; the entity table comes from <code>ecs.bin</code>. <code>export_gltf</code> for other uses keeps its nodes.</td><td class="why">The page spawns geometries no entity uses at export (a room's walls), and batches need geometry ids, not nodes. The glb export for other tools stays a scene.</td><td><span class="who q">agent</span></td></tr>
-<tr><td>queries filter by component</td><td>The desktop store tracks which components each entity was spawned with, and a query returns the alive entities that have all of them, as its docstring says.</td><td class="why"><code>EntityStore.get_component_view</code> returns every alive entity whatever the query (<code>src/manifoldx/ecs.py:123</code>). The page could copy the defect; parity with a defect would freeze it (Q3).</td><td><span class="who q">agent</span></td></tr>
+<tr><td>queries filter by component</td><td>The desktop store tracks which components each entity was spawned with, and a query returns the alive entities that have all of them, as its docstring says.</td><td class="why"><code>EntityStore.get_component_view</code> returns every alive entity whatever the query (<code>src/manifoldx/ecs.py:123</code>). The page could copy the defect; parity with a defect would freeze it (Q3).</td><td><span class="who">maintainer</span></td></tr>
 <tr><td>one event queue, the desktop's order</td><td>Each frame delivers the <code>frame</code> event, then the events emitted during the previous frame, then the input and widget events since then, in that order. The page records input and widget events in the replay frame, so Python replays them through the same bus.</td><td class="why">That is the desktop's order: emits queue during systems, OS events queue between frames, and <code>dispatch_pending</code> drains both at the next frame's start.</td><td><span class="who q">agent</span></td></tr>
 <tr><td>random.Random ported bit for bit</td><td><code>random.Random</code> instances (and the module's functions) cross with their Mersenne Twister state, and the runtime implements <code>random</code>, <code>uniform</code>, <code>randint</code>, <code>randrange</code> and <code>choice</code> as CPython does.</td><td class="why">The fair's people pause for random times. A replay compares exact values, and MT19937 is small and fully specified; numpy's generators stay setup-only.</td><td><span class="who q">agent</span></td></tr>
 <tr><td>five widgets</td><td>Button, Slider, Toggle and Image draw in the page with the desktop's fields and events; a new Joystick widget lands on both.</td><td class="why">Both consumers wrote a joystick and on-screen buttons by hand. Image is an SVG the page can show as is, so it is cheap.</td><td><span class="who q">agent</span></td></tr>
 <tr><td>joint poses in, clips out</td><td><code>set_joints</code> works in frame code and the export writes each skinned geometry's joints, which closes #82. Animation clips are not part of slice 5.</td><td class="why">The fair's people are rigid parts with one joint each, posed by code every frame; <code>set_joints</code> is that. The desktop has no clips to be at parity with.</td><td><span class="who q">agent</span></td></tr>
 <tr><td>sound is out</td><td>No sound API in slice 5.</td><td class="why">manifoldx has no audio on the desktop (no module names it). Parity means designing both, with a dependency choice for the desktop (Q2).</td><td><span class="who q">agent</span></td></tr>
 <tr><td>#153 and #154 ride along</td><td><code>engine.camera.up</code> joins the surface, and a write to a material's field fails with a message that points at <code>set_material</code>.</td><td class="why">Both are surface fixes in the files slice 5 edits anyway.</td><td><span class="who q">agent</span></td></tr>
+<tr><td>a host page may frame the export</td><td>An app may keep a host page that frames its export and talks to it only through events (section 06). The second consumer's world counts as replaced when its world code is gone from its page script.</td><td class="why">Q1. Its document panels need rich text, text input and network access the GUI lacks; porting them first would hold slice 5 behind #105. Revisit when the GUI has text input.</td><td><span class="who">maintainer</span></td></tr>
+<tr><td>the audio backend waits for slice 7</td><td>A spike in slice 7 measures latency and install weight of two desktop candidates on the three desktop platforms; the API is a loop, a one-shot, a positional source and volume, started from frame code.</td><td class="why">Q2. Sound is out of slice 5, and the dependency is the maintainer's choice once it is measured.</td><td><span class="who">maintainer</span></td></tr>
+<tr><td>the query fix lands first</td><td>Query filtering is fixed on the desktop as the first task of plan 5a, with a CHANGELOG entry under changed behaviour, and the examples and demos are run before and after.</td><td class="why">Q3. It is what the docstring promises and what an ECS query means; matching the defect would freeze it.</td><td><span class="who">maintainer</span></td></tr>
+<tr><td>widgets drawn from the theme</td><td>The page draws Button, Slider, Toggle and Joystick from the widget's resolved style, with ARIA roles and arrow keys on the Slider, not as native inputs.</td><td class="why">Q4. The GUI's theme then means the same on the desktop and in the page.</td><td><span class="who">maintainer</span></td></tr>
+<tr><td>Joystick is a manifoldx widget</td><td>Joystick lands in <code>manifoldx.gui</code>, small like the Slider, on the desktop and in the page.</td><td class="why">Q5. An app's controls stay one piece of code, and the replay can drive it.</td><td><span class="who">maintainer</span></td></tr>
+<tr><td>no instanced skinning in slice 5</td><td>One <code>SkinnedMesh</code> per skinned entity. A crowd past a few hundred gets a joint texture and a custom three.js material later.</td><td class="why">Q6. 40 people cost 40 draw calls, which the second consumer pays today.</td><td><span class="who">maintainer</span></td></tr>
+<tr><td>measure the rooms in 5c</td><td>Plan 5c measures the gzipped library glb with every room. If it adds more than 203 KB, slice 9 moves before slice 7.</td><td class="why">Q7. Until slice 9 the rooms ship in the first download.</td><td><span class="who">maintainer</span></td></tr>
+<tr><td>batch culling measured in 5c</td><td>Batches ship by (geometry, material). Plan 5c measures the second consumer's six viewpoints; if triangles per view grow, <code>scene.js</code> splits large batches by a spatial cell, with no API change.</td><td class="why">Q8. A batch is culled whole; the consumer's audit found culling worth 54 to 79% of the triangles per view.</td><td><span class="who">maintainer</span></td></tr>
 </tbody>
 </table>
 
@@ -481,31 +490,32 @@ person.set_joints(m)                     # (J, 4, 4) for one entity</pre>
 <li>Writes through array indexing, views that alias component rows, and dtypes other than float32, float64, bool and int32.</li>
 </ul>
 
-<h2 id="open"><span class="n">16</span>Open questions</h2>
-<div class="q"><h4>Q1 · May an app keep a host page around its export?</h4>
+<h2 id="open"><span class="n">16</span>Questions, settled</h2>
+<p>The maintainer settled all eight questions on 2026-11-07 by accepting each recommendation. Each one keeps its question; its last paragraph is now the decision, and the decisions table carries it as a row tagged <code>maintainer</code>.</p>
+<div class="q"><h4>Q1 · May an app keep a host page around its export?<span class="settled">settled · maintainer</span></h4>
 <p>The second consumer's document panels (sheets with image pagers and video, a message inbox over its HTTP API, saved cards, a map, the character screen) need rich text, text input and network access that manifoldx's GUI does not have, and #105 is far off. The rule says no app JavaScript; these panels are the consumer's website more than its 3D app.</p>
-<p><span class="rec">recommendation</span>Allow a host page that frames the export and talks to it only through events (section 06), and count the fair's world as replaced when its <code>main.js</code> holds no world code. Revisit when the GUI has text input. The alternative, porting the panels into the GUI first, would hold slice 5's done behind #105.</p></div>
-<div class="q"><h4>Q2 · Which audio backend on the desktop?</h4>
+<p><span class="rec">decision</span>A host page is allowed: one that frames the export and talks to it only through events (section 06), and count the fair's world as replaced when its <code>main.js</code> holds no world code. Revisit when the GUI has text input. Porting the panels into the GUI first was rejected: it would hold slice 5's done behind #105.</p></div>
+<div class="q"><h4>Q2 · Which audio backend on the desktop?<span class="settled">settled · maintainer</span></h4>
 <p>Parity needs sound on both sides. The desktop needs a library for output and decoding; the browser has Web Audio.</p>
-<p><span class="rec">recommendation</span>Decide in slice 7 by a spike that measures latency and install weight of two candidates on the three desktop platforms. Keep the API small: a loop, a one-shot, a positional source, volume, all started from frame code.</p></div>
-<div class="q"><h4>Q3 · Fix query filtering on the desktop, or match it?</h4>
+<p><span class="rec">decision</span>Decided in slice 7, by a spike that measures latency and install weight of two candidates on the three desktop platforms. The API stays small: a loop, a one-shot, a positional source, volume, all started from frame code.</p></div>
+<div class="q"><h4>Q3 · Fix query filtering on the desktop, or match it?<span class="settled">settled · maintainer</span></h4>
 <p>Today every query returns every alive entity. An app whose query names a component some entities lack today also writes those entities' rows (zeros nothing reads); after the fix it skips them, and <code>len(q)</code> changes.</p>
-<p><span class="rec">recommendation</span>Fix it as the first task of 5a, with a CHANGELOG entry under changed behaviour: it is what the docstring promises and what an ECS query means. The examples and demos run before and after to show which, if any, relied on it.</p></div>
-<div class="q"><h4>Q4 · Widgets in the desktop's look or the browser's?</h4>
+<p><span class="rec">decision</span>Fixed, as the first task of 5a, with a CHANGELOG entry under changed behaviour: it is what the docstring promises and what an ECS query means. The examples and demos are run before and after to show which, if any, relied on it.</p></div>
+<div class="q"><h4>Q4 · Widgets in the desktop's look or the browser's?<span class="settled">settled · maintainer</span></h4>
 <p>Native <code>&lt;input type="range"&gt;</code> and checkboxes come with keyboard and screen-reader support for free; drawn elements match the desktop and the theme.</p>
-<p><span class="rec">recommendation</span>Draw them from the widget's resolved style, as the mockup does, with ARIA roles and arrow keys on the Slider. The GUI's theme then means the same in both places.</p></div>
-<div class="q"><h4>Q5 · Is Joystick a manifoldx widget?</h4>
+<p><span class="rec">decision</span>Drawn from the widget's resolved style, as the mockup does, with ARIA roles and arrow keys on the Slider. The GUI's theme then means the same in both places.</p></div>
+<div class="q"><h4>Q5 · Is Joystick a manifoldx widget?<span class="settled">settled · maintainer</span></h4>
 <p>It could be page-only, since a desktop has a keyboard. Parity says land it on both; on the desktop it is a mouse drag nobody needs much.</p>
-<p><span class="rec">recommendation</span>Yes, in <code>manifoldx.gui</code>, small like the Slider, so an app's controls are one piece of code and the replay can drive it.</p></div>
-<div class="q"><h4>Q6 · When does skinning get instanced?</h4>
+<p><span class="rec">decision</span>Yes: Joystick lands in <code>manifoldx.gui</code>, small like the Slider, so an app's controls are one piece of code and the replay can drive it.</p></div>
+<div class="q"><h4>Q6 · When does skinning get instanced?<span class="settled">settled · maintainer</span></h4>
 <p>One <code>SkinnedMesh</code> per entity costs a draw call each. The fair has 40 people and is fine; a crowd of thousands is not.</p>
-<p><span class="rec">recommendation</span>Not in slice 5. When an app needs more than a few hundred, use a joint texture and the desktop's rigid-joint shader idea in a custom three.js material.</p></div>
-<div class="q"><h4>Q7 · The fair's rooms in the first glb?</h4>
+<p><span class="rec">decision</span>Not in slice 5. When an app needs more than a few hundred, use a joint texture and the desktop's rigid-joint shader idea in a custom three.js material.</p></div>
+<div class="q"><h4>Q7 · The fair's rooms in the first glb?<span class="settled">settled · maintainer</span></h4>
 <p>Until slice 9, rooms that spawn on entering must ship in the library glb, which a phone downloads up front; today the viewer builds them from JSON with no download.</p>
-<p><span class="rec">recommendation</span>Measure the gzipped glb with every room in the 5c plan. If it adds more than the 203 KB the fair's character screen waits for today, move slice 9 before 7.</p></div>
-<div class="q"><h4>Q8 · Batches and culling</h4>
+<p><span class="rec">decision</span>The 5c plan measures the gzipped glb with every room. If it adds more than the 203 KB the fair's character screen waits for today, move slice 9 before 7.</p></div>
+<div class="q"><h4>Q8 · Batches and culling<span class="settled">settled · maintainer</span></h4>
 <p>A batch is culled as a whole. The fair's audit found culling worth 54 to 79% of the triangles per view with its merged meshes cut in 32 m stretches; one batch spanning the grounds would draw everything.</p>
-<p><span class="rec">recommendation</span>Ship batches by (geometry, material) and measure the fair's six viewpoints in 5c. If triangles per view grow, split large batches by a spatial cell as the fair's merge does, inside <code>scene.js</code>, with no API change.</p></div>
+<p><span class="rec">decision</span>Batches ship by (geometry, material), and 5c measures the fair's six viewpoints in 5c. If triangles per view grow, split large batches by a spatial cell as the fair's merge does, inside <code>scene.js</code>, with no API change.</p></div>
 </main>
 </div>
 
