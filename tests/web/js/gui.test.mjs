@@ -99,7 +99,9 @@ class FakeElement {
   get textContent() { return this._text; }
   set textContent(v) { this._text = String(v); this.writes++; }
   appendChild(c) { this.children.push(c); return c; }
+  removeChild(c) { this.children.splice(this.children.indexOf(c), 1); return c; }
   addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
+  removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] ?? []).filter((f) => f !== fn); }
   fire(type) { for (const fn of this.listeners[type] ?? []) fn({ type }); }
 }
 const fakeLayer = () => {
@@ -244,4 +246,15 @@ test("a rescale keeps the offset reached code wrote", () => {
   gui.sync(widgets);
   gui.rescale(200);
   assert.equal(layer.children[0].props.left, "80px");
+});
+
+test("destroy leaves the layer empty and the root panels without listeners", () => {
+  const layer = fakeLayer();
+  const gui = buildGui(layer, { scale: 1, design_height: null, panels: [panel(), panel()] });
+  const roots = [...layer.children];
+  roots[0].fire("pointerenter");
+  gui.destroy();
+  assert.equal(layer.children.length, 0);
+  for (const r of roots) assert.deepEqual(Object.values(r.listeners).flat(), []);
+  assert.equal(gui.pointerOver, false);
 });

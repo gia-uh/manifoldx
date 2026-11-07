@@ -432,7 +432,7 @@ def test_a_save_during_the_build_reloads_again(dev_app): ...  # edit inside the 
 </details>
 
 <!-- ============================================================ TASK 5 -->
-<details class="task" id="task-5" data-state="pending">
+<details class="task" id="task-5" data-state="done">
 <summary><span class="num">5</span><span><span class="ttl">The tab swaps to a new version in place</span><span class="files">js/browser.js · js/dev.js · js/scene.js · js/gui.js · js/index.html · tests/web/js/dev.test.mjs</span></span><span class="state"></span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -588,6 +588,12 @@ In <code>test_agent_commands</code>, run the real CLI in the app's folder: <code
 <li><b><code>/api/events</code> under <code>--web</code> also leaves out manifoldx's own handlers</b> (task 4). The engine registers the GUI's <code>pointer_down</code>, <code>pointer_move</code> and <code>pointer_up</code>; they are not roots, so the tab never runs them. The list and the emit check keep the app's handlers only (<code>src/manifoldx/devchannel.py:263</code>).</li>
 <li><b>A tab's stream notices a closed tab within 0.25 s</b> (task 4). The handler waits on its queue 0.25 s at a time and checks the socket for end of stream, so a call goes to the previous tab at once rather than after the next 15 s comment line (<code>src/manifoldx/devchannel.py:287</code>, <code>:402</code>). <code>Tab.disconnect(tab_id, q)</code> takes the stream's queue, so an EventSource that reconnects under the same id is not dropped by its old stream (<code>src/manifoldx/web/dev.py:75</code>).</li>
 <li><b>Forwarded requests fail as 504 <code>the tab did not answer</code></b> after 5 s, and as 500 with the tab's text when its reply is <code>{"ok": false}</code> (<code>src/manifoldx/devchannel.py:323</code>).</li>
+<li><b>A swap builds everything new before it touches the running version</b> (task 5). The new modules, state and, when the hash changed, the new scene are loaded and built first; only then is the old scene disposed or reset and the GUI rebuilt, so a version that fails to load leaves the running one whole. A failed swap shows the error panel with <code>The tab keeps running v{n}.</code> but does not set <code>mx.error</code>, so the running version keeps its loop (<code>src/manifoldx/web/js/browser.js:218</code>, <code>:258</code>). Swaps are chained, each after the one before, so versions apply in order (<code>:271</code>).</li>
+<li><b>The scene frees itself</b> (task 5). <code>dispose()</code> is a method of the MxScene beside <code>resetMaterials()</code>, freeing each geometry, material, texture and the environment once, so the Node suite checks it (<code>src/manifoldx/web/js/scene.js:187</code>, <code>:193</code>).</li>
+<li><b>The new input learns the lock through <code>ScriptInput.lockHeld()</code></b> (task 5), a method beside <code>lockLost()</code> in <code>manifoldx.js</code>, which stays free of the DOM (<code>src/manifoldx/web/js/manifoldx.js:205</code>).</li>
+<li><b><code>status</code> also takes <code>offline</code> and <code>paused</code> messages, and the running version again clears <code>offline</code></b> (task 5). An EventSource that reconnects gets the current version first, which is the running one; without this rule the tab would stay offline until the next save (<code>src/manifoldx/web/js/dev.js:13</code>). The model starts from the exported <code>INITIAL</code>.</li>
+<li><b>The tab's <code>pagehide</code> beacon lands in task 5</b>, with the <code>reload_state</code> answer, since both send <code>encodeState(engine.state)</code> (<code>src/manifoldx/web/js/browser.js:293</code>). Until task 7, the tab answers the other calls with <code>{"ok": false, "error": "the tab does not answer &lt;kind&gt; yet"}</code> (<code>:289</code>).</li>
+<li><b><code>dev.test.mjs</code> needs no registration</b>: <code>tests/web/test_node_suites.py:136</code> runs every <code>*.test.mjs</code> in the folder.</li>
 </ul>
 
 <h2>Self-review</h2>

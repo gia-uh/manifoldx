@@ -80,12 +80,13 @@ function sameOverrides(map, applied) {
   return true;
 }
 
-// buildGui(layer, spec) -> {update(values), sync(widgets), rescale(engineH), pointerOver}: the
+// buildGui(layer, spec) -> {update(values), sync(widgets), rescale(engineH), destroy(), pointerOver}: the
 // panels as divs in layer. update writes each ValueDisplay's text (values in getter order,
 // guiValues') only when it changed; sync applies what reached code wrote into the widget
 // objects (engine.gui.widgets: a Panel's offset, a Text's text, any widget's style_overrides,
 // resolved over its base style), writing the DOM only where a value changed; rescale
-// recomputes the sizes when the GUI scales with the window (design_height). pointerOver is
+// recomputes the sizes when the GUI scales with the window (design_height); destroy removes the
+// panels and their listeners, for the next version's GUI. pointerOver is
 // whether the pointer is over a root panel; browser.js copies it into
 // engine.gui.pointer_over_gui each frame.
 export function buildGui(layer, spec) {
@@ -93,6 +94,7 @@ export function buildGui(layer, spec) {
   const all = []; // [element, node, isRoot, the CSS it has]
   const displays = []; // the ValueDisplays' elements, by getter index
   const shown = [];
+  const roots = []; // [element, its pointerenter and pointerleave listeners]
   let over = 0;
   let scale = spec.scale;
 
@@ -104,8 +106,10 @@ export function buildGui(layer, spec) {
     else if (node.kind === "Text") el.textContent = node.text;
     else if (node.kind === "ValueDisplay") displays[node.value] = el;
     if (isRoot) {
-      el.addEventListener("pointerenter", () => { over++; });
-      el.addEventListener("pointerleave", () => { over = Math.max(0, over - 1); });
+      const enter = () => { over++; }, leave = () => { over = Math.max(0, over - 1); };
+      el.addEventListener("pointerenter", enter);
+      el.addEventListener("pointerleave", leave);
+      roots.push([el, enter, leave]);
     }
     return el;
   }
@@ -171,6 +175,15 @@ export function buildGui(layer, spec) {
         scale = engineH / spec.design_height;
         apply();
       }
+    },
+    destroy() {
+      for (const [el, enter, leave] of roots) {
+        el.removeEventListener("pointerenter", enter);
+        el.removeEventListener("pointerleave", leave);
+        layer.removeChild(el);
+      }
+      roots.length = 0;
+      over = 0;
     },
     get pointerOver() { return over > 0; },
   };

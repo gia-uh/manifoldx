@@ -199,6 +199,12 @@ export class ScriptInput {
   lockLost() {
     this._captured = false;
   }
+
+  // The pointer is still locked from the version before this one (manifoldx run --web swapped
+  // versions under the lock): pointer_captured reads true, as it did.
+  lockHeld() {
+    this._captured = true;
+  }
 }
 
 // engine.camera: position, target and up are float32, as manifoldx.camera.Camera holds
