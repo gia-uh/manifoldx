@@ -160,20 +160,20 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 </div>
 
 <h2>Open questions</h2>
-<p>Each has a recommendation. Tasks are written for the recommended answer; where another answer changes a task, the question says which.</p>
-<div class="q"><h3>1 · Labels and speech bubbles while the port waits for slice 7</h3>
+<p>Each had a recommendation; the maintainer accepted all five on 2026-11-07. Tasks are written for those answers.</p>
+<div class="q"><h3>1 · Labels and speech bubbles while the port waits for slice 7<span class="settled">settled · maintainer</span></h3>
 <p>The consumer draws HTML labels and speech bubbles at 3D points, with overlap avoidance (its <code>drawLabels</code>, about 50 lines). The spec moves them into manifoldx in slice 7 and says nothing of them for 5c. Once the world is in the export, the host page cannot project a 3D point: the camera is in the frame. Either the labels disappear from the consumer between 5c and slice 7, or frame code projects the points and emits their screen positions to the host.</p>
 <p><span class="rec">recommendation</span>Add <code>Camera.project</code> to frame code (task 5; the desktop already has it at <code>src/manifoldx/camera.py:103</code>, so parity holds) and let the world emit the label anchors' pixels each frame they change. The host keeps its label code until slice 7. If the answer is no, drop task 5 and task 14 removes the labels and bubbles with the world code.</p></div>
-<div class="q"><h3>2 · The download once the world comes from the library glb</h3>
+<div class="q"><h3>2 · The download once the world comes from the library glb<span class="settled">settled · maintainer</span></h3>
 <p>Today the consumer builds its geometry and its canvas textures in the browser from a small JSON file: 581 KB on a first visit without the music, by its audit. After the port, every geometry and texture is in the library glb, written as raw float32 with no meshopt (that is #156, slice 6), and the spec's Q7 only bounds the rooms (203 KB gzipped). The grounds, stands, people and props may weigh more than the rooms.</p>
 <p><span class="rec">recommendation</span>Task 8 measures the gzipped glb and <code>ecs.bin</code> of the grounds alone, and task 12 of the whole space with every room. Both numbers go on #140. If the first visit grows past twice the audit's 581 KB, propose moving #156's meshopt ahead of slice 7, as Q7 does for slice 9; the port still merges, and its deployment waits for that answer.</p></div>
-<div class="q"><h3>3 · The pixel ratio, until slice 6</h3>
+<div class="q"><h3>3 · The pixel ratio, until slice 6<span class="settled">settled · maintainer</span></h3>
 <p>The export page renders at <code>min(devicePixelRatio, 2)</code> (<code>src/manifoldx/web/js/browser.js:153</code>). The consumer starts a phone at ratio 1, at most 1.5 elsewhere, and scales it down to 0.7 when frames run slow. A phone of ratio 3 would draw four times the pixels after the port, and the spec puts the ratio cap and scaler in slice 6 (#160).</p>
 <p><span class="rec">recommendation</span>Keep it in slice 6. The bench of task 14 runs before and after at a device scale factor of 1, so it compares the world code and not the ratio. The port merges in 5c and reaches visitors once slice 6's cap lands; task 14 says so in its PR.</p></div>
-<div class="q"><h3>4 · Publishing runs the export on the server</h3>
+<div class="q"><h3>4 · Publishing runs the export on the server<span class="settled">settled · maintainer</span></h3>
 <p>The consumer publishes a fair by copying its viewer and writing the space JSON. After the port, publishing runs <code>export --web</code> per space in its backend. The export opens an offscreen wgpu device when the app has startup handlers (<code>src/manifoldx/web/export.py:112-114</code>), and <code>load_texture</code> needs one, so the backend's image needs a software Vulkan driver it does not have.</p>
 <p><span class="rec">recommendation</span>Install mesa's lavapipe in the consumer's image, as manifoldx's CI does, and measure in task 8 the image's growth and the export's time per space. Building the textures as SVG or as arrays to avoid the device would change more code for the same result.</p></div>
-<div class="q"><h3>5 · The consumer's own work in flight</h3>
+<div class="q"><h3>5 · The consumer's own work in flight<span class="settled">settled · maintainer</span></h3>
 <p>The consumer has a scope spec dated today (a character editor, visitor cards, analytics, video) whose tasks touch the same page script. A port that deletes the world sections while other branches edit them will conflict on every merge.</p>
 <p><span class="rec">recommendation</span>The port builds beside the current viewer: a new entry page serves the export, and the old page stays as it is until task 14 swaps them and deletes the world code. Changes to the world sections of the page script made after task 8 starts are ported in the task that owns that section; the panels are free to change throughout.</p></div>
 
