@@ -1,0 +1,23 @@
+three.js, vendored for the page manifoldx export --web writes.
+
+tarball:   three-0.186.1.tgz (npm pack three@0.186.1)
+integrity: sha512-blFeqb49wRCSGUGj7gtpfnSGHy2lwDk94RhUmS1c/hTby70kvChbWpkJ4Pm1390LqzzvTmzgXKHPEafJwCb8jA==
+           (npm view three@0.186.1 dist.integrity; the tarball's own sha512 matched it)
+
+files taken, unchanged:
+  package/build/three.module.js                     -> three.module.js
+  package/build/three.core.js                       -> three.core.js
+  package/examples/jsm/loaders/GLTFLoader.js        -> addons/loaders/GLTFLoader.js
+  package/examples/jsm/utils/BufferGeometryUtils.js -> addons/utils/BufferGeometryUtils.js
+  package/examples/jsm/utils/SkeletonUtils.js       -> addons/utils/SkeletonUtils.js (GLTFLoader imports it)
+  package/LICENSE                                   -> LICENSE
+
+The 0.186.1 package ships no minified builds (build/ holds three.module.js, three.core.js,
+three.cjs, three.tsl.js, three.webgpu.js and three.webgpu.nodes.js), so these are the
+published ES modules as they are: three.module.js imports ./three.core.js, the addons
+import "three" (the page's importmap) and each other by relative path.
+
+To upgrade: npm pack three@<version> outside the repo, check its integrity against
+npm view three@<version> dist.integrity, copy the files above, set VERSION and
+manifoldx.web.export.THREE_VERSION, rewrite this file, and run
+uv run pytest tests/web/test_vendor.py.

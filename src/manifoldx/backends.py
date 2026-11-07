@@ -188,7 +188,12 @@ def get_offscreen_canvas(width: int, height: int) -> "BaseRenderCanvas":
             "Install with: pip install manifold-gfx[offline]"
         ) from None
 
-    # Now import the offscreen canvas (only if imageio-ffmpeg is available)
+    return get_headless_canvas(width, height)
+
+
+def get_headless_canvas(width: int, height: int) -> "BaseRenderCanvas":
+    """An offscreen canvas for a wgpu device and still frames, with no video writer: what
+    render_frame and the exports need, so it does not require the offline extra."""
     from rendercanvas.offscreen import OffscreenRenderCanvas
 
     return OffscreenRenderCanvas(size=(width, height), format="rgba-u8")

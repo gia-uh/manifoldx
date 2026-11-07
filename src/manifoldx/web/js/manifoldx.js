@@ -109,7 +109,8 @@ function load(state, modules, resolve) {
 }
 
 // loadApp(state, modules, options): the app as an export left it, {engine, roots}, ready for
-// step(). The engine is createEngine(state.engine) with options over it; engine.state is the
+// step(). The engine is createEngine(state.engine) with options over it (options.hooks are the
+// browser's scene hooks, see createEngine); engine.state is the
 // snapshot's, set once the state is loaded, because its handles resolve through the engine.
 export function loadApp(state, modules, options = {}) {
   const engine = createEngine({ ...state.engine, ...options });
@@ -125,8 +126,12 @@ export function loadApp(state, modules, options = {}) {
 const keyName = (k) => (k === " " ? "Space" : k.length === 1 ? k.toLowerCase() : k);
 
 // engine.input, fed one frame at a time: setFrame({keys, just, d: [dx, dy], buttons,
-// clicks, vp: [w, h]}) replaces what the last frame said. keys and just are key names
-// (pressed, and pressed this frame), buttons and clicks mouse buttons the same way.
+// clicks, vp: [w, h], up, released, pos: [x, y], wheel: [dx, dy], mods}) replaces what the
+// last frame said. keys and just are key names (pressed, and pressed this frame), buttons and
+// clicks mouse buttons the same way. The last five are optional and read as empty when
+// absent: up and released are the keys and buttons released this frame, pos the pointer
+// position in CSS pixels from the canvas's top-left, wheel the wheel's motion, mods the held
+// modifiers among Alt, Control, Meta and Shift, sorted.
 export class ScriptInput {
   constructor(onResize = null) {
     this._keys = new Set();
@@ -134,10 +139,16 @@ export class ScriptInput {
     this._buttons = new Set();
     this._clicks = new Set();
     this._delta = [0, 0];
+    this._up = new Set();
+    this._released = new Set();
+    this._pos = [0, 0];
+    this._wheel = [0, 0];
+    this._mods = [];
     this._viewport = [0, 0];
     this._captured = false;
     this._onResize = onResize;
     this._log = null;
+    this._capture = () => true;
   }
 
   setFrame(frame) {
@@ -146,6 +157,12 @@ export class ScriptInput {
     this._buttons = new Set(frame.buttons);
     this._clicks = new Set(frame.clicks);
     this._delta = [frame.d[0], frame.d[1]];
+    this._up = new Set((frame.up ?? []).map(keyName));
+    this._released = new Set(frame.released ?? []);
+    const pos = frame.pos ?? [0, 0], wheel = frame.wheel ?? [0, 0];
+    this._pos = [pos[0], pos[1]];
+    this._wheel = [wheel[0], wheel[1]];
+    this._mods = [...(frame.mods ?? [])];
     const [w, h] = frame.vp;
     if (w !== this._viewport[0] || h !== this._viewport[1]) {
       this._viewport = [w, h];
@@ -160,28 +177,38 @@ export class ScriptInput {
   is_mouse_pressed(button) { return this._buttons.has(button); }
   just_mouse_pressed(button) { return this._clicks.has(button); }
   get pressed_buttons() { return [...this._buttons].sort((a, b) => a - b); }
-  // What a frame does not hold answers as nothing happened, as manifoldx.web.replay's does.
-  just_released(key) { return false; }
-  just_mouse_released(button) { return false; }
-  get modifiers() { return []; }
-  get mouse_pos() { return [0, 0]; }
-  get wheel_delta() { return [0, 0]; }
+  just_released(key) { return this._up.has(keyName(key)); }
+  just_mouse_released(button) { return this._released.has(button); }
+  get modifiers() { return this._mods; }
+  get mouse_pos() { return this._pos; }
+  get wheel_delta() { return this._wheel; }
   get viewport_size() { return this._viewport; }
   get pointer_captured() { return this._captured; }
 
-  // Headless, the capture always takes: the flag follows and the log records it.
+  // The capture hook decides (headless, it always takes). When it takes, the flag follows
+  // and the log records it; when it refuses, nothing changes.
   capture_pointer(on) {
+    if (!this._capture(Boolean(on))) return false;
     this._captured = Boolean(on);
     if (this._log) this._log.push(["capture", this._captured]);
     return true;
   }
+
+  // The browser ended the capture without the app asking (Escape, a refused lock):
+  // pointer_captured reads false from now.
+  lockLost() {
+    this._captured = false;
+  }
 }
 
-// engine.camera: position and target are float32, as manifoldx.camera.Camera holds them.
+// engine.camera: position, target and up are float32, as manifoldx.camera.Camera holds
+// them; fov is the vertical field of view in degrees.
 export class Camera {
-  constructor({ position, target, near = 0.1, far = 1000.0 }) {
+  constructor({ position, target, fov = 60, up = [0, 1, 0], near = 0.1, far = 1000.0 }) {
     this.position = Float32Array.from(position);
     this.target = Float32Array.from(target);
+    this.fov = fov;
+    this.up = Float32Array.from(up);
     this.near = near;
     this.far = far;
   }
@@ -196,22 +223,29 @@ export class Camera {
   }
 }
 
-// createEngine({w, h, camera: {position, target, near, far}, materials, log, state}):
-// the engine object transpiled code reaches. materials maps a material id to the
+// createEngine({w, h, camera: {position, target, fov, up, near, far}, materials, log, state,
+// hooks}): the engine object transpiled code reaches. materials maps a material id to the
 // renderer's material (none, headless); log receives ["material", entity, material_id] and
-// ["capture", on] as reached code asks for them; state is engine.state, a Map as every dict.
-// resolve(kind, value) is loadState's resolver for this engine.
-export function createEngine({ w, h, camera, materials = {}, log = [], state = new Map() }) {
+// ["capture", on] as reached code asks for them, the trace's record; state is engine.state, a
+// Map as every dict. hooks are where the browser acts, both optional:
+// setMaterial(entityIndex, materialId) after the log, and capture(on) -> boolean, whether the
+// capture took (headless: a no-op and () => true). resolve(kind, value) is loadState's
+// resolver for this engine.
+export function createEngine({ w, h, camera, materials = {}, log = [], state = new Map(), hooks = {} }) {
+  const { setMaterial = () => {}, capture = () => true } = hooks;
   const engine = { w, h, state, log };
   engine.input = new ScriptInput((nw, nh) => { engine.w = nw; engine.h = nh; });
   engine.input._log = log;
+  engine.input._capture = capture;
   engine.input._viewport = [w, h];
   engine.camera = new Camera(camera);
   engine.gui = { pointer_over_gui: false, widgets: [] };
 
   const entities = new Map(), mats = new Map();
   engine.set_material = (entity, material) => {
-    log.push(["material", typeof entity === "number" ? entity : entity.index, material.id]);
+    const index = typeof entity === "number" ? entity : entity.index;
+    log.push(["material", index, material.id]);
+    setMaterial(index, material.id);
   };
   engine.resolve = (kind, value) => {
     if (kind === "engine") {
@@ -252,4 +286,51 @@ export function guiValues(app) {
       const v = r.fn();
       return typeof v === "string" ? v : str_(v);
     });
+}
+
+// ---------------------------------------------------------------- the trace
+
+// JSON as Python's json writes the same values: a Map (a dict) as an object, typed arrays and
+// Sets as arrays.
+export function toJSON(value) {
+  return JSON.stringify(value, (k, v) => {
+    if (v instanceof Map) return Object.fromEntries(v);
+    if (ArrayBuffer.isView(v)) return Array.from(v);
+    if (v instanceof Set) return [...v];
+    return v;
+  });
+}
+
+// path's value in app ({engine, roots, modules}): its first name is a global of the app's
+// main module or, when it has none by that name, a key of engine.state; then attributes and
+// dict keys.
+export function pathValue(app, path) {
+  const [head, ...rest] = path.split(".");
+  const main = app.modules.__main__;
+  let v;
+  if (main !== undefined && head in main) v = main[head];
+  else if (app.engine.state.has(head)) v = app.engine.state.get(head);
+  else throw new Error(`the path ${path} names nothing at ${head}`);
+  for (const name of rest) {
+    if (v instanceof Map ? !v.has(name) : v === null || typeof v !== "object" || !(name in v)) {
+      throw new Error(`the path ${path} names nothing at ${name}`);
+    }
+    v = v instanceof Map ? v.get(name) : v[name];
+  }
+  return v;
+}
+
+// The trace entry of the frame just run, as plain JSON values (the form is
+// manifoldx.web.replay's): {camera, gui, log, state, paths}, log being what the engine's log
+// gained since logStart.
+export function traceEntry(app, paths, logStart) {
+  const { engine } = app;
+  const entry = {
+    camera: { position: engine.camera.position, target: engine.camera.target },
+    gui: guiValues(app),
+    log: engine.log.slice(logStart),
+    state: engine.state,
+    paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
+  };
+  return JSON.parse(toJSON(entry));
 }

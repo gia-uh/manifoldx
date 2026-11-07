@@ -196,7 +196,9 @@ class _Writer:
         name = kind.__name__
         note = None
         if kind is StandardMaterial:
-            pbr = {"baseColorFactor": _rgba(mat.color), "metallicFactor": float(mat.metallic),
+            rgba = _rgba(mat.color)
+            rgba[3] *= float(mat.opacity)  # the desktop blends opacity < 1 over what is behind
+            pbr = {"baseColorFactor": rgba, "metallicFactor": float(mat.metallic),
                    "roughnessFactor": float(mat.roughness)}
             if mat.albedo_map is not None:
                 tex = self.texture(mat.albedo_map)

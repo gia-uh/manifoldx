@@ -1500,10 +1500,10 @@ class Engine:
     def _ensure_offscreen(self, supersample: int):
         size = (self.w * supersample, self.h * supersample)
         if self._still_size is None:
-            from manifoldx.backends import get_offscreen_canvas
+            from manifoldx.backends import get_headless_canvas
 
             self._follow_resize = False
-            self._init_canvas(get_offscreen_canvas(width=size[0], height=size[1]))
+            self._init_canvas(get_headless_canvas(width=size[0], height=size[1]))
             self._running = True
             self._fire_startup()
             self._settle()

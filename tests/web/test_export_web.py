@@ -1,7 +1,10 @@
 """manifoldx export --web: the app runs its setup in Python, then the folder holds the
 transpiled code, the state it starts from, the scene and a report, and loads in Node."""
 
+import gzip
+import html
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +13,10 @@ import pytest
 
 import manifoldx as mx
 from manifoldx.cli import main
+from manifoldx.web.export import VENDOR, export_web
+from manifoldx.web.replay import compare
+
+WEB_WALK = Path(__file__).parents[2] / "examples" / "web_walk.py"
 
 RIG = """
 class Rig:
@@ -135,6 +142,16 @@ EXPECTED_FILES = {
     "scene.glb",
     "scene.export-report.json",
     "report.json",
+    # The browser page.
+    "index.html",
+    "browser.js",
+    "input.js",
+    "scene.js",
+    "gui.js",
+    "sourcemap.js",
+    "progress.js",
+    "fonts/DejaVuSansMono.ttf",
+    *(f"vendor/three/{p.relative_to(VENDOR)}" for p in VENDOR.rglob("*") if p.is_file()),
 }
 
 
@@ -205,6 +222,8 @@ def test_the_folder_loads_in_node_with_the_state_python_left(app_dir, tmp_path):
         "camera": {
             "position": [0.0, 1.0, 2.0],
             "target": [0.0, 0.0, 0.0],
+            "fov": 60.0,
+            "up": [0.0, 1.0, 0.0],
             "near": 0.1,
             "far": 1000.0,
         },
@@ -272,3 +291,333 @@ def test_the_scene_report_does_not_call_transpiled_code_dropped(app_dir, tmp_pat
     err = capsys.readouterr().err
     assert "custom Python that runs every frame" not in err
     assert "ValueDisplay.getter = label" not in err  # transpiled too
+
+
+# XML namespaces three.js passes to createElementNS: names, not requests.
+NAMESPACES = {"http://www.w3.org/1999/xhtml"}
+
+
+def _urls_outside_comments(text: str) -> list[str]:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    text = re.sub(r"(^|[^:\\])//.*$", r"\1", text, flags=re.M)
+    found = re.findall(r"https?://[^\s'\"`)]*", text)
+    return [u for u in found if u not in NAMESPACES]
+
+
+@pytest.fixture(scope="module")
+def walk_page(tmp_path_factory) -> Path:
+    out = tmp_path_factory.mktemp("walk_page") / "out"
+    assert export_web(None, str(WEB_WALK), out, []) == 0
+    return out
+
+
+def test_the_page_has_every_file(walk_page):
+    files = _files(walk_page)
+    assert {"index.html", "browser.js", "input.js", "scene.js", "gui.js"} <= files
+    assert {"sourcemap.js", "progress.js", "fonts/DejaVuSansMono.ttf"} <= files
+    vendored = {f"vendor/three/{p.relative_to(VENDOR)}" for p in VENDOR.rglob("*") if p.is_file()}
+    assert len(vendored) == 8 and vendored <= files
+
+
+def test_index_html_names_the_title_and_the_scene_sizes(walk_page):
+    page = (walk_page / "index.html").read_text()
+    assert "<title>Web walk</title>" in page
+    glb = (walk_page / "scene.glb").read_bytes()
+    meta = dict(re.findall(r'<meta name="(scene-[a-z-]+)" content="(\d+)">', page))
+    assert int(meta["scene-bytes"]) == len(glb)
+    assert int(meta["scene-gzip-bytes"]) == len(gzip.compress(glb, 9))
+    imports = json.loads(
+        re.search(r'<script type="importmap">(.*?)</script>', page, re.S).group(1)
+    )["imports"]
+    assert imports == {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/addons/",
+    }
+    assert "serve this folder over HTTP (python -m http.server)" in page
+    assert '<script type="module" src="browser.js"></script>' in page
+
+
+def test_the_title_is_escaped(app_dir, tmp_path):
+    out = tmp_path / "out"
+    assert _export(app_dir, out, BARE.replace('"bare"', '"a <b> & c"')) == 0
+    page = (out / "index.html").read_text()
+    assert f"<title>{html.escape('a <b> & c')}</title>" in page
+
+
+def test_no_file_requests_anything_outside_the_folder(walk_page):
+    for f in walk_page.rglob("*"):
+        if f.suffix not in {".js", ".mjs", ".html", ".json"}:
+            continue  # the license, the font, the glb and the maps hold no code
+        assert _urls_outside_comments(f.read_text()) == [], f
+
+
+def test_the_url_check_bites():
+    assert _urls_outside_comments('fetch("https://cdn.example/three.js") // https://ok') == [
+        "https://cdn.example/three.js"
+    ]
+    assert _urls_outside_comments("/* https://ok */ <!-- http://ok -->") == []
+
+
+FRAME = {"keys": [], "just": [], "d": [0.0, 0.0], "buttons": [], "clicks": [], "vp": [320, 200]}
+
+
+def _replay_both(folder: Path, out: Path, src: str, paths=(), **modules):
+    """Export the app, then replay one frame in Python and in Node: (python, node)."""
+    from manifoldx.web.replay import replay_node, replay_python
+
+    assert _export(folder, out, src, **modules) == 0
+    return replay_python(None, str(folder / "app.py"), [FRAME], list(paths)), replay_node(
+        out, [FRAME], list(paths)
+    )
+
+
+SHELF = """
+from dataclasses import dataclass
+import manifoldx as mx
+
+engine = mx.Engine("shelf", width=320, height=200)
+
+
+@dataclass
+class Item:
+    name: str
+    size: float
+
+
+@dataclass
+class Shelf:
+    items: tuple
+
+
+shelf = Shelf((Item("a", 1.0), Item("b", 2.0)))
+
+
+def tick(query, dt: float):
+    engine.state["names"] = [it.name for it in shelf.items]
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_items_of_an_unannotated_tuple_field_type_from_live_values(app_dir, tmp_path):
+    """gia-uh/manifoldx#142: a bare `tuple` annotation gives way to the live items' types, so
+    the field Item.name is in the snapshot and the browser reads what Python reads."""
+    py, node = _replay_both(app_dir, tmp_path / "out", SHELF)
+    assert py[0]["state"]["names"] == ["a", "b"]
+    assert compare(py, node) is None, str(compare(py, node))
+
+
+UNKNOWN_READ = """
+import manifoldx as mx
+
+engine = mx.Engine("unknown", width=320, height=200)
+
+
+class Item:
+    def __init__(self, name):
+        self.name = name
+
+
+engine.state["item"] = Item("a")
+
+
+def tick(query, dt: float):
+    it = engine.state["item"]
+    engine.state["name"] = it.name
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_an_attribute_read_on_an_unknown_type_fails_naming_what_to_annotate(
+    app_dir, tmp_path, capsys
+):
+    """gia-uh/manifoldx#142: a read whose receiver has no type cannot know which field to
+    snapshot, so the export stops at its line instead of leaving the field out."""
+    out = tmp_path / "out"
+    assert _export(app_dir, out, UNKNOWN_READ) == 1
+    line = UNKNOWN_READ.splitlines().index('    engine.state["name"] = it.name') + 1
+    err = capsys.readouterr().err
+    assert f"app.py:{line}: `it.name`" in err
+    assert "annotate `it`" in err
+    assert not out.exists()
+
+
+GRID = """
+import manifoldx as mx
+
+engine = mx.Engine("grid", width=320, height=200)
+LEVELS = {"a": [1.0, 2.0], "b": [3.0]}
+
+
+def grid(levels):
+    xs = [x for level in levels for x in level]
+    return min(xs), max(xs)
+
+
+X0, X1 = grid(LEVELS.values())
+
+
+def tick(query, dt: float):
+    engine.state["span"] = X1 - X0
+
+
+engine.system(tick)
+engine.run()
+"""
+
+LEVELS = """
+from pathlib import Path
+
+DATA = Path(__file__).parent
+LEVELS = {"a": {"w": 3.0}, "root": {"w": float(len(str(DATA)))}}
+"""
+
+ROOMS = """
+import manifoldx as mx
+from webx_levels import LEVELS
+
+engine = mx.Engine("rooms", width=320, height=200)
+ROOMS = {"first": LEVELS["a"]}
+
+
+def tick(query, dt: float):
+    w: float = ROOMS["first"]["w"]
+    engine.state["w"] = w * 2.0
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_a_global_set_by_a_call_does_not_reach_the_call(app_dir, tmp_path):
+    """A global's value comes from the snapshot: its initializer ran at setup, so the function
+    it calls stays setup and the globals it reads stay out of the browser."""
+    out = tmp_path / "out"
+    py, node = _replay_both(app_dir, out, GRID)
+    assert py[0]["state"]["span"] == 2.0
+    assert compare(py, node) is None, str(compare(py, node))
+    report = json.loads((out / "report.json").read_text())
+    assert "__main__.grid" in report["setup"]
+    assert report["globals"] == ["__main__.X0", "__main__.X1", "__main__.engine"]
+
+
+def test_a_global_built_from_another_does_not_snapshot_that_one(app_dir, tmp_path):
+    """ROOMS reads LEVELS at setup; reached code reads only ROOMS, so neither LEVELS nor the
+    Path LEVELS' initializer read goes in the snapshot."""
+    out = tmp_path / "out"
+    py, node = _replay_both(app_dir, out, ROOMS, webx_levels=LEVELS)
+    assert py[0]["state"]["w"] == 6.0
+    assert compare(py, node) is None, str(compare(py, node))
+    report = json.loads((out / "report.json").read_text())
+    assert report["globals"] == ["__main__.ROOMS", "__main__.engine"]
+    assert set(json.loads((out / "state.json").read_text())["globals"]) == {"__main__"}
+
+
+HELD = """
+import manifoldx as mx
+
+engine = mx.Engine("held", width=320, height=200)
+
+
+class Item:
+    def __init__(self, name):
+        self.name = name
+
+
+PICK = Item("a")
+
+
+def tick(query, dt: float):
+    engine.state["p"] = PICK
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_a_global_s_object_crosses_when_reached_code_only_passes_it(app_dir, tmp_path):
+    """With no initializer to walk, the class of what a reached global holds is reached from
+    the global's type, so the snapshot writes it."""
+    out = tmp_path / "out"
+    assert _export(app_dir, out, HELD) == 0
+    assert "__main__.Item" in json.loads((out / "report.json").read_text())["classes"]
+
+
+def test_startup_handlers_run_without_the_offline_extra(app_dir, tmp_path, monkeypatch):
+    """The export needs a wgpu device for startup, not video: plain manifold-gfx, without
+    imageio-ffmpeg, exports an app with a startup handler."""
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", None)  # `import imageio_ffmpeg` fails
+    out = tmp_path / "out"
+    assert _export(app_dir, out, ASYNC) == 0
+    assert _node(out)["state"] == {"loaded": "yes"}
+
+
+FIRST = """
+import manifoldx as mx
+
+engine = mx.Engine("first", width=320, height=200)
+
+
+class P:
+    def __init__(self):
+        self.pt: tuple[float, float] = (1.0, 2.0)
+
+    def first(self) -> tuple[float, float]:
+        return self.pt
+
+
+p = P()
+
+
+def tick(query, dt: float):
+    ax, ay = p.first()
+    engine.state["x"] = ax * 2.0
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_unpacking_a_call_result_types_from_the_return_annotation(app_dir, tmp_path):
+    """gia-uh/manifoldx#143: the names unpacked from a call take the callee's return type."""
+    py, node = _replay_both(app_dir, tmp_path / "out", FIRST)
+    assert py[0]["state"]["x"] == 2.0
+    assert compare(py, node) is None, str(compare(py, node))
+
+
+READ = """
+import manifoldx as mx
+
+engine = mx.Engine("read", width=320, height=200)
+engine.state["a"] = 1.5
+engine.state["b"] = 2.0
+
+
+def read() -> tuple[float, float]:
+    return engine.state["a"], engine.state["b"]
+
+
+def tick(query, dt: float):
+    a, b = read()
+    engine.state["s"] = a + b
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+def test_a_return_annotation_wins_over_an_unknown_inferred_return(app_dir, tmp_path):
+    """gia-uh/manifoldx#143: reads of engine.state are unknown; the annotation types them."""
+    py, node = _replay_both(app_dir, tmp_path / "out", READ)
+    assert py[0]["state"]["s"] == 3.5
+    assert compare(py, node) is None, str(compare(py, node))

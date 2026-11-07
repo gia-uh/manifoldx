@@ -370,6 +370,7 @@ class FuncInfo:
     cls: str | None = None
     parent: FunctionKey | None = None
     declared: dict[str, Ty] = field(default_factory=dict)  # param types before call sites
+    declared_returns: Ty = UNKNOWN  # the return annotation, which wins over inference
 
     @property
     def self_name(self) -> str | None:
@@ -449,10 +450,12 @@ LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
 # attribute's type, a method's as fn(name, return), by the names class_name gives the
 # classes. What is not here types as unknown.
 _INPUT, _CAMERA = "manifoldx.input.InputState", "manifoldx.Camera"
+_GUI = "manifoldx.gui.widgets._GuiRoot"
 RUNTIME_SURFACE = {
     "manifoldx.Engine": {
         "input": obj(_INPUT),
         "camera": obj(_CAMERA),
+        "gui": obj(_GUI),
         "w": INT,
         "h": INT,
         "state": STATE,
@@ -483,10 +486,12 @@ RUNTIME_SURFACE = {
     _CAMERA: {
         "position": vec("f32"),
         "target": vec("f32"),
+        "fov": NUM,
         "near": NUM,
         "far": NUM,
         "get_forward": fn(f"{_CAMERA}.get_forward", vec("f32")),
     },
+    _GUI: {"pointer_over_gui": BOOL},
 }
 
 # math's functions the subset has, and its constants.
@@ -611,8 +616,10 @@ class TypeEnv:
             if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
                 if is_classvar(st.annotation):
                     continue
-                info.fields[st.target.id] = self.annotation(st.annotation, module)
-                info.annotated.add(st.target.id)
+                t = self.annotation(st.annotation, module)
+                if t.known:  # one the model cannot read (a bare `tuple`) leaves the live type
+                    info.fields[st.target.id] = t
+                    info.annotated.add(st.target.id)
                 if info.dataclass:
                     info.init_fields.append(st)
             elif isinstance(st, ast.FunctionDef):
@@ -694,7 +701,8 @@ class TypeEnv:
         types = {}
         for p in a.posonlyargs + a.args + a.kwonlyargs:
             types[p.arg] = self.annotation(p.annotation, module) if p.annotation else UNKNOWN
-        return FuncInfo(key, n, params, defaults, types)
+        returns = self.annotation(n.returns, module) if n.returns else UNKNOWN
+        return FuncInfo(key, n, params, defaults, types, declared_returns=returns)
 
     def annotation(self, node: ast.expr, module: str) -> Ty:
         """The type an annotation names; unknown for what the model has no kind for."""
@@ -716,8 +724,11 @@ class TypeEnv:
             return vec("f64")
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
             args = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
-            ts = [self.annotation(x, module) for x in args]
             head = node.value.id
+            if head == "tuple" and len(args) == 2 and _is_ellipsis(args[1]):
+                # Of any length, as a tuple(...) call's result: a list of its items' type.
+                return list_of(self.annotation(args[0], module))
+            ts = [self.annotation(x, module) for x in args]
             if head == "list" and len(ts) == 1:
                 return list_of(ts[0])
             if head == "set" and len(ts) == 1:
@@ -879,10 +890,12 @@ class TypeEnv:
         if isinstance(n, ast.Name):
             return self.name(n.id, ctx)
         if isinstance(n, ast.List):
-            return list_of(union(*(self.expr(e, ctx) for e in n.elts)))
+            return list_of(union(*(self.item(e, ctx) for e in n.elts)))
         if isinstance(n, ast.Set):
-            return set_of(union(*(self.expr(e, ctx) for e in n.elts)))
+            return set_of(union(*(self.item(e, ctx) for e in n.elts)))
         if isinstance(n, ast.Tuple):
+            if any(isinstance(e, ast.Starred) for e in n.elts):  # its length is not known
+                return list_of(union(*(self.item(e, ctx) for e in n.elts)))
             return tuple_of(*(self.expr(e, ctx) for e in n.elts))
         if isinstance(n, ast.Dict):
             return dict_of(
@@ -919,6 +932,10 @@ class TypeEnv:
         if isinstance(n, ast.JoinedStr):
             return STR
         return UNKNOWN
+
+    def item(self, e: ast.expr, ctx: Ctx) -> Ty:
+        """The type of what an element of a display adds: a starred one, its items."""
+        return elem(self.expr(e.value, ctx)) if isinstance(e, ast.Starred) else self.expr(e, ctx)
 
     def lambda_params(self, n: ast.Lambda, ctx: Ctx) -> dict[str, Ty]:
         """A lambda's parameters: one with a default has the default's type, the others
@@ -1365,12 +1382,14 @@ class TypeEnv:
                 found = {}
                 bind_target(st.target, elem(self.expr(st.iter, ctx)), found)
                 assign(found)
-            elif isinstance(st, ast.Return):
+            elif isinstance(st, ast.Return) and not info.declared_returns.known:
                 t = self.expr(st.value, ctx) if st.value is not None else NONE
                 info.returns = join(info.returns, t)
             elif isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
                 self._mutation(st.value, ctx, assign)
-        if not ends_in_return(info.node.body):
+        if info.declared_returns.known:
+            info.returns = info.declared_returns
+        elif not ends_in_return(info.node.body):
             info.returns = join(info.returns, NONE)
         return (info.locals, info.returns, dict(cls.fields) if cls else None) != before
 
@@ -1384,6 +1403,10 @@ class TypeEnv:
                 assign({name: list_of(self.expr(call.args[-1], ctx))})
             elif recv.all("list") and f.attr == "extend":
                 assign({name: list_of(elem(self.expr(call.args[0], ctx)))})
+
+
+def _is_ellipsis(n: ast.expr) -> bool:
+    return isinstance(n, ast.Constant) and n.value is Ellipsis
 
 
 def is_classvar(annotation: ast.expr) -> bool:
@@ -1411,7 +1434,7 @@ def bind_target(t: ast.expr, ty: Ty, out: dict[str, Ty]) -> None:
                 m.args[i] if m.kind == "tuple" and len(m.args) == len(t.elts) else elem(m)
                 for m in ty.members
             ]
-            bind_target(e, union(*items) if items else UNKNOWN, out)
+            bind_target(e, union(*items), out)  # nothing yet (a call's return): wait
 
 
 def own_statements(body: list[ast.stmt]):

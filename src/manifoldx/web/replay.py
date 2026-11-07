@@ -3,10 +3,14 @@ in Node, trace the same values on both sides, and report the first frame where t
 
 A frame is what engine.input reports for one frame:
 
-    {"keys": [str], "just": [str], "d": [dx, dy], "buttons": [int], "clicks": [int], "vp": [w, h]}
+    {"keys": [str], "just": [str], "d": [dx, dy], "buttons": [int], "clicks": [int], "vp": [w, h],
+     "up": [str], "released": [int], "pos": [x, y], "wheel": [dx, dy], "mods": [str]}
 
 keys and buttons are held, just and clicks pressed this frame, d the mouse motion and vp the
-viewport size. Each side reads one frame, then runs the app's systems once with a fixed dt and
+viewport size. The last five are optional and read as empty when absent: up and released are
+the keys and buttons released this frame, pos the pointer position in CSS pixels from the
+canvas's top-left, wheel the wheel's motion, mods the held modifiers among Alt, Control, Meta
+and Shift, sorted. Each side reads one frame, then runs the app's systems once with a fixed dt and
 traces:
 
     {"camera": {"position", "target"}, "gui": [str], "log": [...], "state": engine.state,
@@ -36,8 +40,8 @@ Frame = dict  # the frame form above
 
 class ScriptInput:
     """engine.input fed one frame at a time, as js/manifoldx.js's ScriptInput is: the getters
-    of InputState, what a frame holds and what it does not (no releases, modifiers, pointer
-    position or wheel) answering as nothing happened. capture_pointer always takes, as in a
+    of InputState, answered from the frame's fields (keys, just, d, buttons, clicks, vp, and
+    the optional up, released, pos, wheel and mods, empty when absent). capture_pointer always takes, as in a
     headless browser, and logs ["capture", on]; a new viewport size resizes the engine."""
 
     def __init__(self, engine, log: list) -> None:
@@ -47,6 +51,11 @@ class ScriptInput:
         self._buttons: frozenset[int] = frozenset()
         self._clicks: frozenset[int] = frozenset()
         self._delta = (0.0, 0.0)
+        self._up: frozenset[str] = frozenset()
+        self._released: frozenset[int] = frozenset()
+        self._pos = (0.0, 0.0)
+        self._wheel = (0.0, 0.0)
+        self._mods: tuple[str, ...] = ()
         self._viewport = (engine.w, engine.h)
         self._captured = False
 
@@ -56,6 +65,12 @@ class ScriptInput:
         self._buttons = frozenset(frame["buttons"])
         self._clicks = frozenset(frame["clicks"])
         self._delta = (float(frame["d"][0]), float(frame["d"][1]))
+        self._up = frozenset(map(_key_name, frame.get("up", ())))
+        self._released = frozenset(frame.get("released", ()))
+        pos, wheel = frame.get("pos", (0, 0)), frame.get("wheel", (0, 0))
+        self._pos = (float(pos[0]), float(pos[1]))
+        self._wheel = (float(wheel[0]), float(wheel[1]))
+        self._mods = tuple(frame.get("mods", ()))
         size = (int(frame["vp"][0]), int(frame["vp"][1]))
         if size != self._viewport:
             self._viewport = size
@@ -68,7 +83,7 @@ class ScriptInput:
         return _key_name(key) in self._just
 
     def just_released(self, key: str) -> bool:
-        return False
+        return _key_name(key) in self._up
 
     @property
     def pressed_keys(self) -> frozenset[str]:
@@ -76,11 +91,11 @@ class ScriptInput:
 
     @property
     def modifiers(self) -> tuple[str, ...]:
-        return ()
+        return self._mods
 
     @property
     def mouse_pos(self) -> tuple[float, float]:
-        return (0.0, 0.0)
+        return self._pos
 
     @property
     def mouse_delta(self) -> tuple[float, float]:
@@ -88,7 +103,7 @@ class ScriptInput:
 
     @property
     def wheel_delta(self) -> tuple[float, float]:
-        return (0.0, 0.0)
+        return self._wheel
 
     def is_mouse_pressed(self, button: int) -> bool:
         return button in self._buttons
@@ -97,7 +112,7 @@ class ScriptInput:
         return button in self._clicks
 
     def just_mouse_released(self, button: int) -> bool:
-        return False
+        return button in self._released
 
     @property
     def pressed_buttons(self) -> tuple[int, ...]:

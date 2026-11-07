@@ -62,7 +62,38 @@ jobs:
         run: uv sync --extra offline --extra viz --extra svg --dev
 
       - name: Run the web tests with no skips
+        # tests/web/browser needs Chromium; the browser job runs it.
         shell: bash
         run: |
-          uv run pytest tests/web -v --tb=short -rs | tee web-tests.log
+          set -o pipefail
+          uv run pytest tests/web --ignore=tests/web/browser -v --tb=short -rs | tee web-tests.log
           if grep -q SKIPPED web-tests.log; then echo "web tests skipped on CI"; exit 1; fi
+
+  browser:
+    # The exported page in headless Chromium (Playwright): the web_walk replay against Python,
+    # the page's own checks, and the visual parity with the desktop frame, which needs lavapipe
+    # for Engine.render_frame. Any skip fails the job.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies and Chromium
+        run: |
+          uv sync --extra offline --extra viz --dev --group browser
+          uv run playwright install --with-deps chromium
+
+      - name: Run the browser tests with no skips
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest tests/web/browser -v --tb=short -rs | tee browser-tests.log
+          if grep -q SKIPPED browser-tests.log; then echo "browser tests skipped on CI"; exit 1; fi

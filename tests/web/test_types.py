@@ -269,3 +269,33 @@ def test_the_engine_surface_types_as_the_runtime_has_it():
     assert env.attribute(cam, "position") == vec("f32")
     assert env.returns_of_call(env.attribute(cam, "get_forward")) == vec("f32")
     assert not env.attribute(engine, "store").known  # not in the runtime: stays unknown
+
+
+def test_a_variable_length_tuple_annotation_types_every_item():
+    """gia-uh/manifoldx#144: tuple[X, ...] holds X at every index, not a pair."""
+    src = (
+        "def total(xs: tuple[float, ...]):\n"
+        "    s = 0.0\n"
+        "    for x in xs:\n"
+        "        s = s + x * 2.0\n"
+        "    return s\n\n"
+        "def main():\n"
+        "    return total((1.0, 2.0, 3.5))\n"
+    )
+    py, js = run_both(src)
+    assert js == py == 13.0
+
+
+def test_a_starred_tuple_display_keeps_the_item_types():
+    """gia-uh/manifoldx#145: (*a, *b) holds the items of a and of b."""
+    src = (
+        "def main():\n"
+        "    a: list[float] = [1.0, 2.0]\n"
+        "    b: list[float] = [3.0]\n"
+        "    out = []\n"
+        "    for x in (*a, *b):\n"
+        "        out.append(x * 2.0)\n"
+        "    return out\n"
+    )
+    py, js = run_both(src)
+    assert js == py == [2.0, 4.0, 6.0]

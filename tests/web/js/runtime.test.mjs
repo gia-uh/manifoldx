@@ -2,11 +2,23 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
-import { createEngine, guiValues, step } from "../../../src/manifoldx/web/js/manifoldx.js";
+import {
+  createEngine,
+  guiValues,
+  loadApp,
+  pathValue,
+  step,
+  toJSON,
+  traceEntry,
+} from "../../../src/manifoldx/web/js/manifoldx.js";
 
+const CORE = new URL("../../../src/manifoldx/web/js/manifoldx.js", import.meta.url);
 const FORWARD = JSON.parse(readFileSync(new URL("./forward.json", import.meta.url)));
+// The folder export --web wrote for examples/web_walk.py, set by tests/web/test_node_suites.py.
+const WEB_WALK = process.env.MX_WEB_WALK_EXPORT;
 
 const engine = (opts = {}) =>
   createEngine({ w: 640, h: 480, camera: { position: [0, 1, 2], target: [0, 0, 0], near: 0.1, far: 1000 }, ...opts });
@@ -67,6 +79,60 @@ test("what a frame does not hold answers as nothing happened", () => {
   assert.deepEqual(input.wheel_delta, [0, 0]);
 });
 
+const RELEASE = { keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [800, 600] };
+
+test("up drives just_released", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, up: ["W", " "] });
+  assert.equal(input.just_released("w"), true);
+  assert.equal(input.just_released("Space"), true);
+  assert.equal(input.just_released("a"), false);
+});
+
+test("released drives just_mouse_released", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, released: [2] });
+  assert.equal(input.just_mouse_released(2), true);
+  assert.equal(input.just_mouse_released(1), false);
+});
+
+test("pos drives mouse_pos", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, pos: [12.5, 30] });
+  assert.deepEqual(input.mouse_pos, [12.5, 30]);
+});
+
+test("wheel drives wheel_delta", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, wheel: [0, -3] });
+  assert.deepEqual(input.wheel_delta, [0, -3]);
+});
+
+test("mods drives modifiers", () => {
+  const input = engine().input;
+  input.setFrame({ ...RELEASE, mods: ["Control", "Shift"] });
+  assert.deepEqual(input.modifiers, ["Control", "Shift"]);
+  input.setFrame(RELEASE);
+  assert.deepEqual(input.modifiers, []);
+});
+
+test("the camera holds fov and a float32 up", () => {
+  const e = engine({ camera: { position: [0, 1, 2], target: [0, 0, 0], fov: 50, up: [0, 0, 1] } });
+  assert.equal(e.camera.fov, 50);
+  assert.ok(e.camera.up instanceof Float32Array);
+  assert.deepEqual(Array.from(e.camera.up), [0, 0, 1]);
+  const d = engine().camera;
+  assert.equal(d.fov, 60);
+  assert.deepEqual(Array.from(d.up), [0, 1, 0]);
+});
+
+test("engine.gui.pointer_over_gui is the flag the state's gui handle resolves to", () => {
+  const e = engine();
+  assert.equal(e.resolve("engine", "gui").pointer_over_gui, false);
+  e.gui.pointer_over_gui = true;
+  assert.equal(e.resolve("engine", "gui").pointer_over_gui, true);
+});
+
 test("set_material and capture_pointer append to the log", () => {
   const log = [];
   const e = engine({ log });
@@ -114,4 +180,109 @@ test("guiValues returns each getter's text in order", () => {
     ],
   };
   assert.deepEqual(guiValues(app), ["fps 60", "Matemática"]);
+});
+
+// ---------------------------------------------------------------- scene hooks
+
+test("set_material calls the setMaterial hook with the entity's index and the material's id", () => {
+  const calls = [];
+  const log = [];
+  const e = engine({ log, hooks: { setMaterial: (entity, id) => calls.push([entity, id]) } });
+  e.set_material(e.resolve("entity", 4), e.resolve("material", 7));
+  e.set_material(5, e.resolve("material", 2));
+  assert.deepEqual(calls, [[4, 7], [5, 2]]);
+  assert.deepEqual(log, [["material", 4, 7], ["material", 5, 2]]);
+});
+
+test("a capture hook that refuses leaves the flag false and the log unchanged", () => {
+  const asked = [];
+  const log = [];
+  const e = engine({ log, hooks: { capture: (on) => (asked.push(on), false) } });
+  assert.equal(e.input.capture_pointer(true), false);
+  assert.equal(e.input.pointer_captured, false);
+  assert.deepEqual(asked, [true]);
+  assert.deepEqual(log, []);
+});
+
+test("a capture hook that takes sets the flag and logs, as headless does", () => {
+  const log = [];
+  const e = engine({ log, hooks: { capture: () => true } });
+  assert.equal(e.input.capture_pointer(true), true);
+  assert.equal(e.input.pointer_captured, true);
+  assert.equal(e.input.capture_pointer(false), true);
+  assert.equal(e.input.pointer_captured, false);
+  assert.deepEqual(log, [["capture", true], ["capture", false]]);
+});
+
+test("lockLost clears pointer_captured", () => {
+  const e = engine();
+  e.input.capture_pointer(true);
+  e.input.lockLost();
+  assert.equal(e.input.pointer_captured, false);
+});
+
+test("loadApp passes options.hooks to the engine", () => {
+  const calls = [];
+  const state = {
+    table: [],
+    roots: [],
+    engine: { w: 10, h: 10, camera: { position: [0, 0, 1], target: [0, 0, 0] } },
+  };
+  const { engine: e } = loadApp(state, {}, { hooks: { setMaterial: (i, m) => calls.push([i, m]) } });
+  e.set_material(3, e.resolve("material", 1));
+  assert.deepEqual(calls, [[3, 1]]);
+});
+
+// ---------------------------------------------------------------- the trace helpers
+
+test("traceEntry is the entry replay.mjs built, for a frame of the web_walk export", { skip: !WEB_WALK && "MX_WEB_WALK_EXPORT not set" }, async () => {
+  const folder = pathToFileURL(WEB_WALK + "/");
+  const { load } = await import(new URL("replay.mjs", folder).href);
+  const app = await load(folder);
+  const frames = JSON.parse(readFileSync(new URL("../fixtures/web_walk_script.json", import.meta.url)));
+  const paths = ["rig.pos", "rig.yaw", "rig.mode", "selected"];
+  // Frames up to the first click, which captures the pointer and logs.
+  const upto = frames.findIndex((f) => f.clicks.length) + 1;
+  let entry;
+  for (const frame of frames.slice(0, upto)) {
+    const start = app.engine.log.length;
+    app.engine.input.setFrame(frame);
+    step(app, 1 / 60);
+    entry = traceEntry(app, paths, start);
+    // What replay() built before the helpers moved into the core.
+    const { engine: e } = app;
+    const before = {
+      camera: { position: e.camera.position, target: e.camera.target },
+      gui: guiValues(app),
+      log: e.log.slice(start),
+      state: e.state,
+      paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
+    };
+    assert.deepEqual(entry, JSON.parse(toJSON(before)));
+  }
+  assert.deepEqual(entry.log, [["capture", true]]);
+  assert.equal(entry.camera.position.length, 3);
+  assert.ok(!(entry.camera.position instanceof Float32Array));
+});
+
+test("toJSON writes Maps as objects, typed arrays and Sets as arrays", () => {
+  const v = new Map([["a", new Float32Array([1, 2])], ["b", new Set(["x"])]]);
+  assert.equal(toJSON(v), '{"a":[1,2],"b":["x"]}');
+});
+
+test("pathValue reads a main global first, then a key of engine.state", () => {
+  const e = engine({ state: new Map([["selected", "b2"], ["rig", "shadowed"]]) });
+  const app = { engine: e, modules: { __main__: { rig: { pos: [1, 2, 3], cfg: new Map([["k", 4]]) } } } };
+  assert.deepEqual(pathValue(app, "rig.pos"), [1, 2, 3]);
+  assert.equal(pathValue(app, "rig.cfg.k"), 4);
+  assert.equal(pathValue(app, "selected"), "b2");
+  assert.throws(() => pathValue(app, "rig.nope"), /names nothing at nope/);
+});
+
+test("the core imports only pyrt.js and names no DOM or three.js", () => {
+  const src = readFileSync(CORE, "utf8");
+  const specifiers = [...src.matchAll(/^\s*import\b[^;]*?["']([^"']+)["']/gm)].map((m) => m[1]);
+  assert.deepEqual(specifiers, ["./pyrt.js"]);
+  assert.doesNotMatch(src, /\bimport\s*\(/);
+  assert.doesNotMatch(src, /\b(document|window|three|THREE)\b/);
 });
