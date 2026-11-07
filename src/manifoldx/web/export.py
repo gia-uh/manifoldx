@@ -5,6 +5,7 @@ out/
   pyrt.js, manifoldx.js   the runtime
   replay.mjs              loads the folder in Node
   state.json              the snapshot, engine.state, the engine's size and camera, the GUI
+  ecs.bin                 the entity store's rows and membership, laid out by state.json's "ecs"
   scene.glb               the scene (and scene.export-report.json, the glTF export's report)
   report.json             the roots, what was transpiled, what stayed setup, what was left out
   index.html              the page: serve the folder (python -m http.server) and open it
@@ -74,6 +75,7 @@ class Built:
     modules: dict[str, tuple[str, str]]  # name: (code, source map JSON with its sources set)
     state: dict
     report: dict  # report.json, and the glTF export's report as "scene_report"
+    ecs: bytes  # ecs.bin, laid out by state["ecs"]
     glb: bytes
     scene_sha: str  # sha256 of glb, hex, first 16
     title: str
@@ -93,7 +95,7 @@ def build_export(
 
     from .gui import gui_spec
     from .reach import find_roots
-    from .snapshot import snapshot
+    from .snapshot import ecs_bytes, snapshot
     from .transpile import reach_app, transpile_app
     from .types import LiveTypes, TranspileError, key_label, module_path
 
@@ -117,6 +119,7 @@ def build_export(
             reach = reach_app(sources, roots, LiveTypes(set(sources)))
             lap("reach")
             state = snapshot(roots, reach, engine, left_out)
+            state["ecs"], ecs = ecs_bytes(engine)
             lap("snapshot")
             mods = transpile_app(sources, reach=reach, runtime=runtime)
             lap("transpile")
@@ -158,6 +161,7 @@ def build_export(
         modules=modules,
         state=state,
         report=report,
+        ecs=ecs,
         glb=glb,
         scene_sha=hashlib.sha256(glb).hexdigest()[:16],
         title=str(engine.title),
@@ -181,7 +185,7 @@ def write_static(out, dev=False) -> None:
 
 
 def write_version(built: Built, out, scene_path="scene.glb") -> None:
-    """app/, state.json and report.json into out, and the glb with its export report at
+    """app/, state.json, ecs.bin and report.json into out, and the glb with its export report at
     scene_path (relative to out) unless a file is there already."""
     out = Path(out)
     shutil.rmtree(out / "app", ignore_errors=True)
@@ -190,6 +194,7 @@ def write_version(built: Built, out, scene_path="scene.glb") -> None:
         (out / "app" / f"{name}.js").write_text(code)
         (out / "app" / f"{name}.js.map").write_text(smap)
     (out / "state.json").write_text(json.dumps(built.state, allow_nan=False))
+    (out / "ecs.bin").write_bytes(built.ecs)
     report = {k: v for k, v in built.report.items() if k != "scene_report"}
     (out / "report.json").write_text(json.dumps(report, indent=1) + "\n")
     glb = out / scene_path

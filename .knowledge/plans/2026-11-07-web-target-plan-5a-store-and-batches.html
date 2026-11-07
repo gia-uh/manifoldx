@@ -285,7 +285,7 @@ Diff the two outputs. Every line whose count changed is an app that relied on th
 </details>
 
 <!-- ============================================================ TASK 2 -->
-<details class="task" id="task-2" data-state="pending">
+<details class="task" id="task-2" data-state="done">
 <summary><span class="num">2</span><span><span class="ttl">The store crosses: ecs.bin, layouts, geometry values, the origin</span><span class="files">web/snapshot.py · web/export.py · web/types.py · tests/web/test_ecs_snapshot.py</span></span><span class="state"></span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -828,6 +828,11 @@ def test_the_batched_scene_is_drawn_as_the_desktop():
 <li><b>Component classes are records, not transpiled classes</b> (task 9). An app's <code>Component</code> subclass has a library base and annotation-driven storage (<code>src/manifoldx/components.py:81-101</code>); the page needs its layout, which <code>ecs.bin</code>'s header carries, and its constructor, which <code>$rt.component</code> gives.</li>
 <li><b>#153 and #154 ride in 5a</b> (task 8). The spec puts them in slice 5 without a plan; task 8 edits the same tables.</li>
 <li><b>The <code>web-crowd</code> bench lands in 5a</b> (task 13). Section 11 names the case without a plan; it measures the batches this plan builds.</li>
+<li><b>One of task 1's five tests passes before the change</b> (task 1). <code>test_transform_is_a_member_when_not_given</code> (<code>tests/test_ecs.py:342</code>) checks a length the old rule also gives, since every alive entity matched; it guards the new rule's Transform bit and was not a fail-first test. The other four failed on lengths.</li>
+<li><b><code>examples/point_cloud.py</code> broke under the new rule and was fixed</b> (task 1). Its <code>gravity</code> query names <code>ScalarValue</code>, which the star lacks, so it sees 10002 entities, not 10003, and its velocities array, sized per store slot, no longer broadcast; it is now one row per query row (<code>examples/point_cloud.py:135</code>). The audit's other 40 apps that ran kept their counts.</li>
+<li><b>build_export, not snapshot(), puts the store's header under <code>"ecs"</code></b> (task 2). <code>ecs_bytes</code> returns the bytes and the header together, and <code>snapshot()</code> returns only JSON, so <code>build_export</code> calls it beside the snapshot (<code>src/manifoldx/web/export.py:122</code>), as it adds <code>"gui"</code>.</li>
+<li><b>The dtype error reads as the snapshot's other errors</b> (task 2). <code>SnapshotError</code> joins its two parts with a colon, so the line is <code>the component Flags: dtype int64; ecs.bin carries float32 and uint32 and it cannot cross to the browser</code> (<code>src/manifoldx/web/snapshot.py:290</code>), and the test asserts that.</li>
+<li><b>Task 2's fixture builds with <code>capture_engine</code> and <code>build_export</code></b> (task 2). After <code>export_web</code> the app's module is no longer <code>sys.modules["__main__"]</code>, so the fixture keeps it and reads <code>main.CRATE</code> (<code>tests/web/test_ecs_snapshot.py:43</code>). Two tests were added: the Node replay resolves <code>CRATE</code> to <code>{geometry_id}</code> (<code>:115</code>), and a store of 3 entities, whose blocks need padding, keeps every block on a multiple of 4 (<code>:128</code>); with 4 entities the padding mutation passed.</li>
 </ul>
 
 <h2>Self-review</h2>

@@ -139,6 +139,7 @@ EXPECTED_FILES = {
     "manifoldx.js",
     "replay.mjs",
     "state.json",
+    "ecs.bin",
     "scene.glb",
     "scene.export-report.json",
     "report.json",
@@ -219,6 +220,7 @@ def test_the_folder_loads_in_node_with_the_state_python_left(app_dir, tmp_path):
     assert state["engine"] == {
         "w": 320,
         "h": 200,
+        "origin": [0.0, 0.0],
         "camera": {
             "position": [0.0, 1.0, 2.0],
             "target": [0.0, 0.0, 0.0],

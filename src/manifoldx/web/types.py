@@ -140,6 +140,18 @@ def obj(name: str) -> Ty:
     return Ty("obj", name=name)
 
 
+# A geometry: a dict with a 2-d "positions" array, or what has to_geometry() (a
+# modeling.Mesh). It crosses by its id in the engine's geometry registry.
+GEOMETRY = obj("manifoldx.Geometry")
+
+
+def is_geometry(v) -> bool:
+    if isinstance(v, dict):
+        positions = v.get("positions")
+        return isinstance(positions, np.ndarray) and positions.ndim == 2
+    return not isinstance(v, type) and hasattr(v, "to_geometry")
+
+
 def fn(name: str | None = None, returns: Ty | None = None) -> Ty:
     return Ty("fn", (returns,) if returns is not None else (), name=name)
 
@@ -282,6 +294,8 @@ class LiveTypes:
             return NUM
         if isinstance(v, str):
             return STR
+        if is_geometry(v):
+            return GEOMETRY
         if isinstance(v, np.ndarray):
             if v.dtype == np.float32:
                 return vec("f32")

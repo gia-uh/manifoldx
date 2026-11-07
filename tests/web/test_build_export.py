@@ -60,7 +60,12 @@ def test_write_version_keeps_an_existing_scene(tmp_path, walk_built):
     (tmp_path / "scenes" / "x.glb").write_bytes(b"old")
     write_version(walk_built, tmp_path / "v1", scene_path="../scenes/x.glb")
     assert (tmp_path / "scenes" / "x.glb").read_bytes() == b"old"
-    assert {p.name for p in (tmp_path / "v1").iterdir()} == {"app", "state.json", "report.json"}
+    assert {p.name for p in (tmp_path / "v1").iterdir()} == {
+        "app",
+        "state.json",
+        "ecs.bin",
+        "report.json",
+    }
 
 
 def test_crossed_keys_leave_out_what_cannot_cross(tmp_path):

@@ -28,8 +28,8 @@ const FLOATS = { nan: NaN, inf: Infinity, "-inf": -Infinity };
 // loadState(state, modules, resolve): build the objects snapshot() wrote and return its
 // roots, [{kind, label, event, fn}]. modules maps each module name to its namespace;
 // resolve(kind, value) turns a handle into the runtime's object: kind "engine" (value
-// "Engine", "input", "camera" or "gui"), "material" (an id), "entity" (an index) or
-// "widget" (an index). An object is built without its constructor, from its class's
+// "Engine", "input", "camera" or "gui"), "material" (an id), "entity" (an index),
+// "widget" (an index) or "geometry" (an id in the engine's geometry registry). An object is built without its constructor, from its class's
 // prototype; an object of a class with __call__ is callable; a shared object stays one.
 export function loadState(state, modules, resolve) {
   return load(state, modules, resolve).roots;
@@ -62,6 +62,7 @@ function load(state, modules, resolve) {
     if ("__material" in v) return resolve("material", v.__material);
     if ("__entity" in v) return resolve("entity", v.__entity);
     if ("__widget" in v) return resolve("widget", v.__widget);
+    if ("__geometry" in v) return resolve("geometry", v.__geometry);
     if ("__function" in v) {
       const at = v.__function.lastIndexOf(":");
       const f = moduleOf(modules, v.__function.slice(0, at))[v.__function.slice(at + 1)];
@@ -255,7 +256,7 @@ export function createEngine({ w, h, camera, gui = null, materials = {}, calls =
   engine.camera = new Camera(camera);
   engine.gui = { pointer_over_gui: false, widgets: gui === null ? [] : guiWidgets(gui) };
 
-  const entities = new Map(), mats = new Map();
+  const entities = new Map(), mats = new Map(), geometries = new Map();
   engine.set_material = (entity, material) => {
     const index = typeof entity === "number" ? entity : entity.index;
     calls.push(["material", index, material.id]);
@@ -274,6 +275,10 @@ export function createEngine({ w, h, camera, gui = null, materials = {}, calls =
     if (kind === "material") {
       if (!mats.has(value)) mats.set(value, { id: value, material: materials[value] ?? null });
       return mats.get(value);
+    }
+    if (kind === "geometry") {
+      if (!geometries.has(value)) geometries.set(value, Object.freeze({ geometry_id: value }));
+      return geometries.get(value);
     }
     if (kind === "widget") {
       engine.gui.widgets[value] ??= { index: value };

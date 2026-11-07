@@ -4,7 +4,8 @@ snapshot(roots, reach, engine) walks from engine.state, the roots (a bound metho
 closure's cells and defaults) and the module globals reached code reads, and writes JSON:
 
     {"table": [entry, ...], "roots": [root, ...], "globals": {module: {name: value}},
-     "state": value, "engine": {"w", "h", "camera": {"position", "target", "fov", "up", "near", "far"}}}
+     "state": value, "engine": {"w", "h", "origin": [x, z],
+                                "camera": {"position", "target", "fov", "up", "near", "far"}}}
 
 A root is {"kind", "label", "event", "fn": value}, in the order find_roots gave them.
 "state" is engine.state as a dict entry; "engine" is what the runtime's createEngine takes.
@@ -15,6 +16,7 @@ A value is null, a bool, a number, a str, a tuple as a JSON array, or one of
     {"__engine": "Engine" | "input" | "camera" | "gui"}
     {"__material": id}              registered in the engine's material registry
     {"__entity": index}
+    {"__geometry": id}              registered in the engine's geometry registry
     {"__widget": n}                 the n-th widget walking engine.gui's panels
     {"__function": "module:name"}   a module function reached code has
     {"__bound": value, "name": str} a method of the object `value`
@@ -24,6 +26,17 @@ A table entry is a list (a JSON array), {"__dict": [[key, value], ...]} (str key
 order), {"__set": [value, ...]}, {"__f32": [...]} or {"__f64": [...]} (a 1-d float numpy
 array), or {"__type": "module.Class", "fields": {name: value}} with only the fields
 reached code reads.
+
+ecs_bytes(engine) writes the entity store as the header build_export puts under "ecs" and
+the bytes of ecs.bin:
+
+    {"max_entities", "high_water", "free": [int], "alive": [offset, nbytes],
+     "components": [{"name", "dtype": "f4" | "u4", "cols", "fields": {field: [col, size]},
+                     "rows": [offset, nbytes], "members": [offset, nbytes]}]}
+
+ecs.bin holds the alive mask as uint8 for slots [0, high_water), then per component in the
+store's registration order its rows [0, high_water) row-major little-endian in its dtype and
+its membership as uint8. Every block starts on a multiple of 4.
 """
 
 from __future__ import annotations
@@ -38,7 +51,7 @@ from manifoldx.gltf.engine_export import _widgets
 
 from .reach import Reach, closure_site, is_closure
 from .transpile import js_name
-from .types import class_name
+from .types import class_name, is_geometry
 
 
 class SnapshotError(Exception):
@@ -103,6 +116,7 @@ class _Writer:
         engine = {
             "w": int(self.engine.w),
             "h": int(self.engine.h),
+            "origin": [float(self.engine._origin[0]), float(self.engine._origin[1])],
             "camera": {
                 "position": [float(x) for x in cam.position],
                 "target": [float(x) for x in cam.target],
@@ -171,6 +185,9 @@ class _Writer:
             if id(v) not in self.widgets:
                 raise SnapshotError(path, "a GUI widget that is not in the engine's GUI")
             return {"__widget": self.widgets[id(v)]}
+        geometries = self.engine._geometry_registry
+        if id(v) in geometries._object_to_id or is_geometry(v):
+            return {"__geometry": geometries.register(v)}
         if id(v) in self.refs:
             return {"__ref": self.refs[id(v)]}
         if isinstance(v, (list, dict, set, frozenset, np.ndarray)) or self.app_object(v, path):
@@ -244,6 +261,70 @@ class _Writer:
             self.value(d, f"{path}<default {i}>") for i, d in enumerate(f.__defaults__ or ())
         ]
         return {"__closure": f"{key[0]}:{line}:{col}", "cells": cells, "defaults": defaults}
+
+
+# Transform's columns under both spellings, as a field view takes them.
+_TRANSFORM_FIELDS = {"pos": (0, 3), "position": (0, 3), "rot": (3, 4), "rotation": (3, 4)}
+_DTYPES = {np.dtype("f4"): "f4", np.dtype("u4"): "u4"}
+
+
+def ecs_bytes(engine) -> tuple[dict, bytes]:
+    """The entity store as ecs.bin's bytes and their header (the module docstring's form);
+    raises SnapshotError for a component of a dtype other than float32 or uint32."""
+    store = engine.store
+    hw = store._high_water
+    data = bytearray()
+
+    def block(raw: bytes) -> list[int]:
+        data.extend(bytes(-len(data) % 4))
+        start = len(data)
+        data.extend(raw)
+        return [start, len(raw)]
+
+    alive = block(store._alive[:hw].astype(np.uint8).tobytes())
+    components = []
+    for name, array in store._components.items():
+        code = _DTYPES.get(array.dtype)
+        if code is None:
+            raise SnapshotError(
+                f"the component {name}",
+                f"dtype {array.dtype}; ecs.bin carries float32 and uint32 and it",
+            )
+        cols = int(np.prod(array.shape[1:]))
+        rows = array[:hw].reshape(hw, cols).astype(array.dtype.newbyteorder("<"))
+        components.append(
+            {
+                "name": name,
+                "dtype": code,
+                "cols": cols,
+                "fields": {f: [int(c), int(n)] for f, (c, n) in _fields(name).items()},
+                "rows": block(rows.tobytes()),
+                "members": block(store._members[name][:hw].astype(np.uint8).tobytes()),
+            }
+        )
+    header = {
+        "max_entities": int(store.max_entities),
+        "high_water": int(hw),
+        "free": [int(i) for i in store._free_list],
+        "alive": alive,
+        "components": components,
+    }
+    return header, bytes(data)
+
+
+def _fields(name: str) -> dict:
+    """{field: (col, size)} of the store's component `name`: a built-in's or a Component
+    subclass's _layout, an @engine.component class's column table, else none."""
+    from manifoldx.components import _COMPONENT_CLASSES, Material, Mesh, Transform
+    from manifoldx.ecs import _COMPONENT_REGISTRY
+
+    if name == "Transform":
+        return {**_TRANSFORM_FIELDS, **Transform._layout}
+    builtin = {"Mesh": Mesh, "Material": Material}.get(name) or _COMPONENT_CLASSES.get(name)
+    if builtin is not None:
+        return builtin._layout
+    decorated = _COMPONENT_REGISTRY.get(name)
+    return getattr(decorated, "_component_start_idx", {})
 
 
 def _float(x: float):

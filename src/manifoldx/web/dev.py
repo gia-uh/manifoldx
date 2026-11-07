@@ -6,7 +6,7 @@ memory and writes it as a numbered version beside files every version shares:
 
 .manifoldx/web/
   index.html, browser.js, dev.js, ...   the page, the runtime, vendor/three/, fonts/ (written once)
-  v{n}/app/, v{n}/state.json, v{n}/report.json   a version; the last three are kept
+  v{n}/app/, v{n}/state.json, v{n}/ecs.bin, v{n}/report.json   a version; the last three are kept
   scenes/<sha>.glb                      a scene by the hash of its bytes, written when new
 
 Then it pushes the version message to the tab, which swaps to it in place. A step that fails
