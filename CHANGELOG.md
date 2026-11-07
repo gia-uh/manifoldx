@@ -216,6 +216,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A query returns only the entities that have its components.** A system's query returns
+  only the alive entities that have every component it names, as its docstring said; before,
+  it returned every alive entity. An app whose query names a component some entities lack no
+  longer writes their rows, and `len(query)` counts only the matching entities (#140).
+  `examples/point_cloud.py` kept its velocities per store slot, star included; they are now
+  per query row.
+
 - **Key names no longer depend on Shift, and Space is `"Space"`.** A letter pressed with
   Shift held arrived as `"W"`, so `is_pressed("w")` was false while sprinting. Letters are
   now lowercase on `KeyEvent.key` and in the polling state, and the space bar, which

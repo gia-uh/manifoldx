@@ -201,7 +201,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 <h2>Tasks</h2>
 
 <!-- ============================================================ TASK 1 -->
-<details class="task" id="task-1" data-state="pending">
+<details class="task" id="task-1" data-state="done">
 <summary><span class="num">1</span><span><span class="ttl">Desktop: a query returns only the entities with its components (changes behaviour)</span><span class="files">ecs.py · tests/test_ecs.py · CHANGELOG.md</span></span><span class="state"></span></summary>
 <div class="body">
 <p class="note">This task changes the desktop's behaviour, as the maintainer settled in Q3: today <code>EntityStore.get_component_view</code> returns every alive entity whatever the query (<code>src/manifoldx/ecs.py:123-127</code>). An app whose query names a component some entities lack writes those entities' rows today and skips them after this task, and its <code>len(q)</code> changes. It goes first so every later task builds on the fixed rule.</p>
