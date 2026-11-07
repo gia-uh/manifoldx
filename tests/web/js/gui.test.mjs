@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildGui, panelCss } from "../../../src/manifoldx/web/js/gui.js";
+import { buildGui, panelCss, widgetCss } from "../../../src/manifoldx/web/js/gui.js";
 
 const THEME = {
   bg: "#222", fg: "#ddd", font_size: 14, padding: 4, gap: 4, border: 0, border_color: "#444",
@@ -88,21 +88,30 @@ test("sized panels clip what overflows", () => {
 
 class FakeElement {
   constructor(tag) {
-    this.tagName = tag;
+    this.tagName = tag.toUpperCase();
     this.children = [];
+    this.parentNode = null;
     this.props = {};
+    this.attrs = {};
     this.listeners = {};
+    this.captured = [];
     this.writes = 0;
+    this.attrWrites = 0;
     this._text = "";
+    this.rect = { left: 0, top: 0, width: 0, height: 0 };
     this.style = { setProperty: (k, v) => { this.props[k] = v; }, removeProperty: (k) => { delete this.props[k]; } };
   }
   get textContent() { return this._text; }
   set textContent(v) { this._text = String(v); this.writes++; }
-  appendChild(c) { this.children.push(c); return c; }
-  removeChild(c) { this.children.splice(this.children.indexOf(c), 1); return c; }
+  setAttribute(k, v) { this.attrs[k] = String(v); this.attrWrites++; }
+  getAttribute(k) { return this.attrs[k] ?? null; }
+  getBoundingClientRect() { return this.rect; }
+  setPointerCapture(id) { this.captured.push(id); }
+  appendChild(c) { this.children.push(c); c.parentNode = this; return c; }
+  removeChild(c) { this.children.splice(this.children.indexOf(c), 1); c.parentNode = null; return c; }
   addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
   removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] ?? []).filter((f) => f !== fn); }
-  fire(type) { for (const fn of this.listeners[type] ?? []) fn({ type }); }
+  fire(type, ev = {}) { for (const fn of this.listeners[type] ?? []) fn({ type, target: this, ...ev }); }
 }
 const fakeLayer = () => {
   const doc = { createElement: (tag) => new FakeElement(tag) };
@@ -147,16 +156,6 @@ test("a Text shows its text; a ValueDisplay's min_width is a scaled min-width", 
   assert.equal(text.textContent, "hello");
   assert.equal(vd.props["min-width"], "160px");
   assert.equal(text.props["font-size"], "28px");
-});
-
-test("pointerOver follows the root panels' pointerenter and pointerleave", () => {
-  const layer = fakeLayer();
-  const gui = buildGui(layer, WALK);
-  assert.equal(gui.pointerOver, false);
-  layer.children[0].fire("pointerenter");
-  assert.equal(gui.pointerOver, true);
-  layer.children[0].fire("pointerleave");
-  assert.equal(gui.pointerOver, false);
 });
 
 test("rescale follows engine.h when design_height is set, and does nothing otherwise", () => {
@@ -248,13 +247,171 @@ test("a rescale keeps the offset reached code wrote", () => {
   assert.equal(layer.children[0].props.left, "80px");
 });
 
-test("destroy leaves the layer empty and the root panels without listeners", () => {
+test("destroy leaves the layer empty", () => {
   const layer = fakeLayer();
   const gui = buildGui(layer, { scale: 1, design_height: null, panels: [panel(), panel()] });
-  const roots = [...layer.children];
-  roots[0].fire("pointerenter");
   gui.destroy();
   assert.equal(layer.children.length, 0);
-  for (const r of roots) assert.deepEqual(Object.values(r.listeners).flat(), []);
-  assert.equal(gui.pointerOver, false);
+});
+
+// ---------------------------------------------------------------- the five widgets (5b)
+
+const STYLE = { ...THEME, bg: "#303030", fg: "#e0e0e0", border: 1, border_color: "#555", radius: 4 };
+const node = (kind, widget, extra = {}) => ({ kind, widget, style: STYLE, base: STYLE, overrides: {}, ...extra });
+const WIDGETS = () => ({
+  scale: 2, design_height: null,
+  panels: [panel({}, {
+    widget: 0, base: THEME, overrides: {},
+    children: [
+      node("Button", 1, { name: "go", label: "Go" }),
+      node("Slider", 2, { name: "speed", min: 0, max: 4, value: 1, label: "speed" }),
+      node("Toggle", 3, { name: "lit", value: false, label: "lit" }),
+      node("Joystick", 4, { name: "pad", value: [0.5, 0.25] }),
+      node("Image", 5, { svg: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"/>', size: [8, 4] }),
+    ],
+  })],
+});
+const built = () => {
+  const layer = fakeLayer();
+  const gui = buildGui(layer, WIDGETS());
+  const [button, slider, toggle, joystick, image] = layer.children[0].children;
+  return { layer, gui, button, slider, toggle, joystick, image };
+};
+const widgetObjects = () => [
+  { index: 0, kind: "Panel", offset: [0, 0], style_overrides: new Map() },
+  { index: 1, kind: "Button", name: "go", label: "Go", style_overrides: new Map() },
+  { index: 2, kind: "Slider", name: "speed", min: 0, max: 4, value: 1, label: "speed", style_overrides: new Map() },
+  { index: 3, kind: "Toggle", name: "lit", value: false, label: "lit", style_overrides: new Map() },
+  { index: 4, kind: "Joystick", name: "pad", value: [0.5, 0.25], style_overrides: new Map() },
+  { index: 5, kind: "Image", style_overrides: new Map() },
+];
+
+test("a Button is a button element with its label and the resolved style", () => {
+  const { button } = built();
+  assert.equal(button.tagName, "BUTTON");
+  assert.equal(button.attrs.type, "button");
+  assert.equal(button.textContent, "Go");
+  assert.equal(button.props["background-color"], "#303030");
+  assert.equal(button.props.color, "#e0e0e0");
+  assert.equal(button.props["border-radius"], "8px");
+  assert.equal(button.props["border-width"], "2px");
+  assert.equal(button.props["border-color"], "#555");
+  assert.equal(button.props["text-align"], "center");
+  assert.equal(button.attrs["data-mx-widget"], "1");
+  assert.equal(widgetCss(WIDGETS().panels[0].children[0], 2)["font-size"], "28px");
+});
+
+test("a Slider has role slider, its ARIA range and a knob at its value", () => {
+  const { slider } = built();
+  assert.equal(slider.attrs.role, "slider");
+  assert.equal(slider.attrs["aria-valuemin"], "0");
+  assert.equal(slider.attrs["aria-valuemax"], "4");
+  assert.equal(slider.attrs["aria-valuenow"], "1");
+  assert.equal(slider.attrs["aria-label"], "speed");
+  assert.equal(slider.attrs.tabindex, "0");
+  assert.equal(slider.props.width, "320px"); // the intrinsic 160 x 16, times the scale
+  assert.equal(slider.props.height, "32px");
+  assert.equal(slider.children[0].props.width, "25%");
+  assert.equal(slider.children[0].props["background-color"], "#e0e0e0");
+  assert.equal(slider.props["touch-action"], "none");
+});
+
+test("a Toggle has role switch and aria-checked follows its value", () => {
+  const { gui, toggle } = built();
+  assert.equal(toggle.attrs.role, "switch");
+  assert.equal(toggle.attrs["aria-checked"], "false");
+  const [box, label] = toggle.children;
+  assert.equal(box.props.width, "28px"); // 14 px, times the scale
+  assert.equal(box.children[0].props.display, "none");
+  assert.equal(label.textContent, "lit");
+  const w = widgetObjects();
+  w[3].value = true;
+  gui.sync(w);
+  assert.equal(toggle.attrs["aria-checked"], "true");
+  assert.equal(box.children[0].props.display, "block");
+});
+
+test("a Joystick is a round pad with a knob and touch-action none", () => {
+  const { joystick } = built();
+  assert.equal(joystick.props["border-radius"], "50%");
+  assert.equal(joystick.props.width, "192px"); // 96 px, times the scale
+  assert.equal(joystick.props["touch-action"], "none");
+  const knob = joystick.children[0];
+  // r 96, knob 0.4 * 192 = 76.8; centre 96 + 0.5 * (96 - 38.4), 96 - 0.25 * (96 - 38.4), y up
+  const k = 0.8 * 96;
+  assert.equal(knob.props.width, `${k}px`);
+  assert.equal(knob.props.left, `${96 + 0.5 * (96 - k * 0.5) - k * 0.5}px`);
+  assert.equal(knob.props.top, `${96 - 0.25 * (96 - k * 0.5) - k * 0.5}px`);
+  assert.equal(knob.props["border-radius"], "50%");
+});
+
+test("an Image shows its SVG as an img at svg_size times the scale", () => {
+  const { image } = built();
+  assert.equal(image.tagName, "IMG");
+  assert.ok(image.attrs.src.startsWith("data:image/svg+xml;charset=utf-8,"));
+  assert.equal(decodeURIComponent(image.attrs.src.slice("data:image/svg+xml;charset=utf-8,".length)), WIDGETS().panels[0].children[4].svg);
+  assert.equal(image.props.width, "16px");
+  assert.equal(image.props.height, "8px");
+});
+
+test("targetOf gives the widget and the fractions of its box", () => {
+  const { gui, slider } = built();
+  slider.rect = { left: 100, top: 50, width: 200, height: 20 };
+  const knob = slider.children[0];
+  assert.deepEqual(gui.targetOf({ target: knob, pointerId: 1, clientX: 150, clientY: 55 }), [2, 0.25, 0.25]);
+  assert.equal(gui.targetOf({ target: { parentNode: null }, pointerId: 1, clientX: 150, clientY: 55 }), null);
+});
+
+test("a non-interactive widget is no target", () => {
+  const { gui, image, layer } = built();
+  assert.equal(gui.targetOf({ target: image, pointerId: 1, clientX: 0, clientY: 0 }), null);
+  assert.equal(gui.targetOf({ target: layer.children[0], pointerId: 1, clientX: 0, clientY: 0 }), null);
+});
+
+test("a held pointer keeps its widget outside the box", () => {
+  const { gui, slider } = built();
+  slider.rect = { left: 100, top: 50, width: 200, height: 20 };
+  gui.hold(1, 2);
+  const canvas = { parentNode: null };
+  assert.deepEqual(gui.targetOf({ target: canvas, pointerId: 1, clientX: 340, clientY: 60 }), [2, 1.2, 0.5]);
+  assert.equal(gui.targetOf({ target: canvas, pointerId: 2, clientX: 340, clientY: 60 }), null);
+  gui.release(1);
+  assert.equal(gui.targetOf({ target: canvas, pointerId: 1, clientX: 340, clientY: 60 }), null);
+});
+
+test("a pointerdown on a Slider or a Joystick captures and holds it; a cancel releases", () => {
+  const { gui, slider, joystick, button } = built();
+  slider.fire("pointerdown", { pointerId: 5 });
+  joystick.fire("pointerdown", { pointerId: 6 });
+  button.fire("pointerdown", { pointerId: 7 });
+  assert.deepEqual([slider.captured, joystick.captured, button.captured], [[5], [6], []]);
+  const away = { target: { parentNode: null }, clientX: 0, clientY: 0 };
+  assert.equal(gui.targetOf({ ...away, pointerId: 5 })[0], 2);
+  assert.equal(gui.targetOf({ ...away, pointerId: 6 })[0], 4);
+  assert.equal(gui.targetOf({ ...away, pointerId: 7 }), null);
+  joystick.fire("pointercancel", { pointerId: 6 });
+  assert.equal(gui.targetOf({ ...away, pointerId: 6 }), null);
+});
+
+test("a frame-code write updates the label, the knob and aria-valuenow, and only what changed", () => {
+  const { gui, button, slider, joystick } = built();
+  const w = widgetObjects();
+  const fill = slider.children[0], knob = joystick.children[0];
+  const before = [button.writes, slider.attrWrites, countWrites(fill), countWrites(knob)];
+  gui.sync(w);
+  assert.deepEqual([button.writes, slider.attrWrites, before[2](), before[3]()], [before[0], before[1], 0, 0]);
+  w[1].label = "Again";
+  w[2].value = 3;
+  w[4].value = [0, 0];
+  gui.sync(w);
+  assert.equal(button.textContent, "Again");
+  assert.equal(slider.attrs["aria-valuenow"], "3");
+  assert.equal(fill.props.width, "75%");
+  assert.equal(knob.props.left, `${96 - 0.8 * 96 * 0.5}px`);
+  assert.equal(button.writes, before[0] + 1);
+  assert.ok(before[2]() > 0 && before[3]() > 0);
+  w[2].max = 6;
+  gui.sync(w);
+  assert.equal(slider.attrs["aria-valuemax"], "6");
+  assert.equal(fill.props.width, "50%");
 });

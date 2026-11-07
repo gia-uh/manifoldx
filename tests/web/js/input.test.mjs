@@ -442,3 +442,48 @@ test("a click while the pointer is locked reaches the builder; no capture is tri
   canvas.fire("pointerdown", { button: 0, clientX: 410, clientY: 290, pointerType: "mouse", pointerId: 1 });
   assert.deepEqual(b.take(vp).clicks, [1]);
 });
+
+// A GUI as attachDom sees it: the layer the panels are in, and targetOf, which names the
+// widget a DOM event went to ([widget, fx, fy]) or null; release ends a held pointer.
+function fakeGui() {
+  const layer = { on: {} };
+  layer.addEventListener = (type, fn) => { layer.on[type] = fn; };
+  layer.removeEventListener = (type, fn) => { if (layer.on[type] === fn) delete layer.on[type]; };
+  const released = [];
+  return {
+    layer, released,
+    targetOf: (ev) => (ev.onWidget ? [2, 0.25, 0.5] : null),
+    release: (id) => released.push(id),
+  };
+}
+
+test("a pointer down on the GUI is a click and carries its target", () => {
+  const { win, canvas } = domFakes();
+  const gui = fakeGui();
+  const b = new FrameBuilder();
+  attachDom(canvas, b, { gui });
+  gui.layer.on.pointerdown({ button: 0, clientX: 30, clientY: 60, pointerType: "mouse", pointerId: 1, isPrimary: true, onWidget: true });
+  win.fire("pointermove", { movementX: 200, movementY: 0, clientX: 230, clientY: 60, pointerId: 1, isPrimary: true, onWidget: true });
+  win.fire("pointerup", { button: 0, clientX: 230, clientY: 60, pointerId: 1, isPrimary: true, onWidget: true });
+  win.fire("pointermove", { movementX: 1, movementY: 0, clientX: 231, clientY: 60, pointerId: 1, isPrimary: true });
+  const f = b.take(vp);
+  assert.deepEqual(f.clicks, [1]);
+  assert.deepEqual(f.events.map(([name, p]) => [name, p.gui ?? null]), [
+    ["pointer_down", [2, 0.25, 0.5]], ["pointer_move", [2, 0.25, 0.5]], ["pointer_up", [2, 0.25, 0.5]], ["pointer_move", null],
+  ]);
+  assert.deepEqual(f.events[0][1].x, 20); // CSS pixels from the canvas's top-left
+  assert.equal("gui" in f.events[3][1], false);
+  assert.deepEqual(gui.released, [1]); // after the up read its target
+  assert.deepEqual(canvas.captured, []); // the canvas captures only its own downs
+});
+
+test("a pointer down on the canvas asks the GUI too, and detach removes the layer's listener", () => {
+  const { canvas } = domFakes();
+  const gui = fakeGui();
+  const b = new FrameBuilder();
+  const detach = attachDom(canvas, b, { gui });
+  canvas.fire("pointerdown", { button: 0, clientX: 110, clientY: 90, pointerType: "touch", pointerId: 9, isPrimary: false });
+  assert.equal("gui" in b.take(vp).events[0][1], false);
+  detach();
+  assert.deepEqual(Object.keys(gui.layer.on), []);
+});

@@ -69,15 +69,18 @@ export class FrameBuilder {
 
   // A pointer event as _InputBridge._build_pointer_event makes it: dx and dy from the last
   // pointer event's position on a move, 0 on a down or up; the position re-anchored on each.
-  _pointer(phase, ev, button) {
+  // target, the GUI's [widget, fx, fy] for the event, goes in as its "gui" when there is one.
+  _pointer(phase, ev, button, target = null) {
     const [x, y] = this._pos;
     const moved = phase === "move" && this._last !== null;
     const dx = moved ? x - this._last[0] : 0, dy = moved ? y - this._last[1] : 0;
     this._last = [x, y];
     const pointer_id = ev.isPrimary === false ? ev.pointerId : 0;
-    this._events.push([`pointer_${phase}`, {
+    const payload = {
       x, y, dx, dy, button, buttons: sortedNumbers(this._buttons), modifiers: [...this._mods], phase, pointer_id,
-    }]);
+    };
+    if (target !== null) payload.gui = target;
+    this._events.push([`pointer_${phase}`, payload]);
   }
 
   keyDown(ev) {
@@ -98,31 +101,31 @@ export class FrameBuilder {
     this._key("key_up", name);
   }
 
-  pointerDown(ev) {
+  pointerDown(ev, target = null) {
     this._modsFrom(ev);
     this.lastPointerType = ev.pointerType ?? null;
     const b = buttonOf(ev.button);
     if (!this._buttons.has(b)) this._clicks.add(b);
     this._buttons.add(b);
     this._pos = [ev.x, ev.y];
-    this._pointer("down", ev, b);
+    this._pointer("down", ev, b, target);
   }
 
-  pointerUp(ev) {
+  pointerUp(ev, target = null) {
     this._modsFrom(ev);
     const b = buttonOf(ev.button);
     if (this._buttons.delete(b)) this._released.add(b);
     this._pos = [ev.x, ev.y];
-    this._pointer("up", ev, b);
+    this._pointer("up", ev, b, target);
   }
 
-  pointerMove(ev) {
+  pointerMove(ev, target = null) {
     this._modsFrom(ev);
     if (ev.pointerType) this.lastPointerType = ev.pointerType;
     this._d[0] += ev.movementX;
     this._d[1] += ev.movementY;
     this._pos = [ev.x, ev.y];
-    this._pointer("move", ev, 0);
+    this._pointer("move", ev, 0, target);
   }
 
   wheel(ev) {
@@ -186,16 +189,22 @@ export class FrameBuilder {
 }
 
 // Feed builder from the DOM: keys and blur on the window, pointerdown on the canvas (captured,
-// so a drag that leaves it keeps reporting), pointermove/pointerup on the window, the wheel
-// and the context menu on the canvas. Positions are CSS pixels from the canvas's top-left.
-// Tab and Space are kept from the page (no focus move, no scroll); browser shortcuts such as
-// Control+W are left alone. Returns detach().
-export function attachDom(canvas, builder, { devicePixelRatio } = {}) {
+// so a drag that leaves it keeps reporting) and on gui's layer, pointermove/pointerup on the
+// window, the wheel and the context menu on the canvas. With a gui (buildGui's, or anything
+// with its layer, targetOf and release), each pointer event carries gui.targetOf(ev), the
+// widget it went to, and a pointerup releases the widget's hold once it has read it. A
+// pointer down on the GUI is a click in the frame too, as the desktop's input layer records
+// every pointer event before the GUI sees it. Positions are CSS pixels from the canvas's
+// top-left. Tab and Space are kept from the page (no focus move, no scroll); browser shortcuts
+// such as Control+W are left alone. Returns detach().
+export function attachDom(canvas, builder, { devicePixelRatio, gui = null } = {}) {
   const win = canvas.ownerDocument.defaultView;
   const at = (ev) => {
     const r = canvas.getBoundingClientRect();
     return { x: ev.clientX - r.left, y: ev.clientY - r.top };
   };
+  const targetOf = (ev) => (gui === null ? null : gui.targetOf(ev));
+  const down = (ev) => builder.pointerDown({ ...pick(ev), button: ev.button, pointerType: ev.pointerType, ...at(ev) }, targetOf(ev));
   const listeners = [
     [win, "keydown", (ev) => {
       if (ev.code === "Tab" || ev.code === "Space") ev.preventDefault();
@@ -204,14 +213,17 @@ export function attachDom(canvas, builder, { devicePixelRatio } = {}) {
     [win, "keyup", (ev) => builder.keyUp(ev)],
     [win, "blur", () => builder.blur()],
     [canvas, "pointerdown", (ev) => {
-      builder.pointerDown({ ...pick(ev), button: ev.button, pointerType: ev.pointerType, ...at(ev) });
+      down(ev);
       // A locked pointer cannot be captured (Chromium throws InvalidStateError), nor needs to be.
       if (!canvas.ownerDocument.pointerLockElement) canvas.setPointerCapture(ev.pointerId);
     }],
     [win, "pointermove", (ev) => {
-      builder.pointerMove({ ...pick(ev), movementX: ev.movementX, movementY: ev.movementY, pointerType: ev.pointerType, ...at(ev) });
+      builder.pointerMove({ ...pick(ev), movementX: ev.movementX, movementY: ev.movementY, pointerType: ev.pointerType, ...at(ev) }, targetOf(ev));
     }],
-    [win, "pointerup", (ev) => builder.pointerUp({ ...pick(ev), button: ev.button, ...at(ev) })],
+    [win, "pointerup", (ev) => {
+      builder.pointerUp({ ...pick(ev), button: ev.button, ...at(ev) }, targetOf(ev));
+      gui?.release(ev.pointerId);
+    }],
     [canvas, "wheel", (ev) => {
       ev.preventDefault();
       builder.devicePixelRatio = devicePixelRatio ?? win.devicePixelRatio ?? 1;
@@ -219,6 +231,7 @@ export function attachDom(canvas, builder, { devicePixelRatio } = {}) {
     }, { passive: false }],
     [canvas, "contextmenu", (ev) => ev.preventDefault()],
   ];
+  if (gui !== null) listeners.push([gui.layer, "pointerdown", down]);
   for (const [target, type, fn, opts] of listeners) target.addEventListener(type, fn, opts);
   return () => {
     for (const [target, type, fn, opts] of listeners) target.removeEventListener(type, fn, opts);

@@ -146,7 +146,10 @@ async function start() {
   const makeApp = (version) => ({ ...loadApp(version.state, version.modules, { hooks, ecs: version.ecs }), modules: version.modules });
   running.app = makeApp(running);
   lock.input = running.app.engine.input;
-  attachDom(canvas, builder);
+  // The GUI the pointer events are routed through: the running version's, which a swap replaces.
+  attachDom(canvas, builder, {
+    gui: { layer: $("mx-gui"), targetOf: (ev) => gui.targetOf(ev), release: (id) => gui.release(id) },
+  });
   Object.assign(mx, { app: running.app, scene, renderer, gui, version: info ? info.version : null });
 
   let size = [0, 0], guiH = null;
@@ -166,7 +169,6 @@ async function start() {
     const frame = builder.take([w, h]);
     engine.calls.length = 0; // the trace's record of one frame
     try {
-      engine.gui.pointer_over_gui = gui.pointerOver;
       advance(app, { ...frame, events: [...(frame.events ?? []), ...events.splice(0)] }, dt);
       gui.sync(engine.gui.widgets);
       gui.update(guiValues(app));
