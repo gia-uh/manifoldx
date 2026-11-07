@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A pointer capture per pointer.** `PointerEvent.pointer_id`, 0 on the desktop; the GUI keeps one
+  pointer capture per pointer (#140).
+
 - **export --web: the entity store in the page.** The export writes the store's arrays as
   `ecs.bin` and their layouts in `state.json`; the page keeps them in a `Store` with the
   desktop's slot rules and its flush after the systems. Transpiled systems use their
@@ -240,6 +243,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails if any frame takes more than twice the median (#85).
 
 ### Changed
+
+- **The arrow keys step a clicked Slider.** After a pointer goes down on a Slider, the arrow keys
+  step it by a twentieth of its range (Left and Down lower it, Right and Up raise it), emitting
+  change and commit, until a pointer goes down outside every widget. An app that steers with the
+  arrow keys and has a Slider sees the Slider move too once the user has clicked it (#140).
 
 - **A query returns only the entities that have its components.** A system's query returns
   only the alive entities that have every component it names, as its docstring said; before,

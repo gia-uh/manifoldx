@@ -54,6 +54,7 @@ class PointerEvent:
     buttons: tuple[int, ...]
     modifiers: tuple[str, ...]
     phase: str  # "down" | "up" | "move"
+    pointer_id: int = 0  # which pointer; the desktop has one, 0
 
 
 @dataclass(frozen=True, slots=True)

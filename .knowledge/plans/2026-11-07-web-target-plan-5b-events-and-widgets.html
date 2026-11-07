@@ -209,7 +209,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 <h2>Tasks</h2>
 
 <!-- ============================================================ TASK 1 -->
-<details class="task" id="task-1" data-state="pending">
+<details class="task" id="task-1" data-state="done">
 <summary><span class="num">1</span><span><span class="ttl">Desktop: the GUI bridge captures per pointer, locates through a seam, and steps a focused Slider with the arrow keys (changes behaviour)</span><span class="files">input.py · gui/bridge.py · gui/slider.py · tests/gui/test_bridge.py · tests/gui/test_slider.py · CHANGELOG.md</span></span><span class="state"></span></summary>
 <div class="body">
 <p class="note">This task changes one desktop behaviour: after a pointer goes down on a Slider, the arrow keys step it, as Q4 settled for the page and the parity rule then requires of the desktop. An app that drives its camera with the arrow keys and has a Slider sees the Slider move too once the user has clicked it, until a click lands outside every widget. The other two changes keep behaviour: <code>PointerEvent</code> gains a field with a default, and the bridge keeps one capture per pointer, which on the desktop is always pointer 0, so a new down still ends the capture as it does today (<code>src/manifoldx/gui/bridge.py:53-61</code>).</p>
