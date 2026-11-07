@@ -432,15 +432,80 @@ function where(c, x, y, dtype) {
   return new NdArray(out, [...shape], dtype);
 }
 
-// np.stack of rank-1 arrays of one length: axis 0 puts them as rows, axis 1 as columns.
+// np.stack of arrays of one shape: axis 0 puts them as items of a new first dimension,
+// axis 1 puts rank-1 arrays as columns.
 function stack(list, axis, dtype) {
-  const items = list.map(asnd), k = items.length ? items[0].data.length : 0, cast = CAST[dtype];
-  if (items.some((v) => v.data.length !== k)) throw new Error("ValueError: all input arrays must have the same shape");
-  const out = new TYPED[dtype](k * items.length);
+  const items = list.map(asnd), shape = items.length ? items[0].shape : [0], cast = CAST[dtype];
+  if (items.some((v) => v.shape.length !== shape.length || v.shape.some((d, i) => d !== shape[i]))) {
+    throw new Error("ValueError: all input arrays must have the same shape");
+  }
+  const k = sizeOf(shape), out = new TYPED[dtype](k * items.length);
   items.forEach((v, j) => {
     for (let i = 0; i < k; i++) out[axis === 0 ? j * k + i : i * items.length + j] = cast(v.data[i]);
   });
-  return new NdArray(out, axis === 0 ? [items.length, k] : [k, items.length], dtype);
+  return new NdArray(out, axis === 0 ? [items.length, ...shape] : [k, items.length], dtype);
+}
+
+// np.array of numbers (rank 1) or of rows, each a list of numbers or a rank-1 array (rank 2).
+function ndArray(items, dtype) {
+  const v = Array.from(items), cast = CAST[dtype];
+  if (!v.length || typeof v[0] !== "object") return new NdArray(TYPED[dtype].from(v, cast), [v.length], dtype);
+  const rows = v.map((r) => (Array.isArray(r) ? r : Array.from(asnd(r).data))), w = rows[0].length;
+  if (rows.some((r) => r.length !== w)) {
+    throw new Error(`ValueError: setting an array element with a sequence. The requested array has an inhomogeneous shape after 1 dimensions. The detected shape was (${rows.length},) + inhomogeneous part.`);
+  }
+  const out = new TYPED[dtype](rows.length * w);
+  rows.forEach((r, i) => r.forEach((x, j) => { out[i * w + j] = cast(x); }));
+  return new NdArray(out, [rows.length, w], dtype);
+}
+
+function eye(n, dtype) {
+  const out = full([n, n], 0, dtype);
+  for (let i = 0; i < n; i++) out.data[i * n + i] = 1;
+  return out;
+}
+
+// a @ b on (..., n, k) and (..., k, m), the leading dimensions broadcast as numpy's are. A
+// float32 element is numpy's forward chain: each product of two float32 values is exact in a
+// double, added to the accumulator and rounded, k in order (plan 5c, departure 1).
+function matmul(x, y, dtype) {
+  const a = asnd(x), b = asnd(y), cast = CAST[dtype];
+  const [n, k] = a.shape.slice(-2), [k2, m] = b.shape.slice(-2);
+  if (k2 !== k) {
+    throw new Error(`ValueError: matmul: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature (n?,k),(k,m?)->(n?,m?) (size ${k2} is different from ${k})`);
+  }
+  const la = a.shape.slice(0, -2), lb = b.shape.slice(0, -2), r = Math.max(la.length, lb.length);
+  const pa = [...Array(r - la.length).fill(1), ...la], pb = [...Array(r - lb.length).fill(1), ...lb];
+  const lead = pa.map((d, i) => (d === pb[i] || pb[i] === 1 ? d : d === 1 ? pb[i] : -1));
+  if (lead.includes(-1)) {
+    const remap = (s) => `${shapeText(s)}->(${[...s.slice(0, -2), "newaxis", "newaxis"].join(",")})`;
+    throw new Error(`ValueError: operands could not be broadcast together with remapped shapes [original->remapped]: ${remap(a.shape)} ${remap(b.shape)}  and requested shape (${n},${m})`);
+  }
+  const A = Float64Array.from(a.data, cast), B = Float64Array.from(b.data, cast);
+  const items = sizeOf(lead), out = new TYPED[dtype](items * n * m);
+  for (let t = 0; t < items; t++) {
+    // item t's matrix in a and in b: a broadcast dimension of 1 stays at index 0
+    let ta = 0, tb = 0, rest = t, wa = 1, wb = 1;
+    for (let d = r - 1; d >= 0; d--) {
+      const i = rest % lead[d];
+      rest = (rest - i) / lead[d];
+      if (pa[d] !== 1) ta += i * wa;
+      if (pb[d] !== 1) tb += i * wb;
+      wa *= pa[d];
+      wb *= pb[d];
+    }
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < m; j++) {
+        const ia = (ta * n + i) * k, ib = tb * k * m + j;
+        let acc = 0;
+        if (dtype === "f32") for (let p = 0; p < k; p++) acc = Math.fround(acc + A[ia + p] * B[ib + p * m]);
+        else if (dtype === "i32") for (let p = 0; p < k; p++) acc = (acc + Math.imul(A[ia + p], B[ib + p * m])) | 0;
+        else for (let p = 0; p < k; p++) acc += A[ia + p] * B[ib + p * m];
+        out[(t * n + i) * m + j] = acc;
+      }
+    }
+  }
+  return new NdArray(out, [...lead, n, m], dtype);
 }
 
 const outOfBounds = (i, axis, size) => new Error(`IndexError: index ${i} is out of bounds for axis ${axis} with size ${size}`);
@@ -510,10 +575,9 @@ export const nd = {
   full,
   arange: ndArange,
   tolist,
-  array: (items, dtype) => {
-    const v = Array.from(items);
-    return new NdArray(TYPED[dtype].from(v, CAST[dtype]), [v.length], dtype);
-  },
+  array: ndArray,
+  eye,
+  matmul,
   sin: unary(Math.sin),
   cos: unary(Math.cos),
   exp: unary(Math.exp),

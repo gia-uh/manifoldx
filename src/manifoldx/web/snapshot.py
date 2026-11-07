@@ -39,6 +39,7 @@ the bytes of ecs.bin:
      "components": [{"name", "dtype": "f4" | "u4", "cols", "fields": {field: [col, size]},
                      "defaults": {field: number | [number]},
                      "rows": [offset, nbytes], "members": [offset, nbytes]}],
+     "skinned": {geometry id: joints}, "poses": [{"entity", "at": [offset, nbytes]}],
      "spawnable": [{"name", "dtype", "cols", "fields", "defaults"}]}
 
 defaults are a Component subclass's class-level field defaults, as float32 values. build_export
@@ -47,7 +48,9 @@ registered, which the page registers when it first spawns one, as Engine.spawn d
 
 ecs.bin holds the alive mask as uint8 for slots [0, high_water), then per component in the
 store's registration order its rows [0, high_water) row-major little-endian in its dtype and
-its membership as uint8. Every block starts on a multiple of 4.
+its membership as uint8, then per posed alive entity (one the desktop's JointStore holds a
+block for), ascending, its MAX_JOINTS matrices as float32 row-major. skinned names every
+registered geometry with joints and its joint count. Every block starts on a multiple of 4.
 """
 
 from __future__ import annotations
@@ -61,6 +64,7 @@ import numpy as np
 
 from manifoldx.components import _COMPONENT_CLASSES
 from manifoldx.gltf.engine_export import _widgets
+from manifoldx.skinning import MAX_JOINTS, joint_count
 
 from .reach import Reach, closure_site, is_closure
 from .transpile import js_name
@@ -323,12 +327,27 @@ def ecs_bytes(engine) -> tuple[dict, bytes]:
                 "members": block(store._members[name][:hw].astype(np.uint8).tobytes()),
             }
         )
+    # A skinned geometry's joint count, and each posed alive entity's whole block of
+    # MAX_JOINTS matrices, row-major: a later set_joints with a larger J finds what an
+    # earlier one wrote past its own J.
+    skinned = {
+        str(gid): joint_count(geo)
+        for gid, geo in engine._geometry_registry._geometries.items()
+        if "joints" in geo
+    }
+    joints = engine._render_pipeline._joints
+    poses = [
+        {"entity": int(i), "at": block(joints.pose(int(i), MAX_JOINTS).astype("<f4").tobytes())}
+        for i in np.flatnonzero(store._alive[:hw] & (joints.block_of[:hw] != 0))
+    ]
     header = {
         "max_entities": int(store.max_entities),
         "high_water": int(hw),
         "free": [int(i) for i in store._free_list],
         "alive": alive,
         "components": components,
+        "skinned": skinned,
+        "poses": poses,
     }
     return header, bytes(data)
 

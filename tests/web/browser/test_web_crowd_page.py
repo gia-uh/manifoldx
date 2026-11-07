@@ -1,7 +1,8 @@
 """examples/web_crowd.py in headless Chromium: tests/web/test_web_crowd.py's script driven
 through Playwright's keyboard and mouse runs as Python runs it on the frames the page built,
-the page draws one call per non-empty (geometry, material) batch, and a picked box is drawn by
-the batch of its material. Each control works under a real pointer, a Joystick and a Button
+the page draws one call per non-empty (geometry, material) batch and one for the skinned
+figure, whose bones are the pose Python gave it, and a picked box is drawn by the batch of its
+material. Each control works under a real pointer, a Joystick and a Button
 under two fingers at once, and the frames the page records say what the pointer did.
 tests/web/browser/test_visual.py checks the batched scene against the desktop's: lit_yard
 exports as a library and draws through batches."""
@@ -12,7 +13,7 @@ import shutil
 
 from manifoldx.web.replay import compare, replay_python
 
-from ..test_web_crowd import PATHS, SPACE, WIDGETS, script
+from ..test_web_crowd import FIGURE, PATHS, SPACE, WIDGETS, script
 from .conftest import BATCHES_OF, WEB_CROWD, touch
 
 
@@ -30,13 +31,13 @@ def tick(page) -> dict:
     return page.evaluate("__mx.tick(1 / 60)")
 
 
-def drive(page, n: int | None = None) -> list[dict]:
+def drive(page, n: int | None = None, each=None) -> list[dict]:
     """The script's first n frames (all by default), each frame's events made with Playwright's
     keyboard, mouse and wheel in their order, then one __mx.tick. A pointer event routed to a
     control goes to its place (fx, fy) in that control's box on the page; the others go to their
     x and y. The tap of a second finger (a pointer_id other than 0) is left out: the mouse is one
     pointer, and test_a_joystick_and_a_button_at_once taps with two. Returns what each tick
-    returned."""
+    returned, or what each(page) returned after it."""
     page.evaluate(f"() => {{ __mx.paths = {json.dumps(PATHS)}; }}")
     ran, view, at = [], None, None
     for f in script()[:n]:
@@ -64,7 +65,7 @@ def drive(page, n: int | None = None) -> list[dict]:
                     page.mouse.up()
             elif name == "wheel":
                 page.mouse.wheel(ev["dx"], ev["dy"])
-        ran.append(tick(page))
+        ran.append(tick(page) if each is None else (tick(page), each(page))[1])
     return ran
 
 
@@ -88,7 +89,7 @@ def test_chromium_matches_python(open_page, served, crowd_export):
     # destroys, a pick in gold, the Slider dragged and stepped, the Joystick held
     assert trace[-1]["state"]["waves"] == 6
     alive = [len(e["store"]["alive"]) for e in trace]
-    assert alive[7] == 49 and alive[63] == 97
+    assert alive[7] == 50 and alive[63] == 98
     # boxes fell and were destroyed before the fifth Space wave (when exactly depends on the
     # gravity the drag left, and Playwright's mouse moves to the Slider's end before its up)
     assert any(alive[i] < alive[i - 1] for i in range(64, 200))
@@ -100,13 +101,37 @@ def test_chromium_matches_python(open_page, served, crowd_export):
     assert trace[230]["state"]["wind"][0] > 0.5 and trace[261]["state"]["wind"] == [0.0, 0.0]
 
 
+DRAWN = "[...__mx.scene.batches.values()].filter((b) => b.count > 0).length"
+# Each bone's matrixWorld (column-major) of the figure's SkinnedMesh.
+BONES = f"__mx.scene.skinned.get({FIGURE}).skeleton.bones.map((b) => Array.from(b.matrixWorld.elements))"
+
+
 def test_one_draw_call_per_batch(open_page, served, crowd_export):
     page = open_page(served(crowd_export))
     drive(page, 42)  # two waves, and frame 41 painted one box gold
-    calls = page.evaluate("__mx.renderer.info.render.calls")
-    drawn = page.evaluate("[...__mx.scene.batches.values()].filter((b) => b.count > 0).length")
+    assert page.evaluate(DRAWN) == 4  # the ground, two colours of 23 and 24 boxes, the gold one
+    assert page.evaluate("[...__mx.scene.skinned.keys()]") == [FIGURE]
+
+
+def test_draw_calls_are_the_batches_plus_the_figure(open_page, served, crowd_export):
+    page = open_page(served(crowd_export))
     assert page.evaluate("__mx.renderer.info.autoReset") is True
-    assert calls == drawn == 4  # the ground, two colours of 23 and 24 boxes, the gold one
+    counts = drive(page, 42, lambda p: p.evaluate(f"[__mx.renderer.info.render.calls, {DRAWN}]"))
+    assert all(calls == drawn + 1 for calls, drawn in counts), counts
+    assert counts[-1] == [5, 4]
+
+
+def test_the_figure_is_posed_as_python_poses_it(open_page, served, crowd_export):
+    page = open_page(served(crowd_export))
+    bones = drive(page, 30, lambda p: p.evaluate(BONES))
+    python = replay_python(None, str(WEB_CROWD), page.evaluate("__mx.frames"), PATHS)
+    for i, (entry, drawn) in enumerate(zip(python, bones)):
+        pose = entry["joints"][str(FIGURE)]
+        assert len(drawn) == len(pose) == 6
+        for j, (m, b) in enumerate(zip(pose, drawn)):
+            want = [m[4 * r + c] for c in range(4) for r in range(4)]  # column-major
+            assert max(abs(x - y) for x, y in zip(want, b)) <= 1e-6, f"frame {i} joint {j}"
+    assert python[0]["joints"] != python[29]["joints"]
 
 
 def test_an_entitys_material_is_read_from_its_batch(open_page, served, crowd_export):
@@ -123,7 +148,7 @@ def test_an_entitys_material_is_read_from_its_batch(open_page, served, crowd_exp
     ), f"entity {picked} is drawn by batch {keys[0]}, not with GOLD"
     # its neighbour keeps its wave's colour
     red = page.evaluate("__mx.app.modules.__main__.COLORS[0].id")
-    others = [e for e in ran[40]["entry"]["store"]["alive"] if e not in (0, picked)]
+    others = [e for e in ran[40]["entry"]["store"]["alive"] if e not in (0, FIGURE, picked)]
     [key] = page.evaluate(BATCHES_OF, others[0])
     assert page.evaluate(
         "([key, id]) => __mx.scene.batches.get(key).material === __mx.scene.materials.get(id)",

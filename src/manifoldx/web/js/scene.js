@@ -1,8 +1,8 @@
 // The exported scene in three.js: the glTF's manifoldx extras (background, fog, environment,
 // sun, shadows) applied once with manifoldx's calibration, the desktop's fixed light for
-// BasicMaterial and PhongMaterial, the glb's library of geometries and materials by id, and one
-// InstancedMesh per (geometry, material) drawing the entity store. THREE is passed in, so this
-// module imports nothing.
+// BasicMaterial and PhongMaterial, the glb's library of geometries and materials by id, one
+// InstancedMesh per (geometry, material) drawing the entity store, and one SkinnedMesh per
+// skinned entity. THREE is passed in, so this module imports nothing.
 
 // three.js against the desktop at the same intensities, measured by tests/web/browser/test_visual.py
 // on tests/web/apps/lit_yard.py (sky environment, sun, shadows, fog) at 320x200, lavapipe for the
@@ -15,7 +15,14 @@ export const CALIBRATION = { environment: 1.45, sun: 1.0 };
 
 // The desktop lights BasicMaterial and PhongMaterial with a fixed light from (1, 1, 1) in world
 // space: 0.3 ambient + 0.7 Lambert (resources.py, the basic shader).
-const BASIC_VERTEX = "\tvMxNormal = normalize( mat3( modelMatrix ) * normal );";
+// A skinned mesh's normal is its joint-posed one (objectNormal, skinnormal_vertex's).
+const BASIC_VERTEX = [
+  "#ifdef USE_SKINNING",
+  "\tvMxNormal = normalize( mat3( modelMatrix ) * objectNormal );",
+  "#else",
+  "\tvMxNormal = normalize( mat3( modelMatrix ) * normal );",
+  "#endif",
+].join("\n");
 const BASIC_FRAGMENT = "\tdiffuseColor.rgb *= 0.3 + 0.7 * max( dot( normalize( vMxNormal ), normalize( vec3( 1.0 ) ) ), 0.0 );";
 
 function mxBasic(THREE, base) {
@@ -119,8 +126,9 @@ function writeInstance(b, k, rows, i, m, p, q, sc) {
 // The glTF the loader parsed, as an MxScene: .scene and .camera to render, .geometries
 // (geometry id to its BufferGeometry, the glb's library), .materials (material id to its
 // three.js material), .batches ("gid:mid" to the InstancedMesh drawing those entities),
-// .materialOf(entity) (the store's Material column, or null), .sync(engine) each frame (the
-// camera, then the batches from engine.store), .setCalibration(partial) over a copy of
+// .skinned (entity to the SkinnedMesh drawing it), .materialOf(entity) (the store's Material
+// column, or null), .sync(engine) each frame (the camera, then the batches and the skinned
+// meshes from engine.store), .setCalibration(partial) over a copy of
 // CALIBRATION, and .dispose() (frees its GPU resources). The renderer is used for its
 // capabilities, the shadow map switch and, when the scene has an environment, PMREM.
 export async function buildScene(THREE, gltf, renderer) {
@@ -146,6 +154,8 @@ export async function buildScene(THREE, gltf, renderer) {
   for (const [id, index] of Object.entries(extras.mx_geometries ?? {})) {
     geometries.set(Number(id), (await gltf.parser.getDependency("mesh", index)).geometry);
   }
+  // The library geometries with joints (JOINTS_0, which the loader reads as skinIndex).
+  const skinnedGeometries = new Set([...geometries].filter(([, g]) => g.hasAttribute("skinIndex")).map(([id]) => id));
   // A mesh without a Material, which the desktop draws white with its basic light.
   const white = mxBasic(THREE, new THREE.MeshBasicMaterial({ name: "BasicMaterial", color: 0xffffff }));
   const coloured = new Map(); // material id -> its copy with vertex colours on
@@ -194,6 +204,65 @@ export async function buildScene(THREE, gltf, renderer) {
   let slotOf = new Map(), seen = null, seenVersion = -1;
   const m4 = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
 
+  // The skinned entities: one SkinnedMesh each under gltf.scene, the geometry shared, a
+  // skeleton of J bones per entity outside the scene graph. Each bone's matrixWorld is the
+  // pose's matrix and its inverse the identity, and the bind is detached at the identity, so
+  // a vertex of joint j lands at TRS · pose[j] · v (spec Q6: one draw call per entity).
+  const skinned = new Map(), spheres = new Map();
+
+  // The desktop's culling sphere of a skinned geometry (renderer.vertex_bounds): about the
+  // box's centre, the farthest vertex's distance padded to r * 1.5 + 0.5, as joints move them.
+  const sphereOf = (gid) => {
+    if (!spheres.has(gid)) {
+      const pos = geometries.get(gid).getAttribute("position");
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < pos.count; i++) {
+        for (let a = 0; a < 3; a++) {
+          lo[a] = Math.min(lo[a], pos.getComponent(i, a));
+          hi[a] = Math.max(hi[a], pos.getComponent(i, a));
+        }
+      }
+      const c = lo.map((x, a) => (x + hi[a]) / 2);
+      let r = 0;
+      for (let i = 0; i < pos.count; i++) {
+        r = Math.max(r, Math.hypot(pos.getComponent(i, 0) - c[0], pos.getComponent(i, 1) - c[1], pos.getComponent(i, 2) - c[2]));
+      }
+      spheres.set(gid, new THREE.Sphere(new THREE.Vector3(...c), r * 1.5 + 0.5));
+    }
+    return spheres.get(gid).clone();
+  };
+
+  const dropSkinned = (i) => {
+    const mesh = skinned.get(i);
+    mesh.removeFromParent();
+    mesh.skeleton.dispose();
+    skinned.delete(i);
+  };
+
+  const skinnedMesh = (i, gid, mid, store) => {
+    let mesh = skinned.get(i);
+    if (mesh !== undefined && mesh.geometry !== geometries.get(gid)) {
+      dropSkinned(i);
+      mesh = undefined;
+    }
+    if (mesh === undefined) {
+      const bones = Array.from({ length: store.skinned.get(gid) ?? 1 }, () => {
+        const bone = new THREE.Bone();
+        bone.matrixAutoUpdate = bone.matrixWorldAutoUpdate = false;
+        return bone;
+      });
+      mesh = new THREE.SkinnedMesh(geometries.get(gid), batchMaterial(gid, mid));
+      mesh.bindMode = THREE.DetachedBindMode;
+      mesh.bind(new THREE.Skeleton(bones, bones.map(() => new THREE.Matrix4())), new THREE.Matrix4());
+      mesh.matrixAutoUpdate = false;
+      mesh.boundingSphere = sphereOf(gid);
+      mesh.castShadow = mesh.receiveShadow = shadows;
+      mesh.name = `skinned:${i}`;
+      gltf.scene.add(mesh);
+      skinned.set(i, mesh);
+    } else mesh.material = batchMaterial(gid, mid);
+  };
+
   const batch = (gid, mid) => {
     const key = `${gid}:${mid}`;
     if (!batches.has(key)) {
@@ -222,8 +291,14 @@ export async function buildScene(THREE, gltf, renderer) {
       slotOf = new Map();
       const mesh = store.member("Mesh"), gids = store.column("Mesh");
       const mat = store.member("Material"), mids = store.column("Material");
+      const skinnedNow = new Set();
       for (let i = 0; i < store.highWater; i++) {
         if (!store.alive[i] || !mesh?.[i] || !geometries.has(gids[i])) continue;
+        if (skinnedGeometries.has(gids[i])) {
+          skinnedMesh(i, gids[i], mat?.[i] ? mids[i] : 0, store);
+          skinnedNow.add(i);
+          continue;
+        }
         const key = batch(gids[i], mat?.[i] ? mids[i] : 0);
         const list = members.get(key);
         slotOf.set(i, [key, list.length]);
@@ -242,6 +317,7 @@ export async function buildScene(THREE, gltf, renderer) {
         b.visible = list.length > 0;
         changed.add(b);
       }
+      for (const i of skinned.keys()) if (!skinnedNow.has(i)) dropSkinned(i);
     } else {
       const dirty = store.takeDirty();
       if (dirty !== null) {
@@ -259,6 +335,21 @@ export async function buildScene(THREE, gltf, renderer) {
       b.boundingBox = null;
       b.computeBoundingSphere();
     }
+    // Every sync: each skinned mesh's matrix from its Transform row, its bones from the pose.
+    for (const [i, mesh] of skinned) {
+      mesh.matrix.compose(
+        p.set(rows[i * 10], rows[i * 10 + 1], rows[i * 10 + 2]),
+        q.set(rows[i * 10 + 3], rows[i * 10 + 4], rows[i * 10 + 5], rows[i * 10 + 6]),
+        sc.set(rows[i * 10 + 7], rows[i * 10 + 8], rows[i * 10 + 9]),
+      );
+      mesh.matrixWorldNeedsUpdate = true;
+      const pose = store.joints.get(i);
+      mesh.skeleton.bones.forEach((bone, m) => {
+        if (pose === undefined) bone.matrixWorld.identity();
+        else bone.matrixWorld.fromArray(pose, m * 16).transpose(); // row-major to three's columns
+      });
+      mesh.skeleton.update();
+    }
   };
 
   const camera = new THREE.PerspectiveCamera();
@@ -268,6 +359,7 @@ export async function buildScene(THREE, gltf, renderer) {
     geometries,
     materials,
     batches,
+    skinned,
     materialOf(entity) {
       const store = seen;
       if (store === null || !(entity < store.capacity && store.alive[entity] && store.member("Material")?.[entity])) return null;
@@ -291,6 +383,7 @@ export async function buildScene(THREE, gltf, renderer) {
       for (const m of coloured.values()) free(m);
       free(white);
       for (const b of batches.values()) b.dispose(); // the instance buffers
+      for (const mesh of skinned.values()) mesh.skeleton.dispose(); // the bone textures
       free(scene.environment);
     },
     sync(engine) {

@@ -5,6 +5,7 @@ Each breaking test damages the copied runtime one way and must see compare repor
 mismatch. tests/web/browser reuses script, PATHS and the two export fixtures."""
 
 import json
+import math
 import random
 import shutil
 from pathlib import Path
@@ -16,7 +17,7 @@ from manifoldx.web.replay import compare, replay_node, replay_python
 
 EXAMPLE = Path(__file__).parents[2] / "examples" / "web_crowd.py"
 FIXTURE = Path(__file__).parent / "fixtures" / "web_crowd_script.json"
-PATHS = ["waves", "picked", "throws", "g", "fallen"]
+PATHS = ["waves", "picked", "throws", "g", "fallen", "walked"]
 
 SEED, FRAMES, VIEW = 5, 600, [800, 500]
 SPACE = (5, 6, 200, 301)  # two waves in a row, one after the first fell, one after the resize
@@ -51,7 +52,11 @@ ROUTED = {
 }
 HELD = [(80, 90), (220, 260)]  # the pointer stays on its control: no wandering moves
 WHEEL = {270: 120.0}  # dy, CSS pixels
-KEYS = {280: "ArrowLeft"}  # pressed, released the next frame
+KEYS = {
+    280: "ArrowLeft",
+    400: "f",
+    460: "f",
+}  # pressed, released the next frame; f pauses the figure
 
 
 class _Page:
@@ -219,7 +224,7 @@ def _events(entry: dict) -> list[str]:
 def test_the_script_does_what_it_says(crowd_python_trace):
     t = crowd_python_trace
     alive = [len(e["store"]["alive"]) for e in t]
-    assert alive[7] == 48 + 1  # two waves and the ground
+    assert alive[7] == 48 + 2  # two waves, the ground and the figure
     assert t[7]["state"]["waves"] == 2
 
     # The Button's two clicks at 60 and 61: each click event the frame after its pointer, each
@@ -229,19 +234,19 @@ def test_the_script_does_what_it_says(crowd_python_trace):
     assert "gui:button:wave:click" in t[61]["events"] and "gui:button:wave:click" in t[62]["events"]
     assert "throw" in t[62]["events"] and "throw" in t[63]["events"]
     assert [t[i]["state"]["waves"] for i in (61, 62, 63, 65)] == [2, 3, 4, 4]
-    assert alive[63] == 4 * 24 + 1
+    assert alive[63] == 4 * 24 + 2
 
     # The first rings fall below the floor and are destroyed before the fifth wave, the thrown
     # ones still up; it spawns into the freed slots, the free list from its end.
     drops = [i for i in range(8, 200) if alive[i] < alive[i - 1]]
     assert drops, "no box was destroyed before frame 200"
-    assert alive[199] == 1 + 48
+    assert alive[199] == 2 + 48
     freed = t[199]["store"]["free"]
     assert len(freed) == 48
-    assert t[200]["store"]["high_water"] == t[199]["store"]["high_water"] == 97
+    assert t[200]["store"]["high_water"] == t[199]["store"]["high_water"] == 98
     assert t[200]["store"]["alive"] == sorted([*t[199]["store"]["alive"], *freed[-24:]])
     assert t[199]["state"]["fallen"] == 48 and t[230]["state"]["fallen"] == 96
-    assert t[599]["state"]["fallen"] == 7 * 24 and alive[599] == 1
+    assert t[599]["state"]["fallen"] == 7 * 24 and alive[599] == 2
 
     # Frames 40 and 41 pick the same box and paint it gold; the Button's click at 60 clears
     # the pick, giving its colour back; 120 picks its neighbour; the sky at 150 clears it.
@@ -286,7 +291,7 @@ def test_the_script_does_what_it_says(crowd_python_trace):
     # The resize reaches the engine and its handler, and the wave after it is the seventh.
     assert t[300]["state"]["resize"] == [640, 400]
     assert t[301]["state"]["waves"] == 7
-    assert alive[301] == 1 + 3 * 24
+    assert alive[301] == 2 + 3 * 24
     assert t[400]["state"]["fall"] > 0.0
     # The clock and the frame event.
     assert t[60]["state"]["sec"] == pytest.approx(1.0, abs=1e-5)
@@ -299,7 +304,44 @@ def test_the_script_does_what_it_says(crowd_python_trace):
         "gui:toggle:spin:change", "gui:joystick:wind:change", "throw", "fell",
     }  # fmt: skip
     last = t[-1]["state"]
-    assert last["key_down"] == last["key_up"] == 5  # Space four times and ArrowLeft
+    assert last["key_down"] == last["key_up"] == 7  # Space four times, ArrowLeft and f twice
+
+
+FIGURE = 1  # the walking figure's slot, spawned after the ground
+
+
+def _figure(entry: dict) -> tuple[list[float], list[list[float]]]:
+    """The figure's Transform row and its joints in a trace entry."""
+    alive = entry["store"]["alive"]
+    return entry["store"]["rows"]["Transform"][alive.index(FIGURE)], entry["joints"][str(FIGURE)]
+
+
+def test_the_figure_walks_and_swings(crowd_python_trace):
+    t = crowd_python_trace
+    row, joints = _figure(t[599])
+    assert abs(math.hypot(row[0], row[2]) - 6.0) < 1e-4
+    assert row[1] == 0.0
+    assert len(joints) == 6
+    assert _figure(t[100])[1] != _figure(t[200])[1]
+    # f at 400 pauses it: pose, place and walked hold until f at 460 resumes it
+    held = [_figure(t[i]) for i in range(399, 460)]
+    assert all(h == held[0] for h in held)
+    assert {t[i]["paths"]["walked"] for i in range(399, 460)} == {t[399]["paths"]["walked"]}
+    assert _figure(t[460]) != held[0] and t[460]["paths"]["walked"] > t[399]["paths"]["walked"]
+    # 1.2 m/s over the frames it walked
+    assert t[599]["paths"]["walked"] == pytest.approx(1.2 * (600 - 60) / 60)
+
+
+def test_a_figure_drawn_at_rest_is_a_mismatch(crowd_export, crowd_python_trace, frames, tmp_path):
+    out = _copy(crowd_export, tmp_path)
+    _patch(
+        out,
+        "manifoldx.js",
+        "  set_joints(matrices) {\n",
+        "  set_joints(matrices) {\n    return null;\n",
+    )
+    mismatch = compare(crowd_python_trace, replay_node(out, frames, PATHS))
+    assert mismatch is not None and mismatch.frame == 0, str(mismatch)
 
 
 # Each damages the copied manifoldx.js or pyrt.js one way: [file, old text, new text].

@@ -100,6 +100,7 @@ def _meshed(engine, report):
 
 def nodes(engine, names, extras, report):
     from manifoldx.resources import BasicMaterial
+    from manifoldx.skinning import joint_count
 
     unlit = None  # the renderer draws a mesh without a Material as a white BasicMaterial
     name_of, extras_of = _lookup(names), _lookup(extras)
@@ -110,10 +111,12 @@ def nodes(engine, names, extras, report):
             unlit = unlit or BasicMaterial("#ffffff")
             material = unlit
         t = comps["Transform"][i]
-        out.append(Node(engine._geometry_registry.get(gid), material,
+        geo = engine._geometry_registry.get(gid)
+        joints = engine._render_pipeline._joints.pose(i, joint_count(geo)) if "joints" in geo else None
+        out.append(Node(geo, material,
                         pos=tuple(t[0:3]), rot=tuple(t[3:7]), scale=tuple(t[7:10]),
                         name=name_of(i) or f"entity_{i}",
-                        extras={**(extras_of(i) or {}), "mx": {"entity": i, "material": mid}}))
+                        extras={**(extras_of(i) or {}), "mx": {"entity": i, "material": mid}}, joints=joints))
     return out
 
 

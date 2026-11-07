@@ -24,6 +24,7 @@ from .types import (
     LIB_CONSTANTS,
     MATH_FUNCTIONS,
     ND_FUNCTIONS,
+    ND_ONLY_OPS,
     RANDOM_FUNCTIONS,
     RUNTIME_KEYWORDS,
     RUNTIME_SURFACE,
@@ -110,7 +111,7 @@ def js_name(name: str) -> str:
 # numpy's arithmetic as runtime helpers; a "32" suffix gives a Float32Array.
 VECTOR_OPS = {ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div"}
 # Operators on numpy arrays of any rank, as $rt.nd's functions.
-ND_OPS = {**VECTOR_OPS, ast.BitAnd: "and", ast.BitOr: "or"}
+ND_OPS = {**VECTOR_OPS, ast.BitAnd: "and", ast.BitOr: "or", ast.MatMult: "matmul"}
 ND_COMPARE = {
     ast.Lt: "lt",
     ast.LtE: "le",
@@ -1034,7 +1035,7 @@ class _Module:
         if "field" in (a_t.kind, b_t.kind):
             return self.field_op(n, a_t, b_t)
         arrays = [m.kind for m in a_t.members + b_t.members if m.kind in ("vec", "nd")]
-        if "nd" in arrays or (arrays and isinstance(op, (ast.Pow, ast.BitAnd, ast.BitOr))):
+        if "nd" in arrays or (arrays and isinstance(op, ND_ONLY_OPS)):
             return self.nd_op(n, a_t, b_t)
         if arrays:
             return self.vector_op(n, a_t, b_t)
@@ -1102,10 +1103,29 @@ class _Module:
         t = self.ty(n)
         if isinstance(n.op, ast.Pow):
             return self.nd_pow(n, t)
+        if isinstance(n.op, ast.MatMult):
+            self.no_vector_in_matmul(n, a_t, b_t)
         if type(n.op) not in ND_OPS or t.kind != "nd":
             self.fail(n, f"`{ast.unparse(n)}` on a {a_t} and a {b_t}")
         a, b = self.e(n.left), self.e(n.right)
         return f'{self.rt("nd." + ND_OPS[type(n.op)])}({a}, {b}, "{t.dtype}")'
+
+    def no_vector_in_matmul(self, n: ast.BinOp, a_t: Ty, b_t: Ty) -> None:
+        """numpy multiplies a matrix by a vector through another kernel, whose rounding order
+        the page cannot match; the same product with the vector as a column matches."""
+        vector = [t.kind == "vec" or (t.kind == "nd" and t.rank == 1) for t in (a_t, b_t)]
+        if vector[1] and not vector[0]:
+            self.fail(
+                n,
+                f"`{ast.unparse(n)}`, a matrix times a vector, which numpy rounds in an order the "
+                "page cannot match (write the vector as a column: m @ np.array([[x], [y], [z]]))",
+            )
+        if any(vector):
+            self.fail(
+                n,
+                f"`{ast.unparse(n)}`, a vector in @, which numpy rounds in an order the page cannot "
+                "match (write a vector as a row, np.array([[x, y, z]]), or a column)",
+            )
 
     def nd_pow(self, n: ast.BinOp, t: Ty) -> str:
         """numpy computes a ** 2, a ** 0.5 and a ** -1 exactly, as square, sqrt and
@@ -1522,6 +1542,11 @@ class _Module:
             name == "numpy.linalg.norm" and not kw and args and self.ty(args[0]).kind == "vec"
         ):
             return self.nd_call(name, n, what)
+        if name == "numpy.eye":
+            if kw - {"dtype"} or len(args) != 1 or not self.ty(n).known:
+                self.fail(n, f"this call to {what}")
+            self.numeric(n, args[0], what)
+            return f'{self.rt("nd.eye")}({self.e(args[0])}, "{self.ty(n).dtype}")'
         if name == "numpy.array" and self.ty(n).kind == "nd":
             if kw - {"dtype"} or not 1 <= len(args) + len(kw) <= 2:
                 self.fail(n, f"this call to {what}")

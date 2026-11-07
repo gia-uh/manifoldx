@@ -136,13 +136,19 @@ export function loadApp(state, modules, options = {}) {
 
 const TYPED = { f4: Float32Array, u4: Uint32Array };
 
+// manifoldx.skinning.MAX_JOINTS: a pose holds this many matrices.
+export const MAX_JOINTS = 32;
+const IDENTITY = Float32Array.of(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+
 // The page's entity store, as manifoldx.ecs.EntityStore holds it: per component a row-major
 // typed array of `cols` columns and a member bit per slot, an alive bit per slot and the free
 // list. The arrays hold `capacity` slots and grow by doubling up to maxEntities; a slot at or
 // past capacity is dead. Slots, membership and the free list follow EntityStore's rules, so
 // the same spawns and destroys give the same indices. version moves on every spawn and
 // destroy and on a write to Mesh or Material; dirty is [lo, hi), the slots whose Transform
-// rows changed since takeDirty(), or null.
+// rows changed since takeDirty(), or null. skinned maps a skinned geometry's id to its joint
+// count; joints maps a posed slot to its MAX_JOINTS matrices, row-major, as the desktop's
+// JointStore keeps a block per posed entity: a slot destroyed or handed out again loses it.
 export class Store {
   // header: state.json's "ecs"; buffer: ecs.bin, laid out by it.
   static load(header, buffer) {
@@ -163,6 +169,10 @@ export class Store {
       store._members.set(c.name, members);
     }
     for (const c of header.spawnable ?? []) store._spawnable.set(c.name, c);
+    for (const [gid, j] of Object.entries(header.skinned ?? {})) store.skinned.set(Number(gid), j);
+    for (const { entity, at } of header.poses ?? []) {
+      store.joints.set(entity, new Float32Array(buffer.slice(at[0], at[0] + at[1])));
+    }
     return store;
   }
 
@@ -179,6 +189,8 @@ export class Store {
     this._members = new Map();
     this._spawnable = new Map(); // layouts registered at their first spawn
     this._queue = [];
+    this.skinned = new Map();
+    this.joints = new Map();
   }
 
   layout(name) { return this._layouts.get(name); }
@@ -249,6 +261,7 @@ export class Store {
     }
     this._grow(hi - 1);
     for (const i of indices) this.alive[i] = 1;
+    for (const i of indices) this.joints.delete(i);
     this.highWater = Math.max(this.highWater, hi);
     for (const [name, bits] of this._members) {
       const on = rows.has(name) || name === "Transform" ? 1 : 0;
@@ -276,6 +289,7 @@ export class Store {
       .filter((i) => i < this.capacity && this.alive[i]);
     if (!gone.length) return;
     for (const i of gone) this.alive[i] = 0;
+    for (const i of gone) this.joints.delete(i);
     this.free.push(...gone);
     this.version++;
   }
@@ -330,6 +344,20 @@ export class Store {
       });
       if (hi > 0) this._touch(name, lo, hi);
     }
+  }
+
+  // data, j row-major matrices per index, into the first j matrices of each index's pose,
+  // now; a slot with no pose gets MAX_JOINTS identities first, as JointStore.set_many does.
+  setJoints(indices, data, j) {
+    Array.from(indices, Number).forEach((i, k) => {
+      let pose = this.joints.get(i);
+      if (pose === undefined) {
+        pose = new Float32Array(MAX_JOINTS * 16);
+        for (let m = 0; m < MAX_JOINTS; m++) pose.set(IDENTITY, m * 16);
+        this.joints.set(i, pose);
+      }
+      pose.set(data.subarray(k * j * 16, (k + 1) * j * 16));
+    });
   }
 
   takeDirty() {
@@ -492,6 +520,30 @@ const traceFloat = (x) => (Number.isNaN(x) ? "nan" : x === Infinity ? "inf" : x 
 // alive slots, free, high_water, rows: {component: the alive slots' rows}}, a component's
 // rows being {digest, n} past 1,000 alive entities: the rows' uint32 words w[i], row-major,
 // d = Σ w[i]·(i + 1) mod 2^32.
+const JOINTS_DIGEST_PAST = 8;
+
+// The posed alive entities' joints as the trace writes them (manifoldx.web.replay.joints_trace):
+// {entity: J rows of 16}, J the joint count of the entity's geometry, ascending; past 8 posed
+// entities {digest, n}, traceStore's digest over the float32 words of all J-joint blocks.
+export function traceJoints(store) {
+  const posed = [...store.joints.keys()].filter((i) => store.alive[i]).sort((a, b) => a - b);
+  const mesh = store.column("Mesh");
+  const blocks = posed.map((i) => store.joints.get(i).subarray(0, store.skinned.get(mesh[i]) * 16));
+  if (posed.length > JOINTS_DIGEST_PAST) {
+    let d = 0, w = 0;
+    for (const b of blocks) {
+      const words = new Uint32Array(b.buffer, b.byteOffset, b.length);
+      for (const x of words) d = (d + Math.imul(x, ++w)) >>> 0;
+    }
+    return { digest: d, n: posed.length };
+  }
+  const out = {};
+  posed.forEach((i, k) => {
+    out[i] = Array.from({ length: blocks[k].length / 16 }, (_, m) => Array.from(blocks[k].subarray(m * 16, m * 16 + 16)));
+  });
+  return out;
+}
+
 export function traceStore(store) {
   const alive = [];
   for (let i = 0; i < store.highWater; i++) if (store.alive[i]) alive.push(i);
@@ -560,9 +612,31 @@ export class EntityHandle {
     return null;
   }
 
+  // As the desktop handle's: the geometry first, then the shape; joints past J keep theirs.
+  set_joints(matrices) {
+    const store = this._engine.store;
+    requireSkinned(store, [this.index]);
+    const m = asValues(matrices);
+    if (m.shape.length !== 3 || m.shape[1] !== 4 || m.shape[2] !== 4 || !(m.shape[0] >= 1 && m.shape[0] <= MAX_JOINTS)) {
+      throw new Error(`ValueError: set_joints expects shape (J, 4, 4) with 1 <= J <= ${MAX_JOINTS}, got ${shapeOf(m.shape)}`);
+    }
+    store.setJoints([this.index], Float32Array.from(m.data), m.shape[0]);
+    return null;
+  }
+
   destroy(free_geometry = true) {
     this._engine.store.queueDestroy([this.index]);
     return null;
+  }
+}
+
+// Every index's geometry (its Mesh column) is skinned, or Engine.set_joints's error.
+function requireSkinned(store, indices) {
+  const mesh = store.column("Mesh");
+  for (const i of indices) {
+    if (mesh === undefined || !store.skinned.has(mesh[i])) {
+      throw new Error("ValueError: set_joints needs an entity whose geometry has joints (Mesh(joints=...))");
+    }
   }
 }
 
@@ -731,6 +805,56 @@ export class Camera {
     const n = vnorm32(d);
     return d.map((x) => Math.fround(x / n));
   }
+
+  // Camera.project: points (n, 3) or (3,) as float64 with a column of ones, times
+  // cameraMatrix transposed, in float64; pixels from the top-left and the clip w (negative
+  // behind the camera). [xy (n, 2), w (n,)].
+  project(points, width, height) {
+    const { data, shape } = asValues(points);
+    const n = shape.length === 1 ? 1 : shape[0];
+    const m = cameraMatrix(this, width / height);
+    const xy = new Float64Array(n * 2), w = new Float64Array(n);
+    const clip = [0, 0, 0, 0];
+    for (let r = 0; r < n; r++) {
+      const [x, y, z] = data.subarray(r * 3, r * 3 + 3);
+      for (let c = 0; c < 4; c++) clip[c] = x * m[c * 4] + y * m[c * 4 + 1] + z * m[c * 4 + 2] + m[c * 4 + 3];
+      w[r] = clip[3];
+      xy[r * 2] = ((clip[0] / clip[3] + 1) / 2) * width;
+      xy[r * 2 + 1] = ((1 - clip[1] / clip[3]) / 2) * height;
+    }
+    return [new NdArray(xy, [n, 2], "f64"), new NdArray(w, [n], "f64")];
+  }
+}
+
+// The desktop's get_projection_matrix(aspect, near, far) @ get_view_matrix(), row-major: each
+// matrix's entries computed in float64 and stored as float32, as camera.py does, the product
+// numpy's float32 matmul.
+export function cameraMatrix(camera, aspect) {
+  const [px, py, pz] = camera.position, [ux, uy, uz] = camera.up;
+  let fx = camera.target[0] - px, fy = camera.target[1] - py, fz = camera.target[2] - pz;
+  let k = Math.sqrt(fx * fx + fy * fy + fz * fz);
+  [fx, fy, fz] = [fx / k, fy / k, fz / k];
+  let [rx, ry, rz] = [fy * uz - fz * uy, fz * ux - fx * uz, fx * uy - fy * ux];
+  k = Math.sqrt(rx * rx + ry * ry + rz * rz);
+  [rx, ry, rz] = [rx / k, ry / k, rz / k];
+  const [tx, ty, tz] = [ry * fz - rz * fy, rz * fx - rx * fz, rx * fy - ry * fx];
+  const view = Float32Array.of(
+    rx, ry, rz, -(rx * px + ry * py + rz * pz),
+    tx, ty, tz, -(tx * px + ty * py + tz * pz),
+    -fx, -fy, -fz, fx * px + fy * py + fz * pz,
+    0, 0, 0, 1,
+  );
+  const { near, far } = camera;
+  const f = 1.0 / Math.tan((camera.fov * (Math.PI / 180)) / 2.0);
+  const proj = new Float32Array(16);
+  proj[0] = f / aspect;
+  proj[5] = f;
+  proj[10] = -far / (far - near);
+  proj[11] = -(far * near) / (far - near);
+  proj[14] = -1.0;
+  const m4 = (a) => new NdArray(a, [4, 4], "f32");
+  const [P, V] = [m4(proj), m4(view)];
+  return nd.matmul(P, V, "f32").data;
 }
 
 // createEngine({w, h, camera: {position, target, fov, up, near, far}, origin: [x, z], gui, materials, calls,
@@ -808,6 +932,20 @@ export function createEngine({ w, h, camera, origin = [0, 0], gui = null, materi
       x.data.forEach((m, i) => { if (m) ix.push(i); });
     } else ix = Array.from(x instanceof NdArray ? x.data : x);
     if (ix.length) engine.store.queueDestroy(ix);
+    return null;
+  };
+  // engine.set_joints(indices, matrices), as Engine.set_joints: the shapes, then each entity's
+  // geometry, then matrices[k] (cast to float32) into entity indices[k]'s pose at once.
+  engine.set_joints = (indices, matrices) => {
+    const ix = asValues(indices), m = asValues(matrices), s = m.shape;
+    if (ix.shape.length !== 1 || s.length !== 4 || s[0] !== ix.shape[0] || s[2] !== 4 || s[3] !== 4 || !(s[1] >= 1 && s[1] <= MAX_JOINTS)) {
+      throw new Error(
+        `ValueError: set_joints expects indices of shape (N,) and matrices of shape (N, J, 4, 4) with 1 <= J <= ${MAX_JOINTS}, got ${shapeOf(ix.shape)} and ${shapeOf(s)}`,
+      );
+    }
+    if (ix.data.length === 0) return null;
+    requireSkinned(engine.store, ix.data);
+    engine.store.setJoints(ix.data, Float32Array.from(m.data), s[1]);
     return null;
   };
   engine.set_material = (entity, material) => {
@@ -1208,6 +1346,7 @@ export function traceEntry(app, paths, logStart) {
     state: engine.state,
     paths: Object.fromEntries(paths.map((p) => [p, pathValue(app, p)])),
     store: engine.store === null || engine.store === undefined ? null : traceStore(engine.store),
+    joints: engine.store === null || engine.store === undefined ? {} : traceJoints(engine.store),
     events: engine.bus.delivered.splice(0),
   };
   return JSON.parse(toJSON(entry));

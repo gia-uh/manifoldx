@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **export --web: skinned entities and matrices in frame code.** Transpiled code may call
+  `set_joints` on the engine and on entity handles, use `@` on matrices and stacks of them
+  (numpy's broadcasting; float32 summed in numpy's order, so the page matches bit for bit),
+  `np.eye`, nested `np.array`, `np.stack` of any rank and `Camera.project`; the page draws
+  each skinned entity posed, a three.js SkinnedMesh of its own, one draw call each.
+  `examples/web_crowd.py` gains a walking figure (#140).
+
 - **A Joystick widget.** `manifoldx.gui.Joystick(name=...)`: a drag gives a value in the unit
   disc, y up, emitting `gui:joystick:<name>:change`; release returns it to (0, 0) (#140).
 
@@ -269,6 +276,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails if any frame takes more than twice the median (#85).
 
 ### Changed
+
+- **glTF export writes a skinned entity posed.** `Engine.export_gltf` writes a skinned entity
+  with its joints and its current pose: `JOINTS_0` and `WEIGHTS_0` on its mesh, a skin with
+  identity inverse binds, and one joint node per joint under a node carrying the entity's
+  `Transform`. Viewers that ignored the joints now pose the figure, and the file holds one
+  more node per joint and per skinned entity. Lifts the 0.10.0 known limitation (#82).
 
 - **A pointer capture per pointer.** `PointerEvent.pointer_id` is new, always 0 on the desktop;
   the GUI keeps one pointer capture per pointer, so a pointer going down no longer ends another

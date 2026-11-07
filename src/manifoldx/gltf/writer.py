@@ -21,6 +21,7 @@ class Node:
     scale: tuple = (1.0, 1.0, 1.0)
     name: str | None = None
     extras: dict | None = None
+    joints: np.ndarray | None = None  # (J, 4, 4) row-major pose of a skinned geometry's joints
 
 
 def build_glb(nodes, *, camera=None, lights=(), environment=None, scene_extras=None, extra_materials=None,
@@ -161,14 +162,31 @@ class _Writer:
                 prim["material"] = mat
             self._meshes[key] = self.b.add("meshes", {"primitives": [prim]})
         entry = {"name": name, "mesh": self._meshes[key]}
+        trs = {}
         for key_, value, default in (("translation", node.pos, (0, 0, 0)), ("rotation", node.rot, (0, 0, 0, 1)),
                                      ("scale", node.scale, (1, 1, 1))):
             value = [float(v) for v in value]
             if value != list(default):
-                entry[key_] = value
+                trs[key_] = value
+        if node.joints is None:
+            entry.update(trs)
+        else:
+            # glTF ignores a skinned mesh node's transform, so the entity's Transform goes on
+            # the joints' parent and each vertex lands at TRS . pose[joint] . v.
+            entry["skin"] = self.skin(name, node.joints, trs)
         if node.extras is not None:
             entry["extras"] = node.extras
         self._roots.append(self.b.add("nodes", entry))
+
+    def skin(self, name, pose, trs):
+        """One joint node per matrix of `pose` under a skeleton node holding `trs`; the skin's index."""
+        joints = [self.b.add("nodes", {"name": f"{name}_joint_{j}", "matrix": [float(v) for v in m.T.ravel()]})
+                  for j, m in enumerate(np.asarray(pose, np.float32))]
+        skeleton = self.b.add("nodes", {"name": f"{name}_skeleton", **trs, "children": joints})
+        self._roots.append(skeleton)
+        binds = np.tile(np.eye(4, dtype=np.float32).ravel(), (len(joints), 1))
+        return self.b.add("skins", {"joints": joints, "inverseBindMatrices": self.b.accessor(binds),
+                                    "skeleton": skeleton})
 
     def library(self, geometry):
         """A geometry as a mesh of its own, COLOR_0 included when it has colours; the
@@ -196,6 +214,13 @@ class _Writer:
             attrs["TEXCOORD_0"] = self.b.accessor(np.asarray(geo["uvs"], np.float32), target=ARRAY_BUFFER)
         if colors and "colors" in geo:
             attrs["COLOR_0"] = self.b.accessor(np.asarray(geo["colors"], np.float32), target=ARRAY_BUFFER)
+        if "joints" in geo:  # rigid skinning: one joint per vertex, weight 1
+            joints = np.zeros((len(pos), 4), np.uint8)
+            joints[:, 0] = np.asarray(geo["joints"])
+            weights = np.zeros((len(pos), 4), np.float32)
+            weights[:, 0] = 1.0
+            attrs["JOINTS_0"] = self.b.accessor(joints, target=ARRAY_BUFFER)
+            attrs["WEIGHTS_0"] = self.b.accessor(weights, target=ARRAY_BUFFER)
         indices = None
         if "indices" in geo:
             # glTF forbids the component type's maximum value as an index.
