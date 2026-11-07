@@ -22,6 +22,7 @@ from .reach import Reach, closure_site
 from .types import (
     LIB_CONSTANTS,
     MATH_FUNCTIONS,
+    ND_FUNCTIONS,
     RUNTIME_SURFACE,
     STATE,
     STR_METHODS,
@@ -689,6 +690,10 @@ class _Module:
                 self.fail(n, "a chained assignment to anything but names")
             return " = ".join(js_name(t.id) for t in targets) + f" = {self.e(value)}"
         t = targets[0]
+        if isinstance(t, ast.Subscript) and self.ty(t.value).kind == "nd":
+            self.fail(
+                n, f"`{ast.unparse(n)}`, a write through an index (build a new array with np.where)"
+            )
         if isinstance(t, ast.Subscript):
             return self.setitem(t, self.e(value))
         if isinstance(t, ast.Attribute) and self.ty(t.value) == STATE:
@@ -883,6 +888,8 @@ class _Module:
                 f"`{ast.unparse(n)}`, an attribute of a value of unknown type "
                 f"(annotate `{ast.unparse(n.value)}`),",
             )
+        if t.kind == "nd" and n.attr == "shape":
+            return f"[...{self.e(n.value)}.shape]"
         if not t.all("obj", "none"):
             self.fail(n, f"the attribute .{n.attr} of a {t}")
         if self.env.methods(t, n.attr):  # a bound method keeps its object, as in Python
@@ -1154,6 +1161,16 @@ class _Module:
             lo = self.e(s.lower) if s.lower else "0"
             hi = f", {self.e(s.upper)}" if s.upper else ""
             return f"{self.e(n.value)}.slice({lo}{hi})"
+        if t.kind == "nd" or (t.kind == "vec" and self.ty(s).kind == "nd"):
+            if not self.ty(n).known:
+                self.fail(
+                    n,
+                    f"`{ast.unparse(n)}`, an index of a numpy array outside the subset "
+                    "(an int, [:, j], a bool mask or an index array),",
+                )
+            if isinstance(s, ast.Tuple):  # [:, j]
+                return f"{self.rt('nd.getitem')}({self.e(n.value)}, [null, {self.e(s.elts[1])}])"
+            return f"{self.rt('nd.getitem')}({self.e(n.value)}, {self.e(s)})"
         obj = self.e(n.value)
         if t.all("dict"):  # a missing key raises KeyError, as in Python
             return f"{self.rt('getitem')}({obj}, {self.e(s)})"
@@ -1248,6 +1265,8 @@ class _Module:
                 if n.keywords and len(sigs) > 1:
                     self.fail(n, f"keyword arguments to .{f.attr}(), whose classes differ in it,")
                 return self.place(n, methods[0], f"{self.e(f.value)}.{f.attr}", skip=1)
+            if f.attr in ("sum", "min", "max", "mean") and is_array(self.ty(f.value)):
+                self.fail(n, f"`{ast.unparse(n)}` (write np.{f.attr}({ast.unparse(f.value)}))")
             if f.attr == "tolist" and not (n.args or n.keywords) and is_array(self.ty(f.value)):
                 return f"{self.rt('nd.tolist')}({self.e(f.value)})"
             method = self.method(n, f)
@@ -1272,6 +1291,14 @@ class _Module:
                 self.numeric(n, x, what)
             start, stop, step = (self.e(x) for x in args[:3])
             return f'{self.rt("nd.arange")}({start}, {stop}, {step}, "{self.ty(n).dtype}")'
+        if name in ND_FUNCTIONS and not (
+            name == "numpy.linalg.norm" and not kw and args and self.ty(args[0]).kind == "vec"
+        ):
+            return self.nd_call(name, n, what)
+        if name == "numpy.array" and self.ty(n).kind == "nd":
+            if kw - {"dtype"} or not 1 <= len(args) + len(kw) <= 2:
+                self.fail(n, f"this call to {what}")
+            return f'{self.rt("nd.array")}({self.iterable(args[0])}, "{self.ty(n).dtype}")'
         if name in ("numpy.array", "numpy.zeros"):
             if kw - {"dtype"} or not 1 <= len(args) + len(kw) <= 2:
                 self.fail(n, f"this call to {what}")
@@ -1318,6 +1345,27 @@ class _Module:
                 js = self.rt(js[4:])
             return f"{js}({', '.join(self.e(x) for x in args)})"
         self.fail(n, what)
+
+    def nd_call(self, name: str, n: ast.Call, what: str) -> str:
+        """A numpy function on arrays (ND_FUNCTIONS), given the dtype numpy computes in."""
+        f = name.removeprefix("numpy.")
+        t = self.ty(n)
+        kw = {k.arg for k in n.keywords}
+        axis_kw = f in ("sum", "mean", "min", "max", "linalg.norm", "stack")
+        if not t.known or kw - ({"axis"} if axis_kw else set()):
+            found = ", ".join(str(self.ty(a)) for a in n.args)
+            self.fail(n, f"`{ast.unparse(n)}`, {what} of {found or 'nothing'},")
+        args = [self.e(a) for a in n.args]
+        d = t.dtype if t.kind == "nd" else {"f32": "f32", "f64": "f64"}.get(t.dtype, "i32")
+        if f in ("sum", "mean", "min", "max", "linalg.norm", "stack"):
+            axis = self.env.axis(n)
+            if f == "stack" and axis is None:
+                axis = 0
+            fn = "norm" if f == "linalg.norm" else f
+            return f'{self.rt("nd." + fn)}({args[0]}, {"null" if axis is None else axis}, "{d}")'
+        if f in ("argmin", "argmax") or (f == "where" and len(args) == 1):
+            return f"{self.rt('nd.' + f)}({args[0]})"
+        return f'{self.rt("nd." + f)}({", ".join(args)}, "{d}")'
 
     def nd_full(self, name: str, n: ast.Call, what: str) -> str:
         """np.zeros, np.ones and np.full: a float vector for an int shape, else an NdArray."""
@@ -1488,6 +1536,8 @@ class _Module:
             self.fail(n, f"this call to {name}()")
         x, t = args[0], self.ty(args[0])
         if name == "len":
+            if t.kind == "nd":
+                return f"{self.e(x)}.shape[0]"
             if t.all("list", "tuple", "vec"):
                 return f"{self.e(x)}.length"
             if t.all("set"):

@@ -181,6 +181,8 @@ def nd_dtype(op: ast.AST, a: Ty, b: Ty) -> str | None:
         else:
             return None
     dtypes = {d for k, d in kinds if k != "py"}
+    if not dtypes:  # two Python numbers, as np.where(m, 1.0, 0) sees them
+        return "f64" if ("py", "float") in kinds else "i32"
     if "bool" in dtypes:
         return None
     if "f64" in dtypes:
@@ -540,6 +542,14 @@ STR_METHODS = {
 }
 
 LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
+# The numpy functions on arrays of any rank (TypeEnv.nd_function types them).
+ND_FUNCTIONS = frozenset(
+    f"numpy.{f}"
+    for f in (
+        "sin cos exp sqrt floor clip minimum maximum where sum mean min max argmin argmax "
+        "stack column_stack"
+    ).split()
+) | {"numpy.linalg.norm"}
 # The numpy dtypes an array constructor may name, by their dotted names.
 NP_DTYPES = {
     "numpy.float32": "f32",
@@ -641,6 +651,7 @@ LIB_CONSTANTS = {
     "math.nan": "NaN",
     "numpy.pi": "Math.PI",
     "numpy.inf": "Infinity",
+    "numpy.nan": "NaN",
 }
 
 
@@ -957,18 +968,21 @@ class TypeEnv:
             if shape.all("int"):
                 return vec(d) if d in ("f32", "f64") else nd(d, 1)
             return UNKNOWN
-        if name == "numpy.array":
+        if name == "numpy.array" and n.args:
+            given = any(k.arg == "dtype" for k in n.keywords) or len(n.args) > 1
+            items = self.expr(n.args[0], ctx)
+            if not given and items.all("list", "tuple") and elem(items).all("int"):
+                return nd("i32", 1)  # numpy's int64, held as int32
             d = self.np_dtype(n, ctx)
-            return vec(d) if d in ("f32", "f64") else UNKNOWN
+            return vec(d) if d in ("f32", "f64") else nd(d, 1) if d else UNKNOWN
+        if name in ND_FUNCTIONS:
+            return self.nd_function(name, n, ctx)
         if name == "numpy.arange":
             given = any(k.arg == "dtype" for k in n.keywords) or len(n.args) > 3
             if not given:
                 return vec("f64")
             d = self.np_dtype(n, ctx, 3)
             return nd(d, 1) if d in ("f32", "f64", "i32") else UNKNOWN
-        if name == "numpy.linalg.norm" and n.args:
-            t = self.expr(n.args[0], ctx)
-            return Ty("num", dtype=t.dtype) if t.kind == "vec" else UNKNOWN
         if name in ("math.floor", "math.ceil"):
             return INT
         if name.startswith("math.") and name[5:] in MATH_FUNCTIONS:
@@ -976,6 +990,80 @@ class TypeEnv:
         if name == "textwrap.wrap":
             return list_of(STR)
         return UNKNOWN
+
+    @staticmethod
+    def axis(n: ast.Call) -> int | None | str:
+        """The axis a reduction names (keyword or second argument): None, 0 or 1, or "bad"
+        for anything else."""
+        given = [k.value for k in n.keywords if k.arg == "axis"] + n.args[1:2]
+        if not given or (isinstance(given[0], ast.Constant) and given[0].value is None):
+            return None
+        v = given[0]
+        return (
+            v.value
+            if isinstance(v, ast.Constant) and v.value in (0, 1) and type(v.value) is int
+            else "bad"
+        )
+
+    def nd_function(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
+        """The type of a numpy function of ND_FUNCTIONS on arrays; unknown outside the subset."""
+        f = name.removeprefix("numpy.")
+        args = [self.expr(a, ctx) for a in n.args]
+        if not args or any(len(t.members) != 1 for t in args):
+            return UNKNOWN
+        a = args[0]
+        if f in ("stack", "column_stack"):
+            items = elem(a)
+            if not (a.all("list", "tuple") and len(items.members) == 1 and is_array(items)):
+                return UNKNOWN
+            if array_rank(items) != 1 or items.dtype == "bool":
+                return UNKNOWN
+            return nd(items.dtype, 2)
+        if f == "where" and len(args) == 1:
+            return (
+                tuple_of(*[nd("i32", 1)] * a.rank)
+                if a.kind == "nd" and a.dtype == "bool"
+                else UNKNOWN
+            )
+        if f == "where" and len(args) == 3:
+            if not (a.kind == "nd" and a.dtype == "bool"):
+                return UNKNOWN
+            d = nd_dtype(ast.Add(), args[1], args[2])
+            return nd(d, max(map(array_rank, args))) if d else UNKNOWN
+        if not is_array(a):
+            return UNKNOWN
+        rank = array_rank(a)
+        if f in ("sin", "cos", "exp", "sqrt", "floor"):
+            return nd(a.dtype, rank) if a.dtype in ("f32", "f64") else UNKNOWN
+        if f in ("minimum", "maximum", "clip"):
+            if len(args) != (3 if f == "clip" else 2):
+                return UNKNOWN
+            d = nd_dtype(ast.Add(), a, args[1])
+            if f == "clip" and d:
+                d = nd_dtype(ast.Add(), nd(d, rank), args[2])
+            return nd(d, max(map(array_rank, args))) if d else UNKNOWN
+        if len(args) > (1 if f == "linalg.norm" else 2) and f not in ("minimum", "maximum", "clip"):
+            return UNKNOWN  # norm's second argument is ord, not the axis
+        if f in ("argmin", "argmax"):
+            return INT if len(args) == 1 and a.dtype != "bool" else UNKNOWN
+        axis = self.axis(n)
+        if axis == "bad" or (axis == 1 and rank != 2):
+            return UNKNOWN
+        if f == "linalg.norm":
+            if axis is None:
+                return Ty("num", dtype=a.dtype) if a.kind == "vec" else UNKNOWN
+            out = "f64" if a.dtype in ("i32", "bool") else a.dtype
+        elif f == "sum":
+            out = "int" if a.dtype in ("i32", "bool") else a.dtype
+        elif f == "mean":
+            out = "f64" if a.dtype in ("i32", "bool") else a.dtype
+        elif a.dtype == "bool":
+            return UNKNOWN
+        else:  # min, max
+            out = "int" if a.dtype == "i32" else a.dtype
+        if axis is None or rank == 1:
+            return INT if out == "int" else Ty("num", dtype=out)
+        return nd("i32" if out == "int" else out, 1)
 
     def name(self, name: str, ctx: Ctx) -> Ty:
         c = ctx.binder(name)
@@ -998,6 +1086,8 @@ class TypeEnv:
         the attribute adds nothing (hasattr or isinstance guards that read)."""
         if not recv.members:
             return NEVER
+        if recv.kind == "nd" and attr == "shape":
+            return tuple_of(*[INT] * recv.rank)
         out = []
         for m in recv.members:
             if m.kind == "none":
@@ -1198,8 +1288,31 @@ class TypeEnv:
         d = nd_dtype(op, a, b)
         return nd(d, rank) if d else UNKNOWN
 
+    def nd_subscript(self, t: Ty, key: ast.expr, ctx: Ctx) -> Ty:
+        """a[key] of an nd: an int gives an item (an nd of one rank less, or a number), [:, j]
+        a column, a bool mask the elements it selects (its rank is the array's) or the rows
+        (rank 1), an index array the rows it names; every one a copy."""
+        if (
+            isinstance(key, ast.Tuple)
+            and len(key.elts) == 2
+            and isinstance(key.elts[0], ast.Slice)
+            and not (key.elts[0].lower or key.elts[0].upper or key.elts[0].step)
+            and self.expr(key.elts[1], ctx).all("int")
+        ):
+            return nd(t.dtype, 1) if t.rank == 2 else UNKNOWN
+        k = self.expr(key, ctx)
+        if k.all("int"):
+            return nd_item(t)
+        if k.kind == "nd" and k.rank == 1 and k.dtype == "i32":
+            return t
+        if k.kind == "nd" and k.dtype == "bool" and k.rank in (1, t.rank):
+            return nd(t.dtype, 1 if k.rank == t.rank else t.rank)
+        return UNKNOWN
+
     def subscript(self, n: ast.Subscript, ctx: Ctx) -> Ty:
         t = self.expr(n.value, ctx)
+        if t.kind == "nd" or (t.kind == "vec" and self.expr(n.slice, ctx).kind == "nd"):
+            return self.nd_subscript(nd(t.dtype, 1) if t.kind == "vec" else t, n.slice, ctx)
         if isinstance(n.slice, ast.Slice):
             return t
         out = []

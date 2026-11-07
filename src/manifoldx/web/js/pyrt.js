@@ -310,6 +310,163 @@ function tolist(x) {
   return rows(0, a.shape);
 }
 
+// numpy's pairwise sum (numpy/_core/src/umath/loops_utils.h.src, pairwise_sum) over
+// data[start, start + n), every addition cast to the dtype: below 8 items left to right, up
+// to 128 in eight accumulators, past that split at n / 2 rounded down to a multiple of 8.
+const BLOCK = 8;
+function pairwise(data, start, n, cast) {
+  if (n < BLOCK) {
+    let res = -0;
+    for (let i = 0; i < n; i++) res = cast(res + cast(data[start + i]));
+    return res;
+  }
+  if (n <= 128) {
+    const r = Array.from({ length: BLOCK }, (_, j) => cast(data[start + j]));
+    let i = BLOCK;
+    for (; i < n - (n % BLOCK); i += BLOCK) {
+      for (let j = 0; j < BLOCK; j++) r[j] = cast(r[j] + cast(data[start + i + j]));
+    }
+    let res = cast(cast(cast(r[0] + r[1]) + cast(r[2] + r[3])) + cast(cast(r[4] + r[5]) + cast(r[6] + r[7])));
+    for (; i < n; i++) res = cast(res + cast(data[start + i]));
+    return res;
+  }
+  let n2 = Math.floor(n / 2);
+  n2 -= n2 % 8;
+  return cast(pairwise(data, start, n2, cast) + pairwise(data, start + n2, n - n2, cast));
+}
+
+// A reduction of a over axis (null: every element, flat), as numpy runs it on a C-contiguous
+// array: axis 1 of (k, c) reduces each row with `row`, axis 0 folds row after row with `step`.
+function reduce(row, step) {
+  return (x, axis, dtype) => {
+    const a = asnd(x), cast = CAST[dtype], data = a.data;
+    if (axis === null || a.shape.length === 1) return row(data, 0, data.length, cast);
+    const [k, c] = a.shape;
+    const out = new TYPED[dtype](axis === 1 ? k : c);
+    if (axis === 1) for (let i = 0; i < k; i++) out[i] = row(data, i * c, c, cast);
+    else {
+      if (k === 0) throw new Error("ValueError: zero-size array to reduction operation which has no identity");
+      for (let j = 0; j < c; j++) out[j] = cast(data[j]);
+      for (let i = 1; i < k; i++) for (let j = 0; j < c; j++) out[j] = step(out[j], cast(data[i * c + j]), cast);
+    }
+    return new NdArray(out, [out.length], dtype);
+  };
+}
+
+const sumRow = (data, start, n, cast) => (n === 0 ? 0 : pairwise(data, start, n, cast));
+// min and max propagate NaN, as numpy's do.
+const nanPick = (better) => (x, y) => (Number.isNaN(x) || Number.isNaN(y) ? NaN : better(x, y) ? x : y);
+const lower = nanPick((x, y) => x <= y), higher = nanPick((x, y) => x >= y);
+function extreme(f) {
+  return (data, start, n, cast) => {
+    if (n === 0) throw new Error("ValueError: zero-size array to reduction operation which has no identity");
+    let res = cast(data[start]);
+    for (let i = 1; i < n; i++) res = f(res, cast(data[start + i]));
+    return res;
+  };
+}
+
+const ndSum = reduce(sumRow, (s, v, cast) => cast(s + v));
+const ndMean = (x, axis, dtype) => {
+  const a = asnd(x), cast = CAST[dtype];
+  const s = ndSum(a, axis, dtype);
+  const count = axis === null || a.shape.length === 1 ? a.data.length : a.shape[axis];
+  if (!(s instanceof NdArray)) return cast(s / count);
+  return new NdArray(s.data.map((v) => cast(v / count)), s.shape, dtype);
+};
+
+// The flat index of the first minimum (maximum), or of the first NaN, as numpy's.
+function argExtreme(better) {
+  return (x) => {
+    const { data } = asnd(x);
+    if (!data.length) throw new Error("ValueError: attempt to get argmin of an empty sequence");
+    let at = 0;
+    for (let i = 0; i < data.length; i++) {
+      if (Number.isNaN(data[i])) return i;
+      if (better(data[i], data[at])) at = i;
+    }
+    return at;
+  };
+}
+
+// np.where(cond): the indices of the true elements, one Int32Array per axis; with x and y,
+// x where cond holds and y elsewhere, broadcast and cast to dtype.
+function where(c, x, y, dtype) {
+  const cond = asnd(c);
+  if (x === undefined) {
+    const axes = cond.shape.map(() => []);
+    cond.data.forEach((v, i) => {
+      if (!v) return;
+      for (let d = cond.shape.length - 1; d >= 0; d--) {
+        axes[d].push(i % cond.shape[d]);
+        i = Math.floor(i / cond.shape[d]);
+      }
+    });
+    return axes.map((ix) => new NdArray(Int32Array.from(ix), [ix.length], "i32"));
+  }
+  const a = asnd(x), b = asnd(y), cast = CAST[dtype];
+  const arrays = [cond, a, b].filter((v) => v instanceof NdArray);
+  const shape = arrays.reduce((s, v) => broadcast(new NdArray(null, s, null), v), arrays[0].shape);
+  const n = sizeOf(shape);
+  const at = (v, i) => (v instanceof NdArray ? v.data[i % v.data.length] : v);
+  const out = new TYPED[dtype](n);
+  for (let i = 0; i < n; i++) out[i] = cast(at(cond, i) ? at(a, i) : at(b, i));
+  return new NdArray(out, [...shape], dtype);
+}
+
+// np.stack of rank-1 arrays of one length: axis 0 puts them as rows, axis 1 as columns.
+function stack(list, axis, dtype) {
+  const items = list.map(asnd), k = items.length ? items[0].data.length : 0, cast = CAST[dtype];
+  if (items.some((v) => v.data.length !== k)) throw new Error("ValueError: all input arrays must have the same shape");
+  const out = new TYPED[dtype](k * items.length);
+  items.forEach((v, j) => {
+    for (let i = 0; i < k; i++) out[axis === 0 ? j * k + i : i * items.length + j] = cast(v.data[i]);
+  });
+  return new NdArray(out, axis === 0 ? [items.length, k] : [k, items.length], dtype);
+}
+
+const outOfBounds = (i, axis, size) => new Error(`IndexError: index ${i} is out of bounds for axis ${axis} with size ${size}`);
+
+// a[key], a copy: an int (a number from a rank-1 array, else a row), [null, j] (a[:, j]),
+// a bool mask over the whole array (the elements, flat) or over its rows, or an index array
+// of rows.
+function ndGetitem(x, key) {
+  const a = asnd(x), [k] = a.shape, w = sizeOf(a.shape.slice(1));
+  const rows = (ix) => {
+    const out = new TYPED[a.dtype](ix.length * w);
+    ix.forEach((r, j) => out.set(a.data.subarray(r * w, (r + 1) * w), j * w));
+    return new NdArray(out, [ix.length, ...a.shape.slice(1)], a.dtype);
+  };
+  const row = (i) => {
+    const r = i < 0 ? i + k : i;
+    if (!(r >= 0 && r < k)) throw outOfBounds(i, 0, k);
+    return r;
+  };
+  if (typeof key === "number") {
+    const r = row(key);
+    return a.shape.length === 1 ? a.data[r] : new NdArray(a.data.slice(r * w, (r + 1) * w), a.shape.slice(1), a.dtype);
+  }
+  if (Array.isArray(key)) {
+    const [, j] = key, c = a.shape[1], col = j < 0 ? j + c : j;
+    if (!(col >= 0 && col < c)) throw outOfBounds(j, 1, c);
+    return new NdArray(TYPED[a.dtype].from({ length: k }, (_, i) => a.data[i * c + col]), [k], a.dtype);
+  }
+  const m = asnd(key);
+  if (m.dtype !== "bool") return rows(Array.from(m.data, row));
+  if (m.shape.length === a.shape.length) {
+    if (m.shape.some((d, i) => d !== a.shape[i])) {
+      throw new Error(`IndexError: boolean index did not match indexed array along axis 0; size of axis is ${k} but size of corresponding boolean axis is ${m.shape[0]}`);
+    }
+    return new NdArray(a.data.filter((_, i) => m.data[i]), [m.data.reduce((s, v) => s + v, 0)], a.dtype);
+  }
+  if (m.data.length !== k) {
+    throw new Error(`IndexError: boolean index did not match indexed array along axis 0; size of axis is ${k} but size of corresponding boolean axis is ${m.data.length}`);
+  }
+  const ix = [];
+  m.data.forEach((v, i) => { if (v) ix.push(i); });
+  return rows(ix);
+}
+
 const plus = (x, y) => x + y, minus = (x, y) => x - y, times = (x, y) => x * y;
 export const nd = {
   asnd,
@@ -335,6 +492,31 @@ export const nd = {
   full,
   arange: ndArange,
   tolist,
+  array: (items, dtype) => {
+    const v = Array.from(items);
+    return new NdArray(TYPED[dtype].from(v, CAST[dtype]), [v.length], dtype);
+  },
+  sin: unary(Math.sin),
+  cos: unary(Math.cos),
+  exp: unary(Math.exp),
+  floor: unary(Math.floor),
+  clip: (a, lo, hi, dtype) => nd.minimum(nd.maximum(a, lo, dtype), hi, dtype),
+  minimum: binary(lower),
+  maximum: binary(higher),
+  sum: ndSum,
+  mean: ndMean,
+  min: reduce(extreme(lower), (s, v) => lower(s, v)),
+  max: reduce(extreme(higher), (s, v) => higher(s, v)),
+  norm: (a, axis, dtype) => {
+    const s = ndSum(nd.mul(a, a, dtype), axis, dtype);
+    return s instanceof NdArray ? nd.sqrt(s, dtype) : CAST[dtype](Math.sqrt(s));
+  },
+  argmin: argExtreme((x, y) => x < y),
+  argmax: argExtreme((x, y) => x > y),
+  where,
+  stack,
+  column_stack: (list, dtype) => stack(list, 1, dtype),
+  getitem: ndGetitem,
 };
 
 // ---------------------------------------------------------------- objects and collections
