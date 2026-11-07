@@ -734,6 +734,7 @@ RUNTIME_SURFACE = {
         "near": NUM,
         "far": NUM,
         "get_forward": fn(f"{_CAMERA}.get_forward", vec("f32")),
+        "project": fn(f"{_CAMERA}.project", tuple_of(nd("f64", 2), nd("f64", 1))),
     },
     _GUI: {"pointer_over_gui": BOOL},
     # An entity handle: its transform reads and writes the entity's row at once (pos in world

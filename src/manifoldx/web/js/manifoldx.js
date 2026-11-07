@@ -805,6 +805,56 @@ export class Camera {
     const n = vnorm32(d);
     return d.map((x) => Math.fround(x / n));
   }
+
+  // Camera.project: points (n, 3) or (3,) as float64 with a column of ones, times
+  // cameraMatrix transposed, in float64; pixels from the top-left and the clip w (negative
+  // behind the camera). [xy (n, 2), w (n,)].
+  project(points, width, height) {
+    const { data, shape } = asValues(points);
+    const n = shape.length === 1 ? 1 : shape[0];
+    const m = cameraMatrix(this, width / height);
+    const xy = new Float64Array(n * 2), w = new Float64Array(n);
+    const clip = [0, 0, 0, 0];
+    for (let r = 0; r < n; r++) {
+      const [x, y, z] = data.subarray(r * 3, r * 3 + 3);
+      for (let c = 0; c < 4; c++) clip[c] = x * m[c * 4] + y * m[c * 4 + 1] + z * m[c * 4 + 2] + m[c * 4 + 3];
+      w[r] = clip[3];
+      xy[r * 2] = ((clip[0] / clip[3] + 1) / 2) * width;
+      xy[r * 2 + 1] = ((1 - clip[1] / clip[3]) / 2) * height;
+    }
+    return [new NdArray(xy, [n, 2], "f64"), new NdArray(w, [n], "f64")];
+  }
+}
+
+// The desktop's get_projection_matrix(aspect, near, far) @ get_view_matrix(), row-major: each
+// matrix's entries computed in float64 and stored as float32, as camera.py does, the product
+// numpy's float32 matmul.
+export function cameraMatrix(camera, aspect) {
+  const [px, py, pz] = camera.position, [ux, uy, uz] = camera.up;
+  let fx = camera.target[0] - px, fy = camera.target[1] - py, fz = camera.target[2] - pz;
+  let k = Math.sqrt(fx * fx + fy * fy + fz * fz);
+  [fx, fy, fz] = [fx / k, fy / k, fz / k];
+  let [rx, ry, rz] = [fy * uz - fz * uy, fz * ux - fx * uz, fx * uy - fy * ux];
+  k = Math.sqrt(rx * rx + ry * ry + rz * rz);
+  [rx, ry, rz] = [rx / k, ry / k, rz / k];
+  const [tx, ty, tz] = [ry * fz - rz * fy, rz * fx - rx * fz, rx * fy - ry * fx];
+  const view = Float32Array.of(
+    rx, ry, rz, -(rx * px + ry * py + rz * pz),
+    tx, ty, tz, -(tx * px + ty * py + tz * pz),
+    -fx, -fy, -fz, fx * px + fy * py + fz * pz,
+    0, 0, 0, 1,
+  );
+  const { near, far } = camera;
+  const f = 1.0 / Math.tan((camera.fov * (Math.PI / 180)) / 2.0);
+  const proj = new Float32Array(16);
+  proj[0] = f / aspect;
+  proj[5] = f;
+  proj[10] = -far / (far - near);
+  proj[11] = -(far * near) / (far - near);
+  proj[14] = -1.0;
+  const m4 = (a) => new NdArray(a, [4, 4], "f32");
+  const [P, V] = [m4(proj), m4(view)];
+  return nd.matmul(P, V, "f32").data;
 }
 
 // createEngine({w, h, camera: {position, target, fov, up, near, far}, origin: [x, z], gui, materials, calls,
