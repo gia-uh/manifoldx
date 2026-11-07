@@ -95,7 +95,7 @@ def build_export(
 
     from .gui import gui_spec
     from .reach import find_roots
-    from .snapshot import ecs_bytes, snapshot
+    from .snapshot import ecs_bytes, snapshot, spawnable
     from .transpile import reach_app, transpile_app
     from .types import LiveTypes, TranspileError, key_label, module_path
 
@@ -120,6 +120,7 @@ def build_export(
             lap("reach")
             state = snapshot(roots, reach, engine, left_out)
             state["ecs"], ecs = ecs_bytes(engine)
+            state["ecs"]["spawnable"] = spawnable(engine, reach.components)
             lap("snapshot")
             mods = transpile_app(sources, reach=reach, runtime=runtime)
             lap("transpile")

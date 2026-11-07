@@ -26,6 +26,7 @@ from .types import (
     LiveTypes,
     TranspileError,
     TypeEnv,
+    is_material,
     key_label,
     module_path,
     query,
@@ -108,6 +109,8 @@ class Reach:
 
     functions: set of FunctionKey · classes: set of "module.Class" · globals: set of
     (module, name) · fields: {"module.Class": set of the field names reached code reads}
+    · components: {store name: class} of the Component subclasses reached code constructs,
+    which the page registers when it first spawns one, as Engine.spawn does
     · chain(key): the root's label, then each function from the root down to key."""
 
     def __init__(self, roots, env: TypeEnv):
@@ -118,6 +121,7 @@ class Reach:
         self.classes: set[str] = set()
         self.globals: set[tuple[str, str]] = set()
         self.fields: dict[str, set[str]] = {}
+        self.components: dict[str, type] = {}
         self._via: dict[object, FunctionKey | None] = {}  # what reached a thing first
         self._root: dict[FunctionKey, str] = {}  # a root function's label
         if self.everything:
@@ -330,6 +334,9 @@ class Reach:
         elif isinstance(n, ast.Call):
             for callee, _ in env.callees(n, ctx):
                 self._add(callee.key, key)
+            made = env.component_name(n.func, ctx)
+            if made in env.component_classes:
+                self.components[made] = env.component_classes[made]
             f = n.func
             if (
                 isinstance(f, ast.Name)
@@ -352,7 +359,7 @@ class Reach:
                 if check and not read and manifoldx and attr not in WRITABLE.get(m.name, ()):
                     what = RUNTIME_NAMES.get(m.name, f"a {m.name.rsplit('.', 1)[-1]}")
                     hint = ""
-                    if _is_material(m.name):
+                    if is_material(m.name):
                         what = "a material"
                         hint = " (swap materials made at setup with engine.set_material)"
                     raise TranspileError(
@@ -416,16 +423,6 @@ class Reach:
 
     def class_(self, qualname: str) -> bool:
         return self.everything or qualname in self.classes
-
-
-def _is_material(name: str) -> bool:
-    """name ("manifoldx.resources.PhongMaterial") is a material class: the page builds its
-    materials once from the glTF, so their fields do not change at runtime."""
-    from manifoldx import resources
-
-    module, _, cls = name.rpartition(".")
-    c = getattr(resources, cls, None) if module == "manifoldx.resources" else None
-    return isinstance(c, type) and issubclass(c, resources.Material)
 
 
 def is_closure(key: FunctionKey) -> bool:

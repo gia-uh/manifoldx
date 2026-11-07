@@ -773,7 +773,6 @@ def _write_error(app_dir, tmp_path, capsys, write: str) -> tuple[str, int]:
     [
         ("x.x = 1.0", "x.x", "x"),
         ("x.x += 1.0", "x.x", "x"),
-        ('mat.color = "#00ff00"', "mat.color", "mat"),
     ],
 )
 def test_a_write_through_a_value_of_unknown_type_fails_the_export(
@@ -786,6 +785,16 @@ def test_a_write_through_a_value_of_unknown_type_fails_the_export(
     assert (
         f"app.py:{line}: writing `{field}`, a field of a value of unknown type (annotate `{name}`), "
         "is outside the subset (reached from system tick)"
+    ) in err
+
+
+def test_a_material_write_points_at_set_material(app_dir, tmp_path, capsys):
+    """gia-uh/manifoldx#154: a material global types from its live value, and its write fails
+    with the way to change a material in the page, not a request to annotate it."""
+    err, line = _write_error(app_dir, tmp_path, capsys, 'mat.color = "#00ff00"')
+    assert (
+        f"app.py:{line}: writing `mat.color`, a field of a material the page does not apply "
+        "(swap materials made at setup with engine.set_material), is outside the subset"
     ) in err
 
 

@@ -37,6 +37,7 @@ KINDS = frozenset(
         "query",
         "accessor",
         "field",
+        "component",
         "union",
         "unknown",
     }
@@ -210,6 +211,16 @@ def field_compare_dtype(b: Ty) -> str | None:
     if b.kind == "field":
         return "f32"
     return nd_compare_dtype(nd("f32", 2), b)
+
+
+def is_material(name: str | None) -> bool:
+    """name ("manifoldx.resources.PhongMaterial") is a material class: the page builds its
+    materials once from the glTF, so their fields do not change at runtime."""
+    from manifoldx import resources
+
+    module, _, cls = (name or "").rpartition(".")
+    c = getattr(resources, cls, None) if module == "manifoldx.resources" else None
+    return isinstance(c, type) and issubclass(c, resources.Material)
 
 
 def obj(name: str) -> Ty:
@@ -650,6 +661,8 @@ RUNTIME_SURFACE = {
         "state": STATE,
         "set_material": fn("manifoldx.Engine.set_material", NONE),
         "log": fn("manifoldx.Engine.log", NONE),
+        "spawn": fn("manifoldx.Engine.spawn", union(obj(_HANDLE), NONE)),
+        "destroy": fn("manifoldx.Engine.destroy", NONE),
     },
     _INPUT: {
         "pressed_keys": set_of(STR),
@@ -709,6 +722,10 @@ WRITABLE = {
     _TEXT: {"text", "style_overrides"},
     _VALUE_DISPLAY: {"style_overrides"},
 }
+
+# The runtime-surface functions that take keywords, and which: the call passes them as a final
+# object literal ({n: k}).
+RUNTIME_KEYWORDS = {"manifoldx.Engine.spawn": ("n",)}
 
 # How an error names an object of each manifoldx class; another goes by its class name.
 RUNTIME_NAMES = {
@@ -1046,6 +1063,9 @@ class TypeEnv:
             sym = self.resolve(module, node.id)
             if sym is not None and sym.kind == "class":
                 return obj(sym.target)
+            if sym is not None and sym.kind == "setup":  # EntityHandle, from manifoldx.engine
+                t = self.library_class(sym.target, None)
+                return t if t.name in RUNTIME_SURFACE else UNKNOWN
             return UNKNOWN
         if isinstance(node, ast.Attribute) and ast.unparse(node) in ("np.ndarray", "numpy.ndarray"):
             return vec("f64")
@@ -1551,6 +1571,9 @@ class TypeEnv:
 
     def call(self, n: ast.Call, ctx: Ctx) -> Ty:
         f = n.func
+        component = self.component_name(f, ctx)
+        if component is not None:
+            return Ty("component", name=component)
         if isinstance(f, ast.Name):
             local = self.is_local(f.id, ctx)
             if local:
@@ -1867,7 +1890,10 @@ class TypeEnv:
                     else:
                         for t in n.targets:
                             bind_target(t, self.expr(n.value, ctx), found)
+                    live = self.live.globals if self.live is not None else {}
                     for name, t in found.items():
+                        if not t.known and (module, name) in live:
+                            continue  # setup's value crosses: what it holds is its type
                         new = join(self.globals.get((module, name), NEVER), t)
                         if new != self.globals.get((module, name)):
                             self.globals[(module, name)] = new

@@ -151,7 +151,7 @@ export class Store {
     for (const c of header.components) {
       const Typed = TYPED[c.dtype];
       if (Typed === undefined) throw new Error(`the component ${c.name} has the dtype ${c.dtype}, which the page does not hold`);
-      store._layouts.set(c.name, { dtype: c.dtype, cols: c.cols, fields: c.fields });
+      store._layouts.set(c.name, { dtype: c.dtype, cols: c.cols, fields: c.fields, defaults: c.defaults ?? {} });
       const rows = new Typed(store.capacity * c.cols);
       rows.set(new Typed(buffer.slice(c.rows[0], c.rows[0] + c.rows[1])));
       store._columns.set(c.name, rows);
@@ -159,6 +159,7 @@ export class Store {
       members.set(new Uint8Array(buffer, c.members[0], hw));
       store._members.set(c.name, members);
     }
+    for (const c of header.spawnable ?? []) store._spawnable.set(c.name, c);
     return store;
   }
 
@@ -173,10 +174,22 @@ export class Store {
     this._layouts = new Map();
     this._columns = new Map();
     this._members = new Map();
+    this._spawnable = new Map(); // layouts registered at their first spawn
     this._queue = [];
   }
 
   layout(name) { return this._layouts.get(name); }
+
+  // A component reached code spawns that setup never registered gets its columns and member
+  // bits now, all zero, as Component.register gives them on the desktop's first spawn.
+  register(name) {
+    if (this._layouts.has(name)) return;
+    const c = this._spawnable.get(name);
+    if (c === undefined) throw new Error(`ValueError: Component ${name} not registered`);
+    this._layouts.set(name, { dtype: c.dtype, cols: c.cols, fields: c.fields, defaults: c.defaults ?? {} });
+    this._columns.set(name, new TYPED[c.dtype](this.capacity * c.cols));
+    this._members.set(name, new Uint8Array(this.capacity));
+  }
   column(name) { return this._columns.get(name); }
   member(name) { return this._members.get(name); }
 
@@ -550,6 +563,63 @@ export class EntityHandle {
   }
 }
 
+// ---------------------------------------------------------------- spawning
+
+// A value's float64 numbers and numpy shape, as np.asarray sees it: a number (shape []), a
+// typed array, an NdArray, or nested arrays (a tuple of numbers, a list of rows).
+function asValues(v) {
+  if (typeof v === "number") return { data: Float64Array.of(v), shape: [] };
+  if (v instanceof NdArray) return { data: Float64Array.from(v.data), shape: [...v.shape] };
+  if (ArrayBuffer.isView(v)) return { data: Float64Array.from(v), shape: [v.length] };
+  const shape = [];
+  for (let x = v; Array.isArray(x); x = x[0]) shape.push(x.length);
+  return { data: Float64Array.from(v.flat(Infinity)), shape };
+}
+
+const shapeOf = (s) => `(${s.join(", ")}${s.length === 1 ? "," : ""})`;
+
+// rows[:, c0:c0+size] = v for n rows of `cols` columns, numpy's broadcast of one value, one
+// row or n rows; `shift` (optional) is subtracted in float64 before the float32 store.
+function assignColumns(rows, n, cols, c0, size, v, shift = null) {
+  const { data, shape } = asValues(v);
+  const per = data.length === n * size && shape[0] === n && n !== 1;
+  if (!(data.length === 1 || data.length === size || per)) {
+    throw new Error(`ValueError: could not broadcast input array from shape ${shapeOf(shape)} into shape (${n},${size})`);
+  }
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < size; c++) {
+      const x = data.length === 1 ? data[0] : data[(per ? r * size : 0) + c];
+      rows[r * cols + c0 + c] = shift === null ? x : x - shift[c];
+    }
+  }
+}
+
+// One Component subclass's rows, as Component.get_data packs them: each field's value (or the
+// class default when the call left it out; zeros without one) broadcast from a number, one
+// field-sized row, n numbers for a one-column field, or n rows.
+function componentRows(name, layout, values, n) {
+  const rows = new Float32Array(n * layout.cols);
+  for (const [field, [c0, size]] of Object.entries(layout.fields)) {
+    const v = values.has(field) && values.get(field) !== null ? values.get(field) : layout.defaults[field];
+    if (v === undefined || v === null) continue;
+    const { data, shape } = asValues(v);
+    const one = shape.length === 0 || data.length === 1 && shape.length <= 1 && !(shape[0] === n && size === 1 && n > 1);
+    if (one) {
+      for (let r = 0; r < n; r++) rows.fill(data[0], r * layout.cols + c0, r * layout.cols + c0 + size);
+    } else if (shape.length === 1 && shape[0] === n && size === 1) {
+      for (let r = 0; r < n; r++) rows[r * layout.cols + c0] = data[r];
+    } else if (shape.length === 1 && shape[0] === size) {
+      for (let r = 0; r < n; r++) rows.set(data, r * layout.cols + c0);
+    } else if (shape[0] === n) {
+      const w = data.length / n;
+      for (let r = 0; r < n; r++) for (let c = 0; c < size; c++) rows[r * layout.cols + c0 + c] = data[r * w + c];
+    } else {
+      throw new Error(`ValueError: ${name}: field '${field}' value shape ${shapeOf(shape)} incompatible with n=${n}, field size=${size}`);
+    }
+  }
+  return rows;
+}
+
 // ---------------------------------------------------------------- the engine, headless
 
 // One name per physical key, as manifoldx.input._key_name: a letter lowercase, the space
@@ -687,6 +757,51 @@ export function createEngine({ w, h, camera, origin = [0, 0], gui = null, materi
   engine.gui = { pointer_over_gui: false, widgets: gui === null ? [] : guiWidgets(gui) };
 
   const entities = new Map(), mats = new Map(), geometries = new Map();
+
+  // engine.spawn(...components, {n}), as Engine.spawn: each component's rows as its get_data
+  // makes them (the last of a kind wins), a Component subclass registered on its first spawn,
+  // Transform's pos taken as world coordinates (the origin subtracted in float64), the slots
+  // filled at once. The handle of the first entity, or null for n 0.
+  engine.spawn = (...args) => {
+    const last = args[args.length - 1];
+    const opts = last && !("component" in last) ? args.pop() : {};
+    const n = opts.n ?? 1, store = engine.store;
+    const given = new Map(args.map((c) => [c.component, c.values]));
+    for (const name of given.keys()) store.register(name);
+    const rows = new Map();
+    for (const [name, values] of given) {
+      if (name === "Mesh") rows.set(name, Uint32Array.of(values.get("geometry").geometry_id));
+      else if (name === "Material") rows.set(name, Uint32Array.of(values.get("material").id));
+      else if (name !== "Transform") rows.set(name, componentRows(name, store.layout(name), values, n));
+      else {
+        const t = new Float32Array(n * 10);
+        for (let r = 0; r < n; r++) t.set([0, 0, 0, 0, 0, 0, 1, 1, 1, 1], r * 10);
+        const [ox, oz] = engine.origin;
+        const at = (k, c0, size, shift) => values.has(k) && values.get(k) !== null && assignColumns(t, n, 10, c0, size, values.get(k), shift);
+        at("pos", 0, 3, ox === 0 && oz === 0 ? null : [ox, 0, oz]);
+        at("rot", 3, 4, null);
+        at("scale", 7, 3, null);
+        rows.set(name, t);
+      }
+    }
+    if (!rows.has("Transform")) store.register("Transform");
+    if (n <= 0) return null;
+    const indices = store.spawn(n, rows);
+    return engine.resolve("entity", indices[0]);
+  };
+
+  // engine.destroy(x), as Engine.destroy: null does nothing; a bool mask gives its true
+  // positions, an index array its values; the entities go at the flush.
+  engine.destroy = (x) => {
+    if (x === null || x === undefined) return null;
+    let ix;
+    if (x instanceof NdArray && x.dtype === "bool") {
+      ix = [];
+      x.data.forEach((m, i) => { if (m) ix.push(i); });
+    } else ix = Array.from(x instanceof NdArray ? x.data : x);
+    if (ix.length) engine.store.queueDestroy(ix);
+    return null;
+  };
   engine.set_material = (entity, material) => {
     const index = typeof entity === "number" ? entity : entity.index;
     const store = engine.store;

@@ -136,6 +136,10 @@ const DEG_TO_RAD = Math.PI / 180, RAD_TO_DEG = 180 / Math.PI;
 export const radians = (x) => x * DEG_TO_RAD;
 export const degrees = (x) => x * RAD_TO_DEG;
 
+// A component's constructor (Transform(pos=...), Mesh(g), Velocity(v=...)) as a record of
+// its values by field, which engine.spawn turns into rows as the component's get_data does.
+export const component = (name, values) => ({ component: name, values });
+
 // Transform.rotation(x, y, z) of Python numbers: numpy computes the half angles' cos and sin
 // and the products in float64, then stacks them as float32 (x, y, z, w).
 export function quat_euler(x, y, z) {

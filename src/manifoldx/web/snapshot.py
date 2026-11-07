@@ -33,7 +33,13 @@ the bytes of ecs.bin:
 
     {"max_entities", "high_water", "free": [int], "alive": [offset, nbytes],
      "components": [{"name", "dtype": "f4" | "u4", "cols", "fields": {field: [col, size]},
-                     "rows": [offset, nbytes], "members": [offset, nbytes]}]}
+                     "defaults": {field: number | [number]},
+                     "rows": [offset, nbytes], "members": [offset, nbytes]}],
+     "spawnable": [{"name", "dtype", "cols", "fields", "defaults"}]}
+
+defaults are a Component subclass's class-level field defaults, as float32 values. build_export
+adds "spawnable": the Component subclasses reached code constructs that the store has not
+registered, which the page registers when it first spawns one, as Engine.spawn does.
 
 ecs.bin holds the alive mask as uint8 for slots [0, high_water), then per component in the
 store's registration order its rows [0, high_water) row-major little-endian in its dtype and
@@ -48,6 +54,7 @@ import types
 
 import numpy as np
 
+from manifoldx.components import _COMPONENT_CLASSES
 from manifoldx.gltf.engine_export import _widgets
 
 from .reach import Reach, closure_site, is_closure
@@ -299,6 +306,7 @@ def ecs_bytes(engine) -> tuple[dict, bytes]:
                 "dtype": code,
                 "cols": cols,
                 "fields": {f: [int(c), int(n)] for f, (c, n) in component_fields(name).items()},
+                "defaults": _defaults(_COMPONENT_CLASSES.get(name)),
                 "rows": block(rows.tobytes()),
                 "members": block(store._members[name][:hw].astype(np.uint8).tobytes()),
             }
@@ -311,6 +319,33 @@ def ecs_bytes(engine) -> tuple[dict, bytes]:
         "components": components,
     }
     return header, bytes(data)
+
+
+def spawnable(engine, components: dict[str, type]) -> list[dict]:
+    """The layouts of the Component subclasses in components ({store name: class}) that the
+    engine's store has not registered, as ecs_bytes writes a component's."""
+    out = []
+    for name, cls in components.items():
+        if name in engine.store._components:
+            continue
+        out.append(
+            {
+                "name": name,
+                "dtype": _DTYPES[np.dtype(cls._dtype)],
+                "cols": int(cls._shape[0]),
+                "fields": {
+                    f: [int(c), int(n)] for f, (c, n) in component_fields(name, cls).items()
+                },
+                "defaults": _defaults(cls),
+            }
+        )
+    return out
+
+
+def _defaults(cls) -> dict:
+    """A Component subclass's class-level field defaults as float32 values (none for others)."""
+    found = getattr(cls, "_field_defaults", None) or {}
+    return {f: np.asarray(v, np.float32).tolist() for f, v in found.items()}
 
 
 def _float(x: float):

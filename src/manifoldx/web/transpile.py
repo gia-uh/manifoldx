@@ -20,9 +20,11 @@ from dataclasses import dataclass
 
 from .reach import Reach, closure_site
 from .types import (
+    GEOMETRY,
     LIB_CONSTANTS,
     MATH_FUNCTIONS,
     ND_FUNCTIONS,
+    RUNTIME_KEYWORDS,
     RUNTIME_SURFACE,
     STATE,
     STR_METHODS,
@@ -40,6 +42,7 @@ from .types import (
     elem,
     field_compare_dtype,
     is_array,
+    is_material,
     nd_compare_dtype,
     readonly,
     key_label,
@@ -1364,6 +1367,9 @@ class _Module:
         ):
             self.fail(n, "*args or **kwargs in a call")
         f = n.func
+        component = self.env.component_name(f, self.ctx)
+        if component is not None:
+            return self.component(n, component)
         if isinstance(f, ast.Name) and not self.is_local(f.id):
             sym = self.env.symbols[self.ctx.module].get(f.id)
             if sym is None:
@@ -1406,9 +1412,91 @@ class _Module:
             method = self.method(n, f)
             if method is not None:
                 return method
-        if n.keywords:
+        surface = {m.name for m in self.ty(f).members if m.kind == "fn"}
+        name = surface.pop() if len(surface) == 1 else None
+        if name in ("manifoldx.Engine.spawn", "manifoldx.Engine.destroy"):
+            self.entity_call(n, name)
+        allowed = RUNTIME_KEYWORDS.get(name, ())
+        if any(k.arg not in allowed for k in n.keywords):
             self.fail(n, f"keyword arguments to `{ast.unparse(f)}`, whose signature is unknown,")
-        return f"{self.e(f)}({', '.join(self.e(a) for a in n.args)})"
+        args = [self.e(a) for a in n.args]
+        if n.keywords:  # a runtime function's keywords: a final object literal
+            args.append("{" + ", ".join(f"{k.arg}: {self.e(k.value)}" for k in n.keywords) + "}")
+        return f"{self.e(f)}({', '.join(args)})"
+
+    def entity_call(self, n: ast.Call, name: str) -> None:
+        """engine.spawn takes components and n=, an int; engine.destroy one array of entity
+        indices or a bool mask (or None)."""
+        if name == "manifoldx.Engine.spawn":
+            for a in n.args:
+                if not self.ty(a).all("component"):
+                    self.fail(
+                        n,
+                        f"engine.spawn() of `{ast.unparse(a)}`, not a component (Mesh, "
+                        "Material, Transform or a Component subclass),",
+                    )
+            for k in n.keywords:
+                if k.arg == "n" and not self.ty(k.value).all("int"):
+                    self.fail(n, f"engine.spawn(n=...) of `{ast.unparse(k.value)}`, not an int,")
+            return
+        t = self.ty(n.args[0]) if len(n.args) == 1 and not n.keywords else None
+        ok = t is not None and all(
+            m.kind in ("nd", "none") or (m.kind in ("list", "tuple") and elem(m).all("int"))
+            for m in t.members
+        )
+        if not (ok and t.members):
+            self.fail(n, "engine.destroy() of anything but entity indices, a bool mask or None")
+
+    def component(self, n: ast.Call, name: str) -> str:
+        """A component's constructor as the runtime's record of its values, by field: Transform
+        takes pos, rot and scale, Mesh a geometry the export saw, Material a material, and a
+        Component subclass its fields, by keyword as its __init__ does."""
+        what = f"{name}()"
+        builtin = {
+            "Transform": ["pos", "rot", "scale"],
+            "Mesh": ["geometry"],
+            "Material": ["material"],
+        }
+        params = builtin.get(name)
+        if params is None:
+            params = list(component_fields(name, self.env.component_classes.get(name)))
+            if n.args:
+                self.fail(n, f"positional arguments to {what}, which takes its fields by keyword,")
+        if len(n.args) > len(params):
+            self.fail(n, f"{what} with {len(n.args)} positional arguments")
+        given = dict(zip(params, n.args))
+        for k in n.keywords:
+            if k.arg not in params or k.arg in given:
+                self.fail(n, f"the keyword {k.arg} to {what}")
+            given[k.arg] = k.value
+        if name in ("Mesh", "Material") and len(given) != 1:
+            self.fail(n, f"{what} without its {params[0]}")
+        for x in given.values():
+            t = self.ty(x)
+            if name == "Mesh" and not (t.members and all(m == GEOMETRY for m in t.members)):
+                if isinstance(x, ast.Call):
+                    self.fail(
+                        n,
+                        f"`{ast.unparse(n)}`, a geometry built in frame code (build it at setup "
+                        "and keep it in a global: meshes built at runtime are not in the page yet),",
+                    )
+                self.fail(
+                    n,
+                    f"Mesh() of a value that is not a geometry the export saw (`{ast.unparse(x)}`)",
+                )
+            if name == "Material" and not (
+                t.all("obj") and all(is_material(m.name) for m in t.members)
+            ):
+                self.fail(
+                    n,
+                    f"Material() of a value that is not a material made at setup (`{ast.unparse(x)}`)",
+                )
+            values = t.is_numeric or (is_array(t) and len(t.members) == 1)
+            values = values or (t.all("list", "tuple") and elem(t).is_numeric)
+            if name not in ("Mesh", "Material") and not values:
+                self.fail(n, f"{what} with `{ast.unparse(x)}`, a {t}, not numbers or an array,")
+        pairs = ", ".join(f"[{json.dumps(k)}, {self.e(v)}]" for k, v in given.items())
+        return f"{self.rt('component')}({json.dumps(name)}, new Map([{pairs}]))"
 
     def lib_call(self, name: str, n: ast.Call) -> str:
         """A call into math or numpy."""
@@ -1557,8 +1645,9 @@ class _Module:
     def method(self, n: ast.Call, f: ast.Attribute) -> str | None:
         """A method call on a typed builtin value; None for an app object's method."""
         t = self.ty(f.value)
-        if t.all("obj") or (t == STATE and f.attr not in DICT_ATTRS):
-            return None  # an app object's method, or a call of the value under a State key
+        objects = t.all("obj", "none") and any(m.kind == "obj" for m in t.members)
+        if objects or (t == STATE and f.attr not in DICT_ATTRS):
+            return None  # an object's method (None ruled out by a test), or a State key's value
         if (
             isinstance(f.value, ast.Name)
             and self.env.symbols[self.ctx.module].get(f.value.id, None) is not None
