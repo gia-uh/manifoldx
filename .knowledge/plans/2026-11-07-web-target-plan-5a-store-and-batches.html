@@ -344,7 +344,7 @@ def test_a_component_of_another_dtype_fails_the_export(tmp_path):
 </details>
 
 <!-- ============================================================ TASK 3 -->
-<details class="task" id="task-3" data-state="pending">
+<details class="task" id="task-3" data-state="done">
 <summary><span class="num">3</span><span><span class="ttl">Under --web the glb is a library of geometries and materials</span><span class="files">gltf/engine_export.py · gltf/writer.py · web/export.py · tests/test_gltf_library.py</span></span><span class="state"></span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -833,6 +833,10 @@ def test_the_batched_scene_is_drawn_as_the_desktop():
 <li><b>build_export, not snapshot(), puts the store's header under <code>"ecs"</code></b> (task 2). <code>ecs_bytes</code> returns the bytes and the header together, and <code>snapshot()</code> returns only JSON, so <code>build_export</code> calls it beside the snapshot (<code>src/manifoldx/web/export.py:122</code>), as it adds <code>"gui"</code>.</li>
 <li><b>The dtype error reads as the snapshot's other errors</b> (task 2). <code>SnapshotError</code> joins its two parts with a colon, so the line is <code>the component Flags: dtype int64; ecs.bin carries float32 and uint32 and it cannot cross to the browser</code> (<code>src/manifoldx/web/snapshot.py:290</code>), and the test asserts that.</li>
 <li><b>Task 2's fixture builds with <code>capture_engine</code> and <code>build_export</code></b> (task 2). After <code>export_web</code> the app's module is no longer <code>sys.modules["__main__"]</code>, so the fixture keeps it and reads <code>main.CRATE</code> (<code>tests/web/test_ecs_snapshot.py:43</code>). Two tests were added: the Node replay resolves <code>CRATE</code> to <code>{geometry_id}</code> (<code>:115</code>), and a store of 3 entities, whose blocks need padding, keeps every block on a multiple of 4 (<code>:128</code>); with 4 entities the padding mutation passed.</li>
+<li><b>Library mode reports the materials its entities draw</b> (task 3). With no nodes, the notes <code>node()</code> adds per drawn entity (<code>PhongMaterial</code> approximated, a material with no glTF equivalent dropped) were gone from <code>scene.export-report.json</code>; <code>build_glb</code> takes <code>drawn_materials</code>, each meshed entity's material, and reports their notes as a node's (<code>src/manifoldx/gltf/engine_export.py:132</code>, <code>tests/test_gltf_library.py:101</code>). An entity with no Material is not among them: the page draws it white itself.</li>
+<li><b>Task 3's tests read the glb through pygltflib's objects</b> (task 3). <code>tests/gltf_helpers.py</code>'s <code>load</code> returns a <code>GLTF2</code>, so the tests read <code>g.scenes[0].extras</code> and <code>prim.attributes.COLOR_0</code>, not dicts. The fixture also draws the coloured geometry, so the no-library case counts 4 entity nodes, not 3, and a seventh test checks that a point cloud's entities are still reported as dropped.</li>
+<li><b>From task 3 to task 10 the page draws no entities</b> (task 3). <code>build_export</code> writes the library, which <code>scene.js</code> reads only from task 10, so three Node tests fail in between: <code>tests/web/js/scene.test.mjs:56</code>, <code>:67</code> and <code>:249</code>, the ones task 10 rewrites. <code>tests/web/test_node_suites.py</code> is red on this branch until then; the rest of <code>tests/web</code> outside <code>browser/</code> passes.</li>
+<li><b>Verify against <code>origin/main</code></b> (tasks 1 and 3). A local <code>main</code> ref may lag the remote; the audit's before run and task 3's <code>git diff main</code> used <code>origin/main</code>.</li>
 </ul>
 
 <h2>Self-review</h2>

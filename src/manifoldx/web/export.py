@@ -149,9 +149,14 @@ def build_export(
         smap["sources"] = [paths[name]]
         modules[name] = (mod.code, json.dumps(smap))
     with tempfile.TemporaryDirectory() as tmp:
-        # Not engine.export_gltf: its report would call the transpiled roots dropped.
+        # Not engine.export_gltf: its report would call the transpiled roots dropped. A library
+        # of geometries and materials by id: the page draws the entities from the store.
         scene = export_engine(
-            engine, Path(tmp) / "scene.glb", transpiled=[r.func for r in roots], camera=scene_camera
+            engine,
+            Path(tmp) / "scene.glb",
+            transpiled=[r.func for r in roots],
+            camera=scene_camera,
+            library=True,
         )
         glb = (Path(tmp) / "scene.glb").read_bytes()
     report["scene_report"] = scene.to_dict()

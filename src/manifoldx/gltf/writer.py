@@ -23,13 +23,21 @@ class Node:
     extras: dict | None = None
 
 
-def build_glb(nodes, *, camera=None, lights=(), environment=None, scene_extras=None, extra_materials=None):
+def build_glb(nodes, *, camera=None, lights=(), environment=None, scene_extras=None, extra_materials=None,
+              geometries=None, drawn_materials=()):
     """extra_materials: (id, material) pairs written even when no node uses them; the
     scene's extras map each id to its glTF material index under "mx_materials"
-    (a material glTF cannot express is left out)."""
+    (a material glTF cannot express is left out). geometries: (id, geometry) pairs, each
+    written once as a mesh with no material and no node, mapped under "mx_geometries".
+    drawn_materials: the material of each entity drawn from the library, reported as a node's is."""
     w = _Writer()
     for i, node in enumerate(nodes):
         w.node(node, i)
+    for mat in drawn_materials:
+        _index, note = w.material(mat)
+        if note is not None:
+            w.report.add("material", *note)
+    mx_geometries = {str(gid): w.library(geometry) for gid, geometry in geometries or ()}
     mx_materials = {}
     for mid, mat in extra_materials or ():
         index, _note = w.material(mat)  # a note only matters for drawn materials, reported by node()
@@ -42,6 +50,8 @@ def build_glb(nodes, *, camera=None, lights=(), environment=None, scene_extras=N
     extras = dict(scene_extras or {})
     if extra_materials is not None:
         extras["mx_materials"] = mx_materials
+    if geometries is not None:
+        extras["mx_geometries"] = mx_geometries
     if environment is not None:
         extras["environment"] = w.environment(environment)
     return w.finish(extras), w.report
@@ -97,6 +107,11 @@ def _rgba(color):
     return [*map(float, material_rgb(color)), alpha]
 
 
+def _uses_colors(mat):
+    """The textured pipeline ignores vertex colours, so glTF must not multiply them in."""
+    return bool(getattr(mat, "vertex_colors", False)) and getattr(mat, "albedo_map", None) is None
+
+
 def _image(path):
     data = Path(path).read_bytes()
     if data[:3] == b"\xff\xd8\xff":
@@ -135,9 +150,7 @@ class _Writer:
             self.report.add("material", *note)
             if note[1] == "dropped" and note[0] != "StandardMaterial.ao":
                 return
-        # The textured pipeline ignores vertex colours, so glTF must not multiply them in.
-        colors = bool(getattr(node.material, "vertex_colors", False)) and getattr(node.material, "albedo_map",
-                                                                                 None) is None
+        colors = _uses_colors(node.material)
         key = (id(node.geometry), mat, colors)
         if key not in self._meshes:
             attrs, indices = self.geometry(node.geometry, colors)
@@ -156,6 +169,15 @@ class _Writer:
         if node.extras is not None:
             entry["extras"] = node.extras
         self._roots.append(self.b.add("nodes", entry))
+
+    def library(self, geometry):
+        """A geometry as a mesh of its own, COLOR_0 included when it has colours; the
+        material that draws it says whether to use them. Returns the mesh index."""
+        attrs, indices = self.geometry(geometry, True)
+        prim = {"attributes": dict(attrs), "mode": 4}
+        if indices is not None:
+            prim["indices"] = indices
+        return self.b.add("meshes", {"primitives": [prim]})
 
     def geometry(self, geometry, colors):
         """Accessors for a geometry, written once however many materials use it."""
@@ -220,6 +242,7 @@ class _Writer:
         else:
             return None, (name, "dropped", "no glTF equivalent; its entities are not exported")
         out["name"] = name
+        out["extras"] = {"mx": {"vertex_colors": _uses_colors(mat)}}
         if out["pbrMetallicRoughness"]["baseColorFactor"][3] < 1.0:
             out["alphaMode"] = "BLEND"
         return self.b.add("materials", out), note

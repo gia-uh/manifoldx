@@ -79,11 +79,9 @@ def _lookup(table):
     return table if callable(table) else table.get
 
 
-def nodes(engine, names, extras, report):
-    from manifoldx.resources import BasicMaterial
-
-    unlit = None  # the renderer draws a mesh without a Material as a white BasicMaterial
-    name_of, extras_of = _lookup(names), _lookup(extras)
+def _meshed(engine, report):
+    """(index, geometry id, material id, material) of each alive entity with a mesh; an
+    entity drawn without one (point cloud, label or volume) is reported as dropped."""
     comps = engine.store._components
     out = []
     for i in np.where(engine.store._alive)[0]:
@@ -96,6 +94,18 @@ def nodes(engine, names, extras, report):
                 report.add("entity", type(material).__name__, "dropped",
                            "drawn without a mesh (point cloud, label or volume); glTF has no equivalent")
             continue
+        out.append((i, gid, mid, material))
+    return out
+
+
+def nodes(engine, names, extras, report):
+    from manifoldx.resources import BasicMaterial
+
+    unlit = None  # the renderer draws a mesh without a Material as a white BasicMaterial
+    name_of, extras_of = _lookup(names), _lookup(extras)
+    comps = engine.store._components
+    out = []
+    for i, gid, mid, material in _meshed(engine, report):
         if material is None:
             unlit = unlit or BasicMaterial("#ffffff")
             material = unlit
@@ -107,15 +117,29 @@ def nodes(engine, names, extras, report):
     return out
 
 
-def export_engine(engine, path, *, names=None, extras=None, strict=False, transpiled=(), camera=True):
-    """camera=False leaves the camera out, for run --web: the page has its own, from the snapshot."""
+def export_engine(engine, path, *, names=None, extras=None, strict=False, transpiled=(), camera=True,
+                  library=False):
+    """camera=False leaves the camera out, for run --web: the page has its own, from the snapshot.
+    library=True writes no entity nodes, but every registered geometry once by its id (the
+    named built-ins, the sprite quad and axis lines, are not meshes), for export --web: the
+    page draws the entities from the store."""
     if engine._device is None and engine._event_bus._handlers.get("startup"):
         engine._ensure_offscreen(1)  # startup handlers may need the device (load_texture)
     report = code_report(engine, transpiled)
     lights = [light for light in (engine._sun, engine._spot) if light is not None] + list(engine._lights)
-    data, written = build_glb(nodes(engine, names, extras, report), camera=engine.camera if camera else None, lights=lights,
+    geometries, drawn_materials = None, []
+    if library:
+        drawn_materials = [m for _i, _gid, _mid, m in _meshed(engine, report) if m is not None]
+        reg = engine._geometry_registry
+        builtin = set(reg._name_to_id.values())
+        geometries = [(gid, geo) for gid, geo in reg._geometries.items() if gid not in builtin]
+        drawn = []
+    else:
+        drawn = nodes(engine, names, extras, report)
+    data, written = build_glb(drawn, camera=engine.camera if camera else None, lights=lights,
                               environment=engine._environment, scene_extras=scene_extras(engine),
-                              extra_materials=list(engine._material_registry._materials.items()))
+                              extra_materials=list(engine._material_registry._materials.items()),
+                              geometries=geometries, drawn_materials=drawn_materials)
     report.extend(written)
     report.print()
     if strict and len(report):
