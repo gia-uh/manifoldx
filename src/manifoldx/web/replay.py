@@ -10,8 +10,18 @@ keys and buttons are held, just and clicks pressed this frame, d the mouse motio
 viewport size. The last five are optional and read as empty when absent: up and released are
 the keys and buttons released this frame, pos the pointer position in CSS pixels from the
 canvas's top-left, wheel the wheel's motion, mods the held modifiers among Alt, Control, Meta
-and Shift, sorted. Each side reads one frame, delivers the event queue, then runs the app's systems once with a fixed dt and
-traces:
+and Shift, sorted. "events" is optional too: the frame's events, [name, payload] in the order
+they came, the page's input events with the fields of the desktop's classes,
+
+    ["key_down" | "key_up", {"key", "modifiers": [str], "is_down"}]
+    ["pointer_down" | "pointer_up" | "pointer_move",
+     {"x", "y", "dx", "dy", "button", "buttons": [int], "modifiers": [str], "phase", "pointer_id"}]
+    ["wheel", {"dx", "dy", "x", "y", "buttons", "modifiers"}]
+    ["resize", {"width", "height", "pixel_ratio"}]
+
+delivered as KeyEvent, PointerEvent, WheelEvent and ResizeEvent (event_of), and any other event
+with its JSON payload. Each side reads one frame, delivers the event queue, then runs the app's
+systems once with a fixed dt and traces:
 
     {"camera": {"position", "target"}, "gui": [str], "log": [...], "state": engine.state,
      "paths": {path: value}, "store": store_trace(engine.store), "events": [name]}
@@ -44,7 +54,7 @@ from pathlib import Path
 
 import numpy as np
 
-from manifoldx.input import _key_name
+from manifoldx.input import KeyEvent, PointerEvent, ResizeEvent, WheelEvent, _key_name
 
 DT = 1 / 60
 
@@ -229,8 +239,36 @@ def replay_python(
     return trace
 
 
+KEY_EVENTS = ("key_down", "key_up")
+POINTER_EVENTS = ("pointer_down", "pointer_up", "pointer_move")
+
+
 def event_of(name: str, payload):
-    """The payload a frame's event is delivered with."""
+    """The payload a frame's event is delivered with, as js/manifoldx.js's eventOf: the seven
+    input events as the desktop's classes (their lists as tuples, a missing pointer_id 0), any
+    other payload as it is."""
+    if name in KEY_EVENTS:
+        return KeyEvent(payload["key"], tuple(payload["modifiers"]), payload["is_down"])
+    if name in POINTER_EVENTS:
+        p = payload
+        return PointerEvent(
+            p["x"],
+            p["y"],
+            p["dx"],
+            p["dy"],
+            p["button"],
+            tuple(p["buttons"]),
+            tuple(p["modifiers"]),
+            p["phase"],
+            p.get("pointer_id", 0),
+        )
+    if name == "wheel":
+        p = payload
+        return WheelEvent(
+            p["dx"], p["dy"], p["x"], p["y"], tuple(p["buttons"]), tuple(p["modifiers"])
+        )
+    if name == "resize":
+        return ResizeEvent(payload["width"], payload["height"], payload["pixel_ratio"])
     return payload
 
 

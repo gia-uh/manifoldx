@@ -6,7 +6,7 @@
 
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { advance, fromJSON, guiValues, loadApp, toJSON, traceEntry } from "./manifoldx.js";
+import { advance, guiValues, loadApp, toJSON, traceEntry } from "./manifoldx.js";
 
 // The folder's app, {engine, roots, modules}; options go to createEngine over the exported ones.
 export async function load(folder = new URL(".", import.meta.url), options = {}) {
@@ -18,15 +18,13 @@ export async function load(folder = new URL(".", import.meta.url), options = {})
   return { ...loadApp(state, modules, { ecs, ...options }), modules };
 }
 
-// One trace entry per frame: advance runs the frame (its events' payloads read as runtime
-// values), then traceEntry reads it.
+// One trace entry per frame: advance runs the frame, then traceEntry reads it.
 export function replay(app, frames, paths, dt = 1 / 60) {
   const { engine } = app;
   const trace = [];
   for (const frame of frames) {
     const start = engine.calls.length;
-    const events = (frame.events ?? []).map(([name, payload]) => [name, fromJSON(payload)]);
-    advance(app, { ...frame, events }, dt);
+    advance(app, frame, dt);
     trace.push(traceEntry(app, paths, start));
   }
   return trace;

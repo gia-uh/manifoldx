@@ -276,9 +276,9 @@ function handlerApp() {
 
 const IDLE = { keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [10, 10] };
 
-test("advance delivers a frame's event to every handler root of it once, with the payload as a Map, before the systems", () => {
+test("advance delivers a frame's event to every handler root of it once, its JSON payload as a Map, before the systems", () => {
   const { app, seen } = handlerApp();
-  advance(app, { ...IDLE, events: [["bump", fromJSON({ by: 10 })]] }, 1 / 60);
+  advance(app, { ...IDLE, events: [["bump", { by: 10 }]] }, 1 / 60);
   assert.equal(seen.length, 2);
   const [name, payload] = seen[0];
   assert.equal(name, "bump");

@@ -152,7 +152,7 @@ async function start() {
   let size = [0, 0], guiH = null;
   let frozen = null; // while a reload builds (Q2): the timer that unfreezes after FREEZE_MAX
   let manual = false;
-  const events = []; // [name, payload] an agent emitted, delivered in the next frame's queue
+  const events = []; // [name, JSON payload] an agent emitted, delivered in the next frame's queue
   let onPause = () => {}; // dev mode: an exception in a frame pauses until the next edit
 
   // One frame as the loop runs it: the frame the DOM built, the systems, the GUI, the camera,
@@ -323,7 +323,7 @@ async function start() {
             mergePatch(engine.state, fromJSON(body));
             return reply(stateView(engine.state));
           case "emit":
-            events.push([body.name, fromJSON(body.payload)]);
+            events.push([body.name, body.payload]); // JSON: advance's eventOf reads it
             return reply(null);
           case "look":
             return dev.lookPng(canvas, $("mx-gui"), () => {

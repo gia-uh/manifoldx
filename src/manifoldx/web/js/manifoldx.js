@@ -883,16 +883,44 @@ export class EventBus {
   }
 }
 
+// The fields of the desktop's input event classes (manifoldx.input), by event name.
+const KEY_FIELDS = ["key", "modifiers", "is_down"];
+const POINTER_FIELDS = ["x", "y", "dx", "dy", "button", "buttons", "modifiers", "phase", "pointer_id"];
+const EVENT_FIELDS = {
+  key_down: KEY_FIELDS,
+  key_up: KEY_FIELDS,
+  pointer_down: POINTER_FIELDS,
+  pointer_up: POINTER_FIELDS,
+  pointer_move: POINTER_FIELDS,
+  wheel: ["dx", "dy", "x", "y", "buttons", "modifiers"],
+  resize: ["width", "height", "pixel_ratio"],
+};
+
+// eventOf(name, payload): a frame event's JSON payload as its handlers receive it, as
+// manifoldx.web.replay.event_of builds it: the seven input events as frozen objects with the
+// fields of their desktop class (lists frozen as the tuples they are; pointer_id 0 when
+// absent), any other payload through fromJSON.
+export function eventOf(name, payload) {
+  const fields = EVENT_FIELDS[name];
+  if (fields === undefined) return fromJSON(payload);
+  const ev = {};
+  for (const f of fields) {
+    const v = payload[f] ?? (f === "pointer_id" ? 0 : undefined);
+    ev[f] = Array.isArray(v) ? Object.freeze([...v]) : v;
+  }
+  return Object.freeze(ev);
+}
+
 // app: {engine, roots}, roots as loadState returns them. One frame as Engine._draw_frame runs
 // it: the frame to engine.input; elapsed, 0 on the first frame and dt more on each later one;
 // the queue, with the frame event ({dt, elapsed, frame}) first, then what was emitted during
-// the previous frame, then the frame's events ([name, payload], runtime values); delivery; the
-// systems and the flush (step).
+// the previous frame, then the frame's events ([name, payload], JSON, through eventOf);
+// delivery; the systems and the flush (step).
 export function advance(app, frame, dt) {
   const { engine } = app;
   engine.input.setFrame(frame);
   if (engine.frame > 0) engine.elapsed += dt;
-  for (const [name, payload] of frame.events ?? []) engine.emit(name, payload);
+  for (const [name, payload] of frame.events ?? []) engine.emit(name, eventOf(name, payload));
   const payload = new Map([["dt", dt], ["elapsed", engine.elapsed], ["frame", engine.frame]]);
   engine.bus.pending.unshift(["frame", payload]);
   engine.bus.drain((name, p) => deliver(app, name, p));

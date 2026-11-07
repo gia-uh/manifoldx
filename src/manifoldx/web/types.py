@@ -663,6 +663,8 @@ RANDOM_FUNCTIONS = frozenset(f"random.{m}" for m in RANDOM_METHODS)
 _INPUT, _CAMERA = "manifoldx.input.InputState", "manifoldx.Camera"
 _HANDLE, _PROXY = "manifoldx.engine.EntityHandle", "manifoldx.engine._TransformProxy"
 _GUI = "manifoldx.gui.widgets._GuiRoot"
+_KEY_EVENT, _POINTER_EVENT = "manifoldx.input.KeyEvent", "manifoldx.input.PointerEvent"
+_WHEEL_EVENT, _RESIZE_EVENT = "manifoldx.input.WheelEvent", "manifoldx.input.ResizeEvent"
 _PANEL, _TEXT, _VALUE_DISPLAY = (
     "manifoldx.gui.Panel",
     "manifoldx.gui.Text",
@@ -724,6 +726,29 @@ RUNTIME_SURFACE = {
         "destroy": fn(f"{_HANDLE}.destroy", NONE),
     },
     _PROXY: {"pos": vec("f64"), "rot": vec("f32"), "scale": vec("f32")},
+    # The input events' payloads (js/manifoldx.js's eventOf), read only; a tuple[X, ...] types
+    # as a list of X, as its annotation does.
+    _KEY_EVENT: {"key": STR, "modifiers": list_of(STR), "is_down": BOOL},
+    _POINTER_EVENT: {
+        "x": NUM,
+        "y": NUM,
+        "dx": NUM,
+        "dy": NUM,
+        "button": INT,
+        "buttons": list_of(INT),
+        "modifiers": list_of(STR),
+        "phase": STR,
+        "pointer_id": INT,
+    },
+    _WHEEL_EVENT: {
+        "dx": NUM,
+        "dy": NUM,
+        "x": NUM,
+        "y": NUM,
+        "buttons": list_of(INT),
+        "modifiers": list_of(STR),
+    },
+    _RESIZE_EVENT: {"width": INT, "height": INT, "pixel_ratio": NUM},
     # The widgets gui.js draws: the fields the page applies each frame when reached code
     # writes them (gui.js's sync), and nothing else.
     _PANEL: {"offset": tuple_of(NUM, NUM), "style_overrides": dict_of(STR, UNKNOWN)},
@@ -734,13 +759,22 @@ RUNTIME_SURFACE = {
     RANDOM.name: {m: fn(f"{RANDOM.name}.{m}", t) for m, t in RANDOM_METHODS.items()},
 }
 
+# The payload type of a handler of each engine event, for a payload parameter without an
+# annotation the transpiler reads; a handler of another event annotates it.
+EVENT_PAYLOADS = {
+    "frame": dict_of(STR, NUM),
+    "key_down": obj(_KEY_EVENT),
+    "key_up": obj(_KEY_EVENT),
+    "pointer_down": obj(_POINTER_EVENT),
+    "pointer_up": obj(_POINTER_EVENT),
+    "pointer_move": obj(_POINTER_EVENT),
+    "wheel": obj(_WHEEL_EVENT),
+    "resize": obj(_RESIZE_EVENT),
+}
+
 # The fields of manifoldx objects reached code may write: those the page applies each frame
 # (gui.js's sync for the widgets, scene.js's sync for the camera). A write of any other field
 # of a manifoldx object moves the desktop and not the page, so it fails the export.
-# The payload type of a handler of each engine event, for a payload parameter without an
-# annotation the transpiler reads; a handler of another event annotates it.
-EVENT_PAYLOADS = {"frame": dict_of(STR, NUM)}
-
 WRITABLE = {
     _CAMERA: {"position", "target", "up", "fov", "near", "far"},
     _PROXY: {"pos", "rot", "scale"},
@@ -764,6 +798,10 @@ RUNTIME_NAMES = {
     _PANEL: "a Panel",
     _TEXT: "a Text",
     _VALUE_DISPLAY: "a ValueDisplay",
+    _KEY_EVENT: "a KeyEvent",
+    _POINTER_EVENT: "a PointerEvent",
+    _WHEEL_EVENT: "a WheelEvent",
+    _RESIZE_EVENT: "a ResizeEvent",
 }
 
 # math's functions the subset has, and its constants.

@@ -37,10 +37,10 @@ if __name__ == "__main__":
 
 RUN = """
 import { load } from %s;
-import { advance, fromJSON } from %s;
+import { advance } from %s;
 const app = await load(new URL(%s));
 const idle = { keys: [], just: [], d: [0, 0], buttons: [], clicks: [], vp: [64, 64] };
-advance(app, { ...idle, events: [["bump", fromJSON({ by: 10 })]] }, 1 / 60);
+advance(app, { ...idle, events: [["bump", { by: 10 }]] }, 1 / 60);
 console.log(JSON.stringify({ roots: app.roots.map((r) => r.label), yaw: app.engine.state.get("yaw") }));
 """
 
