@@ -768,7 +768,11 @@ def _write_error(app_dir, tmp_path, capsys, write: str) -> tuple[str, int]:
 
 @pytest.mark.parametrize(
     "write, field, name",
-    [("x.x = 1.0", "x.x", "x"), ("x.x += 1.0", "x.x", "x"), ('mat.color = "#00ff00"', "mat.color", "mat")],
+    [
+        ("x.x = 1.0", "x.x", "x"),
+        ("x.x += 1.0", "x.x", "x"),
+        ('mat.color = "#00ff00"', "mat.color", "mat"),
+    ],
 )
 def test_a_write_through_a_value_of_unknown_type_fails_the_export(
     app_dir, tmp_path, capsys, write, field, name
@@ -781,3 +785,125 @@ def test_a_write_through_a_value_of_unknown_type_fails_the_export(
         f"app.py:{line}: writing `{field}`, a field of a value of unknown type (annotate `{name}`), "
         "is outside the subset (reached from system tick)"
     ) in err
+
+
+@pytest.mark.parametrize(
+    "write, what",
+    [
+        (
+            "engine.camera.up = np.array([1.0, 0.0, 0.0], np.float32)",
+            "`engine.camera.up`, a field of the camera",
+        ),
+        ("engine.camera.zoom = 2.0", "`engine.camera.zoom`, a field of the camera"),
+        ("cam.up += np.array([1.0, 0.0, 0.0], np.float32)", "`cam.up`, a field of the camera"),
+        ("engine.camera = cam", "`engine.camera`, a field of the engine"),
+        ("engine.w = 640", "`engine.w`, a field of the engine"),
+        ("engine.state = {}", "`engine.state`, a field of the engine"),
+        (
+            "engine.input.pointer_captured = True",
+            "`engine.input.pointer_captured`, a field of the input",
+        ),
+    ],
+)
+def test_a_runtime_write_the_page_does_not_apply_fails_the_export(
+    app_dir, tmp_path, capsys, write, what
+):
+    """gia-uh/manifoldx#151: the desktop takes the write and the browser runtime has no such
+    field, or never applies it, so the export stops at its line."""
+    err, line = _write_error(app_dir, tmp_path, capsys, write)
+    assert f"app.py:{line}: writing {what} the page does not apply, is outside the subset" in err
+
+
+@pytest.mark.parametrize(
+    "write, what",
+    [
+        (
+            "engine.camera.position = np.array([0.0, 1.0, 2.0])",
+            "a vec[f64] to `engine.camera.position`",
+        ),
+        ("cam.target = (0.0, 1.0, 2.0)", "a tuple[num, num, num] to `cam.target`"),
+        ('engine.camera.fov = "wide"', "a str to `engine.camera.fov`"),
+    ],
+)
+def test_a_camera_write_of_another_type_fails_the_export(app_dir, tmp_path, capsys, write, what):
+    """position and target are float32 vectors on both sides only when the app writes one:
+    numpy would keep a float64 array where the browser rounds to float32."""
+    err, line = _write_error(app_dir, tmp_path, capsys, write)
+    assert f"app.py:{line}: writing {what}" in err
+    assert "is outside the subset" in err
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        "engine.camera.position = cam.position + np.array([0.0, 1.0, 0.0], np.float32)",
+        "engine.camera.position += np.array([0.0, 1.0, 0.0], np.float32)",
+        "cam.target = np.array([0.0, 1.0, 0.0], np.float32)",
+        "engine.camera.fov = 70",
+        "cam.near += 0.5",
+        "engine.camera.far = 500.0",
+        "engine.state.speed = 2.0",
+        "r: Rig = engine.state['rig']\n    r.x = 2.0",
+    ],
+)
+def test_writes_the_page_applies_still_export(app_dir, tmp_path, write):
+    """The camera fields scene.js's sync applies each frame, engine.state and an app object
+    reached through an annotated local all export."""
+    src = RUNTIME_WRITE.replace("{write}", write)
+    assert _export(app_dir, tmp_path / "out", src) == 0
+
+
+CAMERA_WRITES = Path(__file__).parent / "apps" / "camera_writes.py"
+CAMERA_PATHS = ["engine.camera.fov", "engine.camera.near", "engine.camera.far", "dolly.ahead"]
+STILL = {"keys": [], "just": [], "d": [0, 0], "buttons": [], "clicks": [], "vp": [320, 200]}
+
+
+@pytest.fixture(scope="module")
+def camera_export(tmp_path_factory):
+    out = tmp_path_factory.mktemp("camera") / "out"
+    assert export_web(None, str(CAMERA_WRITES), out, []) == 0
+    return out
+
+
+def test_each_writable_camera_field_replays_in_node_as_in_python(camera_export):
+    """gia-uh/manifoldx#151: position (in place), target, fov, near and far written by a
+    system are the same values on both sides, and get_forward reads the written ones."""
+    from manifoldx.web.replay import replay_node, replay_python
+
+    py = replay_python(None, str(CAMERA_WRITES), [STILL] * 5, CAMERA_PATHS)
+    last = py[-1]
+    assert last["camera"]["position"] == pytest.approx([0.5, 2.0, 7.0], abs=1e-6)
+    assert last["camera"]["target"] == pytest.approx([0.8, 1.5, 4.0], abs=1e-6)
+    paths = last["paths"]
+    assert (paths["engine.camera.fov"], paths["engine.camera.far"]) == (55, 1050.0)
+    assert paths["engine.camera.near"] == pytest.approx(0.15)
+    assert paths["dolly.ahead"] == pytest.approx(-3 / (0.3**2 + 0.5**2 + 3.0**2) ** 0.5, abs=1e-6)
+    mismatch = compare(py, replay_node(camera_export, [STILL] * 5, CAMERA_PATHS))
+    assert mismatch is None, str(mismatch)
+
+
+@pytest.mark.parametrize(
+    "write, broken, where",
+    [
+        ("[0.1, 0.0, (-0.2)]", "[0.1, 0.0, (-0.25)]", "camera.position"),
+        ("[0.3, (-0.5), (-3.0)]", "[0.3, (-0.5), (-3.5)]", "camera.target"),
+        ("cam.fov = (50 + dolly.n)", "cam.fov = (51 + dolly.n)", "engine.camera.fov"),
+        ("(0.1 + (0.01 * dolly.n))", "(0.1 + (0.02 * dolly.n))", "engine.camera.near"),
+        ("(cam.far + 10.0)", "(cam.far + 11.0)", "engine.camera.far"),
+    ],
+)
+def test_break_a_camera_write(camera_export, tmp_path, write, broken, where):
+    """The replay sees each field: damage one write in the JS and compare names it."""
+    import shutil
+
+    from manifoldx.web.replay import replay_node, replay_python
+
+    out = tmp_path / "broken"
+    shutil.copytree(camera_export, out)
+    js = out / "app" / "__main__.js"
+    text = js.read_text()
+    assert write in text
+    js.write_text(text.replace(write, broken))
+    py = replay_python(None, str(CAMERA_WRITES), [STILL] * 3, CAMERA_PATHS)
+    mismatch = compare(py, replay_node(out, [STILL] * 3, CAMERA_PATHS))
+    assert mismatch is not None and where in str(mismatch), str(mismatch)
