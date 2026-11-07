@@ -33,6 +33,8 @@ class EntityStore:
         self.max_entities = max_entities
         self._alive = np.zeros(max_entities, dtype=bool)
         self._components: dict[str, np.ndarray] = {}
+        # Per component, which slots have it: set by the spawn that filled the slot.
+        self._members: dict[str, np.ndarray] = {}
         self._free_list: list[int] = []  # Reusable dead entity indices
         # One past the highest slot ever spawned into: every live entity sits
         # below it, so GPU syncs move only rows [0, _high_water).
@@ -52,6 +54,7 @@ class EntityStore:
         """
         full_shape = (self.max_entities,) + shape
         self._components[name] = np.zeros(full_shape, dtype=dtype)
+        self._members[name] = np.zeros(self.max_entities, dtype=bool)
 
     def spawn(self, n: int, **component_data) -> np.ndarray:
         """
@@ -83,6 +86,9 @@ class EntityStore:
             self._high_water = max(self._high_water, int(indices.max()) + 1)
         for hook in self._release_hooks:
             hook(indices)
+        # A filled slot has the components given and Transform, and forgets the rest.
+        for name, members in self._members.items():
+            members[indices] = name in component_data or name == "Transform"
 
         # Write component data to storage
         for comp_name, data in component_data.items():
@@ -121,10 +127,18 @@ class EntityStore:
         self._free_list.extend(indices.tolist())
 
     def get_component_view(self, component_names: list[str], engine=None) -> "ComponentView":
-        """Get a view into entities with specified components."""
-        # Get indices of alive entities that have ALL specified components
-        alive_indices = np.where(self._alive)[0]
-        return ComponentView(self, component_names, alive_indices, engine)
+        """A view of the alive entities that have every named component, ascending.
+
+        A name that is not registered matches nothing; no names give every alive entity.
+        """
+        mask = self._alive.copy()
+        for name in component_names:
+            members = self._members.get(name)
+            if members is None:
+                mask[:] = False
+                break
+            mask &= members
+        return ComponentView(self, component_names, np.flatnonzero(mask), engine)
 
     def get_component_data(self, component_name: str, indices: np.ndarray) -> np.ndarray:
         """Get component data for specific entity indices."""
@@ -305,6 +319,29 @@ class _FieldView:
     def __rtruediv__(self, other):
         """other / field_view (scalar)."""
         return np.asarray(other, dtype=np.float32) / self._get_data()
+
+    def __getitem__(self, key):
+        """field[:, j]: column j of the field, as a one-column field view, so
+        `q[Transform].pos[:, 1] < -10.0` gives the entity indices."""
+        size = self._col_end - self._col_start
+        if (
+            isinstance(key, tuple)
+            and len(key) == 2
+            and key[0] == slice(None)
+            and isinstance(key[1], (int, np.integer))
+            and 0 <= key[1] < size
+        ):
+            start = self._col_start + int(key[1])
+            return _FieldView(
+                self._store,
+                self._indices,
+                self._component_name,
+                start,
+                start + 1,
+                self._field_name,
+                self._commands,
+            )
+        raise TypeError("a field view takes [:, j], one column")
 
     def __le__(self, other):
         """Comparison returns absolute entity indices where condition is true."""
@@ -495,6 +532,22 @@ class ComponentAccessor:
         if self._component_name == "Radius" and name == "radius":
             return _FieldView(
                 self._store, self._indices, "Radius", 0, 1, "radius", self._commands
+            )
+
+        # A Component subclass's fields, from the layout its annotations give
+        from manifoldx.components import _COMPONENT_CLASSES
+
+        layout = getattr(_COMPONENT_CLASSES.get(self._component_name), "_layout", {})
+        if name in layout:
+            col, size = layout[name]
+            return _FieldView(
+                self._store,
+                self._indices,
+                self._component_name,
+                col,
+                col + size,
+                name,
+                self._commands,
             )
 
         # Check if component class has field positions

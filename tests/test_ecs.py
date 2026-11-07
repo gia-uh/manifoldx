@@ -312,3 +312,118 @@ def test_high_water_tracks_highest_slot_ever_spawned():
     assert store._high_water == 6
     store.spawn(n=1)
     assert store._high_water == 7
+
+
+# A query's membership: only the alive entities that have every named component.
+
+from manifoldx.components import Component, Transform  # noqa: E402
+from manifoldx.ecs import EntityStore  # noqa: E402
+from manifoldx.types import Vector3  # noqa: E402
+
+
+def _store():
+    store = EntityStore(16)
+    Transform.register(store)
+    store.register_component("Velocity", np.dtype("f4"), (3,))
+    return store
+
+
+def test_a_query_returns_only_entities_with_all_its_components():
+    store = _store()
+    store.spawn(2, Transform=Transform.get_default_data(2))
+    b = store.spawn(
+        3, Transform=Transform.get_default_data(3), Velocity=np.ones((3, 3), np.float32)
+    )
+    assert store.get_component_view(["Transform", "Velocity"])._indices.tolist() == b.tolist()
+    assert len(store.get_component_view(["Transform"])) == 5
+    assert len(store.get_component_view([])) == 5
+
+
+def test_transform_is_a_member_when_not_given():
+    store = _store()
+    store.spawn(1, Velocity=np.zeros((1, 3), np.float32))
+    assert len(store.get_component_view(["Transform"])) == 1
+
+
+def test_a_refilled_slot_forgets_the_components_it_had():
+    store = _store()
+    v = store.spawn(
+        1, Transform=Transform.get_default_data(1), Velocity=np.ones((1, 3), np.float32)
+    )
+    store.destroy(v)
+    w = store.spawn(1, Transform=Transform.get_default_data(1))
+    assert w[0] == v[0]
+    assert len(store.get_component_view(["Velocity"])) == 0
+
+
+def test_an_unregistered_component_matches_nothing():
+    store = _store()
+    store.spawn(2, Transform=Transform.get_default_data(2))
+    assert len(store.get_component_view(["Nope"])) == 0
+
+
+class _Drift(Component):
+    v: Vector3
+
+
+def test_a_system_skips_entities_without_its_component():
+    import manifoldx as mx
+
+    engine = mx.Engine("membership")
+    still = engine.spawn(Transform(pos=(0, 0, 0)))
+    moving = engine.spawn(Transform(pos=(0, 0, 0)), _Drift(v=(1, 0, 0)))
+    engine.spawn(Transform(pos=(0, 0, 0)))
+
+    @engine.system
+    def push(q: mx.Query[Transform, _Drift], dt: float):
+        q[Transform].pos += np.array([1.0, 0.0, 0.0], np.float32)
+
+    engine.systems.run_all(engine, 1 / 60)
+    engine.commands.execute(engine.store)
+    assert engine.store._components["Transform"][moving.index, 0] == 1.0
+    assert engine.store._components["Transform"][still.index, 0] == 0.0
+
+
+def test_a_column_of_a_field_compares_to_entity_indices():
+    import manifoldx as mx
+
+    engine = mx.Engine("columns")
+    engine.spawn(Transform(pos=(0.0, 0.0, 0.0)))
+    low = engine.spawn(Transform(pos=(0.0, -20.0, 0.0)))
+    engine.spawn(Transform(pos=(0.0, 5.0, 0.0)))
+    seen = {}
+
+    @engine.system
+    def look(q: mx.Query[Transform], dt: float):
+        seen["low"] = q[Transform].pos[:, 1] < -10.0
+        seen["shape"] = q[Transform].pos[:, 1].data.shape
+
+    engine.systems.run_all(engine, 1 / 60)
+    assert low.index != 0
+    assert np.array_equal(seen["low"], np.array([low.index]))
+    assert seen["shape"] == (3, 1)
+
+
+def test_a_field_view_takes_only_one_column():
+    store = _store()
+    store.spawn(2, Transform=Transform.get_default_data(2))
+    pos = store.get_component_view(["Transform"])[Transform].pos
+    with pytest.raises(TypeError, match=r"a field view takes \[:, j\], one column"):
+        pos[0]
+    with pytest.raises(TypeError, match=r"one column"):
+        pos[:, 3]
+
+
+def test_a_query_reads_and_writes_a_component_subclass_field():
+    import manifoldx as mx
+
+    engine = mx.Engine("subclass fields")
+    moving = engine.spawn(Transform(pos=(0, 0, 0)), _Drift(v=(1.0, 2.0, 3.0)))
+
+    @engine.system
+    def push(q: mx.Query[_Drift], dt: float):
+        q[_Drift].v += np.array([1.0, 0.0, 0.0], np.float32)
+
+    engine.systems.run_all(engine, 1 / 60)
+    engine.commands.execute(engine.store)
+    assert engine.store._components["_Drift"][moving.index].tolist() == [2.0, 2.0, 3.0]

@@ -63,9 +63,8 @@ engine.set_lights(
 
 # Disk particles --------------------------------------------------------------
 # The star occupies entity index 0; particles occupy indices 1..NUM_PARTICLES.
-# Per-frame physics runs over all alive entities (Plan 1's Query doesn't filter
-# per-component). The star's own velocity stays zero — softened gravity at the
-# origin returns ~0 acceleration, so it doesn't drift.
+# The gravity system's query names ScalarValue, which the star lacks, so it sees
+# the particles and the HUD labels only: the star never moves.
 positions = mx.random.positions_in_disk(
     NUM_PARTICLES, inner=DISK_INNER, outer=DISK_OUTER,
     thickness=DISK_THICK, axis="y", rng=7,
@@ -126,14 +125,15 @@ engine.spawn(
     n=NUM_HUD,
 )
 
-# Velocities live outside the ECS. Slot 0 is the star (always zero); slots
-# 1..NUM_PARTICLES are the dust particles; slots N_TOTAL..N_TOTAL+NUM_HUD-1
-# are the HUD labels (kept stationary by the gravity system).
+# Velocities live outside the ECS, one row per entity the gravity query sees:
+# rows 0..NUM_PARTICLES-1 are the dust particles, the last NUM_HUD the HUD labels
+# (kept stationary by the gravity system). The labels' store slots follow the
+# star and the particles.
 N_TOTAL = NUM_PARTICLES + 1
 HUD_FPS_IDX = N_TOTAL
 HUD_SPD_IDX = N_TOTAL + 1
-velocities = np.zeros((N_TOTAL + NUM_HUD, 3), dtype=np.float32)
-velocities[1:N_TOTAL] = particle_velocities
+velocities = np.zeros((NUM_PARTICLES + NUM_HUD, 3), dtype=np.float32)
+velocities[:NUM_PARTICLES] = particle_velocities
 
 # HUD update state (boxed so the closure can mutate them).
 _hud_state = {"fps_smooth": 60.0, "clock": 0.0}
@@ -145,16 +145,16 @@ def gravity(query: mx.Query[Transform, ScalarValue], dt: float):
     """Soft gravity from the central star + speed-driven colormap + HUD."""
     global velocities
 
-    pos = query[Transform].pos.data  # (N_TOTAL + NUM_HUD, 3) snapshot
+    pos = query[Transform].pos.data  # (NUM_PARTICLES + NUM_HUD, 3) snapshot
 
     # Soft Keplerian gravity toward the central star.
     accel = mx.physics.central_gravity(pos, GM=GM, softening=SOFTENING)
 
     # HUD labels are static — keep them anchored regardless of gravity.
-    accel[N_TOTAL:] = 0.0
+    accel[NUM_PARTICLES:] = 0.0
 
     velocities[:] = velocities + accel * dt
-    velocities[N_TOTAL:] = 0.0
+    velocities[NUM_PARTICLES:] = 0.0
 
     speeds = np.linalg.norm(velocities, axis=1)
 
@@ -170,7 +170,7 @@ def gravity(query: mx.Query[Transform, ScalarValue], dt: float):
         _hud_state["clock"] = 0.0
         # Bucketing keeps the unique-string count well under the 256-slot cap.
         fps_bucket = int(round(_hud_state["fps_smooth"] / 5.0)) * 5
-        avg_speed = float(speeds[1:N_TOTAL].mean())
+        avg_speed = float(speeds[:NUM_PARTICLES].mean())
         spd_bucket = round(avg_speed * 2.0) / 2.0
 
         atlas = engine.get_label_atlas()

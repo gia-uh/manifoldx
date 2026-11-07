@@ -1,7 +1,7 @@
 // The page's bootstrap: load the export (state, the app's modules, the scene with a progress
 // line), draw it with three.js, and run the app's systems every animation frame on the input
 // the DOM gave, through the same Frame the replay feeds. window.__mx is how tests drive it:
-// {ready, app, scene, gui, frames, trace, error, paths, manual(on), tick(dt), loadStats}, and
+// {ready, app, scene, renderer, gui, frames, trace, error, paths, manual(on), tick(dt), loadStats}, and
 // under manifoldx run --web (<meta name="mx-dev">) also {version, swaps, dev, status, swap(info)}.
 //
 // The renderer, the canvas, the input (FrameBuilder, PointerLock, the DOM listeners) live as
@@ -29,12 +29,14 @@ const mx = {
   ready: new Promise((res, rej) => { resolveReady = res; rejectReady = rej; }),
   app: null,
   scene: null,
+  renderer: null,
   gui: null,
   frames: [],
   trace: [],
   error: null,
   paths: [],
   loadStats: { bytes: 0 },
+  frameMs: null, // {work, render} of the last frame, ms
   manual: () => {},
   tick: () => null,
   version: null,
@@ -98,13 +100,14 @@ async function fetchScene(url, bytes, gzipBytes) {
 // "v4/" under run --web). The app is made when the version runs (makeApp).
 export async function loadVersion(base, info = null) {
   const state = await (await fetchOk(`${base}state.json`)).json();
+  const ecs = await (await fetchOk(`${base}ecs.bin`)).arrayBuffer();
   const modules = {}, maps = {};
   for (const name of state.modules) {
     modules[name] = await import(new URL(`${base}app/${name}.js`, import.meta.url).href);
     const map = await (await fetchOk(`${base}app/${name}.js.map`)).json();
     maps[`app/${name}.js`] = { source: map.sources[0], lines: lineTable(map) };
   }
-  return { state, modules, maps, app: null, info };
+  return { state, ecs, modules, maps, app: null, info };
 }
 
 async function start() {
@@ -137,15 +140,14 @@ async function start() {
   const builder = new FrameBuilder({ devicePixelRatio: window.devicePixelRatio || 1 });
   const lock = new PointerLock(canvas, document, builder);
   const hooks = {
-    setMaterial: (entity, id) => scene.setMaterial(entity, id),
     capture: (on) => lock.request(on),
     log: (text) => mx.dev?.appLog(text), // engine.log: to the dev server's log, nowhere in an export
   };
-  const makeApp = (version) => ({ ...loadApp(version.state, version.modules, { hooks }), modules: version.modules });
+  const makeApp = (version) => ({ ...loadApp(version.state, version.modules, { hooks, ecs: version.ecs }), modules: version.modules });
   running.app = makeApp(running);
   lock.input = running.app.engine.input;
   attachDom(canvas, builder);
-  Object.assign(mx, { app: running.app, scene, gui, version: info ? info.version : null });
+  Object.assign(mx, { app: running.app, scene, renderer, gui, version: info ? info.version : null });
 
   let size = [0, 0], guiH = null;
   let frozen = null; // while a reload builds (Q2): the timer that unfreezes after FREEZE_MAX
@@ -158,6 +160,7 @@ async function start() {
   // app's code threw, which pauses the page, or while a reload holds the tab frozen.
   function runFrame(dt) {
     if (mx.error !== null || frozen !== null) return null;
+    const t0 = performance.now();
     const { app } = running, { engine } = app;
     const w = canvas.clientWidth, h = canvas.clientHeight;
     const frame = builder.take([w, h]);
@@ -184,7 +187,10 @@ async function start() {
       size = [w, h];
     }
     scene.sync(engine);
+    const t1 = performance.now();
     renderer.render(scene.scene, scene.camera);
+    // The bench's numbers (benchmarks/suites/web.py): the frame up to the batches, the render call.
+    mx.frameMs = { work: t1 - t0, render: performance.now() - t1 };
     return { frame, start: 0 };
   }
 
@@ -238,8 +244,8 @@ async function start() {
       thaw();
       return false;
     }
-    if (kept) scene.resetMaterials();
-    else {
+    // A kept scene's batches rebuild from the new version's store at the next sync.
+    if (!kept) {
       scene.dispose();
       scene = built;
     }

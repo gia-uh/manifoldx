@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **export --web: the entity store in the page.** The export writes the store's arrays as
+  `ecs.bin` and their layouts in `state.json`; the page keeps them in a `Store` with the
+  desktop's slot rules and its flush after the systems. Transpiled systems use their
+  component queries (`q[Velocity].v += GRAVITY * dt`, `len(q)`, `for i in q`), with the
+  desktop's field-view semantics; `engine.spawn(..., n=)` from geometries and materials the
+  export saw and `engine.destroy(...)`; entity handles (`h.transform.pos`, `.rot`, `.scale`,
+  `h.set_material`, `h.destroy`) and `Transform.rotation(x, y, z)`. The array subset covers
+  rank-1 and rank-2 float32, float64, int32 and bool arrays with numpy's dtype, broadcasting
+  and rounding rules: `+ - * /`, comparisons, `& |`, `**` by 2, 0.5 and -1, masks and index
+  arrays, `np.sin cos exp sqrt floor clip minimum maximum where sum mean min max argmin
+  argmax stack column_stack linalg.norm`. The trace carries the store, and the Python replay
+  flushes after the systems (#140). Know-how: `know-how/web-export.md`, "Entities in the
+  page".
+- **export --web: one instanced mesh per batch.** Under `--web`, `scene.glb` is a library of
+  geometries and materials by id with no entity nodes (`export_engine(..., library=True)`);
+  the page draws one `InstancedMesh` per (geometry, material) from the store and rebuilds the
+  batches when the store's membership moves, so a frame draws one call per non-empty batch.
+- **`_FieldView[:, j]`**, a one-column view of a query field on the desktop:
+  `engine.destroy(q[Transform].pos[:, 1] < -10.0)` destroys the entities below -10.
+- **`examples/web_crowd.py`**: boxes spawned by Space, drifting by a query system, destroyed
+  when they fall, picked and painted gold; it replays with no mismatch in Node and in
+  Chromium.
+- **`benchmarks` suite `web`**, case `web-crowd`: the exported page's work per frame in
+  headless Chromium for 1,000 and 10,000 boxes, and its draw calls.
+
 - **`manifoldx run --web [-m module | app.py] [--port N]`: the dev loop in a browser tab.**
   It serves the app's page on 127.0.0.1 (the app at `/`, the dev page at `/dev`), and on
   every save reruns setup in Python, exports again and pushes the new version over
@@ -216,6 +241,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A query returns only the entities that have its components.** A system's query returns
+  only the alive entities that have every component it names, as its docstring said; before,
+  it returned every alive entity. An app whose query names a component some entities lack no
+  longer writes their rows, and `len(query)` counts only the matching entities (#140).
+  `examples/point_cloud.py` kept its velocities per store slot, star included; they are now
+  per query row.
+
 - **Key names no longer depend on Shift, and Space is `"Space"`.** A letter pressed with
   Shift held arrived as `"W"`, so `is_pressed("w")` was false while sprinting. Letters are
   now lowercase on `KeyEvent.key` and in the polling state, and the space bar, which
@@ -327,6 +359,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   50 s to 0.7 s, with flat memory (#85).
 
 ### Fixed
+
+- **A query reads the fields of a `Component` subclass.** `q[Velocity].v` raised
+  `AttributeError` for a component declared with the `Component` base, the form AGENTS.md
+  recommends; the accessor now reads the class's layout.
+- **export --web: frame code reads and writes `engine.camera.up`** (#153), which the page
+  copies to the three.js camera each frame.
+- **export --web: writing a material's field points at `set_material`** (#154) instead of
+  asking for an annotation no annotation could satisfy.
 
 - **export --web: handlers and systems registered with decorators export.**
   `@engine.on("name")` and `@engine.system` on a module function, `engine` a module global

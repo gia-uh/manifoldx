@@ -180,10 +180,14 @@ def tick(query, dt):
 """
 
 
-def test_a_system_that_uses_its_query_fails(load):
+def test_a_systems_query_types_from_its_registration(load):
+    from manifoldx.web.types import INT, query
+
     mods, env_of = load({"app": QUERY})
-    with pytest.raises(TranspileError, match="component queries are not supported in the browser"):
-        Reach([Root("system", "system move", mods["app"].move)], env_of())
+    root = Root("system", "system move", mods["app"].move, components=("Transform",))
+    reach = Reach([root], env_of())
+    assert reach.env.local(("app", "move"), "query") == query(("Transform",))
+    assert reach.env.local(("app", "move"), "x") == INT  # iterating it gives entity indices
     # An unused query is fine, and dt is a number.
     reach = Reach([Root("system", "system tick", mods["app"].tick)], env_of())
     assert reach.functions == {("app", "tick")}

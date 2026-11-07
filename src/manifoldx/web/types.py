@@ -31,8 +31,13 @@ KINDS = frozenset(
         "dict",
         "set",
         "vec",
+        "nd",
         "obj",
         "fn",
+        "query",
+        "accessor",
+        "field",
+        "component",
         "union",
         "unknown",
     }
@@ -43,7 +48,8 @@ KINDS = frozenset(
 class Ty:
     """A type. `args` holds the element types: list[elem], set[elem], tuple[*items],
     dict[key, value], union[*members], fn[return] (empty when the return is unknown).
-    `dtype` is a vec's "f64" or "f32". A num carries one when it is a numpy scalar, which
+    `dtype` is a vec's "f64" or "f32", an nd's "f64", "f32", "bool" or "i32". An nd is a
+    numpy array of `rank` dimensions (a bare vec is rank 1 of a float). A num carries one when it is a numpy scalar, which
     numpy keeps at its precision ("f32": np.float32, float32 arithmetic; "f64":
     np.float64); a Python float or int has none and takes the other operand's precision
     (NEP 50). `name` is an obj's class ("module.Qualname") or a
@@ -58,16 +64,21 @@ class Ty:
     args: tuple[Ty, ...] = ()
     dtype: str | None = None
     name: str | None = None
+    rank: int | None = None
 
     def __post_init__(self):
         if self.kind not in KINDS:
             raise ValueError(f"unknown type kind {self.kind!r}")
         if self.kind == "vec" and self.dtype not in ("f64", "f32"):
             raise ValueError(f"a vec's dtype is f64 or f32, not {self.dtype!r}")
+        if self.kind == "nd" and (self.dtype not in ND_DTYPES or not self.rank):
+            raise ValueError(f"an nd has a dtype among {ND_DTYPES} and a rank, not {self.dtype!r}")
         if self.kind == "num" and self.dtype not in (None, "f64", "f32"):
             raise ValueError(f"a num's dtype is None, f64 or f32, not {self.dtype!r}")
-        if self.kind not in ("vec", "num") and self.dtype is not None:
+        if self.kind not in ("vec", "num", "nd") and self.dtype is not None:
             raise ValueError(f"a {self.kind} has no dtype")
+        if self.kind != "nd" and self.rank is not None:
+            raise ValueError(f"a {self.kind} has no rank")
 
     def __str__(self) -> str:
         k, a = self.kind, self.args
@@ -77,6 +88,8 @@ class Ty:
             return f"{k}[{', '.join(map(str, a))}]"
         if k == "vec" or (k == "num" and self.dtype):
             return f"{k}[{self.dtype}]"
+        if k == "nd":
+            return f"nd[{self.dtype}, {self.rank}]"
         if k in ("obj", "fn") and self.name:
             return f"{k} {self.name}"
         return k
@@ -107,6 +120,7 @@ class Ty:
         return self.all("num", "int", "bool", "str", "none")
 
 
+ND_DTYPES = ("f64", "f32", "bool", "i32")
 NUM, INT, BOOL, STR, NONE = Ty("num"), Ty("int"), Ty("bool"), Ty("str"), Ty("none")
 UNKNOWN = Ty("unknown")
 NEVER = Ty("union")
@@ -136,8 +150,156 @@ def vec(dtype: str = "f64") -> Ty:
     return Ty("vec", dtype=dtype)
 
 
+def nd(dtype: str, rank: int) -> Ty:
+    return Ty("nd", dtype=dtype, rank=rank)
+
+
+def is_array(t: Ty) -> bool:
+    """t is one numpy array: a vec or an nd."""
+    return t.kind in ("vec", "nd")
+
+
+def array_rank(t: Ty) -> int:
+    """The rank of an operand: an nd's, 1 for a vec, 0 for a number."""
+    return t.rank if t.kind == "nd" else 1 if t.kind == "vec" else 0
+
+
+def nd_dtype(op: ast.AST, a: Ty, b: Ty) -> str | None:
+    """The dtype numpy 2 gives `a op b` when an array is on a side (NEP 50), or None when
+    the subset has no such operation: float32 with float32 or a Python number stays float32,
+    float64 anywhere is float64, int32 with a Python int is int32 (but / gives float64), with
+    a Python float or a float32 it is float64; a bool array takes no arithmetic, and a side of
+    several types gives None."""
+    kinds = []
+    for t in (a, b):
+        if len(t.members) != 1 or not t.known:
+            return None
+        if t.kind in ("vec", "nd"):
+            kinds.append(("array", t.dtype))
+        elif t.kind == "num" and t.dtype:
+            kinds.append(("scalar", t.dtype))  # a numpy scalar keeps its dtype
+        elif t.kind == "num":
+            kinds.append(("py", "float"))
+        elif t.kind in ("int", "bool"):
+            kinds.append(("py", "int"))
+        else:
+            return None
+    dtypes = {d for k, d in kinds if k != "py"}
+    if not dtypes:  # two Python numbers, as np.where(m, 1.0, 0) sees them
+        return "f64" if ("py", "float") in kinds else "i32"
+    if "bool" in dtypes:
+        return None
+    if "f64" in dtypes:
+        return "f64"
+    if "i32" in dtypes:
+        if "f32" in dtypes or ("py", "float") in kinds or isinstance(op, ast.Div):
+            return "f64"
+        return "i32"
+    return "f32"
+
+
+def nd_compare_dtype(a: Ty, b: Ty) -> str | None:
+    """The dtype numpy compares a and b in (both cast to it), or None outside the subset: as
+    arithmetic, with two bool arrays compared as bool."""
+    if a.kind in ("vec", "nd") and b.kind in ("vec", "nd") and a.dtype == b.dtype == "bool":
+        return "bool"
+    return nd_dtype(ast.Add(), a, b)
+
+
+def field_compare_dtype(b: Ty) -> str | None:
+    """The dtype a float32 field's rows compare against b in, numpy 2's."""
+    if b.kind == "field":
+        return "f32"
+    return nd_compare_dtype(nd("f32", 2), b)
+
+
+def _vague(t: Ty) -> bool:
+    """t is unknown or holds an unknown (list[unknown], the elements of a list of calls)."""
+    return not t.known or any(_vague(a) for a in t.args)
+
+
+def is_material(name: str | None) -> bool:
+    """name ("manifoldx.resources.PhongMaterial") is a material class: the page builds its
+    materials once from the glTF, so their fields do not change at runtime."""
+    from manifoldx import resources
+
+    module, _, cls = (name or "").rpartition(".")
+    c = getattr(resources, cls, None) if module == "manifoldx.resources" else None
+    return isinstance(c, type) and issubclass(c, resources.Material)
+
+
 def obj(name: str) -> Ty:
     return Ty("obj", name=name)
+
+
+# A system's component query, q[X] its accessor of component X, and an accessor's attribute
+# a field view: columns [start, start + size) of X's rows for the query's entities. Each is
+# read-only when the query is an event handler's. The name carries what the type knows.
+def query(components, readonly: bool = False) -> Ty:
+    return Ty("query", name=("ro:" if readonly else "") + ",".join(components))
+
+
+def accessor(component: str, readonly: bool = False) -> Ty:
+    return Ty("accessor", name=("ro:" if readonly else "") + component)
+
+
+def field_view(component: str, name: str, start: int, size: int, readonly: bool = False) -> Ty:
+    return Ty("field", name=f"{'ro:' if readonly else ''}{component}.{name}:{start}:{size}")
+
+
+def readonly(t: Ty) -> bool:
+    """A query, accessor or field of an event handler's query, which writes nothing."""
+    return (t.name or "").startswith("ro:")
+
+
+def query_components(t: Ty) -> list[str]:
+    names = t.name.removeprefix("ro:")
+    return names.split(",") if names else []
+
+
+def field_parts(t: Ty) -> tuple[str, str, int, int]:
+    """A field's (component, field name, start column, size)."""
+    head, start, size = t.name.removeprefix("ro:").rsplit(":", 2)
+    component, _, name = head.partition(".")
+    return component, name, int(start), int(size)
+
+
+# The fields a field view reads of each built-in component, under every spelling the
+# accessor takes; a Component subclass's come from its _layout.
+TRANSFORM_FIELDS = {
+    "pos": (0, 3),
+    "position": (0, 3),
+    "rot": (3, 4),
+    "rotation": (3, 4),
+    "scale": (7, 3),
+}
+
+
+def component_fields(name: str, cls=None) -> dict[str, tuple[int, int]]:
+    """{field: (col, size)} of the store's component `name` (its class `cls` when known): a
+    built-in's, a Component subclass's _layout, an @engine.component class's column table."""
+    from manifoldx.components import _COMPONENT_CLASSES, Material, Mesh
+    from manifoldx.ecs import _COMPONENT_REGISTRY
+
+    if name == "Transform":
+        return dict(TRANSFORM_FIELDS)
+    builtin = {"Mesh": Mesh, "Material": Material}.get(name) or cls or _COMPONENT_CLASSES.get(name)
+    if builtin is not None and hasattr(builtin, "_layout"):
+        return dict(builtin._layout)
+    decorated = _COMPONENT_REGISTRY.get(name)
+    return dict(getattr(decorated, "_component_start_idx", {}))
+
+
+# A geometry: a dict with a 2-d "positions" array, or what has to_geometry() (a
+# modeling.Mesh). It crosses by its id in the engine's geometry registry.
+GEOMETRY = obj("manifoldx.Geometry")
+
+
+def is_geometry(v) -> bool:
+    if isinstance(v, dict):
+        positions = v.get("positions")
+        return isinstance(positions, np.ndarray) and positions.ndim == 2
+    return not isinstance(v, type) and hasattr(v, "to_geometry")
 
 
 def fn(name: str | None = None, returns: Ty | None = None) -> Ty:
@@ -166,7 +328,7 @@ def _merge(a: Ty, b: Ty) -> Ty | None:
     """a and b as one type when they have the same shape, else None."""
     if a == b:
         return a
-    if a.kind != b.kind or a.kind in ("vec", "obj"):
+    if a.kind != b.kind or a.kind in ("vec", "nd", "obj"):
         return None
     if a.kind in ("list", "set", "dict") or (a.kind == "tuple" and len(a.args) == len(b.args)):
         return Ty(a.kind, tuple(union(x, y) for x, y in zip(a.args, b.args)))
@@ -212,9 +374,28 @@ def elem(t: Ty) -> Ty:
             out.append(STR)
         elif m.kind == "vec":
             out.append(Ty("num", dtype=m.dtype))
+        elif m.kind == "nd":
+            out.append(nd_item(m))
+        elif m.kind == "query":  # iterating a query gives its entity indices
+            out.append(INT)
         else:
             return UNKNOWN
     return union(*out)
+
+
+def nd_item(t: Ty) -> Ty:
+    """What indexing an nd's first axis by an int gives: an nd of one rank less, or a
+    number of its dtype."""
+    if t.rank > 1:
+        return nd(t.dtype, t.rank - 1)
+    return {"f32": NUM32, "f64": NUM64, "i32": INT, "bool": BOOL}[t.dtype]
+
+
+def nd_list(t: Ty) -> Ty:
+    """The type of an array's .tolist(): nested lists of Python numbers."""
+    if t.kind == "vec" or t.rank == 1:
+        return list_of({"i32": INT, "bool": BOOL}.get(t.dtype, NUM))
+    return list_of(nd_list(nd(t.dtype, t.rank - 1)))
 
 
 # ---------------------------------------------------------------- live types
@@ -282,6 +463,8 @@ class LiveTypes:
             return NUM
         if isinstance(v, str):
             return STR
+        if is_geometry(v):
+            return GEOMETRY
         if isinstance(v, np.ndarray):
             if v.dtype == np.float32:
                 return vec("f32")
@@ -445,13 +628,34 @@ STR_METHODS = {
 }
 
 LIBS = {"math": "math", "numpy": "numpy", "textwrap": "textwrap"}
+# The numpy functions on arrays of any rank (TypeEnv.nd_function types them).
+ND_FUNCTIONS = frozenset(
+    f"numpy.{f}"
+    for f in (
+        "sin cos exp sqrt floor clip minimum maximum where sum mean min max argmin argmax "
+        "stack column_stack"
+    ).split()
+) | {"numpy.linalg.norm"}
+# The numpy dtypes an array constructor may name, by their dotted names.
+NP_DTYPES = {
+    "numpy.float32": "f32",
+    "numpy.float64": "f64",
+    "numpy.bool_": "bool",
+    "numpy.bool": "bool",
+    "numpy.int32": "i32",
+}
 
 # The manifoldx objects the headless runtime (js/manifoldx.js) implements, by class: each
 # attribute's type, a method's as fn(name, return), by the names class_name gives the
 # classes. What is not here types as unknown.
 _INPUT, _CAMERA = "manifoldx.input.InputState", "manifoldx.Camera"
+_HANDLE, _PROXY = "manifoldx.engine.EntityHandle", "manifoldx.engine._TransformProxy"
 _GUI = "manifoldx.gui.widgets._GuiRoot"
-_PANEL, _TEXT, _VALUE_DISPLAY = "manifoldx.gui.Panel", "manifoldx.gui.Text", "manifoldx.gui.ValueDisplay"
+_PANEL, _TEXT, _VALUE_DISPLAY = (
+    "manifoldx.gui.Panel",
+    "manifoldx.gui.Text",
+    "manifoldx.gui.ValueDisplay",
+)
 RUNTIME_SURFACE = {
     "manifoldx.Engine": {
         "input": obj(_INPUT),
@@ -462,6 +666,8 @@ RUNTIME_SURFACE = {
         "state": STATE,
         "set_material": fn("manifoldx.Engine.set_material", NONE),
         "log": fn("manifoldx.Engine.log", NONE),
+        "spawn": fn("manifoldx.Engine.spawn", union(obj(_HANDLE), NONE)),
+        "destroy": fn("manifoldx.Engine.destroy", NONE),
     },
     _INPUT: {
         "pressed_keys": set_of(STR),
@@ -488,12 +694,22 @@ RUNTIME_SURFACE = {
     _CAMERA: {
         "position": vec("f32"),
         "target": vec("f32"),
+        "up": vec("f32"),
         "fov": NUM,
         "near": NUM,
         "far": NUM,
         "get_forward": fn(f"{_CAMERA}.get_forward", vec("f32")),
     },
     _GUI: {"pointer_over_gui": BOOL},
+    # An entity handle: its transform reads and writes the entity's row at once (pos in world
+    # coordinates, float64), set_material writes its Material column, destroy queues it.
+    _HANDLE: {
+        "index": INT,
+        "transform": obj(_PROXY),
+        "set_material": fn(f"{_HANDLE}.set_material", NONE),
+        "destroy": fn(f"{_HANDLE}.destroy", NONE),
+    },
+    _PROXY: {"pos": vec("f64"), "rot": vec("f32"), "scale": vec("f32")},
     # The widgets gui.js draws: the fields the page applies each frame when reached code
     # writes them (gui.js's sync), and nothing else.
     _PANEL: {"offset": tuple_of(NUM, NUM), "style_overrides": dict_of(STR, UNKNOWN)},
@@ -505,11 +721,16 @@ RUNTIME_SURFACE = {
 # (gui.js's sync for the widgets, scene.js's sync for the camera). A write of any other field
 # of a manifoldx object moves the desktop and not the page, so it fails the export.
 WRITABLE = {
-    _CAMERA: {"position", "target", "fov", "near", "far"},
+    _CAMERA: {"position", "target", "up", "fov", "near", "far"},
+    _PROXY: {"pos", "rot", "scale"},
     _PANEL: {"offset", "style_overrides"},
     _TEXT: {"text", "style_overrides"},
     _VALUE_DISPLAY: {"style_overrides"},
 }
+
+# The runtime-surface functions that take keywords, and which: the call passes them as a final
+# object literal ({n: k}).
+RUNTIME_KEYWORDS = {"manifoldx.Engine.spawn": ("n",)}
 
 # How an error names an object of each manifoldx class; another goes by its class name.
 RUNTIME_NAMES = {
@@ -517,6 +738,8 @@ RUNTIME_NAMES = {
     _INPUT: "the input",
     _CAMERA: "the camera",
     _GUI: "the GUI",
+    _HANDLE: "an entity handle",
+    _PROXY: "an entity's transform",
     _PANEL: "a Panel",
     _TEXT: "a Text",
     _VALUE_DISPLAY: "a ValueDisplay",
@@ -534,6 +757,7 @@ LIB_CONSTANTS = {
     "math.nan": "NaN",
     "numpy.pi": "Math.PI",
     "numpy.inf": "Infinity",
+    "numpy.nan": "NaN",
 }
 
 
@@ -556,6 +780,10 @@ class TypeEnv:
         self.globals: dict[tuple[str, str], Ty] = {}
         self.functions: dict[FunctionKey, FuncInfo] = {}
         self.classes: dict[str, ClassInfo] = {}
+        # The app's Component subclasses, which are store layouts and not app classes (never
+        # transpiled): {"module.Qualname": store name}, and each store name's live class.
+        self.components: dict[str, str] = {}
+        self.component_classes: dict[str, type] = {}
         # A closure root's free variables, typed from its live cells: {key: {name: Ty}}.
         self.cells: dict[FunctionKey, dict[str, Ty]] = {}
         for name, tree in modules.items():
@@ -638,6 +866,12 @@ class TypeEnv:
 
     def _class(self, module: str, n: ast.ClassDef) -> None:
         name = f"{module}.{n.name}"
+        if self._is_component(module, n):
+            self.components[name] = n.name
+            live = getattr(sys.modules.get(module), n.name, None)
+            if isinstance(live, type):
+                self.component_classes[n.name] = live
+            return
         info = ClassInfo(name, n, any(self.is_dataclass(d, module) for d in n.decorator_list))
         self.classes[name] = info
         for st in n.body:
@@ -660,6 +894,77 @@ class TypeEnv:
             info.methods["__init__"] = self._register(
                 module, init, f"{n.name}.__init__", cls=name
             ).key
+
+    def _is_component(self, module: str, n: ast.ClassDef) -> bool:
+        """n subclasses manifoldx.components.Component: its live class does, or a base names
+        a library class that does."""
+        from manifoldx.components import Component
+
+        live = getattr(sys.modules.get(module), n.name, None)
+        if isinstance(live, type):
+            return issubclass(live, Component)
+        return any(
+            isinstance(c, type) and issubclass(c, Component)
+            for c in (self.library_object(b, module) for b in n.bases)
+        )
+
+    def library_object(self, n: ast.expr, module: str):
+        """The library object a setup-imported name (`Transform`, `mx.Transform`) holds, as
+        setup imported it; None for anything else."""
+        attrs = []
+        while isinstance(n, ast.Attribute):
+            attrs.append(n.attr)
+            n = n.value
+        if not isinstance(n, ast.Name):
+            return None
+        sym = self.symbols.get(module, {}).get(n.id)
+        if sym is None or sym.kind != "setup":
+            return None
+        words = sym.target.split()
+        if words[0] == "from":
+            v = getattr(sys.modules.get(words[1]), words[3], None)
+        else:
+            v = sys.modules.get(words[1])
+        for a in reversed(attrs):
+            v = getattr(v, a, None)
+        return v
+
+    def component_name(self, n: ast.expr, ctx: Ctx) -> str | None:
+        """The store name of the component n names in q[n]: Transform, Mesh, Material, a
+        Component subclass (the app's or a library's), or a str; None for anything else."""
+        from manifoldx.components import Component, Material, Mesh, Transform
+
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            return n.value
+        if isinstance(n, ast.Name) and not self.is_local(n.id, ctx):
+            sym = self.resolve(ctx.module, n.id)
+            if sym is not None and sym.kind == "class":
+                return self.components.get(sym.target)
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            sym = self.resolve(ctx.module, n.value.id)
+            if sym is not None and sym.kind == "module":
+                inner = self.resolve(sym.target, n.attr)
+                return (
+                    self.components.get(inner.target) if inner and inner.kind == "class" else None
+                )
+        v = self.library_object(n, ctx.module)
+        if v in (Transform, Mesh, Material) or (isinstance(v, type) and issubclass(v, Component)):
+            if isinstance(v, type) and issubclass(v, Component):
+                self.component_classes.setdefault(v.__name__, v)
+            return v.__name__
+        return None
+
+    def component_field(self, recv: Ty, attr: str) -> Ty:
+        """The field view recv.attr gives for an accessor recv, unknown when the component
+        has no such field (or is Mesh or Material, whose ids frame code does not read)."""
+        component = recv.name.removeprefix("ro:")
+        if component in ("Mesh", "Material"):
+            return UNKNOWN
+        layout = component_fields(component, self.component_classes.get(component))
+        if attr not in layout:
+            return UNKNOWN
+        start, size = layout[attr]
+        return field_view(component, attr, start, size, readonly(recv))
 
     @staticmethod
     def _dataclass_init(n: ast.ClassDef, fields: list[ast.AnnAssign]) -> ast.FunctionDef:
@@ -763,6 +1068,9 @@ class TypeEnv:
             sym = self.resolve(module, node.id)
             if sym is not None and sym.kind == "class":
                 return obj(sym.target)
+            if sym is not None and sym.kind == "setup":  # EntityHandle, from manifoldx.engine
+                t = self.library_class(sym.target, None)
+                return t if t.name in RUNTIME_SURFACE else UNKNOWN
             return UNKNOWN
         if isinstance(node, ast.Attribute) and ast.unparse(node) in ("np.ndarray", "numpy.ndarray"):
             return vec("f64")
@@ -824,25 +1132,47 @@ class TypeEnv:
             return None
         return ".".join([sym.target, *reversed(parts)])
 
-    def np_dtype(self, n: ast.Call, ctx: Ctx) -> str | None:
-        """The dtype an np.array or np.zeros call asks for: "f64" by default, "f32" for
-        np.float32, None for any other."""
-        given = [k.value for k in n.keywords if k.arg == "dtype"] + n.args[1:2]
+    def np_dtype(
+        self, n: ast.Call, ctx: Ctx, at: int = 1, default: str | None = "f64"
+    ) -> str | None:
+        """The dtype a numpy constructor asks for, by keyword or as its positional argument
+        `at`: `default` when none is given; "f32", "f64", "bool" or "i32" for np.float32,
+        np.float64, np.bool_ (np.bool) and np.int32; None for any other."""
+        given = [k.value for k in n.keywords if k.arg == "dtype"] + n.args[at : at + 1]
         if not given:
-            return "f64"
-        return {"numpy.float32": "f32", "numpy.float64": "f64"}.get(
-            self.lib_name(given[0], ctx) or ""
-        )
+            return default
+        return NP_DTYPES.get(self.lib_name(given[0], ctx) or "")
 
     def lib_call(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
-        if name in ("numpy.array", "numpy.zeros"):
+        if name in ("numpy.zeros", "numpy.ones", "numpy.full") and n.args:
+            if name == "numpy.full":
+                fill = self.expr(n.args[1], ctx) if len(n.args) > 1 else UNKNOWN
+                d = self.np_dtype(n, ctx, 2, "f64" if fill.all("num") else None)
+            else:
+                d = self.np_dtype(n, ctx)
+            shape = self.expr(n.args[0], ctx)
+            if d is None:
+                return UNKNOWN
+            if shape.all("tuple") and len(shape.members) == 1 and shape.args:
+                return nd(d, len(shape.args))
+            if shape.all("int"):
+                return vec(d) if d in ("f32", "f64") else nd(d, 1)
+            return UNKNOWN
+        if name == "numpy.array" and n.args:
+            given = any(k.arg == "dtype" for k in n.keywords) or len(n.args) > 1
+            items = self.expr(n.args[0], ctx)
+            if not given and items.all("list", "tuple") and elem(items).all("int"):
+                return nd("i32", 1)  # numpy's int64, held as int32
             d = self.np_dtype(n, ctx)
-            return vec(d) if d else UNKNOWN
+            return vec(d) if d in ("f32", "f64") else nd(d, 1) if d else UNKNOWN
+        if name in ND_FUNCTIONS:
+            return self.nd_function(name, n, ctx)
         if name == "numpy.arange":
-            return vec("f64")
-        if name == "numpy.linalg.norm" and n.args:
-            t = self.expr(n.args[0], ctx)
-            return Ty("num", dtype=t.dtype) if t.kind == "vec" else UNKNOWN
+            given = any(k.arg == "dtype" for k in n.keywords) or len(n.args) > 3
+            if not given:
+                return vec("f64")
+            d = self.np_dtype(n, ctx, 3)
+            return nd(d, 1) if d in ("f32", "f64", "i32") else UNKNOWN
         if name in ("math.floor", "math.ceil"):
             return INT
         if name.startswith("math.") and name[5:] in MATH_FUNCTIONS:
@@ -850,6 +1180,80 @@ class TypeEnv:
         if name == "textwrap.wrap":
             return list_of(STR)
         return UNKNOWN
+
+    @staticmethod
+    def axis(n: ast.Call) -> int | None | str:
+        """The axis a reduction names (keyword or second argument): None, 0 or 1, or "bad"
+        for anything else."""
+        given = [k.value for k in n.keywords if k.arg == "axis"] + n.args[1:2]
+        if not given or (isinstance(given[0], ast.Constant) and given[0].value is None):
+            return None
+        v = given[0]
+        return (
+            v.value
+            if isinstance(v, ast.Constant) and v.value in (0, 1) and type(v.value) is int
+            else "bad"
+        )
+
+    def nd_function(self, name: str, n: ast.Call, ctx: Ctx) -> Ty:
+        """The type of a numpy function of ND_FUNCTIONS on arrays; unknown outside the subset."""
+        f = name.removeprefix("numpy.")
+        args = [self.expr(a, ctx) for a in n.args]
+        if not args or any(len(t.members) != 1 for t in args):
+            return UNKNOWN
+        a = args[0]
+        if f in ("stack", "column_stack"):
+            items = elem(a)
+            if not (a.all("list", "tuple") and len(items.members) == 1 and is_array(items)):
+                return UNKNOWN
+            if array_rank(items) != 1 or items.dtype == "bool":
+                return UNKNOWN
+            return nd(items.dtype, 2)
+        if f == "where" and len(args) == 1:
+            return (
+                tuple_of(*[nd("i32", 1)] * a.rank)
+                if a.kind == "nd" and a.dtype == "bool"
+                else UNKNOWN
+            )
+        if f == "where" and len(args) == 3:
+            if not (a.kind == "nd" and a.dtype == "bool"):
+                return UNKNOWN
+            d = nd_dtype(ast.Add(), args[1], args[2])
+            return nd(d, max(map(array_rank, args))) if d else UNKNOWN
+        if not is_array(a):
+            return UNKNOWN
+        rank = array_rank(a)
+        if f in ("sin", "cos", "exp", "sqrt", "floor"):
+            return nd(a.dtype, rank) if a.dtype in ("f32", "f64") else UNKNOWN
+        if f in ("minimum", "maximum", "clip"):
+            if len(args) != (3 if f == "clip" else 2):
+                return UNKNOWN
+            d = nd_dtype(ast.Add(), a, args[1])
+            if f == "clip" and d:
+                d = nd_dtype(ast.Add(), nd(d, rank), args[2])
+            return nd(d, max(map(array_rank, args))) if d else UNKNOWN
+        if len(args) > (1 if f == "linalg.norm" else 2) and f not in ("minimum", "maximum", "clip"):
+            return UNKNOWN  # norm's second argument is ord, not the axis
+        if f in ("argmin", "argmax"):
+            return INT if len(args) == 1 and a.dtype != "bool" else UNKNOWN
+        axis = self.axis(n)
+        if axis == "bad" or (axis == 1 and rank != 2):
+            return UNKNOWN
+        if f == "linalg.norm":
+            if axis is None:
+                return Ty("num", dtype=a.dtype) if a.kind == "vec" else UNKNOWN
+            out = "f64" if a.dtype in ("i32", "bool") else a.dtype
+        elif f == "sum":
+            out = "int" if a.dtype in ("i32", "bool") else a.dtype
+        elif f == "mean":
+            out = "f64" if a.dtype in ("i32", "bool") else a.dtype
+        elif a.dtype == "bool":
+            return UNKNOWN
+        else:  # min, max
+            out = "int" if a.dtype == "i32" else a.dtype
+        if axis is None or rank == 1:
+            return INT if out == "int" else Ty("num", dtype=out)
+        return nd("i32" if out == "int" else out, 1)
 
     def name(self, name: str, ctx: Ctx) -> Ty:
         c = ctx.binder(name)
@@ -872,6 +1276,12 @@ class TypeEnv:
         the attribute adds nothing (hasattr or isinstance guards that read)."""
         if not recv.members:
             return NEVER
+        if recv.kind == "nd" and attr == "shape":
+            return tuple_of(*[INT] * recv.rank)
+        if recv.kind == "accessor":
+            return self.component_field(recv, attr)
+        if recv.kind == "field":
+            return nd("f32", 2) if attr == "data" else UNKNOWN
         out = []
         for m in recv.members:
             if m.kind == "none":
@@ -960,6 +1370,17 @@ class TypeEnv:
                 return INT
             return t
         if isinstance(n, ast.Compare):
+            if len(n.ops) == 1 and not isinstance(n.ops[0], (ast.In, ast.NotIn, ast.Is, ast.IsNot)):
+                a, b = self.expr(n.left, ctx), self.expr(n.comparators[0], ctx)
+                if "field" in (a.kind, b.kind):
+                    return self.field_compare(n.ops[0], a, b)
+                if any(is_array(m) for m in a.members + b.members):
+                    rank = (
+                        max(array_rank(a), array_rank(b))
+                        if len(a.members) == len(b.members) == 1
+                        else 0
+                    )
+                    return nd("bool", rank) if rank and nd_compare_dtype(a, b) else UNKNOWN
             return BOOL
         if isinstance(n, ast.BoolOp):
             return union(*(self.expr(v, ctx) for v in n.values))
@@ -976,6 +1397,16 @@ class TypeEnv:
         if isinstance(n, ast.JoinedStr):
             return STR
         return UNKNOWN
+
+    @staticmethod
+    def field_compare(op: ast.cmpop, a: Ty, b: Ty) -> Ty:
+        """`field < x`: the entity indices whose one column holds, an int32 array; unknown for
+        a field on the right, a wider field or == and !=."""
+        if a.kind != "field" or field_parts(a)[3] != 1 or len(b.members) != 1:
+            return UNKNOWN
+        if not isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
+            return UNKNOWN
+        return nd("i32", 1) if field_compare_dtype(b) else UNKNOWN
 
     def item(self, e: ast.expr, ctx: Ctx) -> Ty:
         """The type of what an element of a display adds: a starred one, its items."""
@@ -1014,6 +1445,11 @@ class TypeEnv:
             return NEVER
         if not (a.known and b.known):
             return UNKNOWN
+        if "field" in (a.kind, b.kind):
+            return TypeEnv.field_binop(op, a, b)
+        arrays = [m.kind for m in a.members + b.members if m.kind in ("vec", "nd")]
+        if "nd" in arrays or (arrays and isinstance(op, (ast.Pow, ast.BitAnd, ast.BitOr))):
+            return TypeEnv.nd_binop(op, a, b)
         if a.is_numeric and b.is_numeric:
             d = arith_dtype(a, b)
             if d == "mixed":
@@ -1046,8 +1482,79 @@ class TypeEnv:
             return vec(d or "f64") if d != "mixed" else UNKNOWN
         return UNKNOWN
 
+    @staticmethod
+    def field_binop(op: ast.operator, a: Ty, b: Ty) -> Ty:
+        """`a op b` with a field view on a side, as _FieldView computes it: the other side cast
+        to float32 first, the result a float32 (k, size) array. A field on the right takes a
+        number on the left (an array on the left would run numpy's operator, not the field's)."""
+        if not isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.Div)) or len(a.members) != 1:
+            return UNKNOWN
+        other = b if a.kind == "field" else a
+        if len(other.members) != 1:
+            return UNKNOWN
+        ok = other.is_numeric or (a.kind == "field" and (is_array(other) or other.kind == "field"))
+        return nd("f32", 2) if ok else UNKNOWN
+
+    @staticmethod
+    def nd_binop(op: ast.operator, a: Ty, b: Ty) -> Ty:
+        """`a op b` with a numpy array on a side and an nd among them (or **, & and | on
+        any array): an nd of numpy 2's dtype and the larger rank."""
+        rank = max(array_rank(a), array_rank(b)) if len(a.members) == len(b.members) == 1 else 0
+        if not rank:
+            return UNKNOWN
+        if isinstance(op, (ast.BitAnd, ast.BitOr)):
+            return nd("bool", rank) if a.dtype == b.dtype == "bool" else UNKNOWN
+        if not isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
+            return UNKNOWN
+        d = nd_dtype(op, a, b)
+        return nd(d, rank) if d else UNKNOWN
+
+    @staticmethod
+    def field_column(t: Ty, key: ast.expr) -> Ty:
+        """field[:, j], j a constant column of the field: a one-column field view."""
+        component, name, start, size = field_parts(t)
+        if not (
+            isinstance(key, ast.Tuple)
+            and len(key.elts) == 2
+            and isinstance(key.elts[0], ast.Slice)
+            and not (key.elts[0].lower or key.elts[0].upper or key.elts[0].step)
+            and isinstance(key.elts[1], ast.Constant)
+            and type(key.elts[1].value) is int
+            and 0 <= key.elts[1].value < size
+        ):
+            return UNKNOWN
+        return field_view(component, name, start + key.elts[1].value, 1, readonly(t))
+
+    def nd_subscript(self, t: Ty, key: ast.expr, ctx: Ctx) -> Ty:
+        """a[key] of an nd: an int gives an item (an nd of one rank less, or a number), [:, j]
+        a column, a bool mask the elements it selects (its rank is the array's) or the rows
+        (rank 1), an index array the rows it names; every one a copy."""
+        if (
+            isinstance(key, ast.Tuple)
+            and len(key.elts) == 2
+            and isinstance(key.elts[0], ast.Slice)
+            and not (key.elts[0].lower or key.elts[0].upper or key.elts[0].step)
+            and self.expr(key.elts[1], ctx).all("int")
+        ):
+            return nd(t.dtype, 1) if t.rank == 2 else UNKNOWN
+        k = self.expr(key, ctx)
+        if k.all("int"):
+            return nd_item(t)
+        if k.kind == "nd" and k.rank == 1 and k.dtype == "i32":
+            return t
+        if k.kind == "nd" and k.dtype == "bool" and k.rank in (1, t.rank):
+            return nd(t.dtype, 1 if k.rank == t.rank else t.rank)
+        return UNKNOWN
+
     def subscript(self, n: ast.Subscript, ctx: Ctx) -> Ty:
         t = self.expr(n.value, ctx)
+        if t.kind == "query":
+            name = self.component_name(n.slice, ctx)
+            return accessor(name, readonly(t)) if name is not None else UNKNOWN
+        if t.kind == "field":
+            return self.field_column(t, n.slice)
+        if t.kind == "nd" or (t.kind == "vec" and self.expr(n.slice, ctx).kind == "nd"):
+            return self.nd_subscript(nd(t.dtype, 1) if t.kind == "vec" else t, n.slice, ctx)
         if isinstance(n.slice, ast.Slice):
             return t
         out = []
@@ -1069,6 +1576,9 @@ class TypeEnv:
 
     def call(self, n: ast.Call, ctx: Ctx) -> Ty:
         f = n.func
+        component = self.component_name(f, ctx)
+        if component is not None:
+            return Ty("component", name=component)
         if isinstance(f, ast.Name):
             local = self.is_local(f.id, ctx)
             if local:
@@ -1087,6 +1597,8 @@ class TypeEnv:
             lib = self.lib_name(f, ctx)
             if lib is not None:
                 return self.lib_call(lib, n, ctx)
+            if self.is_rotation(f, ctx):
+                return vec("f32")
             if isinstance(f.value, ast.Name):
                 sym = self.resolve(ctx.module, f.value.id)
                 if sym is not None and sym.kind == "module":
@@ -1117,11 +1629,24 @@ class TypeEnv:
                 }.get(f.attr, UNKNOWN)
             if recv.all("str") and f.attr in STR_METHODS:
                 return STR_METHODS[f.attr]
+            if len(recv.members) == 1 and is_array(recv) and f.attr == "tolist":
+                return nd_list(recv)
             methods = self.methods(recv, f.attr)
             if methods:
                 return union(*(m.returns for m in methods))
             return self.returns_of_call(self.attribute(recv, f.attr))
         return self.returns_of_call(self.expr(f, ctx))
+
+    def is_rotation(self, f: ast.expr, ctx: Ctx) -> bool:
+        """f names Transform.rotation, as setup imported it (Transform.rotation,
+        mx.Transform.rotation)."""
+        from manifoldx.components import Transform
+
+        return (
+            isinstance(f, ast.Attribute)
+            and f.attr == "rotation"
+            and self.library_object(f.value, ctx.module) is Transform
+        )
 
     @staticmethod
     def library_class(imported: str, attr: str | None) -> Ty:
@@ -1256,7 +1781,7 @@ class TypeEnv:
     def _symbol_callees(self, sym: Symbol | None) -> list[tuple[FuncInfo, int]]:
         if sym is not None and sym.kind == "func":
             return [(self.functions[sym.target], 0)]
-        if sym is not None and sym.kind == "class":
+        if sym is not None and sym.kind == "class" and sym.target in self.classes:
             init = self.classes[sym.target].methods.get("__init__")
             return [(self.functions[init], 1)] if init else []
         return []
@@ -1370,7 +1895,10 @@ class TypeEnv:
                     else:
                         for t in n.targets:
                             bind_target(t, self.expr(n.value, ctx), found)
+                    live = self.live.globals if self.live is not None else {}
                     for name, t in found.items():
+                        if _vague(t) and (module, name) in live:
+                            continue  # setup's value crosses: what it holds is its type
                         new = join(self.globals.get((module, name), NEVER), t)
                         if new != self.globals.get((module, name)):
                             self.globals[(module, name)] = new
@@ -1414,15 +1942,15 @@ class TypeEnv:
                 field_(st.target, self.annotation(st.annotation, info.key[0]))
             elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Attribute):
                 old = self.expr(st.target, ctx)
-                if old.kind != "vec":
+                if old.kind not in ("vec", "nd"):
                     field_(st.target, self.binop(st.op, old, self.expr(st.value, ctx)))
             elif isinstance(st, ast.FunctionDef):
                 inner = self.functions[(info.key[0], f"{info.key[1]}.<locals>.{st.name}")]
                 assign({st.name: fn(key_label(inner.key), inner.returns)})
             elif isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Name):
                 old = self.expr(st.target, ctx)
-                if old.kind == "vec":
-                    continue  # numpy's += writes into the array: its dtype stays
+                if old.kind in ("vec", "nd", "field"):
+                    continue  # numpy's += writes into the array (a field's queues): it stays
                 assign({st.target.id: self.binop(st.op, old, self.expr(st.value, ctx))})
             elif isinstance(st, ast.For):
                 found = {}

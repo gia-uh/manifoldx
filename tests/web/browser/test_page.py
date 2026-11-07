@@ -12,7 +12,7 @@ import pytest
 
 from manifoldx.web.replay import compare, replay_python
 
-from .conftest import APPS, WEB_WALK, _export
+from .conftest import APPS, BATCHES_OF, WEB_WALK, _export
 
 PATHS = ["rig.pos", "rig.yaw", "rig.pitch", "rig.mode", "selected"]
 LOOK = 0.004  # web_walk's radians per pixel
@@ -179,21 +179,16 @@ def check(page, marks: dict) -> None:
 
     # the HTML shows what the trace shows
     assert page.locator("#mx-gui").inner_text().splitlines() == browser[-1]["gui"]
-    # the picked box's meshes use the material the log names: the meshes under the glTF node
-    # whose extras name the entity, not the page's own map from entities to meshes
+    # the picked box is drawn with the material the log names: by the batch whose instance
+    # sits at its Transform row, not the store's Material column
     last = [x for e in browser for x in e["log"] if x[0] == "material"][-1]
     assert page.evaluate(f"__mx.scene.materialOf({last[1]})") == last[2]
-    drawn = page.evaluate(
-        """([entity, id]) => {
-          const want = __mx.scene.materials.get(id), meshes = [];
-          __mx.scene.scene.traverse((o) => {
-            if (o.userData.mx?.entity === entity) o.traverse((m) => { if (m.isMesh) meshes.push(m); });
-          });
-          return meshes.length > 0 && meshes.every((m) => m.material === want);
-        }""",
-        last[1:],
+    keys = page.evaluate(BATCHES_OF, last[1])
+    drawn = len(keys) == 1 and page.evaluate(
+        "([key, id]) => __mx.scene.batches.get(key).material === __mx.scene.materials.get(id)",
+        [keys[0], last[2]],
     )
-    assert drawn, f"material: entity {last[1]}'s meshes do not draw material {last[2]}"
+    assert drawn, f"material: entity {last[1]}'s batch {keys} does not draw material {last[2]}"
     # the three.js camera follows engine.camera
     assert page.evaluate("__mx.scene.camera.position.toArray()") == pytest.approx(
         browser[-1]["camera"]["position"], abs=1e-6
@@ -209,22 +204,22 @@ def test_chromium_matches_python(open_page, served, web_walk_export):
     check(page, marks)
 
 
-def test_break_swapped_entities(open_page, served, web_walk_export):
-    """The page's map from entities to meshes swapped (the blue crate's with the ground's):
-    the trace still matches, but the material check sees the wrong meshes drawn."""
-    page = open_page(served(web_walk_export))
-    page.evaluate("""() => {
-      const at = (x, y, z) => [...__mx.scene.entities.keys()].find((e) => {
-        let p = null;
-        __mx.scene.scene.traverse((o) => { if (o.userData.mx?.entity === e) p = o.position; });
-        return Math.abs(p.x - x) + Math.abs(p.y - y) + Math.abs(p.z - z) < 1e-6;
-      });
-      const a = at(2, 0.5, -5), b = at(0, -0.05, 0), m = __mx.scene.entities, ma = m.get(a);
-      m.set(a, m.get(b));
-      m.set(b, ma);
-    }""")
+def test_break_batches_ignore_materials(open_page, served, web_walk_export):
+    """scene.js patched so every batch takes the white of no Material: the trace still matches
+    and materialOf still reads the column, but the material check sees the wrong batch."""
+
+    def patch(page):
+        def route(r):
+            body = r.fetch().text()
+            patched = body.replace("batch(gids[i], mat?.[i] ? mids[i] : 0)", "batch(gids[i], 0)")
+            assert patched != body, "scene.js's batch keys changed: update this patch"
+            r.fulfill(body=patched, content_type="text/javascript")
+
+        page.route(re.compile(r".*/scene\.js$"), route)
+
+    page = open_page(served(web_walk_export), before=patch)
     marks = drive(page)
-    with pytest.raises(AssertionError, match=r"^material: entity \d+'s meshes do not draw"):
+    with pytest.raises(AssertionError, match=r"^material: entity \d+'s batch"):
         check(page, marks)
 
 
@@ -362,3 +357,25 @@ def test_a_system_moves_the_camera_and_three_follows(open_page, served, camera_e
     assert got["near"] == pytest.approx(0.15)
     ticks(page, 1)
     assert page.evaluate(seen)["fov"] == 56
+
+
+@pytest.fixture(scope="module")
+def handles_export(tmp_path_factory):
+    return _export(APPS / "handles.py", tmp_path_factory.mktemp("handles"))
+
+
+def test_a_system_writes_camera_up_and_three_follows(open_page, served, handles_export):
+    """gia-uh/manifoldx#153: the up vector frame code writes each frame reaches the three.js
+    camera the page renders with, as the Python replay computes it."""
+    page = open_page(served(handles_export), width=320, height=200)
+    page.evaluate('() => { __mx.paths = ["engine.camera.up"]; }')
+    seen = []
+    for _ in range(20):
+        tick(page)
+        seen.append(page.evaluate("__mx.scene.camera.up.toArray()"))
+    python = replay_python(
+        None, str(APPS / "handles.py"), page.evaluate("__mx.frames"), ["engine.camera.up"]
+    )
+    want = [e["paths"]["engine.camera.up"] for e in python]
+    assert seen == [pytest.approx(w, abs=1e-7) for w in want]
+    assert seen[4] != seen[14]  # it moves

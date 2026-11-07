@@ -25,7 +25,7 @@ from pathlib import Path
 
 from benchmarks import harness
 
-SUITES = ["frame", "ecs", "compute", "skinning", "modeling", "loaders"]
+SUITES = ["frame", "ecs", "compute", "skinning", "modeling", "loaders", "web"]
 ROOT = Path(__file__).resolve().parent.parent
 
 

@@ -14,17 +14,26 @@ and Shift, sorted. Each side reads one frame, then runs the app's systems once w
 traces:
 
     {"camera": {"position", "target"}, "gui": [str], "log": [...], "state": engine.state,
-     "paths": {path: value}}
+     "paths": {path: value}, "store": store_trace(engine.store)}
 
 gui is what each ValueDisplay shows; log the ["material", entity, material_id] and
 ["capture", on] entries this frame added; a path ("rig.pos", "selected") starts at a global of
 the app's main module or, when it has no such global, at a key of engine.state, and goes on
-through attributes and dict keys.
+through attributes and dict keys. The store is traced after the frame's queued commands ran,
+as the engine runs them after its systems:
+
+    {"alive": [slot], "free": [slot], "high_water": int, "rows": {component: [[value]]}}
+
+rows are the alive slots' rows, ascending, a float32 NaN or infinity written "nan", "inf" or
+"-inf"; past 1,000 alive entities a component's rows are {"digest": d, "n": alive}, d being
+the sum of the rows' uint32 words w[i] (row-major) times i + 1, mod 2^32.
 """
 
 from __future__ import annotations
 
 import json
+import math
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -143,16 +152,26 @@ def replay_python(
     """The app (a script, or a module as python -m runs it) started as export --web starts it,
     with app_args as its sys.argv[1:] (give the export's, so both take the same branch), then
     run through frames: one trace entry per frame, as JSON reads it back."""
-    from .export import _as_main, capture_engine
+    from .export import _as_main, _sources, capture_engine
     from .reach import find_roots
+    from .snapshot import snapshot
+    from .transpile import reach_app
+    from .types import LiveTypes
 
     engine, main = capture_engine(module, script, list(app_args or []))
     if engine is None:
         raise ValueError(f"{module or script} finished without calling engine.run()")
+    root = os.getcwd() if module else os.path.dirname(os.path.abspath(script))
     with _as_main(main):
         if engine._device is None and engine._event_bus._handlers.get("startup"):
             engine._ensure_offscreen(1)  # startup runs as export --web runs it
-        getters = [r.func for r in find_roots(engine) if r.kind == "getter"]
+        roots = find_roots(engine)
+        # The export's snapshot registers every material and geometry it meets, in its walk
+        # order, before any frame; frame code that first uses one later would otherwise give
+        # it another id here than the page has.
+        sources, _ = _sources(main, root)
+        snapshot(roots, reach_app(sources, roots, LiveTypes(set(sources))), engine, [])
+        getters = [r.func for r in roots if r.kind == "getter"]
         log: list = []
         engine.input = ScriptInput(engine, log)
         set_material = engine.set_material
@@ -168,6 +187,8 @@ def replay_python(
             start = len(log)
             engine.input.set_frame(frame)
             engine.systems.run_all(engine, dt)
+            engine.commands.execute(engine.store)
+            engine.commands.clear()
             cam = engine.camera
             entry = {
                 "camera": {"position": cam.position, "target": cam.target},
@@ -175,9 +196,41 @@ def replay_python(
                 "log": log[start:],
                 "state": engine.state,
                 "paths": {p: _path(vars(main), engine.state, p) for p in paths},
+                "store": store_trace(engine.store),
             }
             trace.append(json.loads(json.dumps(entry, default=_plain)))
     return trace
+
+
+DIGEST_PAST = 1000  # alive entities past which the trace carries a digest of each component
+
+
+def store_trace(store) -> dict:
+    """The entity store as the trace writes it (the module docstring's form), as
+    js/manifoldx.js's traceStore writes the page's."""
+    alive = np.flatnonzero(store._alive[: store._high_water])
+    rows = {}
+    for name, array in store._components.items():
+        block = array[alive].reshape(len(alive), int(np.prod(array.shape[1:])))
+        if len(alive) > DIGEST_PAST:
+            words = np.ascontiguousarray(block).view(np.uint32).ravel().astype(np.uint64)
+            weights = np.arange(1, len(words) + 1, dtype=np.uint64)
+            d = int(((words * weights) & 0xFFFFFFFF).sum() % 2**32)
+            rows[name] = {"digest": d, "n": len(alive)}
+        else:
+            rows[name] = [[_trace_float(x) for x in row] for row in block.tolist()]
+    return {
+        "alive": alive.tolist(),
+        "free": [int(i) for i in store._free_list],
+        "high_water": int(store._high_water),
+        "rows": rows,
+    }
+
+
+def _trace_float(x):
+    if isinstance(x, float) and not math.isfinite(x):
+        return "nan" if math.isnan(x) else ("inf" if x > 0 else "-inf")
+    return x
 
 
 def replay_node(out_dir: Path | str, frames: list[Frame], paths: list[str], dt: float = DT):

@@ -102,13 +102,14 @@ def test_break_sky_uncalibrated(desktop, exports, served, open_page):
     assert not all(within(web, py))
 
 
+# The batches are built at the first tick's sync from the library, so the swap is there.
 SWAP_BASIC = """async () => {
   const THREE = await import("three");
-  __mx.scene.scene.traverse((o) => {
-    if (o.isMesh && o.material.userData.mxBasic) {
-      o.material = new THREE.MeshStandardMaterial({ color: o.material.color, roughness: 1 });
+  for (const [id, m] of __mx.scene.materials) {
+    if (m.userData.mxBasic) {
+      __mx.scene.materials.set(id, new THREE.MeshStandardMaterial({ color: m.color, roughness: 1 }));
     }
-  });
+  }
 }"""
 
 

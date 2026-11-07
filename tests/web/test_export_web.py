@@ -139,6 +139,7 @@ EXPECTED_FILES = {
     "manifoldx.js",
     "replay.mjs",
     "state.json",
+    "ecs.bin",
     "scene.glb",
     "scene.export-report.json",
     "report.json",
@@ -219,6 +220,7 @@ def test_the_folder_loads_in_node_with_the_state_python_left(app_dir, tmp_path):
     assert state["engine"] == {
         "w": 320,
         "h": 200,
+        "origin": [0.0, 0.0],
         "camera": {
             "position": [0.0, 1.0, 2.0],
             "target": [0.0, 0.0, 0.0],
@@ -771,7 +773,6 @@ def _write_error(app_dir, tmp_path, capsys, write: str) -> tuple[str, int]:
     [
         ("x.x = 1.0", "x.x", "x"),
         ("x.x += 1.0", "x.x", "x"),
-        ('mat.color = "#00ff00"', "mat.color", "mat"),
     ],
 )
 def test_a_write_through_a_value_of_unknown_type_fails_the_export(
@@ -787,15 +788,22 @@ def test_a_write_through_a_value_of_unknown_type_fails_the_export(
     ) in err
 
 
+def test_a_material_write_points_at_set_material(app_dir, tmp_path, capsys):
+    """gia-uh/manifoldx#154: a material global types from its live value, and its write fails
+    with the way to change a material in the page, not a request to annotate it."""
+    err, line = _write_error(app_dir, tmp_path, capsys, 'mat.color = "#00ff00"')
+    assert (
+        f"app.py:{line}: writing `mat.color`, a field of a material the page does not apply "
+        "(swap materials made at setup with engine.set_material), is outside the subset"
+    ) in err
+
+
 @pytest.mark.parametrize(
     "write, what",
     [
-        (
-            "engine.camera.up = np.array([1.0, 0.0, 0.0], np.float32)",
-            "`engine.camera.up`, a field of the camera",
-        ),
+        ("engine.camera.layers = {1}", "`engine.camera.layers`, a field of the camera"),
         ("engine.camera.zoom = 2.0", "`engine.camera.zoom`, a field of the camera"),
-        ("cam.up += np.array([1.0, 0.0, 0.0], np.float32)", "`cam.up`, a field of the camera"),
+        ("cam.zoom += 1.0", "`cam.zoom`, a field of the camera"),
         ("engine.camera = cam", "`engine.camera`, a field of the engine"),
         ("engine.w = 640", "`engine.w`, a field of the engine"),
         ("engine.state = {}", "`engine.state`, a field of the engine"),

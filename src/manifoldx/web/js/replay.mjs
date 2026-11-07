@@ -13,7 +13,9 @@ export async function load(folder = new URL(".", import.meta.url), options = {})
   const state = JSON.parse(readFileSync(new URL("state.json", folder), "utf8"));
   const modules = {};
   for (const name of state.modules) modules[name] = await import(new URL(`app/${name}.js`, folder).href);
-  return { ...loadApp(state, modules, options), modules };
+  const bin = readFileSync(new URL("ecs.bin", folder));
+  const ecs = bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength);
+  return { ...loadApp(state, modules, { ecs, ...options }), modules };
 }
 
 // One trace entry per frame: the frame goes to engine.input, the systems run once with dt,
