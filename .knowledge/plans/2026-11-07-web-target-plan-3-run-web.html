@@ -400,7 +400,7 @@ def test_a_save_during_the_build_reloads_again(dev_app): ...  # edit inside the 
 </details>
 
 <!-- ============================================================ TASK 4 -->
-<details class="task" id="task-4" data-state="pending">
+<details class="task" id="task-4" data-state="done">
 <summary><span class="num">4</span><span><span class="ttl">The dev server talks to the tab</span><span class="files">web/dev.py · devchannel.py · tests/web/test_dev_web.py</span></span><span class="state"></span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -584,6 +584,10 @@ In <code>test_agent_commands</code>, run the real CLI in the app's folder: <code
 <li><b>A save during a reload is caught from the reload's start</b> (task 3). <code>HotReloader._load</code> records mtimes after the app ran, which would miss a save during the tab's state request or the setup; the WebReloader records them before asking the tab (<code>src/manifoldx/web/dev.py:190</code>).</li>
 <li><b><code>dev_orbit.py</code> registers <code>bump</code> with <code>engine.on("bump")(bump)</code></b> (task 3). The decorator form fails the export (<code>the decorator @engine.on('bump') is outside the subset</code>), so the test app uses the call form (<code>tests/web/apps/dev_orbit.py:56</code>). An app that decorates its handlers cannot export yet.</li>
 <li><b><code>error_line</code> prints a <code>GuiUnsupported</code> as its text</b>, like a <code>TranspileError</code>: it names the widget's place, and its traceback has no app frame (<code>src/manifoldx/web/dev.py:57</code>).</li>
+<li><b>Without an answer, a reload takes the last state a tab sent</b> (task 4). Task 3 kept <code>self.state</code> on <code>NoTab</code> or a timeout; the review focus asks for "the last state received", so the reload merges <code>Tab.last_state</code> (the last reply's or beacon's state) when the tab does not answer, and a rebuild for a newly opened tab (reason <code>tab</code>) takes it without asking, since the new tab holds the older state it opened on (<code>src/manifoldx/web/dev.py:239</code>).</li>
+<li><b><code>/api/events</code> under <code>--web</code> also leaves out manifoldx's own handlers</b> (task 4). The engine registers the GUI's <code>pointer_down</code>, <code>pointer_move</code> and <code>pointer_up</code>; they are not roots, so the tab never runs them. The list and the emit check keep the app's handlers only (<code>src/manifoldx/devchannel.py:263</code>).</li>
+<li><b>A tab's stream notices a closed tab within 0.25 s</b> (task 4). The handler waits on its queue 0.25 s at a time and checks the socket for end of stream, so a call goes to the previous tab at once rather than after the next 15 s comment line (<code>src/manifoldx/devchannel.py:287</code>, <code>:402</code>). <code>Tab.disconnect(tab_id, q)</code> takes the stream's queue, so an EventSource that reconnects under the same id is not dropped by its old stream (<code>src/manifoldx/web/dev.py:75</code>).</li>
+<li><b>Forwarded requests fail as 504 <code>the tab did not answer</code></b> after 5 s, and as 500 with the tab's text when its reply is <code>{"ok": false}</code> (<code>src/manifoldx/devchannel.py:323</code>).</li>
 </ul>
 
 <h2>Self-review</h2>

@@ -16,11 +16,15 @@ pushes a failed message naming the Python line and keeps the running version.
 from __future__ import annotations
 
 import gzip
+import itertools
 import os
+import queue
 import shutil
 import sys
+import threading
 import time
 import traceback
+from concurrent.futures import Future
 from pathlib import Path
 
 from manifoldx import devchannel
@@ -39,13 +43,83 @@ class NoTab(Exception):
 
 
 class Tab:
-    """The open tabs. Until a tab connects, calls raise NoTab and pushes go nowhere."""
+    """The open tabs. Every tab gets every push; calls go to the tab that connected last, and to
+    the one before it once that one is gone. Each tab is the queue its stream drains."""
+
+    def __init__(self, reloader=None):
+        self.reloader = reloader
+        self.last_state = None  # the last encoded state a reply or a beacon carried
+        self._tabs: dict[str, queue.SimpleQueue] = {}  # in connection order
+        self._calls: dict[int, Future] = {}
+        self._ids = itertools.count(1)
+        self._lock = threading.Lock()
+
+    def connect(self, tab_id) -> queue.SimpleQueue:
+        """A new stream: it starts with the current version. A tab that opens on a version
+        older than the state the server last received gets a rebuild with that state (F5)."""
+        q = queue.SimpleQueue()
+        w = self.reloader
+        with self._lock:
+            self._tabs.pop(tab_id, None)
+            self._tabs[tab_id] = q
+            if w is not None and w.current is not None:
+                q.put(w.current)
+                newer = (
+                    self.last_state is not None
+                    and state_sha(self.last_state) != w.current["state_sha"]
+                )
+                if newer and w.channel is not None:
+                    w.channel.jobs.put((lambda engine: w.reload("tab"), Future()))
+        return q
+
+    def disconnect(self, tab_id, q=None):
+        with self._lock:
+            if self._tabs.get(tab_id) is q or q is None:
+                self._tabs.pop(tab_id, None)
+
+    def connected(self) -> list[str]:
+        with self._lock:
+            return list(self._tabs)
 
     def push(self, message):
-        pass
+        with self._lock:
+            for q in self._tabs.values():
+                q.put(message)
+
+    def close(self):
+        """End every stream."""
+        self.push(None)
 
     def call(self, kind, body=None, timeout=5.0):
-        raise NoTab
+        """Ask the answering tab; its reply. Raises NoTab, or TimeoutError when it does not answer."""
+        future = Future()
+        with self._lock:
+            if not self._tabs:
+                raise NoTab
+            n = next(self._ids)
+            self._calls[n] = future
+            q = self._tabs[next(reversed(self._tabs))]
+        q.put({"type": "call", "id": n, "kind": kind, "body": body})
+        try:
+            return future.result(timeout)
+        finally:
+            with self._lock:
+                self._calls.pop(n, None)
+
+    def reply(self, call_id, payload) -> bool:
+        """The tab's answer to call_id; False when nobody waits for it any more."""
+        if isinstance(payload, dict) and payload.get("state") is not None:
+            self.last_state = payload["state"]
+        with self._lock:
+            future = self._calls.get(call_id)
+        if future is None:
+            return False
+        future.set_result(payload)
+        return True
+
+    def beacon(self, state):
+        """The state a tab sent as it went away."""
+        self.last_state = state
 
 
 def error_line(exc: BaseException, root) -> str:
@@ -90,7 +164,7 @@ class WebReloader(HotReloader):
             port=port,
         )
         self.web_root = Path(web_root) if web_root else Path(self._root) / devchannel.FOLDER / "web"
-        self.tab = Tab()
+        self.tab = Tab(self)
         self.version = 0
         self.current: dict | None = None  # the last version message
         self.built = None  # the running version's Built
@@ -124,8 +198,9 @@ class WebReloader(HotReloader):
         for e in built.left_out:
             _say(f"left out of the state: {e}")
         if self._open_channel:
-            self.channel = devchannel.Channel(self._root, self, self.port)
+            self.channel = devchannel.Channel(self._root, self, self.port, web=self)
             LOG.info("started %s", self.module or self.script)
+            _say(f"open {self.channel.url}/ (dev page at /dev)")
 
     def _write(self, built) -> dict:
         """Write built as the next version and make it current; returns its message."""
@@ -161,16 +236,21 @@ class WebReloader(HotReloader):
                 f.unlink()
                 self._sizes.pop(f.name.split(".")[0], None)
 
-    def _tab_state(self):
-        """Merge the tab's engine.state into self.state; without a tab, keep it as it is."""
-        try:
-            reply = self.tab.call("reload_state", timeout=STATE_WAIT)
-        except (NoTab, TimeoutError):
+    def _tab_state(self, reason):
+        """Merge the tab's engine.state into self.state: the answering tab's, or without an
+        answer the last one a tab sent. A rebuild for a new tab takes the last one sent, since
+        the new tab holds the older state of the version it opened on."""
+        state = getattr(self.tab, "last_state", None)
+        if reason != "tab":
+            try:
+                reply = self.tab.call("reload_state", timeout=STATE_WAIT)
+                if reply.get("ok") and reply.get("state") is not None:
+                    state = reply["state"]
+            except (NoTab, TimeoutError):
+                pass
+        if state is None:
             return
-        if not reply.get("ok") or reply.get("state") is None:
-            return
-        kept = merge_tab_state(self.state, reply["state"], self.built.crossed)
-        for line in kept:
+        for line in merge_tab_state(self.state, state, self.built.crossed):
             if line not in self._kept_said:
                 self._kept_said.add(line)
                 LOG.info("kept from Python: %s", line)
@@ -190,7 +270,7 @@ class WebReloader(HotReloader):
         seen = {f: _mtime(f) for f in self._mtimes}
         old = self.engine
         try:
-            self._tab_state()
+            self._tab_state(reason)
             lap("state")
             self._drop_modules()
             engine = self._load()
