@@ -57,6 +57,7 @@ ul.rules{padding-left:18px} ul.rules li{font-family:var(--font-ui);font-size:13.
 .q h3{font-family:var(--font-mono);font-weight:500;font-size:13px;color:var(--strong);margin:4px 0 6px}
 .q p{font-family:var(--font-ui);font-size:13.5px;margin:4px 0}
 .q .rec{color:var(--ok);font-family:var(--font-mono);font-size:11px;margin-right:6px}
+.q .settled{font-family:var(--font-mono);font-size:10.5px;color:var(--accent);border:1px solid #5a4430;border-radius:999px;padding:0 7px;margin-left:8px;white-space:nowrap}
 
 /* tasks */
 details.task{background:var(--surface);border:1px solid var(--rule);border-radius:var(--r-lg);margin:12px 0;overflow:hidden}
@@ -756,13 +757,17 @@ Run <code>uv run pytest tests/web/browser/test_web_crowd_page.py tests/web/brows
 <li><b>The Image is a data URL.</b> Section 07 shows the SVG bytes as an <code>&lt;img&gt;</code>; it is written into the gui node as text and shown through a <code>data:image/svg+xml</code> URL, which runs no script and needs no request.</li>
 </ul>
 
-<h2>Open questions</h2>
-<div class="q"><h3>1 · Fixed timestep and <code>engine.elapsed</code> on the desktop</h3>
-<p>Under <code>set_fixed_timestep</code>, <code>Engine.run</code>'s frames never advance <code>engine.elapsed</code>, so <code>engine.delay()</code> and <code>elapsed_at()</code> never resolve there; only <code>render_frame</code> adds the dt (<code>src/manifoldx/engine.py:1477</code>). The page adds every frame's dt. Recommendation: open an issue to add the fixed dt in <code>_compute_dt</code> on the desktop and leave it out of 5b, since no replay runs that mode.</p></div>
-<div class="q"><h3>2 · The arrow keys on a desktop Slider</h3>
-<p>Task 1 makes the arrow keys step a Slider after it is clicked, on the desktop as in the page. An app that steers with the arrows sees the Slider move until a click lands elsewhere. Recommendation: keep it, flagged in the CHANGELOG; the alternative is to drop arrow keys from Q4's decision, which loses the page's keyboard access to the Slider.</p></div>
-<div class="q"><h3>3 · Panels anchored elsewhere than top-left</h3>
-<p>The desktop hit-tests top-left panels only (manifoldx#13), so a Button in a bottom-right panel clicks in the page and not on the desktop. Recommendation: web_crowd keeps its panels top-left in 5b, and #13 is fixed before 5c, whose second consumer puts its buttons in a column on a side.</p></div>
+<h2>Open questions, settled</h2>
+<p>The maintainer settled all three questions on 2026-11-07 by accepting each recommendation. Each one keeps its question; its last paragraph is now the decision.</p>
+<div class="q"><h3>1 · Fixed timestep and <code>engine.elapsed</code> on the desktop<span class="settled">settled · maintainer</span></h3>
+<p>Under <code>set_fixed_timestep</code>, <code>Engine.run</code>'s frames never advance <code>engine.elapsed</code>, so <code>engine.delay()</code> and <code>elapsed_at()</code> never resolve there; only <code>render_frame</code> adds the dt (<code>src/manifoldx/engine.py:1477</code>). The page adds every frame's dt.</p>
+<p><span class="rec">decision</span>The fixed timestep is out of 5b, since no replay runs that mode. Adding the fixed dt in <code>_compute_dt</code> on the desktop is filed as <a href="https://github.com/gia-uh/manifoldx/issues/168">gia-uh/manifoldx#168</a>.</p></div>
+<div class="q"><h3>2 · The arrow keys on a desktop Slider<span class="settled">settled · maintainer</span></h3>
+<p>Task 1 makes the arrow keys step a Slider after it is clicked, on the desktop as in the page. An app that steers with the arrows sees the Slider move until a click lands elsewhere. The alternative was to drop arrow keys from Q4's decision, which loses the page's keyboard access to the Slider.</p>
+<p><span class="rec">decision</span>The arrow keys step a clicked Slider on the desktop, and the CHANGELOG lists it under Changed as a behaviour change.</p></div>
+<div class="q"><h3>3 · Panels anchored elsewhere than top-left<span class="settled">settled · maintainer</span></h3>
+<p>The desktop hit-tests top-left panels only (manifoldx#13), so a Button in a bottom-right panel clicks in the page and not on the desktop.</p>
+<p><span class="rec">decision</span>web_crowd's panels stay top-left in 5b, and #13 (anchors on the desktop) is fixed before plan 5c, whose second consumer puts its buttons in a column on a side.</p></div>
 
 <h2>Self-review</h2>
 <p>Spec coverage, 5b of section 12: <code>emit</code> (task 4), the input events (5), the frame's events and clock (4, 5, 6), MT19937 (3), the host-page bridge (9), Button, Slider, Toggle, Image and Joystick, desktop first (1, 2, 7, 8). Done: web_crowd's panel and a handler per event (10), its Chromium replay with each widget under Playwright's pointer and the frame checks (11). Section 13's items for 5b: <code>random.Random</code> over 10,000 draws per method from a seeded and a mid-stream state, <code>rel=0</code> (3); the breaking tests on emits in the same frame, the widget value after its event and the random state (10); the two-pointer touch (11); Joystick in the painter and the bridge (2). Sections 06 and 07's rules: the frame event's payload and order (4), a handler's read-only query kept from 5a (4), the latch consumed on read (7), the Slider's pointer captured while dragging (1, 7, 8), ARIA roles and the arrow keys (1, 8).</p>
