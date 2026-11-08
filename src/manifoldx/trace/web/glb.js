@@ -100,11 +100,17 @@ class Reader {
     const item = Type.BYTES_PER_ELEMENT * width;
     const step = stride || item;
     const base = bytes.byteOffset + (a.byteOffset ?? 0);
-    const copy = new Uint8Array(item);
-    const typed = new Type(copy.buffer);
-    for (let i = 0; i < a.count; i++) {
-      copy.set(new Uint8Array(bytes.buffer, base + i * step, item));
-      for (let k = 0; k < width; k++) out[i * width + k] = typed[k];
+    if (step === item) {  // tightly packed: one copy into an aligned buffer, then a typed view
+      const raw = new Uint8Array(item * a.count);
+      raw.set(new Uint8Array(bytes.buffer, base, item * a.count));
+      out.set(new Type(raw.buffer));
+    } else {
+      const copy = new Uint8Array(item);
+      const typed = new Type(copy.buffer);
+      for (let i = 0; i < a.count; i++) {
+        copy.set(new Uint8Array(bytes.buffer, base + i * step, item));
+        for (let k = 0; k < width; k++) out[i * width + k] = typed[k];
+      }
     }
     const norm = a.normalized && NORM[a.componentType];
     if (norm) for (let i = 0; i < out.length; i++) out[i] = Math.max(out[i] / norm, -1);
@@ -266,26 +272,31 @@ export function assemble(parts, materials, { textures = [], camera = null, light
     const first = t;
     const cw = attrs.colors ? attrs.colors.width : 0;
     for (let f = 0; f < tri.length; f += 3, t++) {
-      for (let k = 0; k < 3; k++) {
-        const v = tri[f + k];
-        for (let c = 0; c < 3; c++) positions[t * 9 + k * 3 + c] = pos[v * 3 + c];
-      }
       const o = t * 9;
-      const e1 = [positions[o + 3] - positions[o], positions[o + 4] - positions[o + 1], positions[o + 5] - positions[o + 2]];
-      const e2 = [positions[o + 6] - positions[o], positions[o + 7] - positions[o + 1], positions[o + 8] - positions[o + 2]];
-      let fn = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
-      const fl = Math.max(Math.hypot(...fn), 1e-20);
-      fn = fn.map((x) => x / fl);
+      for (let k = 0; k < 3; k++) {
+        const v = tri[f + k] * 3;
+        positions[o + k * 3] = pos[v];
+        positions[o + k * 3 + 1] = pos[v + 1];
+        positions[o + k * 3 + 2] = pos[v + 2];
+      }
+      // the face normal, from the float32 positions as Python computes it
+      const ax = positions[o + 3] - positions[o], ay = positions[o + 4] - positions[o + 1], az = positions[o + 5] - positions[o + 2];
+      const bx = positions[o + 6] - positions[o], by = positions[o + 7] - positions[o + 1], bz = positions[o + 8] - positions[o + 2];
+      let fx = ay * bz - az * by, fy = az * bx - ax * bz, fz = ax * by - ay * bx;
+      const fl = Math.max(Math.sqrt(fx * fx + fy * fy + fz * fz), 1e-20);
+      fx /= fl; fy /= fl; fz /= fl;
       for (let k = 0; k < 3; k++) {
         const v = tri[f + k];
-        let n = fn;
+        let nx = fx, ny = fy, nz = fz;
         if (attrs.normals) {
-          const raw = [attrs.normals[v * 3], attrs.normals[v * 3 + 1], attrs.normals[v * 3 + 2]];
-          const l = Math.max(Math.hypot(...raw), 1e-20);
-          const unit = raw.map((x) => x / l);
-          if (unit.every(Number.isFinite) && Math.hypot(...unit) >= 0.5) n = unit;
+          const rx = attrs.normals[v * 3], ry = attrs.normals[v * 3 + 1], rz = attrs.normals[v * 3 + 2];
+          const l = Math.max(Math.sqrt(rx * rx + ry * ry + rz * rz), 1e-20);
+          const ux = rx / l, uy = ry / l, uz = rz / l;
+          if (Number.isFinite(ux + uy + uz) && ux * ux + uy * uy + uz * uz >= 0.25) { nx = ux; ny = uy; nz = uz; }
         }
-        for (let c = 0; c < 3; c++) normals[o + k * 3 + c] = n[c];
+        normals[o + k * 3] = nx;
+        normals[o + k * 3 + 1] = ny;
+        normals[o + k * 3 + 2] = nz;
         if (attrs.uvs) { uvs[t * 6 + k * 2] = attrs.uvs[v * 2]; uvs[t * 6 + k * 2 + 1] = attrs.uvs[v * 2 + 1]; }
         if (attrs.colors) for (let c = 0; c < 3; c++) colors[o + k * 3 + c] = attrs.colors[v * cw + c];
       }

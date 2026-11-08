@@ -37,7 +37,29 @@ export async function createTracer(scene, options = {}) {
     return [n, await r.text()];
   })));
   const device = options.device || await requestDevice();
-  return new Tracer(device, sources, scene, options);
+  const t = performance.now();
+  const bvh = await buildBvh(scene.positions);
+  return new Tracer(device, sources, scene, { ...options, bvh, buildMs: performance.now() - t });
+}
+
+/** The BVH over positions, built in a worker so the page keeps drawing (777k triangles take
+ * seconds); on the main thread where no module worker starts. */
+export async function buildBvh(positions) {
+  let worker;
+  try {
+    worker = new Worker(new URL('./bvh-worker.js', import.meta.url), { type: 'module' });
+  } catch {
+    return build(positions);
+  }
+  try {
+    return await new Promise((resolve, reject) => {
+      worker.onmessage = (event) => resolve(event.data);
+      worker.onerror = (event) => reject(new Error(`BVH worker: ${event.message}`));
+      worker.postMessage(positions);
+    });
+  } finally {
+    worker.terminate();
+  }
 }
 
 export async function requestDevice() {
@@ -58,7 +80,7 @@ export function cameraFromThree(camera) {
 
 export class Tracer {
   constructor(device, sources, scene, { width = 640, height = 400, canvas = null, environment = null,
-    maxBounces = 6, seed = 0, clamp = 0, diffuseOnly = false, camera = null } = {}) {
+    maxBounces = 6, seed = 0, clamp = 0, diffuseOnly = false, camera = null, bvh = null, buildMs = 0 } = {}) {
     this.device = device;
     this.sources = sources;
     this.scene = scene;
@@ -74,8 +96,8 @@ export class Tracer {
     this.tonemap = 'aces';
     this.pipelines = {};
     let t = performance.now();
-    this.bvh = build(scene.positions);
-    this.buildMs = performance.now() - t;
+    this.bvh = bvh || build(scene.positions);
+    this.buildMs = bvh ? buildMs : performance.now() - t;
     t = performance.now();
     this.upload();
     this.uploadMs = performance.now() - t;
