@@ -1153,7 +1153,7 @@ class Engine:
         self.gui.clear()
         if self._loading_panel is not None:
             self.gui.append(self._loading_panel)
-        self._gui_bridge._captured = None  # a drag on a removed widget ends here
+        self._gui_bridge._captured = {}  # a drag on a removed widget ends here
 
     # === Canvas Initialization ===
 

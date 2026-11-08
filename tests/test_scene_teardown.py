@@ -230,3 +230,16 @@ def test_clear_scene_keeps_the_loading_spinner():
         assert list(engine.gui) == [engine._loading_panel]
     engine._draw_frame()  # closing the block removes the spinner without error
     assert len(engine.gui) == 0
+
+
+def test_a_pointer_event_after_clear_scene_reaches_the_gui():
+    """clear_scene left the GUI bridge's capture table as None, so the next
+    pointer event raised AttributeError."""
+    from manifoldx.input import PointerEvent
+
+    engine = _engine()
+    engine.clear_scene()
+    ev = PointerEvent(x=5.0, y=5.0, dx=0.0, dy=0.0, button=1, buttons=(1,),
+                      modifiers=(), phase="move", pointer_id=0)
+    engine.emit("pointer_move", ev)
+    engine.render_frame(supersample=1)  # handlers run as the frame drains its events
