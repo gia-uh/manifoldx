@@ -61,3 +61,13 @@ def test_reference_scene(name, device):
     err = error(img, ref)
     limit = float((REFS / f"{name}.limit").read_text())
     assert err < limit, f"{name}: mean error {err:.4f} over {limit:.4f}"
+
+
+@pytest.mark.parametrize("name", ["window_room"])  # at 48 px the Cornell box is too small for 16 px steps
+def test_the_denoiser_lowers_the_error(name, device):
+    ref = np.load(REFS / f"{name}.npy").astype(np.float32)
+    t = Tracer(getattr(scenes, name)(), SIZE, SIZE, seed=5, device=device)
+    t.step(16)
+    raw = np.abs(t.radiance() - ref).mean()
+    den = np.abs(t.denoised() - ref).mean()
+    assert den < 0.6 * raw, f"denoised {den:.4f}, raw {raw:.4f}"

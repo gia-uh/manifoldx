@@ -350,7 +350,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let s = surface(hit, o, d);
         if (!found_first && s.transmission < 0.5) {
             first_albedo = s.albedo;
-            first_nd = vec4<f32>(s.n, length(s.p - P.cam_pos));
+            // an emitter seen directly is left out of the filter, as the sky is
+            first_nd = vec4<f32>(s.n, select(length(s.p - P.cam_pos), -1.0, luminance(s.emission) > 0.0));
             found_first = true;
         }
         if (luminance(s.emission) > 0.0) {
@@ -408,6 +409,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     if (any(radiance != radiance) || any(abs(radiance) > vec3<f32>(1.0e20))) { radiance = vec3<f32>(0.0); }
     accum[pixel] += vec4<f32>(radiance, 1.0);
-    aov_albedo[pixel] += vec4<f32>(first_albedo, 1.0);
+    let l = luminance(radiance);
+    aov_albedo[pixel] += vec4<f32>(first_albedo, l * l);  // .w: second moment, for the denoiser
     aov_normal_depth[pixel] += first_nd;
 }

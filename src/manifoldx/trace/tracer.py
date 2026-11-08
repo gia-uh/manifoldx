@@ -262,15 +262,42 @@ class Tracer:
         return acc[..., :3] / np.maximum(acc[..., 3:4], 1.0)
 
     def guides(self) -> dict:
-        """Averaged first-hit albedo, normal and distance, which guide the denoiser."""
+        """Averaged first-hit albedo, normal and distance, and the second moment of luminance."""
+        n = np.maximum(self._read(self._accum)[..., 3], 1.0)
         a = self._read(self._aov_albedo)
         nd = self._read(self._aov_nd)
-        k = np.maximum(a[..., 3:4], 1.0)
-        return {"albedo": a[..., :3] / k, "normal": nd[..., :3] / k, "depth": nd[..., 3] / k[..., 0]}
+        return {"albedo": a[..., :3] / n[..., None], "moment2": a[..., 3] / n,
+                "normal": nd[..., :3] / n[..., None], "depth": nd[..., 3] / n, "samples": n}
 
-    def image(self, denoise: bool = False, exposure="auto", tonemap: str = "aces") -> np.ndarray:
+    def denoised(self, passes: int = 5) -> np.ndarray:
+        """Linear radiance after the à-trous filter, (h, w, 3) float32."""
+        rad = self.radiance()
+        g = self.guides()
+        w = np.array([0.2126, 0.7152, 0.0722], np.float32)
+        albedo = np.maximum(g["albedo"], 0.02)
+        lum_a = np.maximum(albedo @ w, 0.02)
+        var = np.maximum(g["moment2"] - (rad @ w) ** 2, 0.0) / g["samples"] / lum_a ** 2
+        var = _blur3(var)
+        src = np.concatenate([rad / albedo, var[..., None]], axis=2).astype(np.float32)
+        normal = g["normal"] / np.maximum(np.linalg.norm(g["normal"], axis=2, keepdims=True), 1e-6)
+        guide = np.concatenate([normal, g["depth"][..., None]], axis=2).astype(np.float32)
+
+        usage = wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC
+        a, b = self._buffer(src, usage), self._out(src.nbytes)
+        gbuf = self._buffer(guide)
+        flags = [True, False, True]
+        groups = [self._bind("atrous", [a, b, gbuf], flags), self._bind("atrous", [b, a, gbuf], flags)]
+        for k in range(passes):
+            self._write_params(frame=1 << k)
+            enc = self.device.create_command_encoder()
+            self._dispatch(enc, *groups[k % 2])
+            self.device.queue.submit([enc.finish()])
+        out = self._read(b if passes % 2 else a)
+        return out[..., :3] * albedo
+
+    def image(self, denoise: bool = True, exposure="auto", tonemap: str = "aces") -> np.ndarray:
         """(h, w, 3) uint8 sRGB. exposure: a multiplier, or "auto" (log-average luminance to 0.18)."""
-        rgb = self.radiance()
+        rgb = self.denoised() if denoise else self.radiance()
         return to_srgb8(rgb, exposure, tonemap)
 
     # ------------------------------------------------------------ primary rays
@@ -286,6 +313,13 @@ class Tracer:
         self.device.queue.submit([enc.finish()])
         nd = self._read(normal_depth)
         return {"albedo": self._read(albedo)[..., :3], "normal": nd[..., :3], "depth": nd[..., 3]}
+
+
+def _blur3(x: np.ndarray) -> np.ndarray:
+    p = np.pad(x, 1, mode="edge")
+    k = (1.0, 2.0, 1.0)
+    rows = sum(k[i] * p[i: i + x.shape[0], :] for i in range(3)) / 4
+    return sum(k[j] * rows[:, j: j + x.shape[1]] for j in range(3)) / 4
 
 
 def auto_exposure(rgb: np.ndarray) -> float:
