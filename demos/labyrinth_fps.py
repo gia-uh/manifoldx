@@ -93,6 +93,9 @@ def solution_path(wall, start=(1, 1)):
 
 maze = generate_maze(COLS, ROWS, SEED)
 _H, _W = maze.shape
+# Frame code reads the walls as a flat list: the web snapshot carries 1-d arrays and lists,
+# not a 2-d bool grid (know-how/web-export.md).
+WALLS = maze.reshape(-1).tolist()
 
 
 def cell_to_world(r, c):
@@ -104,9 +107,9 @@ def _hits_wall(x, z):
     """True if the player's circle at world (x, z) overlaps any wall cell."""
     for sx in (x - PLAYER_R, x + PLAYER_R):
         for sz in (z - PLAYER_R, z + PLAYER_R):
-            c = int(round(sx / CELL)) + _W // 2
-            r = int(round(sz / CELL)) + _H // 2
-            if not (0 <= r < _H and 0 <= c < _W) or maze[r, c]:
+            c = int(math.floor(sx / CELL + 0.5)) + _W // 2
+            r = int(math.floor(sz / CELL + 0.5)) + _H // 2
+            if not (0 <= r < _H and 0 <= c < _W) or WALLS[r * _W + c]:
                 return True
     return False
 
@@ -117,20 +120,6 @@ _path = np.array([[*cell_to_world(r, c)] for r, c in _walk], dtype=np.float32)  
 
 # --- Engine + scene ------------------------------------------------------
 engine = mx.Engine("Labyrinth FPS", width=1024, height=768)
-
-# Flashlight: a warm cone mounted on the camera; it is the shadow caster.
-engine.set_spot(
-    SpotLight(
-        color="#ffe9c0",
-        intensity=SPOT_INTENSITY,
-        position=(0, EYE, 0),
-        direction=(1, 0, 0),
-        inner_angle=0.16,
-        outer_angle=0.32,
-        distance=SPOT_RANGE,
-    )
-)
-engine.enable_shadows(resolution=2048, near=0.15, bias=0.003, pcf_radius=2)
 
 _cube = cube(1, 1, 1)
 _look = {"yaw": 0.0, "pitch": 0.0}
@@ -143,10 +132,46 @@ def _forward():
     )
 
 
-def _aim_flashlight():
-    """Point the spot from the camera along its forward direction."""
-    engine._spot.position = tuple(engine.camera.position)
-    engine._spot.direction = tuple(_forward())
+class _CameraSpot(SpotLight):
+    """The flashlight: a cone whose position and aim are read from the camera.
+
+    The renderer samples the light every frame, so the beam follows the view without
+    frame code writing the light. A write to a light is outside the web subset: the
+    page keeps the lights scene.glb was written with (know-how/web-export.md).
+    """
+
+    def __init__(self, engine):
+        super().__init__(
+            color="#ffe9c0",
+            intensity=SPOT_INTENSITY,
+            position=(0, EYE, 0),
+            direction=(1, 0, 0),
+            inner_angle=0.16,
+            outer_angle=0.32,
+            distance=SPOT_RANGE,
+        )
+        self._engine = engine
+
+    @property
+    def position(self):
+        return tuple(self._engine.camera.position)
+
+    @position.setter
+    def position(self, value):
+        pass  # set_origin moves a fixed light; this one is wherever the camera is
+
+    @property
+    def direction(self):
+        return tuple(_forward())
+
+    @direction.setter
+    def direction(self, value):
+        pass  # the camera's aim is the light's only direction
+
+
+# Flashlight: a warm cone mounted on the camera; it is the shadow caster.
+engine.set_spot(_CameraSpot(engine))
+engine.enable_shadows(resolution=2048, near=0.15, bias=0.003, pcf_radius=2)
 
 
 @engine.on("startup")
@@ -178,7 +203,6 @@ def build(_payload):
     d = _path[1] - _path[0]
     _look["yaw"] = math.degrees(math.atan2(d[1], d[0]))
     engine.camera.target = engine.camera.position + _forward()
-    _aim_flashlight()
 
 
 def fps_controls(query: mx.Query[Transform], dt: float):
@@ -193,7 +217,7 @@ def fps_controls(query: mx.Query[Transform], dt: float):
     n = np.linalg.norm(hf)
     if n > 0:
         hf /= n
-    right = np.cross(np.array([0, 1, 0], np.float32), hf)
+    right = np.array([hf[2], 0.0, -hf[0]], dtype=np.float32)  # world up x hf
     nr = np.linalg.norm(right)
     if nr > 0:
         right /= nr
@@ -211,16 +235,17 @@ def fps_controls(query: mx.Query[Transform], dt: float):
     if nm > 0:
         move = move / nm * MOVE_SPEED * dt
 
-    pos = engine.camera.position.copy()
+    cam = engine.camera.position
     # Axis-separated collision so we slide along walls instead of sticking.
-    if not _hits_wall(pos[0] + move[0], pos[2]):
-        pos[0] += move[0]
-    if not _hits_wall(pos[0], pos[2] + move[2]):
-        pos[2] += move[2]
-    pos[1] = EYE
+    px = cam[0] + move[0]
+    if _hits_wall(px, cam[2]):
+        px = cam[0]
+    pz = cam[2] + move[2]
+    if _hits_wall(px, pz):
+        pz = cam[2]
+    pos = np.array([px, EYE, pz], dtype=np.float32)
     engine.camera.position = pos
     engine.camera.target = pos + fwd
-    _aim_flashlight()
 
 
 def flythrough(query: mx.Query[Transform], dt: float):
@@ -244,7 +269,6 @@ def flythrough(query: mx.Query[Transform], dt: float):
     _look["pitch"] = -15.0
     engine.camera.position = pos
     engine.camera.target = pos + _forward()
-    _aim_flashlight()
 
 
 # Register exactly one controller for the active mode.

@@ -269,6 +269,8 @@ Fields of app objects are written freely, through a global, a field or a typed l
 
 Handlers and systems registered with the decorators (`@engine.on("bump")`, `@engine.system` on a module function, `engine` a module global) export as the call forms `engine.on("bump")(bump)` and `engine.system(orbit)` do; any other decorator fails the export. Do the scene's building in a `startup` handler or at module level: that is setup.
 
+**Lights are setup.** `engine.set_sun(...)`, `engine.set_spot(...)` and `engine.add_light(...)` reach the page as the lights `scene.glb` was written with, but the page applies no light writes, so a light frame code moves keeps the place setup gave it in the browser. The labyrinth demo keeps its flashlight on the camera without a write: a `SpotLight` subclass returns the camera's position from `position` and its forward vector from `direction`, which the desktop's renderer samples every frame and the page never moves. A grid a system reads must cross too: a 2-d bool `maze` does not, so the demo keeps a flat `WALLS = maze.reshape(-1).tolist()` for frame code and the grid itself for setup.
+
 The runtime's record of the engine calls a frame made (`["material", ...]`, `["capture", ...]`) is `engine.calls`; the trace's JSON keeps the key `log` for it, so fixtures and `replay.py` read it as before.
 
 ## Events in the page
