@@ -286,7 +286,7 @@ Delivery swaps the queue before it starts, so an event emitted by a handler or a
 
 Their fields are read only. Polling `engine.input` in a system still works and is often simpler.
 
-**The frame event and `engine.elapsed`.** `frame` is first in every frame's queue, with `{"dt": dt, "elapsed": engine.elapsed, "frame": n}`. `engine.elapsed` is 0.0 on the first frame and adds each later frame's dt, as the desktop's wall-clock mode does; it is read only.
+**The frame event and `engine.elapsed`.** `frame` is first in every frame's queue, with `{"dt": dt, "elapsed": engine.elapsed, "frame": n}`. `engine.elapsed` is 0.0 on the first frame and adds each later frame's dt, as the desktop does in wall-clock mode and, one `dt` per simulated step, under `set_fixed_timestep`; it is read only.
 
 **A handler's payload.** The transpiler types the payload of the events above, and of the widget events, from a table (`EVENT_PAYLOADS` in `src/manifoldx/web/types.py`). An app's own event has no class, so annotate its handler's payload, or the export stops:
 
