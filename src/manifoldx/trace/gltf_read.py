@@ -141,7 +141,19 @@ class _Reader:
             if light is not None:
                 lights.append(_light(light_defs[light["light"]], world))
         return assemble(parts, self.materials, textures=self.textures, camera=camera, lights=lights,
-                        overrides=overrides)
+                        environment=self.environment(), overrides=overrides)
+
+    def environment(self):
+        """The equirect map manifoldx's writer stores in the scene's extras, if any."""
+        from manifoldx.trace.environment import Environment
+
+        scenes = self.doc.get("scenes") or [{}]
+        env = scenes[self.doc.get("scene", 0)].get("extras", {}).get("manifoldx", {}).get("environment")
+        if not env or "bufferView" not in env:
+            return None
+        raw, _ = self.view(env["bufferView"])
+        data = np.frombuffer(raw, np.float32).reshape(env["height"], env["width"], 3)
+        return Environment(data.copy(), float(env.get("intensity", 1.0)))
 
     def mesh(self, node, world):
         name = node.get("name", "")
