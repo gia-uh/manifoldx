@@ -13,7 +13,7 @@ from manifoldx.viz.shims import (
     scale_bar,
     size,
 )
-from manifoldx.viz.text import LabelTextureAtlas
+from manifoldx.viz.text import AtlasOverflowError, LabelTextureAtlas
 
 __all__ = [
     "PointCloud",
@@ -26,6 +26,7 @@ __all__ = [
     "LabelMaterial",
     "AxisMaterial",
     "VolumeMaterial",
+    "AtlasOverflowError",
     "LabelTextureAtlas",
     # Plan 4 declarative shim
     "Chart",

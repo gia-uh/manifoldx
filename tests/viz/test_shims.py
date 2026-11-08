@@ -228,3 +228,26 @@ def test_chart_full_compose():
     # Component sanity: every Plan 1-3 component path is registered.
     for comp in ("Transform", "Mesh", "Material", "PointCloud", "AxisFrame", "TextLabel"):
         assert comp in engine.store._components, f"missing component: {comp}"
+
+
+def test_points_after_a_mesh_mark_sync_their_own_rows():
+    """The points' per-frame sync wrote into the first live rows of the store,
+    which belong to a mesh mark spawned before them."""
+    import manifoldx.viz as mxv
+    from manifoldx.resources import cube, standard
+
+    try:
+        from manifoldx.backends import get_offscreen_canvas
+        get_offscreen_canvas(width=8, height=8)
+    except Exception as e:
+        pytest.skip(f"offscreen canvas unavailable: {e}")
+    positions = np.array([[11.0, 0.0, 0.0], [12.0, 0.0, 0.0]], dtype=np.float32)
+    chart = mxv.mesh(geometry=cube(1, 1, 1), material=standard("#888888"), position=(0, 5, 0))
+    chart = chart + mxv.points(positions=positions)
+    engine = chart.engine
+    engine.render_frame(supersample=1)
+    t = engine.store._components["Transform"]
+    alive = np.flatnonzero(engine.store._alive)
+    rows = {tuple(np.round(t[i, 0:3], 3)) for i in alive}
+    assert (0.0, 5.0, 0.0) in rows, rows
+    assert {(11.0, 0.0, 0.0), (12.0, 0.0, 0.0)} <= rows, rows
