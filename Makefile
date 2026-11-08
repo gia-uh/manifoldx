@@ -44,12 +44,14 @@ clean:
 docs:
 	uv run --group docs scriptorium render docs/scriptorium.yaml --only site
 
-# Every block ran (scriptorium prints a failing block's traceback and exits 0),
-# docs/examples/ matches the chapters, and every example runs on its own.
-docs-test: docs
-	! grep -l 'Traceback (most recent call last)' docs/site/*.html
+# docs/examples/ matches the chapters (checked before rendering, which rewrites
+# it), every block ran (scriptorium prints a failing block's traceback and
+# exits 0), and every example runs on its own.
+docs-test:
 	for c in docs/chapters/*.md; do uv run --group docs scriptorium tangle --test $$c -d docs || exit 1; done
 	for e in docs/examples/*.py; do [ $$(basename $$e) = __init__.py ] || grep -q "export=$${e#docs/}" docs/chapters/*.md || { echo "$$e is not tangled from the docs"; exit 1; }; done
+	$(MAKE) docs
+	! grep -l 'Traceback (most recent call last)' docs/site/*.html
 	for e in docs/examples/*.py; do uv run python $$e > /dev/null || exit 1; done
 
 # The release gate: docs-test, and every public class named in the chapters.

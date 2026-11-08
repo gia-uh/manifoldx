@@ -113,5 +113,4 @@ jobs:
   docs:
     uses: ./.github/workflows/docs.yml
     with:
-      # docs-check once every chapter is written (0.10 release)
-      target: docs-test
+      target: docs-check
