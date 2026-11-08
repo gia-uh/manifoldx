@@ -90,11 +90,12 @@ def build(positions: np.ndarray) -> BVH:
             bins_of.append(b)
             key = seg * BINS + b
             cnt = np.bincount(key, minlength=K * BINS).reshape(K, BINS)
-            blo = np.full((K * BINS, 3), np.inf, np.float32)
-            bhi = np.full((K * BINS, 3), -np.inf, np.float32)
-            np.minimum.at(blo, key, tlo)
-            np.maximum.at(bhi, key, thi)
-            blo, bhi = blo.reshape(K, BINS, 3), bhi.reshape(K, BINS, 3)
+            blo = np.full((3, K * BINS), np.inf, np.float32)
+            bhi = np.full((3, K * BINS), -np.inf, np.float32)
+            for c in range(3):  # 1-D ufunc.at takes numpy's fast path; on rows it is 14x slower
+                np.minimum.at(blo[c], key, tlo[:, c])
+                np.maximum.at(bhi[c], key, thi[:, c])
+            blo, bhi = blo.T.reshape(K, BINS, 3), bhi.T.reshape(K, BINS, 3)
             lcnt = np.cumsum(cnt, axis=1)[:, :-1]
             rcnt = np.cumsum(cnt[:, ::-1], axis=1)[:, ::-1][:, 1:]
             larea = _area(np.minimum.accumulate(blo, axis=1), np.maximum.accumulate(bhi, axis=1))[:, :-1]
