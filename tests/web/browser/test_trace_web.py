@@ -14,9 +14,13 @@ from manifoldx.trace import Environment, Scene, scenes
 from manifoldx.trace.tracer import Tracer
 
 SIZE = 32
-WEBGPU = ["--enable-unsafe-webgpu", "--enable-unsafe-swiftshader"]
+# With Vulkan and ANGLE on Vulkan, a WebGPU canvas survives its first present in headless Chromium;
+# with the defaults the device is destroyed (compute alone works either way).
+WEBGPU = ["--enable-unsafe-webgpu", "--enable-unsafe-swiftshader", "--enable-features=Vulkan,UseSkiaRenderer",
+          "--use-angle=vulkan"]
 
-PAGE = """<!doctype html><html><body><script type="module">
+PAGE = """<!doctype html><html><body style="margin:0"><canvas id="c" width="32" height="32"></canvas>
+<script type="module">
 import * as trace from './trace/web/trace.js';
 import * as glb from './trace/web/glb.js';
 const f32 = (b) => new Float32Array(Uint8Array.from(atob(b), (c) => c.charCodeAt(0)).buffer);
@@ -241,3 +245,33 @@ def test_hide_drops_a_node_and_its_subtree(page, tmp_path):
     (page.root / "groups.glb").write_bytes(src.read_bytes())
     names = page.evaluate("async () => (await glb.loadGlb('groups.glb', { hide: ['gr*'] })).nodeNames.map((n) => n[0])")
     assert names == ["part-0"]
+
+
+def test_the_loop_refines_on_a_canvas_and_restarts_when_the_camera_moves(page):
+    """Headless Chromium does not composite a WebGPU canvas, so its pixels cannot be read here:
+    draw() and image() share render(), which image() checks above; this checks the loop."""
+    out = page.evaluate("""async (s) => {
+        const canvas = document.getElementById('c');
+        const t = await trace.createTracer(sceneOf(s), { width: 32, height: 32, canvas });
+        const errors = [];
+        let lost = false;
+        t.device.onuncapturederror = (e) => errors.push(e.error.message);
+        t.device.lost.then(() => { lost = true; });
+        const until = async (f) => { for (let i = 0; i < 600 && !f(); i++) await new Promise((r) => setTimeout(r, 20)); };
+        let frames = 0;
+        t.start({ maxSamples: 6, onFrame: () => frames++ });
+        await until(() => !t.running);
+        const first = t.samples;
+        const still = t.setCamera(t.camera);
+        const moved = t.setCamera({ ...t.camera, position: t.camera.position.map((v) => v + 0.1) });
+        const after = t.samples;
+        t.start({ maxSamples: 2 });
+        await until(() => !t.running);
+        const again = t.samples;
+        await t.device.queue.onSubmittedWorkDone();
+        t.destroy();
+        return { first, frames, still, moved, after, again, errors, lost };
+    }""", _scene(scenes.cornell_box()))
+    assert out["errors"] == [] and not out["lost"]
+    assert out["first"] == 6 and 1 <= out["frames"] <= 6
+    assert not out["still"] and out["moved"] and out["after"] == 0 and out["again"] == 2
