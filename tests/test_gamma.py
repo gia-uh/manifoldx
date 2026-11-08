@@ -44,3 +44,14 @@ def test_lit_colour_keeps_its_saturation():
     e.spawn(Mesh(plane(10, 10)), Material(StandardMaterial(color="#cc2222", roughness=0.9)), Transform(pos=(0, 0, 0)))
     r, g, b = (int(v) for v in e.render_frame(supersample=1)[16, 16])
     assert g / r < 0.40, (r, g, b)
+
+
+def test_a_color_object_is_a_material_colour():
+    """StandardMaterial(color=Color(...)) failed at spawn: 'Color' object is not subscriptable."""
+    import numpy as np
+
+    from manifoldx.resources import material_rgb
+    from manifoldx.types import Color
+
+    np.testing.assert_allclose(material_rgb(Color("#cc2222")), material_rgb("#cc2222"), atol=1e-6)
+    np.testing.assert_allclose(material_rgb(Color(linear_r=0.2, linear_g=0.1, linear_b=0.0)), [0.2, 0.1, 0.0], atol=1e-6)
