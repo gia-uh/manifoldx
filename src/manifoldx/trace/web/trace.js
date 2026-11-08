@@ -158,18 +158,23 @@ export class Tracer {
         ...l.color.map((c) => c * l.intensity), Math.cos(l.inner_cone)], i * 12);
     });
 
-    // emissive triangles, in BVH order, with a CDF by power (luminance × area)
+    // emissive triangles in the scene's order (so any BVH samples them alike), each with its
+    // slot in BVH order and a CDF by power (luminance × area)
     const emission = s.materials.map((m) => m.emission[0] * LUM[0] + m.emission[1] * LUM[1] + m.emission[2] * LUM[2]);
+    const slot = new Uint32Array(T);
+    for (let j = 0; j < T; j++) slot[order[j]] = j;
     const hot = [];
     const weights = [];
-    for (let j = 0; j < T; j++) {
-      const e = emission[s.materialIds[order[j]]] || 0;
+    for (let i = 0; i < T; i++) {
+      const e = emission[s.materialIds[i]] || 0;
       if (e > 0) {
-        const t = tris.subarray(j * 12, j * 12 + 12);
-        const cx = t[5] * t[10] - t[6] * t[9];
-        const cy = t[6] * t[8] - t[4] * t[10];
-        const cz = t[4] * t[9] - t[5] * t[8];
-        hot.push(j);
+        const p = s.positions.subarray(i * 9, i * 9 + 9);
+        const e1 = [p[3] - p[0], p[4] - p[1], p[5] - p[2]];
+        const e2 = [p[6] - p[0], p[7] - p[1], p[8] - p[2]];
+        const cx = e1[1] * e2[2] - e1[2] * e2[1];
+        const cy = e1[2] * e2[0] - e1[0] * e2[2];
+        const cz = e1[0] * e2[1] - e1[1] * e2[0];
+        hot.push(slot[i]);
         weights.push(e * 0.5 * Math.hypot(cx, cy, cz));
       }
     }

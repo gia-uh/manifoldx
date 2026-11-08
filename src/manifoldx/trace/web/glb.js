@@ -218,7 +218,7 @@ class Reader {
       let tri;
       if (prim.indices !== undefined) tri = Uint32Array.from(this.accessor(prim.indices));
       else tri = Uint32Array.from({ length: p.length / 3 }, (_, i) => i);
-      if (flip) for (let i = 0; i < tri.length; i += 3) [tri[i + 1], tri[i + 2]] = [tri[i + 2], tri[i + 1]];
+      if (flip) for (let i = 0; i < tri.length; i += 3) [tri[i], tri[i + 2]] = [tri[i + 2], tri[i]];
       const out = {};
       if (attrs.NORMAL !== undefined) {
         const n = this.accessor(attrs.NORMAL);

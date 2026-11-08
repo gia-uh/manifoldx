@@ -146,18 +146,20 @@ class Tracer:
                             np.cos(light.outer_cone))
             lights[i, 2] = (*power, np.cos(light.inner_cone))
 
-        # emissive triangles, in BVH order, with a CDF by power (luminance × area)
+        # emissive triangles in the scene's order (so any BVH samples them alike), each with its
+        # slot in BVH order and a CDF by power (luminance × area)
         emission = mats[:, 1, :3] @ np.array([0.2126, 0.7152, 0.0722], np.float32)
-        tri_mats = s.material_ids[order]
-        hot = np.flatnonzero(emission[tri_mats] > 0)
+        hot = np.flatnonzero(emission[s.material_ids] > 0)
+        slot = np.empty(len(order), np.uint32)
+        slot[order] = np.arange(len(order), dtype=np.uint32)
         self.emissive_total = 0.0
         table = np.zeros((max(len(hot), 1), 4), np.float32)
         if len(hot):
-            p = s.positions[order][hot].astype(np.float64)
+            p = s.positions[hot].astype(np.float64)
             area = 0.5 * np.linalg.norm(np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), axis=1)
-            w = emission[tri_mats[hot]] * area
+            w = emission[s.material_ids[hot]] * area
             self.emissive_total = float(w.sum())
-            table.view(np.uint32)[:, 0] = hot.astype(np.uint32)
+            table.view(np.uint32)[:, 0] = slot[hot]
             table[:, 1] = np.cumsum(w) / w.sum()
             table[-1, 1] = 1.0
         self._emissive_count = len(hot) if self.emissive_total > 0 else 0
