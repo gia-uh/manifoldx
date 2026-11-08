@@ -1031,7 +1031,7 @@ class Engine:
 
     # === Spawn & Destroy ===
     def spawn(self, *args, n: int = 1, **kwargs):
-        """Spawn entities - register components immediately, then emit SPAWN command."""
+        """Spawn n entities now, with these components, and return a handle to the first (None for n=0)."""
         # Handle Mesh, Material, and Transform component objects
         processed_kwargs = {}
         mesh_geo_id = None
