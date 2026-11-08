@@ -1212,6 +1212,7 @@ class Engine:
             return False
 
         dt = self._compute_dt()
+        is_fixed = self._use_fixed_dt
         self._last_dt = dt
 
         # Step 2: resolve frame waiters (tick / delay / elapsed_at)
@@ -1258,6 +1259,12 @@ class Engine:
         # Step 7: GPU compute systems.
         self._compute_runner.run_all(dt)
         self._frame_index += 1
+
+        # Under a fixed timestep the clock is the sum of the steps simulated so
+        # far: this step is done, so the next frame (and every reader after it)
+        # sees one more dt. Wall-clock mode leaves elapsed to _compute_dt.
+        if is_fixed:
+            self.elapsed += dt
 
         updated = time.perf_counter()
         self._render_only(dt)
@@ -1470,7 +1477,6 @@ class Engine:
             self.set_fixed_timestep(dt)
         self._settle()
         rgb = self._draw_still()
-        self.elapsed += self._fixed_dt_value
         if supersample == 1:
             return rgb
         ss = supersample
