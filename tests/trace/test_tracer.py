@@ -40,6 +40,14 @@ def test_the_same_seed_renders_the_same_image(device):
     assert np.array_equal(a.radiance(), b.radiance())
 
 
+def error(img, ref, block=6):
+    """Mean relative error of block averages: noise averages out, a bias does not."""
+    k = SIZE // block
+    a = img.reshape(k, block, k, block, 3).mean(axis=(1, 3))
+    b = ref.reshape(k, block, k, block, 3).mean(axis=(1, 3))
+    return float(np.abs(a - b).mean() / b.mean())
+
+
 def render(name, spp, seed=1, device=None):
     t = Tracer(getattr(scenes, name)(), SIZE, SIZE, seed=seed, device=device)
     t.step(spp)
@@ -50,6 +58,6 @@ def render(name, spp, seed=1, device=None):
 def test_reference_scene(name, device):
     ref = np.load(REFS / f"{name}.npy").astype(np.float32)
     img = render(name, 64, device=device)
-    err = np.abs(img - ref).mean() / ref.mean()
+    err = error(img, ref)
     limit = float((REFS / f"{name}.limit").read_text())
     assert err < limit, f"{name}: mean error {err:.4f} over {limit:.4f}"
