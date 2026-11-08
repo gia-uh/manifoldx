@@ -252,7 +252,7 @@ Reached code may use exactly what `RUNTIME_SURFACE` in `src/manifoldx/web/types.
 - `engine.camera`: `position`, `target` and `up` (float32 vectors), `fov` (vertical, in degrees: with `mouse_pos` and `engine.w`/`engine.h` it turns a tap into a ray), `near`, `far`, `get_forward()`, `project(points, width, height)` (an `(n, 3)` array of world points to their `(n, 2)` pixels, origin top-left, and their `(n,)` depths, both float64, as the desktop's: put a DOM label where an entity is);
 - the GUI's widgets (see The GUI): a Panel's `offset`, a Text's `text`, the fields of `Button`, `Slider`, `Toggle` and `Joystick` in its table, every widget's `style_overrides`, to read and to write.
 
-A member the page does not have fails the export at its line, whether it is read, called as a statement or used in an expression:
+The error names the line:
 
 ```text
 app.py:8: `engine.enable_shadows`, a member of the engine outside the page's runtime surface, is outside the subset (reached from system tick)
