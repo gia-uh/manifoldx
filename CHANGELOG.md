@@ -434,6 +434,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `engine.delay()` and `elapsed_at()` never resolved. Each frame now adds its fixed dt
   once its systems have run, keeping the page's rule: 0 before the first step, then one
   dt per simulated step (#168).
+- **export --web: instanced meshes are lit with their instance rotation.** The page's fixed
+  light for `BasicMaterial` and `PhongMaterial` built the normal from `modelMatrix` alone, so
+  every instance of a batch was shaded as if unrotated; it now takes `instanceMatrix` too,
+  under `USE_INSTANCING`, as three.js's own chunks do, and rotated boxes match the desktop
+  (#172).
 - **GUI panels honour all nine anchors on the desktop.** A root panel anchored anywhere but
   top-left painted and hit-tested at the top-left. Paint and hit-test now place it through
   one function, `gui.layout.anchored_slot`, by the page's rule: the offset measured inward

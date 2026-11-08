@@ -261,7 +261,12 @@ test("the mx basic material lights the colour as the desktop's fixed light", { s
   const m = mx.materials.values().next().value;
   const shader = { vertexShader: THREE.ShaderLib.basic.vertexShader, fragmentShader: THREE.ShaderLib.basic.fragmentShader, uniforms: {} };
   m.onBeforeCompile(shader);
-  assert.match(shader.vertexShader, /vMxNormal = normalize\( mat3\( modelMatrix \) \* normal \);/);
+  // An instance's matrix comes before the model matrix, as three.js's own chunk does.
+  assert.match(
+    shader.vertexShader,
+    /#ifdef USE_INSTANCING\s+mat3 mxNormalMatrix = mat3\( modelMatrix \) \* mat3\( instanceMatrix \);/,
+  );
+  assert.match(shader.vertexShader, /vMxNormal = normalize\( mxNormalMatrix \* normal \);/);
   assert.match(shader.fragmentShader, /diffuseColor\.rgb \*= 0\.3 \+ 0\.7 \* max\( dot\( normalize\( vMxNormal \), normalize\( vec3\( 1\.0 \) \) \), 0\.0 \);/);
   // The brightness comes after the colour is read and before the output.
   const f = shader.fragmentShader;
