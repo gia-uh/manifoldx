@@ -7,7 +7,7 @@
 export const SUN_ANGULAR_RADIUS = 0.2665 * Math.PI / 180;
 const LUM = [0.2126, 0.7152, 0.0722];
 
-/** Oikos's settings shape: {sun_direction, turbidity, ground}; Environment.sky's defaults. */
+/** Environment.sky's keyword arguments and defaults: {sun_direction, turbidity, sun_ratio, ground, width, height}. */
 export function sky({ sun_direction = [0.4, 0.7, 0.3], turbidity = 3.0, sun_ratio = 5.0,
   ground = [0.25, 0.23, 0.2], width = 512, height = 256 } = {}) {
   const l = Math.hypot(...sun_direction);

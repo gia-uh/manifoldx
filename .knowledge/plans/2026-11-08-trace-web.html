@@ -32,15 +32,15 @@ li{margin:4px 0}
 <tr><th>Question</th><th>Choice</th><th>Why</th></tr>
 <tr><td>Fit 8 storage buffers per stage</td><td>Four read-only scene buffers: <code>nodes</code>, <code>tris</code>, <code>shade</code> and one <code>aux</code> array of vec4 that holds materials, the texture table, texels, lights, emissive CDF and the environment tables, at offsets passed in <code>Params</code>. The two AOV buffers become one (two vec4 per pixel).</td><td>path: 4 + 2 written = 6; à-trous: 4 + 3 = 7; denoise prep: 4 + 4 = 8. The hot traversal buffers stay apart.</td></tr>
 <tr><td>Denoiser prep</td><td><code>prep.wgsl</code>: demodulation, variance and its 3×3 blur, the normalised guide. Python's <code>denoised()</code> uses it too.</td><td>No CPU pass in the page; one code path.</td></tr>
-<tr><td>Scene transport</td><td>The page reads the .glb itself (<code>glb.js</code>, a port of <code>gltf_read.py</code>) and builds the BVH in JS (<code>bvh.js</code>, binned SAH, recursive over typed arrays). No packed file.</td><td>Overrides and hide globs (Oikos's trace settings) change materials and drop nodes per view, so the scene has to be assembled in the page anyway; a build-time packed file would freeze one view. The glb is already served.</td></tr>
-<tr><td>Sky</td><td><code>sky.js</code>: <code>Environment.sky</code> and its sampling tables ported.</td><td>Oikos passes <code>sun_direction</code>, <code>turbidity</code>, <code>ground</code>.</td></tr>
+<tr><td>Scene transport</td><td>The page reads the .glb itself (<code>glb.js</code>, a port of <code>gltf_read.py</code>) and builds the BVH in JS (<code>bvh.js</code>, binned SAH, recursive over typed arrays). No packed file.</td><td>A site's overrides and hide globs change materials and drop nodes per view, so the scene has to be assembled in the page anyway; a build-time packed file would freeze one view. The glb is already served.</td></tr>
+<tr><td>Sky</td><td><code>sky.js</code>: <code>Environment.sky</code> and its sampling tables ported.</td><td>A site passes <code>sun_direction</code>, <code>turbidity</code>, <code>ground</code>.</td></tr>
 <tr><td>Output</td><td>Auto exposure by a one-workgroup reduction, ACES and sRGB in a fragment shader that draws a full-screen triangle onto a canvas.</td><td>Works with any canvas format; no readback.</td></tr>
 <tr><td>Shipping</td><td>JS in <code>src/manifoldx/trace/web/</code>, loading the WGSL by URL; <code>manifoldx.trace.web.copy_to(dest)</code> writes JS + WGSL into one folder a site serves.</td><td>The WGSL files stay single-sourced.</td></tr>
 </table>
 
 <h2>API in the page</h2>
 <pre><code>import { createTracer, loadGlb } from './trace/trace.js';
-const scene = await loadGlb(url, { overrides, hide });    // Oikos's settings format
+const scene = await loadGlb(url, { overrides, hide });    // what Scene.from_glb and a node filter take in Python
 const tracer = await createTracer(scene, { width, height, environment, canvas });
 tracer.setCamera({ position, target, up, fov });        // resets the accumulation if it moved
 tracer.frame();                                         // a few samples within a time budget, then draw
@@ -49,8 +49,8 @@ tracer.frame();                                         // a few samples within 
 <h2>Tasks</h2>
 <div class="task" data-state="done"><b>1. Pack the buffers.</b> WGSL bindings and <code>Params</code> offsets; Python <code>_upload</code>; one AOV buffer. The existing <code>tests/trace</code> stay green.</div>
 <div class="task" data-state="done"><b>2. Prep in WGSL.</b> <code>prep.wgsl</code>; <code>denoised()</code> through it; a test against the old numpy prep.</div>
-<div class="task" data-state="done"><b>3. JS scene.</b> <code>glb.js</code>, <code>bvh.js</code>, <code>sky.js</code>; overrides and hide as Oikos's service applies them.</div>
-<div class="task" data-state="done"><b>4. trace.js.</b> Device, pipelines, step loop with a frame budget, reset on camera change, denoise, display. First image of an Oikos house in headless Chromium.</div>
+<div class="task" data-state="done"><b>3. JS scene.</b> <code>glb.js</code>, <code>bvh.js</code>, <code>sky.js</code>; overrides and hide globs as a Python service applies them.</div>
+<div class="task" data-state="done"><b>4. trace.js.</b> Device, pipelines, step loop with a frame budget, reset on camera change, denoise, display. First image of a furnished house in headless Chromium.</div>
 <div class="task" data-state="done"><b>5. Tests.</b> Playwright on SwiftShader WebGPU: the page's radiance at a fixed seed against Python's on the reference scenes; skipped without an adapter; run in the CI browser job.</div>
 <div class="task" data-state="doing"><b>6. Docs and hand-over.</b> Know-how section, CHANGELOG, a demo page; samples per second recorded on the issue as devices report them.</div>
 
@@ -58,7 +58,7 @@ tracer.frame();                                         // a few samples within 
 <ul>
 <li>Parity is statistical, not "within float tolerance": page and Python run on different devices whose <code>sin</code>, <code>cos</code> and <code>exp</code> differ in the last bits, so primary hits match exactly and grazing paths later diverge. The tests compare 4×4 block averages against Python's own spread between two seeds, and the means within 3%.</li>
 <li>The emissive CDF lists triangles in the scene's order (Python too), so a BVH of another shape samples the same lamp for the same random number.</li>
-<li>The BVH build runs in a module worker: Oikos's fabrica is 777k triangles, about 4 s to build.</li>
+<li>The BVH build runs in a module worker: a 777k-triangle building takes about 4 s to build.</li>
 <li>The fragment stage binds no writable storage: the exposure from the reduction is copied into the draw's uniform.</li>
 <li>Headless Chromium does not composite a WebGPU canvas; <code>image()</code> renders the same pass offscreen and is what the tests read.</li>
 </ul>
