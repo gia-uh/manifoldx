@@ -5,10 +5,10 @@ graph to walk and no shader to write before the first picture.
 
 This guide follows one project from start to finish: a small town plaza, forty
 metres on a side, with a fountain, benches, the buildings around it and the
-people who cross it. Each chapter starts from a job the plaza needs done,
-solves it with what the earlier chapters taught, shows where that solution
-hurts, and only then brings in the part of the library that fixes it. The last
-chapter puts the whole plaza together and adds nothing new.
+people who cross it. Each chapter starts from a job the plaza needs done
+and solves it with ManifoldX, bringing in the parts of the library the job
+needs, simplest first. The last chapter puts the whole plaza together and adds
+nothing new.
 
 Every code block in this guide ran when the guide was built, against the
 version of ManifoldX named at the top of the page. The frames you see were

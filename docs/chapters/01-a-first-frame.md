@@ -4,52 +4,10 @@ The plaza starts as a plan on paper: a paved square forty metres on a side,
 and a fountain basin in the middle, four metres wide and one metre tall. Before
 anything moves, we want to see it from where a visitor would stand.
 
-## Drawing it by hand
-
-With only numpy and Pillow we can already make a picture. Put the camera
-somewhere, turn each corner of the basin into a pixel with a perspective
-divide, and draw the edges.
-
-```python {run}
-import numpy as np
-from PIL import Image, ImageDraw
-
-# The basin: a box 4 m wide, 1 m tall, centred on the origin. y points up.
-corners = np.array(
-    [[x, y, z] for x in (-2, 2) for y in (0, 1) for z in (-2, 2)], dtype=float
-)
-edges = [(a, b) for a in range(8) for b in range(a + 1, 8)
-         if np.sum(corners[a] != corners[b]) == 1]
-
-eye = np.array([14.0, 9.0, 14.0])
-forward = -eye / np.linalg.norm(eye)
-right = np.cross(forward, [0, 1, 0])
-right /= np.linalg.norm(right)
-up = np.cross(right, forward)
-
-def to_pixel(p, w=480, h=270, focal=600):
-    d = p - eye
-    x, y, z = d @ right, d @ up, d @ forward
-    return (w / 2 + focal * x / z, h / 2 - focal * y / z)
-
-img = Image.new("RGB", (480, 270), "white")
-draw = ImageDraw.Draw(img)
-for a, b in edges:
-    draw.line([to_pixel(corners[a]), to_pixel(corners[b])], fill="black")
-img
-```
-
-It is a fountain, more or less. But everything a picture of a place needs is
-missing. The back edges show through the front faces, because nothing knows
-which surface is nearer. There is no ground, no light and no colour; adding a
-floor means another loop of edges, and filling faces means sorting them by
-depth ourselves. And this is one box. The plaza will have hundreds of objects,
-and each frame of a simulation will move them.
-
 ## The engine
 
-ManifoldX does that work on the GPU. An `Engine` owns the window, the camera
-and the world; you put things in the world and it draws them.
+An `Engine` owns the window, the camera and the world; you put things in the
+world and it draws them on the GPU.
 
 ```python {run export=examples/first_frame.py}
 import manifoldx as mx
@@ -108,8 +66,8 @@ Image.fromarray(frame)
 ```
 
 The near faces hide the far ones, the floor runs to the horizon, and the sun
-lights the top of the basin brighter than its sides. Nothing in our code
-sorted a face or shaded a pixel.
+lights the top of the basin brighter than its sides. Our code only said what
+is where; the engine sorted the faces and shaded the pixels.
 
 To look at the plaza in a window instead, install the `desktop` extra and end
 the program with `engine.run()`, which opens the window and draws a frame
