@@ -17,7 +17,13 @@ W, H = 320, 200
 # web_walk is within 0.1%) + 2 = 2.3%. With means near 130, FLOOR (about 3%) is the bound.
 THRESHOLD = 0.023
 FLOOR = 4.0
-SCENES = {"web_walk": WEB_WALK, "lit_yard": APPS / "lit_yard.py"}
+# phong_yard draws rotated PhongMaterial boxes in one batch: the page turns their normals with
+# the instance matrix, or lights them as if unrotated (#172).
+SCENES = {
+    "web_walk": WEB_WALK,
+    "lit_yard": APPS / "lit_yard.py",
+    "phong_yard": APPS / "phong_yard.py",
+}
 
 
 def mean_rgb(img: np.ndarray) -> tuple[float, float, float]:
