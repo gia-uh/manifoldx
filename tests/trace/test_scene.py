@@ -68,3 +68,12 @@ def test_from_meshes_fills_flat_normals_and_white_colours():
     assert np.allclose(s.colors, 1)
     n = s.normals[:, 0]
     assert np.allclose(np.abs(n).max(axis=1), 1)
+
+
+def test_an_override_drops_a_texture():
+    from manifoldx.trace.scene import assemble
+
+    tex = Material("floor", texture=0)
+    parts = [("floor-a", box((0, 0, 0), (1, 1, 1))["positions"], np.arange(36).reshape(-1, 3) % 24, {}, 0)]
+    s = assemble(parts, [tex], textures=[np.zeros((2, 2, 4), np.uint8)], overrides={"floor-*": {"texture": None}})
+    assert s.materials[s.material_ids[0]].texture == -1

@@ -164,6 +164,8 @@ def _override(materials, derived, mat, node_name, overrides):
     unknown = set(changes) - _FIELDS
     if unknown:
         raise ValueError(f"unknown material fields in overrides: {sorted(unknown)}")
+    if "texture" in changes and changes["texture"] is None:  # {"texture": None} drops the texture
+        changes["texture"] = -1
     key = (mat, tuple(sorted((k, repr(v)) for k, v in changes.items())))
     if key not in derived:
         materials.append(replace(materials[mat], **changes))
