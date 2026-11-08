@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A path tracer, `manifoldx.trace`.** `Scene.from_glb(path, overrides)` reads any .glb
+  (node trees, PBR factors, emission, transmission and volume, alpha blend as thin glass,
+  base-colour textures, vertex colours, cameras, `KHR_lights_punctual`, the environment map
+  manifoldx writes). `Tracer(scene, w, h)` builds a binned-SAH BVH in numpy and traces it in
+  WGSL compute: Lambert + GGX, thin and solid dielectrics, emissive triangles, a Preetham sky
+  with a sun disk (`Environment.sky`) or an HDR map, next-event estimation with MIS, Russian
+  roulette. `tracer.step(n)` accumulates samples; `tracer.image()` denoises with an
+  edge-aware à-trous filter and tonemaps to sRGB. `manifoldx trace scene.glb -o out.png`
+  renders from the command line; `python -m benchmarks trace` measures it (#175).
+
 - **export --web: skinned entities and matrices in frame code.** Transpiled code may call
   `set_joints` on the engine and on entity handles, use `@` on matrices and stacks of them
   (numpy's broadcasting; float32 summed in numpy's order, so the page matches bit for bit),

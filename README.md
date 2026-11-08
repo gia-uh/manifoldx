@@ -329,6 +329,12 @@ python demos/terrain_stream.py --render --duration 8 --output flyby.mp4
 - Front-to-back composite raymarching in a fragment shader, with depth-test on / depth-write off and pre-multiplied alpha blending
 - Reusable colormap LUT + per-material 256-sample opacity LUT (built from piecewise stops or a numpy array)
 
+### Path tracing (`manifoldx.trace`)
+- A progressive path tracer for any scene written to glTF: `Scene.from_glb(path, overrides)`, `Tracer(scene, w, h)`, `tracer.step(n)`, `tracer.image()`
+- WGSL compute kernels through wgpu-py (no hardware ray tracing); the BVH is built in numpy with binned SAH
+- Lambert + GGX, thin and solid glass, emissive surfaces, base-colour textures and vertex colours; a Preetham sky with a sun disk, HDR maps, punctual lights; next-event estimation with MIS; an edge-aware à-trous denoiser
+- `manifoldx trace scene.glb -o out.png --size 1024x640 --spp 64`; on an RTX 3060 a 4k-triangle interior comes out clean in under a second
+
 ### Hot reload
 
 `manifoldx run app.py` (or `manifoldx run -m package.module`) runs an app and reruns it in the same window each time one of its source files changes. The scene is rebuilt from the new code. Keep in `engine.state` whatever should survive a reload, as plain data:
