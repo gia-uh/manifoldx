@@ -245,12 +245,18 @@ The annotations understood are `int`, `float`, `bool`, `str`, `None`, app classe
 
 ## The engine from transpiled code
 
-Reached code may use exactly what `RUNTIME_SURFACE` in `src/manifoldx/web/types.py` lists; anything else of a manifoldx object types as unknown:
+Reached code may use exactly what `RUNTIME_SURFACE` in `src/manifoldx/web/types.py` lists; any other member of one of those objects fails the export, whether it is read, called as a statement or used in an expression:
 
 - `engine.input`, `engine.camera`, `engine.gui.pointer_over_gui` (whether a pointer event of this frame went to an interactive widget, so a click there is the GUI's), `engine.w`, `engine.h`, `engine.set_material(entity, material)`, `engine.spawn(...)`, `engine.destroy(...)` and `engine.set_joints(indices, matrices)` (see Entities in the page), `engine.emit(name, payload)` and `engine.elapsed` (see Events in the page), `engine.log(text)` (under `run --web` the line goes to the dev server's log; an exported page drops it, as the desktop does outside `run`, and a replay in Node collects it in `engine.lines`), and `engine.state` (subscripts or attributes, see above);
 - `engine.input`: `pressed_keys`, `modifiers`, `mouse_pos`, `mouse_delta`, `wheel_delta`, `pressed_buttons`, `viewport_size`, `pointer_captured`, `is_pressed(key)`, `just_pressed(key)`, `just_released(key)`, `is_mouse_pressed(button)`, `just_mouse_pressed(button)`, `just_mouse_released(button)`, `capture_pointer(on)`;
 - `engine.camera`: `position`, `target` and `up` (float32 vectors), `fov` (vertical, in degrees: with `mouse_pos` and `engine.w`/`engine.h` it turns a tap into a ray), `near`, `far`, `get_forward()`, `project(points, width, height)` (an `(n, 3)` array of world points to their `(n, 2)` pixels, origin top-left, and their `(n,)` depths, both float64, as the desktop's: put a DOM label where an entity is);
 - the GUI's widgets (see The GUI): a Panel's `offset`, a Text's `text`, the fields of `Button`, `Slider`, `Toggle` and `Joystick` in its table, every widget's `style_overrides`, to read and to write.
+
+A member the page does not have fails the export at its line, whether it is read, called as a statement or used in an expression:
+
+```text
+app.py:8: `engine.enable_shadows`, a member of the engine outside the page's runtime surface, is outside the subset (reached from system tick)
+```
 
 Reached code may write only the fields the page applies each frame: the camera's `position`, `target`, `up`, `fov`, `near` and `far`, which `scene.js`'s `sync` copies to the three.js camera before each render, the widget fields above, and `engine.state`'s keys. `position`, `target` and `up` take a float32 vector (`np.array(x, np.float32)`, or float32 arithmetic such as `cam.position + forward`; `cam.position += v` and `cam.position[i] = x` write in place) and `fov`, `near` and `far` a number: numpy would keep a float64 array or a tuple where the runtime rounds to float32. A write of any other field of the engine, its `input`, `camera` or `gui`, or another manifoldx object moves the desktop and not the page, so it fails the export:
 

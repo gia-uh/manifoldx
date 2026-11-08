@@ -429,6 +429,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **export --web: a member of an engine object outside the page's runtime surface fails the
+  export.** Frame code that called an `Engine` method `RUNTIME_SURFACE` lacks — a bare
+  `engine.enable_shadows()`, or the same call inside an expression — transpiled to a call the
+  page has no member for and threw only there; the export now stops at its file and line, as
+  it does for other constructs outside the subset (#171).
 - **GUI panels honour all nine anchors on the desktop.** A root panel anchored anywhere but
   top-left painted and hit-tested at the top-left. Paint and hit-test now place it through
   one function, `gui.layout.anchored_slot`, by the page's rule: the offset measured inward
