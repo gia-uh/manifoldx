@@ -33,11 +33,11 @@ def test_async_handler_runs_to_first_await_on_dispatch_frame():
 
 
 def test_await_delay_resolves_after_seconds_elapsed():
-    """Drive frames manually with a fixed timestep, advancing engine.elapsed
-    between frames (since _compute_dt does not advance it in fixed-dt mode).
+    """Drive frames manually with a fixed timestep, setting engine.elapsed before
+    each frame to place the deadline.
     """
     engine = _make_offscreen_engine()
-    engine.set_fixed_timestep(0.1)  # so _compute_dt doesn't overwrite elapsed
+    engine.set_fixed_timestep(0.1)  # keep _compute_dt from overwriting the elapsed we set
     log = []
 
     @engine.on("start")
