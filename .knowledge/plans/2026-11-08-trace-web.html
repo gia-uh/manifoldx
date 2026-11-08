@@ -47,12 +47,21 @@ tracer.frame();                                         // a few samples within 
 </code></pre>
 
 <h2>Tasks</h2>
-<div class="task" data-state="pending"><b>1. Pack the buffers.</b> WGSL bindings and <code>Params</code> offsets; Python <code>_upload</code>; one AOV buffer. The existing <code>tests/trace</code> stay green.</div>
-<div class="task" data-state="pending"><b>2. Prep in WGSL.</b> <code>prep.wgsl</code>; <code>denoised()</code> through it; a test against the old numpy prep.</div>
-<div class="task" data-state="pending"><b>3. JS scene.</b> <code>glb.js</code>, <code>bvh.js</code>, <code>sky.js</code>; overrides and hide as Oikos's service applies them.</div>
-<div class="task" data-state="pending"><b>4. trace.js.</b> Device, pipelines, step loop with a frame budget, reset on camera change, denoise, display. First image of an Oikos house in headless Chromium.</div>
-<div class="task" data-state="pending"><b>5. Tests.</b> Playwright on SwiftShader WebGPU: the page's radiance at a fixed seed against Python's on the reference scenes; skipped without an adapter; run in the CI browser job.</div>
-<div class="task" data-state="pending"><b>6. Docs and hand-over.</b> Know-how section, CHANGELOG, a demo page; samples per second recorded on the issue as devices report them.</div>
+<div class="task" data-state="done"><b>1. Pack the buffers.</b> WGSL bindings and <code>Params</code> offsets; Python <code>_upload</code>; one AOV buffer. The existing <code>tests/trace</code> stay green.</div>
+<div class="task" data-state="done"><b>2. Prep in WGSL.</b> <code>prep.wgsl</code>; <code>denoised()</code> through it; a test against the old numpy prep.</div>
+<div class="task" data-state="done"><b>3. JS scene.</b> <code>glb.js</code>, <code>bvh.js</code>, <code>sky.js</code>; overrides and hide as Oikos's service applies them.</div>
+<div class="task" data-state="done"><b>4. trace.js.</b> Device, pipelines, step loop with a frame budget, reset on camera change, denoise, display. First image of an Oikos house in headless Chromium.</div>
+<div class="task" data-state="done"><b>5. Tests.</b> Playwright on SwiftShader WebGPU: the page's radiance at a fixed seed against Python's on the reference scenes; skipped without an adapter; run in the CI browser job.</div>
+<div class="task" data-state="doing"><b>6. Docs and hand-over.</b> Know-how section, CHANGELOG, a demo page; samples per second recorded on the issue as devices report them.</div>
+
+<h2>Departures</h2>
+<ul>
+<li>Parity is statistical, not "within float tolerance": page and Python run on different devices whose <code>sin</code>, <code>cos</code> and <code>exp</code> differ in the last bits, so primary hits match exactly and grazing paths later diverge. The tests compare 4×4 block averages against Python's own spread between two seeds, and the means within 3%.</li>
+<li>The emissive CDF lists triangles in the scene's order (Python too), so a BVH of another shape samples the same lamp for the same random number.</li>
+<li>The BVH build runs in a module worker: Oikos's fabrica is 777k triangles, about 4 s to build.</li>
+<li>The fragment stage binds no writable storage: the exposure from the reduction is copied into the draw's uniform.</li>
+<li>Headless Chromium does not composite a WebGPU canvas; <code>image()</code> renders the same pass offscreen and is what the tests read.</li>
+</ul>
 
 <h2>Risks</h2>
 <ul>
