@@ -111,12 +111,6 @@ is black, which is why the lights join the chart before the first frame. A
 `Chart` has no size argument and draws at 800×600 in 0.10; when the frame size
 matters, use a plain `Engine` as in chapter 1.
 
-Order matters in 0.10. `PointsMark` assumes its entities are the first block
-in the store, so a mesh mark composed before `mxv.points` makes the point
-positions overwrite the mesh's rows on the first frame: the mesh jumps to the
-first observation and the cloud stays where it was. Keep the points mark first,
-as here.
-
 ## A frame you can measure
 
 A cloud of colour says nothing about distance. The figure needs three axes in
@@ -211,7 +205,7 @@ string:
 
 ```python {run continue}
 from manifoldx.viz import LabelTextureAtlas
-from manifoldx.viz.text import AtlasOverflowError
+from manifoldx.viz import AtlasOverflowError
 
 full = LabelTextureAtlas()
 for i in range(256):
