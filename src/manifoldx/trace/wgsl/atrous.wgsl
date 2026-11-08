@@ -1,9 +1,9 @@
 // One à-trous pass over demodulated radiance, edge-stopped by normal, depth and luminance
 // (Dammertz et al. 2010; variance-guided as in SVGF). P.frame holds this pass's step in pixels.
 
-@group(0) @binding(7) var<storage, read> src: array<vec4<f32>>;         // irradiance rgb, variance
-@group(0) @binding(8) var<storage, read_write> dst: array<vec4<f32>>;
-@group(0) @binding(9) var<storage, read> guide: array<vec4<f32>>;       // normal xyz, depth (< 0: miss)
+@group(0) @binding(5) var<storage, read> src: array<vec4<f32>>;         // irradiance rgb, variance
+@group(0) @binding(6) var<storage, read_write> dst: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read> guide: array<vec4<f32>>;       // normal xyz, depth (< 0: miss)
 
 const SIGMA_L: f32 = 4.0;
 const SIGMA_N: f32 = 64.0;

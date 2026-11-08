@@ -10,19 +10,28 @@ struct Params {
     sun_dir: vec3<f32>, sun_cos: f32,       // direction towards the sun, cos of its angular radius
     sun_radiance: vec3<f32>, env_sum: f32,  // env_sum: total of the env sampling weights
     clamp_max: f32, scene_radius: f32, emissive_total: f32, flags: u32,
+    // where each table starts in aux, in vec4s
+    mat_off: u32, tex_off: u32, texel_off: u32, env_off: u32,
+    marginal_off: u32, conditional_off: u32, light_off: u32, emissive_off: u32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> nodes: array<vec4<f32>>;   // 2 per node
 @group(0) @binding(2) var<storage, read> tris: array<vec4<f32>>;    // 3 per triangle: v0, e1, e2
 @group(0) @binding(3) var<storage, read> shade: array<vec4<f32>>;   // 5 per triangle
-@group(0) @binding(4) var<storage, read> mats: array<vec4<f32>>;    // 3 per material
-@group(0) @binding(5) var<storage, read> texels: array<u32>;        // RGBA8, sRGB colour
-@group(0) @binding(6) var<storage, read> tex_table: array<vec4<u32>>; // offset, width, height, 0
+// Every other table, packed so a kernel stays within WebGPU's 8 storage buffers per stage:
+// materials (3 per), texture table (offset, width, height, 0 as bits), texels (RGBA8 sRGB, 4 per),
+// environment radiance and pdf (1 per texel), marginal and conditional CDFs (4 per), lights
+// (3 per), emissive triangles (tri bits, cdf, -, -). P.*_off says where each starts.
+@group(0) @binding(4) var<storage, read> aux: array<vec4<f32>>;
 
 const PI: f32 = 3.14159265358979;
 const INF: f32 = 3.0e38;
 const EPS: f32 = 1.0e-4;
+
+fn aux_f32(off: u32, i: u32) -> f32 { return aux[off + (i >> 2u)][i & 3u]; }
+fn aux_u32(off: u32, i: u32) -> u32 { return bitcast<u32>(aux[off + (i >> 2u)][i & 3u]); }
+fn material(m: u32, k: u32) -> vec4<f32> { return aux[P.mat_off + 3u * m + k]; }
 
 // ---------------------------------------------------------------- random numbers (PCG)
 
@@ -142,11 +151,11 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 fn texel(base: u32, w: u32, h: u32, x: i32, y: i32) -> vec4<f32> {
     let xi = u32(((x % i32(w)) + i32(w)) % i32(w));
     let yi = u32(((y % i32(h)) + i32(h)) % i32(h));
-    return unpack4x8unorm(texels[base + yi * w + xi]);
+    return unpack4x8unorm(aux_u32(P.texel_off, base + yi * w + xi));
 }
 
 fn sample_texture(t: u32, uv: vec2<f32>) -> vec3<f32> {
-    let e = tex_table[t];
+    let e = bitcast<vec4<u32>>(aux[P.tex_off + t]);
     let p = uv * vec2<f32>(f32(e.y), f32(e.z)) - 0.5;
     let f = fract(p);
     let i = vec2<i32>(floor(p));
@@ -164,9 +173,9 @@ fn surface(hit: Hit, o: vec3<f32>, d: vec3<f32>) -> Surface {
     let s3 = shade[5u * i + 3u];
     let s4 = bitcast<vec4<u32>>(shade[5u * i + 4u]);
     let mat = bitcast<u32>(s0.w);
-    let m0 = mats[3u * mat];
-    let m1 = mats[3u * mat + 1u];
-    let m2 = mats[3u * mat + 2u];
+    let m0 = material(mat, 0u);
+    let m1 = material(mat, 1u);
+    let m2 = material(mat, 2u);
 
     var s: Surface;
     s.p = o + d * hit.t;

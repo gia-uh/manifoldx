@@ -13,7 +13,7 @@ from manifoldx.trace.environment import Environment
 from manifoldx.trace.scene import Camera, Scene
 
 _WG = 8
-_PARAMS_SIZE = 144
+_PARAMS_SIZE = 176
 
 
 def _wgsl(name: str) -> str:
@@ -121,15 +121,16 @@ class Tracer:
         self.scene_radius = float(np.linalg.norm(hi - lo)) * 0.5 + 1e-3
         self._params = self.device.create_buffer(size=_PARAMS_SIZE,
                                                  usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        rad, marginal, cond, lights, emissive = self._lights(mats)
+        aux, self._offsets = pack_aux([mats, table, texels, rad, marginal, cond, lights, emissive])
         self._scene_buffers = [self._params, self._buffer(self.bvh.packed()), self._buffer(tris),
-                               self._buffer(shade), self._buffer(mats), self._buffer(texels),
-                               self._buffer(table)]
-        self._upload_lights(mats)
-        self.gpu_bytes = sum(b.size for b in self._scene_buffers + self._light_buffers)
+                               self._buffer(shade), self._buffer(aux)]
+        self.gpu_bytes = sum(b.size for b in self._scene_buffers)
         n = self.width * self.height * 16
-        self._accum, self._aov_albedo, self._aov_nd = self._out(n), self._out(n), self._out(n)
+        self._accum, self._aov = self._out(n), self._out(2 * n)
 
-    def _upload_lights(self, mats):
+    def _lights(self, mats):
+        """Environment tables, lights and the emissive-triangle CDF, as arrays for pack_aux."""
         s, order = self.scene, self.bvh.order
         env = self.environment
         rad, marginal, cond, total = env.tables()
@@ -145,24 +146,25 @@ class Tracer:
                             np.cos(light.outer_cone))
             lights[i, 2] = (*power, np.cos(light.inner_cone))
 
-        # emissive triangles, in BVH order, with a CDF by power (luminance × area)
+        # emissive triangles in the scene's order (so any BVH samples them alike), each with its
+        # slot in BVH order and a CDF by power (luminance × area)
         emission = mats[:, 1, :3] @ np.array([0.2126, 0.7152, 0.0722], np.float32)
-        tri_mats = s.material_ids[order]
-        hot = np.flatnonzero(emission[tri_mats] > 0)
+        hot = np.flatnonzero(emission[s.material_ids] > 0)
+        slot = np.empty(len(order), np.uint32)
+        slot[order] = np.arange(len(order), dtype=np.uint32)
         self.emissive_total = 0.0
         table = np.zeros((max(len(hot), 1), 4), np.float32)
         if len(hot):
-            p = s.positions[order][hot].astype(np.float64)
+            p = s.positions[hot].astype(np.float64)
             area = 0.5 * np.linalg.norm(np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), axis=1)
-            w = emission[tri_mats[hot]] * area
+            w = emission[s.material_ids[hot]] * area
             self.emissive_total = float(w.sum())
-            table.view(np.uint32)[:, 0] = hot.astype(np.uint32)
+            table.view(np.uint32)[:, 0] = slot[hot]
             table[:, 1] = np.cumsum(w) / w.sum()
             table[-1, 1] = 1.0
         self._emissive_count = len(hot) if self.emissive_total > 0 else 0
         self._env_total = total
-        self._light_buffers = [self._buffer(rad), self._buffer(marginal), self._buffer(cond),
-                               self._buffer(lights), self._buffer(table)]
+        return rad, marginal, cond, lights, table
 
     def _out(self, nbytes):
         return self.device.create_buffer(size=nbytes, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC
@@ -178,9 +180,9 @@ class Tracer:
             C = wgpu.ShaderStage.COMPUTE
             entries = [{"binding": 0, "visibility": C, "buffer": {"type": wgpu.BufferBindingType.uniform}}]
             entries += [{"binding": b, "visibility": C,
-                         "buffer": {"type": wgpu.BufferBindingType.read_only_storage}} for b in range(1, 7)]
+                         "buffer": {"type": wgpu.BufferBindingType.read_only_storage}} for b in range(1, 5)]
             T = wgpu.BufferBindingType
-            entries += [{"binding": 7 + k, "visibility": C,
+            entries += [{"binding": 5 + k, "visibility": C,
                          "buffer": {"type": T.read_only_storage if ro else T.storage}} for k, ro in enumerate(extra)]
             layout = self.device.create_bind_group_layout(entries=entries)
             pipeline = self.device.create_compute_pipeline(
@@ -219,6 +221,7 @@ class Tracer:
         buf[31] = self._env_total
         buf[32], buf[33], buf[34] = self.clamp, self.scene_radius, self.emissive_total
         ints[35] = 1 if self.diffuse_only else 0
+        ints[36:44] = self._offsets
         self.device.queue.write_buffer(self._params, 0, buf.tobytes())
 
     def _dispatch(self, encoder, pipeline, group):
@@ -238,14 +241,13 @@ class Tracer:
         self.samples = 0
         if hasattr(self, "_accum"):
             enc = self.device.create_command_encoder()
-            for b in (self._accum, self._aov_albedo, self._aov_nd):
+            for b in (self._accum, self._aov):
                 enc.clear_buffer(b)
             self.device.queue.submit([enc.finish()])
 
     def step(self, n: int = 1) -> float:
         """Add n samples per pixel; returns the seconds it took, GPU work included."""
-        pipeline, group = self._bind("path", [self._accum, self._aov_albedo, self._aov_nd] + self._light_buffers,
-                                     [False] * 3 + [True] * 5)
+        pipeline, group = self._bind("path", [self._accum, self._aov])
         t = time.perf_counter()
         for _ in range(n):
             self._write_params(frame=self.samples)
@@ -264,27 +266,18 @@ class Tracer:
     def guides(self) -> dict:
         """Averaged first-hit albedo, normal and distance, and the second moment of luminance."""
         n = np.maximum(self._read(self._accum)[..., 3], 1.0)
-        a = self._read(self._aov_albedo)
-        nd = self._read(self._aov_nd)
+        aov = self._read(self._aov, 8)
+        a, nd = aov[..., :4], aov[..., 4:]
         return {"albedo": a[..., :3] / n[..., None], "moment2": a[..., 3] / n,
                 "normal": nd[..., :3] / n[..., None], "depth": nd[..., 3] / n, "samples": n}
 
     def denoised(self, passes: int = 5) -> np.ndarray:
         """Linear radiance after the à-trous filter, (h, w, 3) float32."""
-        rad = self.radiance()
-        g = self.guides()
-        w = np.array([0.2126, 0.7152, 0.0722], np.float32)
-        albedo = np.maximum(g["albedo"], 0.02)
-        lum_a = np.maximum(albedo @ w, 0.02)
-        var = np.maximum(g["moment2"] - (rad @ w) ** 2, 0.0) / g["samples"] / lum_a ** 2
-        var = _blur3(var)
-        src = np.concatenate([rad / albedo, var[..., None]], axis=2).astype(np.float32)
-        normal = g["normal"] / np.maximum(np.linalg.norm(g["normal"], axis=2, keepdims=True), 1e-6)
-        guide = np.concatenate([normal, g["depth"][..., None]], axis=2).astype(np.float32)
-
-        usage = wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC
-        a, b = self._buffer(src, usage), self._out(src.nbytes)
-        gbuf = self._buffer(guide)
+        a, b, gbuf = self._denoise_buffers()
+        self._write_params()
+        enc = self.device.create_command_encoder()
+        self._dispatch(enc, *self._bind("prep", [self._accum, self._aov, a, gbuf], [True, True, False, False]))
+        self.device.queue.submit([enc.finish()])
         flags = [True, False, True]
         groups = [self._bind("atrous", [a, b, gbuf], flags), self._bind("atrous", [b, a, gbuf], flags)]
         for k in range(passes):
@@ -293,7 +286,22 @@ class Tracer:
             self._dispatch(enc, *groups[k % 2])
             self.device.queue.submit([enc.finish()])
         out = self._read(b if passes % 2 else a)
-        return out[..., :3] * albedo
+        return out[..., :3] * np.maximum(self.guides()["albedo"], 0.02)
+
+    def denoise_inputs(self):
+        """What prep.wgsl hands the à-trous passes: (h, w, 4) source and (h, w, 4) guide."""
+        a, _, gbuf = self._denoise_buffers()
+        self._write_params()
+        enc = self.device.create_command_encoder()
+        self._dispatch(enc, *self._bind("prep", [self._accum, self._aov, a, gbuf], [True, True, False, False]))
+        self.device.queue.submit([enc.finish()])
+        return self._read(a), self._read(gbuf)
+
+    def _denoise_buffers(self):
+        if not hasattr(self, "_denoise"):
+            n = self.width * self.height * 16
+            self._denoise = self._out(n), self._out(n), self._out(n)
+        return self._denoise
 
     def image(self, denoise: bool = True, exposure="auto", tonemap: str = "aces") -> np.ndarray:
         """(h, w, 3) uint8 sRGB. exposure: a multiplier, or "auto" (log-average luminance to 0.18)."""
@@ -315,11 +323,18 @@ class Tracer:
         return {"albedo": self._read(albedo)[..., :3], "normal": nd[..., :3], "depth": nd[..., 3]}
 
 
-def _blur3(x: np.ndarray) -> np.ndarray:
-    p = np.pad(x, 1, mode="edge")
-    k = (1.0, 2.0, 1.0)
-    rows = sum(k[i] * p[i: i + x.shape[0], :] for i in range(3)) / 4
-    return sum(k[j] * rows[:, j: j + x.shape[1]] for j in range(3)) / 4
+def pack_aux(tables) -> tuple[np.ndarray, list]:
+    """Concatenate tables into one (N, 4) float32 array, each padded to whole vec4s; and the
+    vec4 offset of each. A table of u32 is stored as its bits."""
+    parts, offsets, at = [], [], 0
+    for table in tables:
+        flat = np.ascontiguousarray(table).reshape(-1)
+        flat = flat.view(np.float32) if flat.dtype == np.uint32 else flat.astype(np.float32)
+        flat = np.concatenate([flat, np.zeros(-len(flat) % 4, np.float32)])
+        offsets.append(at)
+        parts.append(flat)
+        at += len(flat) // 4
+    return np.concatenate(parts).reshape(-1, 4), offsets
 
 
 def auto_exposure(rgb: np.ndarray) -> float:

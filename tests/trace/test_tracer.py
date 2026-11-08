@@ -71,3 +71,34 @@ def test_the_denoiser_lowers_the_error(name, device):
     raw = np.abs(t.radiance() - ref).mean()
     den = np.abs(t.denoised() - ref).mean()
     assert den < 0.6 * raw, f"denoised {den:.4f}, raw {raw:.4f}"
+
+
+def test_every_kernel_fits_webgpus_default_limits(device):
+    """A device with no raised limits has 8 storage buffers per stage, as a browser's does."""
+    adapter = device.adapter
+    plain = adapter.request_device_sync(required_limits={"max-storage-buffers-per-shader-stage": 8})
+    assert plain.limits["max-storage-buffers-per-shader-stage"] == 8
+    t = Tracer(scenes.window_room(), 16, 16, device=plain)
+    t.aovs()
+    t.step(2)
+    assert np.isfinite(t.denoised()).all()
+
+
+def test_the_denoiser_prep_matches_numpy(device):
+    t = Tracer(scenes.cornell_box(), 24, 16, device=device)
+    t.step(4)
+    src, guide = t.denoise_inputs()
+    rad, g = t.radiance(), t.guides()
+    w = np.array([0.2126, 0.7152, 0.0722], np.float32)
+    albedo = np.maximum(g["albedo"], 0.02)
+    lum_a = np.maximum(albedo @ w, 0.02)
+    var = np.maximum(g["moment2"] - (rad @ w) ** 2, 0.0) / g["samples"] / lum_a ** 2
+    p = np.pad(var, 1, mode="edge")
+    k = (1.0, 2.0, 1.0)
+    rows = sum(k[i] * p[i: i + var.shape[0], :] for i in range(3)) / 4
+    var = sum(k[j] * rows[:, j: j + var.shape[1]] for j in range(3)) / 4
+    normal = g["normal"] / np.maximum(np.linalg.norm(g["normal"], axis=2, keepdims=True), 1e-6)
+    assert np.allclose(src[..., :3], rad / albedo, rtol=1e-5, atol=1e-6)
+    assert np.allclose(src[..., 3], var, rtol=1e-4, atol=1e-7)
+    assert np.allclose(guide[..., :3], normal, atol=1e-5)
+    assert np.allclose(guide[..., 3], g["depth"], rtol=1e-5)
