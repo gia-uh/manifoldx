@@ -59,3 +59,27 @@ def test_resolve_keeps_unsatisfied_waiters(waiters):
     assert not fut_long.done()
     waiters.resolve(elapsed=10.1)
     assert fut_long.done()
+
+
+def test_a_deadline_a_float_rounding_away_resolves_on_its_frame():
+    """0.1333... + 0.1 is 0.23333333333333334, and seven fixed steps of 1/30
+    sum to 0.2333333333333333: the delay resolved one frame late."""
+    import asyncio
+
+    from manifoldx.events import FrameWaiters
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        waiters = FrameWaiters(lambda: loop)
+        elapsed = 0.0
+        for _ in range(4):
+            elapsed += 1 / 30
+        fut = waiters.add_delay(0.1, elapsed)
+        for _ in range(3):
+            elapsed += 1 / 30
+        waiters.resolve(elapsed)
+        assert fut.done()
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()

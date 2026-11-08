@@ -215,7 +215,7 @@ class FrameWaiters:
         # deadline waiters: resolve those whose deadline is reached
         kept: list[tuple[asyncio.Future, float]] = []
         for fut, deadline in self._deadlines:
-            if elapsed >= deadline:
+            if elapsed >= deadline - 1e-9:  # a step sum may land an ulp short
                 if not fut.done():
                     fut.set_result(None)
             else:
