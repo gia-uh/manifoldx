@@ -1,4 +1,4 @@
-.PHONY: help test format lint run clean install bench
+.PHONY: help test format lint run clean install bench docs docs-test docs-check
 
 help:
 	@echo "ManifoldX Makefile"
@@ -10,6 +10,8 @@ help:
 	@echo "  make lint     - Lint code with ruff"
 	@echo "  make run      - Run an example (EXAMPLE=examples.pbr_demo)"
 	@echo "  make bench    - Run benchmark suites (ARGS=\"frame --against main\")"
+	@echo "  make docs     - Render the guide to docs/site with every block executed"
+	@echo "  make docs-check - The docs gate: render, tangle, examples, rift coverage"
 	@echo "  make clean    - Clean build artifacts"
 
 install:
@@ -38,3 +40,18 @@ clean:
 	rm -rf build/ dist/ *.egg-info
 	rm -rf .pytest_cache .ruff_cache
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+docs:
+	uv run --group docs scriptorium render docs/scriptorium.yaml --only site
+
+# Every block ran (scriptorium prints a failing block's traceback and exits 0),
+# docs/examples/ matches the chapters, and every example runs on its own.
+docs-test: docs
+	! grep -l 'Traceback (most recent call last)' docs/site/*.html
+	for c in docs/chapters/*.md; do uv run --group docs scriptorium tangle --test $$c -d docs || exit 1; done
+	for e in docs/examples/*.py; do [ $$(basename $$e) = __init__.py ] || grep -q "export=$${e#docs/}" docs/chapters/*.md || { echo "$$e is not tangled from the docs"; exit 1; }; done
+	for e in docs/examples/*.py; do uv run python $$e > /dev/null || exit 1; done
+
+# The release gate: docs-test, and every public class named in the chapters.
+docs-check: docs-test
+	uvx --from git+https://github.com/apiad/rift@v0.9.0 rift check .
