@@ -429,6 +429,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`set_geometry` moves the shadow auto-fit bounds.** The renderer cached each geometry's
+  local bounding box; after `EntityHandle.set_geometry` wrote vertices outside it, a
+  `enable_shadows(auto_fit=True)` frustum was still fit to the old box and clipped the new
+  shape's shadow. `set_geometry` now mirrors the new positions into the registry and drops
+  the cached box (#83).
 - **`engine.elapsed` advances under a fixed timestep.** `_compute_dt` returns the fixed
   step without touching the clock, so `engine.elapsed` stayed at its start value and
   `engine.delay()` and `elapsed_at()` never resolved. Each frame now adds its fixed dt

@@ -110,6 +110,13 @@ class EntityHandle:
                 "set_geometry got a mesh with joints for an entity spawned without them; "
                 "spawn it from a geometry with joints (Mesh(joints=...)) to skin it."
             )
+        if orig is not None and "positions" in orig:
+            # Mirror the rewritten vertices on the CPU side: the shadow auto-fit
+            # reads them through the registry and caches a box per geometry id.
+            orig["positions"] = np.array(geo["positions"], dtype=orig["positions"].dtype)
+        cache = getattr(self._engine._render_pipeline, "_geom_local_bounds", None)
+        if cache is not None:
+            cache.pop(self._geometry_id, None)
         bufs = reg.get_gpu_buffers(self._geometry_id)
         if bufs is None:
             return  # buffers not created until the first render pass
