@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-08
+
 ### Added
+
+- **The guide.** `docs/` is a literate book in scriptorium that follows one project, a town
+  plaza, over fourteen chapters. Every block runs against the package when the guide renders,
+  each chapter tangles its program into `docs/examples/`, and rift checks that every public
+  class outside `manifoldx.web` is named in it. `make docs` renders it and `make docs-check`
+  is the gate CI runs on every PR. The README points to it instead of keeping a second guide.
+- **Release pipeline.** A tag publishes only after the whole suite passes on lavapipe from the
+  lockfile, the docs gate passes and the tag matches `pyproject.toml`; the wheel is imported in
+  a clean environment before upload, and the GitHub release carries this changelog's section.
+  CI runs the whole suite on a software Vulkan adapter instead of skipping every render test,
+  and lints the tests.
 
 - **The path tracer in a web page.** `src/manifoldx/trace/web/trace.js` runs `manifoldx.trace`'s
   WGSL kernels on the page's WebGPU device: `loadGlb(url, {overrides, hide})` reads a .glb as
@@ -294,6 +307,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`examples/stream_walk.py`** walks a camera across 50 km of streamed noise terrain and
   fails if any frame takes more than twice the median (#85).
 
+- **Rigid GPU skinning in the mesh pass.** `modeling.Mesh(joints=)` gives each vertex a
+  joint index (`(N,)` non-negative ints below `manifoldx.MAX_JOINTS = 32`), and
+  `to_geometry()["joints"]` carries it as uint32. On an entity spawned from such a
+  geometry, `handle.set_joints(matrices)` takes `(J, 4, 4)` model-space matrices
+  (column vectors, before the entity's Transform) and uploads only those J*64 bytes; the
+  vertex shader moves each vertex by its joint's matrix and its normal by the inverse
+  transpose (identity when the 3x3 is singular). Joints not given keep their previous
+  matrix, identity until first set, so an unposed entity draws its rest pose. Two
+  entities spawned from one geometry pose independently, `set_geometry` keeps the
+  joints, and unskinned geometry draws through the same pipelines and buffers as
+  before. Every StandardMaterial variant (plain, vertex colours, textured) skins, as do
+  BasicMaterial, FlatMaterial and PhongMaterial. Modeling ops that keep vertex count and
+  order keep the joints. Example: `examples/skinning.py`, now over a ground plane with a
+  sun shadow (#79).
+- **Skinned shadows and picking.** The shadow pass poses skinned entities with the same
+  joint matrices, so a turned part casts its turned shadow, and the shadow auto-fit
+  bounds follow the posed parts. `render_frame(pass_="ids")` labels a posed part where it
+  is drawn. Unskinned shadows draw through the same shader and pipelines as before (#79).
+- **`set_geometry` refuses joints the entity cannot use.** Giving a mesh with joints to an
+  entity spawned from a geometry without them raises `ValueError` instead of dropping the
+  joints. A skinned entity given a mesh without joints keeps its joints, as before (#79).
+- **Fullscreen on a chosen monitor.** `Engine(fullscreen=True, monitor=...)` takes an index
+  into the monitor list or a case-insensitive substring of a monitor's name (`"HDMI"`, a
+  model name). With `monitor=None` the `MANIFOLDX_MONITOR` environment variable is read
+  with the same rules, then the primary monitor is used, as before. No match raises
+  `ValueError` listing the monitors. The window takes the monitor's current video mode.
+  `manifoldx.backends.list_monitors()` returns `(index, name, (w, h), refresh, is_primary)`;
+  `examples/ui_scale.py --list-monitors` prints it.
+  A fullscreen window no longer minimizes when focus moves to another monitor
+  (GLFW's `AUTO_ICONIFY` is turned off for it).
+- **`engine.gui.scale` and `engine.gui.design_height`: scale the whole GUI.** Widget
+  sizes, paddings, radii, borders, font sizes and offsets are UI pixels; on screen they
+  are multiplied by `engine.gui.effective_scale(engine.h)`, which is `scale` (default
+  1.0) or, when `design_height` is set, `engine.h / design_height`. Layout runs against
+  a viewport of `(w / scale, h / scale)`, so a panel placed at the UI viewport's edge
+  still touches the screen's edge. Text is rasterized at the scaled font size, so it
+  stays sharp; a string too wide for one label-atlas tile at that size is stretched
+  instead of cut off. Hit-tests map the pointer by the same scale, so clicks land on
+  what is drawn. Example:
+  `examples/ui_scale.py` (`--scale`, `+` / `-` live).
+- **One engine, many screens: `Engine.remove_system`, `Engine.off`, `Engine.clear_scene`.**
+  An app that shows several screens in sequence keeps one `Engine` and one `run()` and
+  swaps screens inside it, instead of `quit()` and a new engine per screen, which closes
+  and reopens the window. `remove_system(func)` and `off(event, func)` unregister what
+  `@engine.system` and `@engine.on(event)` registered; `clear_scene()` destroys every
+  entity and GUI panel and keeps systems, handlers, camera, lights, sky, fog and
+  environment. All three are safe mid-frame, from a system, handler or async task, and
+  raise `ValueError` for something never registered. `examples/screens.py` shows two
+  screens as coroutines that wait for Space and tear down.
+
+- **`engine.loading(label)`: load without freezing the window.** A context manager, `with`
+  or `async with`, marking work the scene is still waiting for. While a block is open,
+  `run()` shows the loading spinner with its label; `render_frame`, `render` and
+  `export_gltf` wait for every block to close. `run_blocking` now works under `run()`'s
+  loop. uh-twin, loading 24 OBJs and its textures this way: 866 frames drawn during
+  startup, the longest gap 1.7 s (#28).
+
+- **glTF export.** `manifoldx.gltf.export_gltf(path, nodes)`, `modeling.Mesh.to_gltf(path)`
+  and `Engine.export_gltf(path)` write `.glb` files that Blender, Godot, Unity and three.js
+  open: geometry, PBR materials, embedded textures, punctual lights, the camera, and fog,
+  shadow, background and environment settings in the scene's extras. Everything glTF cannot
+  carry (systems, event handlers, GUI, compute, volumes, point clouds, labels, materials
+  without an equivalent) is reported by name, printed, and saved as
+  `<name>.export-report.json`; `strict=True` raises `ExportIncomplete` and writes nothing.
+  `manifoldx export app.py out.glb` exports any app that ends in `engine.run()` without
+  changing it. The output passes the Khronos glTF validator with no errors. Example:
+  `examples/gltf_export.py` (#23).
+
+- **`TextureHandle.source`**: the image file `load_texture` read, so exporters can embed it.
+
+- **Mipmapped textures.** `load_texture` builds the full mip chain (box-filtered halvings
+  down to 1x1) and samples it trilinearly with 8x anisotropic filtering, so a texture
+  tiled across a large mesh no longer turns to crawling noise at a distance (#21).
+
+- **`manifoldx.humanoid`**: posable mannequins. A 15-joint skeleton with anatomical
+  angles (`flex`, `abduct`, `twist`, `lean`), a pose library with `base` plus
+  overrides, ANSUR II proportions with style presets (heroic, disney, anime,
+  fashion, child, toddler, chibi), a grounding forward-kinematics `solve`, and
+  `spawn_mannequin`. Example: `examples/humanoid.py`.
+- **`Engine.render_frame`**: one still frame headless, as a numpy array, with
+  supersampling; `pass_="ids"` returns a per-group label map drawn with the new
+  `FlatMaterial`.
+- **`Camera.project`**: world points to pixel coordinates and depth.
+- **GPU fields — transpile the `Field` algebra to WGSL.** A composed field (`ridged`, `fbm`, `warp`, `remap`, arithmetic, …) now optionally carries a symbolic AST (`Field._ast`, populated additively by the sources/combinators — the numpy CPU path is untouched, 699 tests pass). `manifoldx.modeling.field_to_wgsl(field, name)` walks it and emits `fn <name>(P: vec3<f32>) -> f32` plus a shared value-noise prelude, so the **same developer-composed field** can drive a shader instead of only baking on the CPU. `examples/gpu_field.py` displaces a flat 256² plane into detailed terrain live in the vertex shader (normals from finite differences of the same field) — no CPU displacement, no baked heightmap. The WGSL noise is a decorative value-noise approximation (not a bit-for-bit CPU Perlin match); `worley`/AST-less fields raise `FieldNotTranspilable`. Design: `.knowledge/analysis/2026-07-28-gpu-fields-design.md`.
+- **Procedural cloud deck (`CloudMaterial`) + sun-aware starfield.** A new alpha-blended `"cloud"` pipeline subtype (reuses the glow alpha-over target) renders a cloud shell whose coverage comes from in-shader fbm value-noise sampled in object space — so slowly rotating the shell drifts the clouds over a static planet. Sunlit tops, cool shadowed undersides at the terminator, dark at night; gaps `discard` to transparent. `manifoldx.sky` gains `StarfieldMaterial`, a point-sprite star material that reads the lighting globals and fades stars out under a daylit sky — altitude-gated so space stays starry and the night side keeps its stars (`starfield(..., ground_radius, atmo_top)` opts in). To let point/sprite shaders read the lighting block, the sprite pass now binds the full globals buffer (shaders using only the compact prefix are unaffected). `demos/planet_dive.py` gains a drifting cloud deck above the peaks and the day-faded starfield.
+- **Physically-based atmospheric scattering (`AtmosphereScatteringMaterial`).** A single-scattering Rayleigh + Mie sky rendered on a shell around the planet: the fragment shader raymarches the view ray (16 primary + 8 secondary sun samples), accumulating optical depth against an analytic ray-sphere atmosphere and combining a Rayleigh phase (`1+cos²θ`) with a forward-peaked Henyey-Greenstein Mie phase, then tonemaps with an exposure control. The **whole sky is now physically derived from the sun angle** — vivid blue by day, warm sunset limb near the terminator, and it goes genuinely **dark at night so the stars reappear** (the secondary march returns full shadow once the sun drops below the local horizon). Additive `"scatter"` pipeline subtype (the renderer gained a `_scatter_target`, one/one blend, no cull, depth-write off — following the existing glow/label blended-pass precedent). 16-byte `vec4` uniform (`[Rg, Ra, intensity, exposure]`). `demos/planet_dive.py` now uses it in place of the old fresnel-glow shell + fake altitude-driven day/night fog: one shell provides the limb from space *and* the full sky at the surface, and the equatorial orbit carries the camera through day into a starry night for free. Design: `.knowledge/analysis/2026-07-28-planet-dive-slice-design.md`; next is aerial perspective (scattering applied to distant terrain) and GPU fields for near-surface detail.
+- **Reusable space/planet look: sun-aware materials, water, stars.** All react to the sun via the existing `Globals.sun_direction`/`sun_color`, so a moving sun gives a cohesive **day/night** cycle for free.
+  - **`AtmosphereMaterial` is now sun-aware** — the halo glows on the **day limb**, fades on the **night side**, and warms to a **sunset tint** near the terminator.
+  - **`WaterMaterial`** (new) — day/night water shading, fresnel sky-reflection at grazing, and a sharp sun **glint**; unlit (16-byte `vec4` uniform: deep colour + fresnel power).
+  - **`manifoldx.sky.starfield(engine, count, radius)`** — a reusable point-sprite star backdrop for any space scene.
+  - `demos/planet_dive.py` now uses all three plus a swept sun (day→dusk→night), and a `starfield` backdrop.
+- **`AtmosphereMaterial` + planet-dive demo.** A new unlit **fresnel rim-glow** material (`pipeline_subtype == "glow"`) renders an atmosphere-halo shell; the renderer gained a small "glow" pipeline branch (alpha blend, depth-write off, no cull) following the label/volume/gui blended-pass precedent. `demos/planet_dive.py`: fly from orbit to the surface of a procedural planet — signed terrain displaces an icosphere into continents + ocean basins (biome-colored), a glossy ocean sphere fills the basins, the atmosphere shell gives the limb halo from space, and a frame-paced descent drives fog + background from space-black to sky-blue. The planet mesh is generated once in a worker process (`submit_process`). First Tier-1 slice of the planet arc (design: `.knowledge/analysis/2026-07-28-planet-dive-slice-design.md`); next is GPU field evaluation for near-surface detail.
+
+- **Geometric modeling v1 (foundation + deformers)** — new `manifoldx.modeling` subpackage: a host-side, numpy-first procedural geometry layer that builds and transforms meshes in code and bakes to the existing geometry dict — no renderer or ECS changes. Core is the immutable `modeling.Mesh` value type (`positions (N,3)` / `faces (M,3)` triangles / lazy `normals` / optional `uvs`) with area-weighted `recompute_normals()`, `with_positions()`, and the single integration seam `to_geometry()` ↔ `from_geometry()` (`modeling.Mesh` is namespaced and never re-exported at top level, so the ECS `Mesh` component keeps that name). Primitives `icosphere` (subdivided icosahedron) / `box` / `plane` / `cylinder` / `torus` generate a `Mesh`. Seeded, deterministic noise fields `noise.perlin` and `noise.fbm` (permutation-table gradient noise; `_resolve_rng`-compatible seeding, same seed ⇒ identical output) drive displacement. Four deformers compose fluently as `Mesh -> Mesh` methods: `displace(field, amount, along="normal"|vector)`, `twist(angle, axis)`, `bend(angle, axis, along)`, `taper(factor, axis)`, each recomputing normals. **Batch 2 — programmatic sculpt brushes:** a radial `Falloff` region model (`smooth`/`linear`/`constant` profiles), cached one-ring vertex `adjacency` (CSR), and the brushes `draw` (along region normal), `inflate` (per-vertex normal), `pinch` (toward center), `flatten` (project region to its best-fit plane), and `smooth` (Laplacian relaxation, global or local via a falloff gate) — all `Mesh -> Mesh`, no viewport. Demo `examples/modeling_asteroid.py` builds a procedural asteroid — `icosphere(4).displace(fbm).twist(...).taper(...).smooth(...)` — PBR-lit and rotating (renders to MP4 via `--render`). **Batch 3 — topology:** `subdivide(iterations, scheme="midpoint"|"loop")` (midpoint linear + Loop smooth subdivision with shared edge vertices), `extrude(face_mask, distance)` (raise a face region along vertex normals with stitched side walls), and `decimate(grid)` (grid vertex-clustering; QEM deferred). `recompute_normals` now gives degenerate/fold vertices a fallback direction so every normal is unit-length. Second demo `examples/modeling_topology.py`: a shadow-casting sun over a gallery of three orbiting, spinning procedural forms — a Loop-subdivided noise blob, an icosphere with an extruded crystal facet, and a decimated low-poly asteroid. **Batch 4 — booleans (CSG):** `union`/`difference`/`intersection` on `Mesh` values via a pure-numpy BSP-tree algorithm (faithful port of the classic Naylor-Amanatides-Thibault / csg.js approach — reimplemented, no vendored `manifold3d`), plus a `translate` convenience. Latent inward winding in the `box` and `torus` primitives was fixed (now CCW-from-outside / outward normals), required for correct CSG orientation. Third demo `examples/modeling_boolean.py`: a shadow-casting sun over three orbiting, spinning CSG solids — a rounded die (box ∩ sphere), a square-drilled ball (sphere − bar), and a fused two-sphere bond (∪). The Manifold-style exact-predicate kernel remains the deferred robustness tier. Design: `.knowledge/analysis/2026-07-28-modeling-booleans-v1-design.md`. This completes geometric-modeling v1 (batches 0-4).
+- **Free-form deformation (FFD).** New `manifoldx.modeling.FFD` (and `Mesh.ffd(resolution)`): a Bezier control lattice embedding a mesh over its bounding box. Move the `(I, J, K, 3)` `points` array, call `apply()` to get the warped `Mesh`; an unmoved lattice reproduces the original exactly. Demo `examples/modeling_ffd.py` oscillates the lattice per frame and writes the deformed vertices straight into the live GPU vertex buffer (FFD preserves vertex count), producing a real-time breathing mesh whose cast shadow warps with it — the first example of animated *geometry* (not just transforms) in the repo.
+- **Composable field algebra (`manifoldx.modeling.fields` + `Field`).** A scalar field is a callable `(points (K,3)) -> (K,)`; the new `Field` type wraps it with operator overloading (`+ - * /`, unary `-`, scalar coercion) and combinators (`mix`, `minimum`/`maximum`, `clamp`, `remap`, `abs`, `power`, `scale`/`bias`, and domain-warp `warp(amount, fx, fy, fz)`) so developers compose their own terrain/deformation fields from primitives — no opinionated terrain generator. Sources: `perlin`/`fbm` (moved here from `noise`, now returning `Field`; `noise` is a back-compat shim), `ridged` (mountain ridges), `billow` (dunes), `worley` (cellular/Voronoi, `f1` or `f2f1` for cracks), `constant`, `coord` (axis ramps/masks), `distance` (radial/island masks). Because a `Field` is callable, `Mesh.displace(field)` consumes it unchanged. Demo `examples/modeling_fields.py`: a developer-composed terrain (ridged + fbm, domain-warped, island-masked) displacing a plane, lit + shadowed. First of four composable-primitive sub-projects for PCG (fields → colour → curves/sweep → scatter). Design: `.knowledge/analysis/2026-07-28-modeling-fields-v1-design.md`.
+- **Per-vertex colour (`color_by` + `Gradient`).** Second PCG primitive: shade a mesh by any field. New `Gradient([(pos, "#rrggbb"), ...])` maps a scalar to RGB (piecewise-linear, clamped; accepts `#rgb`/`#rrggbb`/`(r,g,b)`). `Mesh` gains a `colors` attribute, `with_colors(colors)`, and `color_by(field, gradient)` (samples the field at each vertex → gradient → per-vertex colour); colours ride through deformers and are emitted by `to_geometry()`. On the GPU, `StandardMaterial(vertex_colors=True)` selects a new `"vcolor"` pipeline subtype: geometry interleaves `[pos, normal, colour]` (stride 36) and a WGSL variant tints the PBR albedo by the vertex colour across all light paths (point/sun/spot/IBL/ambient) — full lighting + shadows preserved. Additive behind the new subtype; the scalar and textured paths are untouched. Demo `examples/modeling_colored_terrain.py`: the composed terrain coloured by a developer-defined height gradient (water→sand→grass→rock→snow), lit + shadowed. Design: `.knowledge/analysis/2026-07-28-modeling-color-by-field-design.md`.
+- **`engine.background_color`** — the render-pass clear color is now a settable `(r, g, b)` attribute (default unchanged), so scenes can match a fog/horizon color.
+- **Real-time terrain streaming + supporting primitives.** Amortizes CPU terrain generation off the render loop (~1.7 → ~30 fps): world-aligned patches are generated on a background thread and swapped into a fixed pool of recycled mesh slots. New reusable pieces:
+  - **`@engine.background` + `Task`** — decorate a pure function to run it on the engine's worker thread; the call returns a `Task` (`.ready`, `.result`, `.wait()`, `.on_ready(cb)` with callbacks fired on the main thread at the frame boundary).
+  - **`engine.submit_process(fn, *args) -> Task`** — run a heavy CPU-bound `fn` in a separate *process* (spawn context) so it shares no GIL with the render loop. A patch takes ~1 s of numpy, which holds the GIL through its Python-level parts and would freeze a threaded render loop for ~0.9 s; the process worker drops the worst render-thread stall to ~5 ms. The streaming demo uses this (its patch builder is a top-level function; setup is under `if __name__ == "__main__":`).
+  - **`engine.spawn(...)` returns an `EntityHandle`** (was `None`; backward-compatible) with a `.transform` proxy (read/write pos/rot/scale) and **`.set_geometry(mesh)`** — overwrites the entity's vertex buffer in place (requires equal vertex count), hiding the raw buffer poke. `examples/modeling_ffd.py` and `modeling_ridge_flyby.py` were refactored onto it.
+  - **`engine.enable_fog(start, end, color=None)`** — linear distance fog for `StandardMaterial`, added to the base fragment shader (inherited by scalar/textured/vcolor variants) and applied after tonemap so full fog exactly matches `background_color` for a seamless horizon (`Globals` grew 416→432).
+  - **`Field.shift(offset)`** — sample a field at translated coordinates (turns "the patch at world Z" into one line).
+  - Demo `examples/modeling_terrain_stream.py`. Design: `.knowledge/analysis/2026-07-28-terrain-streaming-and-background-tasks-design.md`.
+- **Infinite ridge flyby demo** — `examples/modeling_ridge_flyby.py`: a real-time procedural mountain range with distance fog, built entirely from the composable primitives. The terrain field is sampled through a forward-scrolling window each frame and poked into the live vertex buffer (constant vertex count), so an endless ridge system flows toward a fixed camera; per-vertex color is a height gradient mixed toward the horizon color by camera distance (CPU-composed fog — no fog shader), with `engine.background_color` set to match so distant peaks dissolve into the sky. Design: `.knowledge/analysis/2026-07-28-geometric-modeling-v1-design.md`. Plans: `.knowledge/plans/2026-07-28-geometric-modeling-v1-plan-1-foundation-deformers.md`, `.knowledge/plans/2026-07-28-geometric-modeling-v1-plan-2-sculpt-brushes.md`.
+
+- **`examples/labyrinth_fps.py`** — a first-person flashlight demo: walk a procedurally-generated maze in the dark. Showcases `engine.input` (WASD grounded movement + right-drag mouse look) and the spot-light + spot-shadow subsystem together. Recursive-backtracker maze rendered as one shared cube mesh per wall cell (two draw batches), grid-based axis-separated wall collision (slides along walls), a `SpotLight` mounted on the camera that casts shadows down the corridors, and a wide FPS FOV. Under `--render` a scripted forward-only flythrough (BFS solution path) walks the corridors so the headless MP4 needs no live input.
+
+- **Spot lights + spot shadows (flashlight)** — `engine.set_spot(SpotLight(...))` gives `StandardMaterial` a flashlight: a cone with smooth inner→outer angular falloff, inverse-square distance attenuation, and a range cutoff. Like `DirectionalLight` before it, `SpotLight` gains its first real consumer (it was previously unused). When shadows are enabled the spot is the caster (priority over the sun): `light_view_proj` becomes a **perspective** projection (vertical FOV = 2·`outer_angle`) from the spot's position/direction (`manifoldx.shadow.compute_spot_light_view_proj`), the depth-only pass renders from the spot's POV, and the fragment samples it to shadow the spot term. A `shadow_caster` field (0=none/1=sun/2=spot) in `Globals` routes the slope-scaled bias + shadow factor to the correct light. `Globals` grew 352 → 416 bytes (spot position/range, direction/cos-inner, color/intensity, cos-outer, caster). Demo: `examples/spot_demo.py` — a flashlight sweeping a dark scene, every object's shadow swinging around the floor as the light orbits.
+
+- **Shadow mapping v1 (directional)** — `StandardMaterial` now casts and receives hard shadows from a single directional sun. New `engine.set_sun(DirectionalLight(...))` adds a real directional term to the PBR shader — previously `DirectionalLight` was silently packed into the point-light array and never worked as a directional light, so this gives the class its first correct consumer. `engine.enable_shadows(target, extent, resolution, near, far, bias)` makes the sun cast: a new depth-only shadow pass (`src/manifoldx/render/passes/shadow.py`, encoded before the main pass in `Engine._draw_frame`) rasterizes all mesh geometry from the sun's POV into a `depth24plus` shadow map, which the `StandardMaterial` fragment shader samples through a comparison sampler (`textureSampleCompareLevel`, hardware 2×2 PCF) to attenuate the sun term. Fragments outside the sun's ortho frustum stay lit; a constant `bias` kills shadow acne. Light-space matrix math is the pure-numpy `manifoldx.shadow.compute_light_view_proj` (ortho × look-at, wgpu z∈[0,1]). The `Globals` uniform grew 240 → 352 bytes (`light_view_proj` mat4 + sun direction/color/intensity + `shadow_enabled`/`shadow_bias`/`shadow_map_size`); the shadow map binds as `@group(2)` on the `StandardMaterial` pipeline, with a 1×1 placeholder depth texture when shadows are off so the pipeline layout is always satisfied. Point-light and IBL contributions are unshadowed in v1 (ambient does not cast a directional shadow). Only `StandardMaterial` casts/receives; sprite/label/volume/axis/GUI paths are untouched. Demo at `examples/shadow_demo.py` (four objects — three spheres + a cube in metallic/matte/polished materials — orbiting and bobbing at different heights over a central pillar and floor, their cast shadows sweeping the ground, climbing the pillar, and crossing each other). **PCF soft shadows (VS2):** `enable_shadows(pcf_radius=...)` averages a `(2r+1)²` grid of comparison taps around each shadow lookup for soft edges — `0` = a single hard tap (VS1 behaviour), `1` = 3×3 (default), `2` = 5×5, etc.; the radius rides in the previously-unused `Globals` pad slot, so the uniform size is unchanged. **Auto-fit + slope-scaled bias:** `enable_shadows(auto_fit=True)` (the default) fits the shadow frustum to the scene's bounding sphere every frame (computed from each geometry's local AABB transformed by its instances), so `target`/`extent`/`near`/`far` no longer need hand-tuning — tighter frustum, sharper shadows; pass `auto_fit=False` to drive the box manually. The fragment bias is now slope-scaled (`bias·(1 + 4·(1−N·L))`), so grazing surfaces stop self-shadowing (acne) without peter-panning on faces toward the sun. Spot/point-light shadows and cascaded maps remain follow-ups. Design: `.knowledge/analysis/2026-07-17-shadow-mapping-v1-design.md`. Plan: `.knowledge/plans/2026-07-17-shadow-mapping-v1-plan.md`.
+
+- **IBL v1 (Image-Based Lighting)** — split-sum physically-based environment lighting for `StandardMaterial`. New `manifoldx.ibl` module: `EnvironmentMap` dataclass with builders `from_color(rgb)`, `from_sky(zenith, horizon, ground)`, `from_image(path, exposure)`, and `from_hdr(path)` (Radiance RGBE decoder included). `engine.set_environment(env_or_preset)` activates an environment; built-in presets: `"studio"`, `"sky"`, `"neutral"`, `"dark"`. On first use, `_precompute()` runs CPU-side: equirectangular → 128 px cubemap, 64 px irradiance map (256 cosine-weighted samples), 8-mip prefiltered specular chain (512 GGX-importance samples per mip), all stored as float16. Pre-baked 512×512 Smith-GGX BRDF LUT ships as a binary asset (`src/manifoldx/assets/ibl/brdf_lut.npy`; regenerable via `scripts/gen_brdf_lut.py`). The `StandardMaterial` WGSL shader was extended to add a correct `proj: mat4x4<f32>` field (fixing a latent `camera_pos` offset bug), `@group(1)` IBL texture bindings, `fresnelSchlickRoughness`, and a split-sum IBL block that additively combines diffuse irradiance + specular split-sum with existing directional/point lights. The `Globals` uniform was extended from 224 → 240 bytes to add `ibl_intensity f32`, `ibl_enabled u32`, and 8 bytes of pad. Optional skybox: new `src/manifoldx/render/passes/skybox.py` draws a fullscreen triangle at depth=1.0 (far plane) sampling the prefiltered map with Reinhard tone map + sRGB gamma; activated when `env.show_skybox = True`. Demo at `examples/ibl_demo.py` (4×4 metallic-roughness grid, press 1/2/3 to cycle environments, S to toggle skybox). Design: `.knowledge/analysis/2026-07-05-ibl-v1-design.md`. Plan: `.knowledge/plans/2026-07-05-ibl-v1-plan.md`.
+
+- **Textured PBR v1** — first slice of texture support in the core mesh-PBR path. New `manifoldx.textures` module exposes `load_texture(engine, path) -> TextureHandle`, backed by a per-engine `TextureRegistry`; images decode via Pillow and upload as `Rgba8UnormSrgb` (so sampling auto-decodes sRGB to linear in the shader). `StandardMaterial` accepts a new `albedo_map: TextureHandle | None` kwarg; when set, the fragment shader samples `textureSample(albedo_tex, albedo_sampler, uv).rgb` instead of using the scalar `material.albedo`. Geometry dicts now carry an optional `"uvs"` key; `sphere()` and `plane()` emit UVs by default. `GeometryRegistry.create_buffers` interleaves `[pos, normal, uv]` (stride 32B) when UVs are present, else falls back to `[pos, normal]` (stride 24B); the mesh-pass pipeline now reads the geometry's actual buffer stride so a scalar `StandardMaterial` bound to a UV-bearing geometry still renders correctly. The pipeline cache key includes `material_subtype` so scalar and textured `StandardMaterial` coexist in one scene without collision. Trying to attach a textured `StandardMaterial` to a geometry without UVs raises `MaterialGeometryMismatchError` at pipeline-cache time. New `manifoldx.assets.obj.load_obj` (re-exported as `manifoldx.load_obj`) parses Wavefront OBJ files with all four face-line forms (`f v`, `f v/vt`, `f v/vt/vn`, `f v//vn`); fan-triangulates polygon faces; rejects mixed forms and negative indices with line-numbered errors. First bundled binary assets: `examples/assets/teapot/teapot.obj` (UV-mapped Newell teapot, ~93 KB) and a procedural `teapot_albedo.png` regenerable via `scripts/gen_teapot_albedo.py`; and `examples/assets/sun_earth_moon/{earth,moon}.jpg` (public-domain NASA imagery). Two new demos: `examples/teapot_demo.py` and `examples/sun_earth_moon_demo.py`. Plan: `.knowledge/plans/2026-06-09-textured-pbr-v1.md`. Design: `.knowledge/analysis/2026-06-09-textured-pbr-v1-design.md`.
+
+- **GUI v1** — in-engine retained-mode GUI for sim controls + HUD readouts. New `manifoldx.gui` package: `Panel`, `Text`, `ValueDisplay`, `Button`, `Slider`, `Toggle`; stack + flex layout; theme + named-class styling with per-widget overrides. Rendering via a new `gui` render pass at the end of the order, using `RectMaterial` (WGSL signed-distance rounded rect) for backgrounds and the existing `LabelTextureAtlas` for glyphs (no new font dependency). Interaction via `_GuiBridge` — subscribes to pointer events on the bus, hit-tests the widget tree top-down, dispatches per-widget state mutations, and exposes `engine.gui.pointer_over_gui` for cooperative consume by user systems. Slider supports drag capture and emits `:change` continuously plus `:commit` on pointer-up. Example at `examples/gui_demo.py`.
+
 ### Changed
 
 - **glTF export writes a skinned entity posed.** `Engine.export_gltf` writes a skinned entity
@@ -343,6 +475,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Shadows fade out over the outer 15% of the shadow map** instead of stopping at its edge,
   so the edge of what the map covers never shows on screen as a line.
+
+- **`startup` fires on `run()`'s first frame, inside the running loop**, instead of before
+  the loop starts. Sync handlers still run before anything is drawn; async handlers now
+  run on the loop that `run()` drives, between frames. Before, they were scheduled on the
+  engine's private loop, which nothing pumps while the window is open, so they never ran
+  (#28).
+- **The environment's precompute no longer blocks the window.** It runs on the background
+  worker, started by the first frame that needs it; until it is done the scene draws
+  without the environment's light and a centred spinner reads "loading lighting...", so
+  the window keeps answering instead of showing "not responding". `render_frame` and
+  `render` wait for it, so offline frames always carry the full lighting. Measured with a
+  gradient sky: 5,589 frames drawn during a 26.5 s precompute, median 4 ms (#25).
+
+- **Examples reorganized into `examples/` (focused) + `demos/` (show-off).** `examples/` files each demonstrate one feature with minimal code (documentation), named by the feature (`pbr.py`, `shadows.py`, `fields.py`, `booleans.py`, `ffd.py`, `color_by.py`, `topology.py`, `deformers.py`, `textures.py`, `gui.py`, `volume.py`, `point_cloud.py`, `axes.py`, `spotlight.py`, `ibl.py` — dropping the `*_demo` suffix). Multi-system, game-like/sim-like showcases moved to a new `demos/` folder (`terrain_stream.py`, `labyrinth_fps.py`, `sun_earth_moon.py`, `smoke.py`). Each folder has a `README.md`; the long-term demo roadmap (Sebastian Lague-inspired) is at `.knowledge/analysis/2026-07-28-demo-roadmap-lague-inspired.md`. Removed the superseded naive `modeling_ridge_flyby.py` (replaced by `demos/terrain_stream.py`).
 
 ### Performance
 
@@ -426,6 +572,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compiled its own pipeline, about 50 ms and 2.9 MB each on a software renderer. Meshes
   with the same layout and material now share one, so 1,000 new meshes went from about
   50 s to 0.7 s, with flat memory (#85).
+
+- **Interactive windows are no longer held to 30 fps.** rendercanvas caps a canvas at
+  `max_fps=30` unless told otherwise, and the desktop canvas never told it. `Engine` and
+  `backends.get_desktop_canvas` take `max_fps` (default 240), so vsync sets the pace: a
+  light scene went from 29 fps to the display's 60 (#75).
+- **GUI text is measured once per string and size.** The painter and the gui pass measure
+  every `Text` widget every frame, and `LabelTextureAtlas.measure_string` opened the font
+  file each time. The measurement and the font are now cached. A scene with ~70 labels
+  spent ~19 ms a frame there and went from ~25 fps to ~56 fps (#75).
+- **`Mesh.recompute_normals` is 2-5x faster.** It scatters face normals with one
+  `np.bincount` per axis instead of `np.add.at`, gathers each corner once and takes the
+  cross product by columns. The normals match the old ones to 1e-6. A mesh posed on the
+  CPU every frame pays this cost once per frame.
+- **IBL precompute: about 3.5x faster, and cached on disk.** The prefiltered chain's mip 0
+  is roughness 0, a mirror, so it is now the radiance cube itself instead of 50 M GGX
+  samples (about 70% of the work). The result is also cached in
+  `$MANIFOLDX_CACHE_DIR/ibl/` (default `~/.cache/manifoldx/ibl/`), keyed by a hash of the
+  radiance data and the precompute parameters, so a second run with the same environment
+  skips it. A gradient sky: about 23 s to 6.5 s cold; uh-twin's first frame 26.6 s to
+  11.7 s cold, 4.1 s warm. Tests point the cache at a temporary directory (#25).
 
 ### Fixed
 
@@ -523,179 +689,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`engine.input.viewport_size` is right from the first frame.** It read (0, 0) until a
   resize event, which a window that is never resized does not send (#17).
 
-## [0.10.0] - 2026-10-15
-
-### Performance
-
-- **Interactive windows are no longer held to 30 fps.** rendercanvas caps a canvas at
-  `max_fps=30` unless told otherwise, and the desktop canvas never told it. `Engine` and
-  `backends.get_desktop_canvas` take `max_fps` (default 240), so vsync sets the pace: a
-  light scene went from 29 fps to the display's 60 (#75).
-- **GUI text is measured once per string and size.** The painter and the gui pass measure
-  every `Text` widget every frame, and `LabelTextureAtlas.measure_string` opened the font
-  file each time. The measurement and the font are now cached. A scene with ~70 labels
-  spent ~19 ms a frame there and went from ~25 fps to ~56 fps (#75).
-- **`Mesh.recompute_normals` is 2-5x faster.** It scatters face normals with one
-  `np.bincount` per axis instead of `np.add.at`, gathers each corner once and takes the
-  cross product by columns. The normals match the old ones to 1e-6. A mesh posed on the
-  CPU every frame pays this cost once per frame.
-- **IBL precompute: about 3.5x faster, and cached on disk.** The prefiltered chain's mip 0
-  is roughness 0, a mirror, so it is now the radiance cube itself instead of 50 M GGX
-  samples (about 70% of the work). The result is also cached in
-  `$MANIFOLDX_CACHE_DIR/ibl/` (default `~/.cache/manifoldx/ibl/`), keyed by a hash of the
-  radiance data and the precompute parameters, so a second run with the same environment
-  skips it. A gradient sky: about 23 s to 6.5 s cold; uh-twin's first frame 26.6 s to
-  11.7 s cold, 4.1 s warm. Tests point the cache at a temporary directory (#25).
-
-### Changed
-
-- **`startup` fires on `run()`'s first frame, inside the running loop**, instead of before
-  the loop starts. Sync handlers still run before anything is drawn; async handlers now
-  run on the loop that `run()` drives, between frames. Before, they were scheduled on the
-  engine's private loop, which nothing pumps while the window is open, so they never ran
-  (#28).
-- **The environment's precompute no longer blocks the window.** It runs on the background
-  worker, started by the first frame that needs it; until it is done the scene draws
-  without the environment's light and a centred spinner reads "loading lighting...", so
-  the window keeps answering instead of showing "not responding". `render_frame` and
-  `render` wait for it, so offline frames always carry the full lighting. Measured with a
-  gradient sky: 5,589 frames drawn during a 26.5 s precompute, median 4 ms (#25).
-
-### Known limitations
-
-- **glTF export writes a skinned entity in its rest pose.** `Engine.export_gltf` writes the
-  geometry's rest positions and no joints or skin, and its report does not mention it (#79).
-- **IBL skybox: first-frame device lockup on NVIDIA Quadro M2000M / Vulkan** — enabling `env.show_skybox = True` on the *very first* presented frame deadlocks the device (the frame's submit never completes) on this GPU/driver (580.159.03). It is a driver first-frame-init lockup, not a code defect: depth format (`depth24plus` everywhere), depth config, bind group, and pipeline layout are all correct, and the pass renders perfectly once *any* prior frame has been presented — a constant-colour skybox renders, and the mesh IBL path samples the same cube fine. The skybox therefore stays **default-OFF**; `examples/ibl_demo.py` is unaffected because it only toggles the skybox via the `S` key after startup (post-first-frame). The only broken usage is scripting `show_skybox = True` before the first present. No warm-up-frame workaround was added (would mask an old-GPU driver quirk in the shared render loop). Investigation + evidence table: `.knowledge/analysis/2026-07-05-ibl-v1-design.md` (§ "Known limitation: first-frame device lockup").
-
-### Features
-
-- **Rigid GPU skinning in the mesh pass.** `modeling.Mesh(joints=)` gives each vertex a
-  joint index (`(N,)` non-negative ints below `manifoldx.MAX_JOINTS = 32`), and
-  `to_geometry()["joints"]` carries it as uint32. On an entity spawned from such a
-  geometry, `handle.set_joints(matrices)` takes `(J, 4, 4)` model-space matrices
-  (column vectors, before the entity's Transform) and uploads only those J*64 bytes; the
-  vertex shader moves each vertex by its joint's matrix and its normal by the inverse
-  transpose (identity when the 3x3 is singular). Joints not given keep their previous
-  matrix, identity until first set, so an unposed entity draws its rest pose. Two
-  entities spawned from one geometry pose independently, `set_geometry` keeps the
-  joints, and unskinned geometry draws through the same pipelines and buffers as
-  before. Every StandardMaterial variant (plain, vertex colours, textured) skins, as do
-  BasicMaterial, FlatMaterial and PhongMaterial. Modeling ops that keep vertex count and
-  order keep the joints. Example: `examples/skinning.py`, now over a ground plane with a
-  sun shadow (#79).
-- **Skinned shadows and picking.** The shadow pass poses skinned entities with the same
-  joint matrices, so a turned part casts its turned shadow, and the shadow auto-fit
-  bounds follow the posed parts. `render_frame(pass_="ids")` labels a posed part where it
-  is drawn. Unskinned shadows draw through the same shader and pipelines as before (#79).
-- **`set_geometry` refuses joints the entity cannot use.** Giving a mesh with joints to an
-  entity spawned from a geometry without them raises `ValueError` instead of dropping the
-  joints. A skinned entity given a mesh without joints keeps its joints, as before (#79).
-- **Fullscreen on a chosen monitor.** `Engine(fullscreen=True, monitor=...)` takes an index
-  into the monitor list or a case-insensitive substring of a monitor's name (`"HDMI"`, a
-  model name). With `monitor=None` the `MANIFOLDX_MONITOR` environment variable is read
-  with the same rules, then the primary monitor is used, as before. No match raises
-  `ValueError` listing the monitors. The window takes the monitor's current video mode.
-  `manifoldx.backends.list_monitors()` returns `(index, name, (w, h), refresh, is_primary)`;
-  `examples/ui_scale.py --list-monitors` prints it.
-  A fullscreen window no longer minimizes when focus moves to another monitor
-  (GLFW's `AUTO_ICONIFY` is turned off for it).
-- **`engine.gui.scale` and `engine.gui.design_height`: scale the whole GUI.** Widget
-  sizes, paddings, radii, borders, font sizes and offsets are UI pixels; on screen they
-  are multiplied by `engine.gui.effective_scale(engine.h)`, which is `scale` (default
-  1.0) or, when `design_height` is set, `engine.h / design_height`. Layout runs against
-  a viewport of `(w / scale, h / scale)`, so a panel placed at the UI viewport's edge
-  still touches the screen's edge. Text is rasterized at the scaled font size, so it
-  stays sharp; a string too wide for one label-atlas tile at that size is stretched
-  instead of cut off. Hit-tests map the pointer by the same scale, so clicks land on
-  what is drawn. Example:
-  `examples/ui_scale.py` (`--scale`, `+` / `-` live).
-- **One engine, many screens: `Engine.remove_system`, `Engine.off`, `Engine.clear_scene`.**
-  An app that shows several screens in sequence keeps one `Engine` and one `run()` and
-  swaps screens inside it, instead of `quit()` and a new engine per screen, which closes
-  and reopens the window. `remove_system(func)` and `off(event, func)` unregister what
-  `@engine.system` and `@engine.on(event)` registered; `clear_scene()` destroys every
-  entity and GUI panel and keeps systems, handlers, camera, lights, sky, fog and
-  environment. All three are safe mid-frame, from a system, handler or async task, and
-  raise `ValueError` for something never registered. `examples/screens.py` shows two
-  screens as coroutines that wait for Space and tear down.
-
-- **`engine.loading(label)`: load without freezing the window.** A context manager, `with`
-  or `async with`, marking work the scene is still waiting for. While a block is open,
-  `run()` shows the loading spinner with its label; `render_frame`, `render` and
-  `export_gltf` wait for every block to close. `run_blocking` now works under `run()`'s
-  loop. uh-twin, loading 24 OBJs and its textures this way: 866 frames drawn during
-  startup, the longest gap 1.7 s (#28).
-
-- **glTF export.** `manifoldx.gltf.export_gltf(path, nodes)`, `modeling.Mesh.to_gltf(path)`
-  and `Engine.export_gltf(path)` write `.glb` files that Blender, Godot, Unity and three.js
-  open: geometry, PBR materials, embedded textures, punctual lights, the camera, and fog,
-  shadow, background and environment settings in the scene's extras. Everything glTF cannot
-  carry (systems, event handlers, GUI, compute, volumes, point clouds, labels, materials
-  without an equivalent) is reported by name, printed, and saved as
-  `<name>.export-report.json`; `strict=True` raises `ExportIncomplete` and writes nothing.
-  `manifoldx export app.py out.glb` exports any app that ends in `engine.run()` without
-  changing it. The output passes the Khronos glTF validator with no errors. Example:
-  `examples/gltf_export.py` (#23).
-
-- **`TextureHandle.source`**: the image file `load_texture` read, so exporters can embed it.
-
-- **Mipmapped textures.** `load_texture` builds the full mip chain (box-filtered halvings
-  down to 1x1) and samples it trilinearly with 8x anisotropic filtering, so a texture
-  tiled across a large mesh no longer turns to crawling noise at a distance (#21).
-
-- **`manifoldx.humanoid`**: posable mannequins. A 15-joint skeleton with anatomical
-  angles (`flex`, `abduct`, `twist`, `lean`), a pose library with `base` plus
-  overrides, ANSUR II proportions with style presets (heroic, disney, anime,
-  fashion, child, toddler, chibi), a grounding forward-kinematics `solve`, and
-  `spawn_mannequin`. Example: `examples/humanoid.py`.
-- **`Engine.render_frame`**: one still frame headless, as a numpy array, with
-  supersampling; `pass_="ids"` returns a per-group label map drawn with the new
-  `FlatMaterial`.
-- **`Camera.project`**: world points to pixel coordinates and depth.
-- **GPU fields — transpile the `Field` algebra to WGSL.** A composed field (`ridged`, `fbm`, `warp`, `remap`, arithmetic, …) now optionally carries a symbolic AST (`Field._ast`, populated additively by the sources/combinators — the numpy CPU path is untouched, 699 tests pass). `manifoldx.modeling.field_to_wgsl(field, name)` walks it and emits `fn <name>(P: vec3<f32>) -> f32` plus a shared value-noise prelude, so the **same developer-composed field** can drive a shader instead of only baking on the CPU. `examples/gpu_field.py` displaces a flat 256² plane into detailed terrain live in the vertex shader (normals from finite differences of the same field) — no CPU displacement, no baked heightmap. The WGSL noise is a decorative value-noise approximation (not a bit-for-bit CPU Perlin match); `worley`/AST-less fields raise `FieldNotTranspilable`. Design: `.knowledge/analysis/2026-07-28-gpu-fields-design.md`.
-- **Procedural cloud deck (`CloudMaterial`) + sun-aware starfield.** A new alpha-blended `"cloud"` pipeline subtype (reuses the glow alpha-over target) renders a cloud shell whose coverage comes from in-shader fbm value-noise sampled in object space — so slowly rotating the shell drifts the clouds over a static planet. Sunlit tops, cool shadowed undersides at the terminator, dark at night; gaps `discard` to transparent. `manifoldx.sky` gains `StarfieldMaterial`, a point-sprite star material that reads the lighting globals and fades stars out under a daylit sky — altitude-gated so space stays starry and the night side keeps its stars (`starfield(..., ground_radius, atmo_top)` opts in). To let point/sprite shaders read the lighting block, the sprite pass now binds the full globals buffer (shaders using only the compact prefix are unaffected). `demos/planet_dive.py` gains a drifting cloud deck above the peaks and the day-faded starfield.
-- **Physically-based atmospheric scattering (`AtmosphereScatteringMaterial`).** A single-scattering Rayleigh + Mie sky rendered on a shell around the planet: the fragment shader raymarches the view ray (16 primary + 8 secondary sun samples), accumulating optical depth against an analytic ray-sphere atmosphere and combining a Rayleigh phase (`1+cos²θ`) with a forward-peaked Henyey-Greenstein Mie phase, then tonemaps with an exposure control. The **whole sky is now physically derived from the sun angle** — vivid blue by day, warm sunset limb near the terminator, and it goes genuinely **dark at night so the stars reappear** (the secondary march returns full shadow once the sun drops below the local horizon). Additive `"scatter"` pipeline subtype (the renderer gained a `_scatter_target`, one/one blend, no cull, depth-write off — following the existing glow/label blended-pass precedent). 16-byte `vec4` uniform (`[Rg, Ra, intensity, exposure]`). `demos/planet_dive.py` now uses it in place of the old fresnel-glow shell + fake altitude-driven day/night fog: one shell provides the limb from space *and* the full sky at the surface, and the equatorial orbit carries the camera through day into a starry night for free. Design: `.knowledge/analysis/2026-07-28-planet-dive-slice-design.md`; next is aerial perspective (scattering applied to distant terrain) and GPU fields for near-surface detail.
-- **Reusable space/planet look: sun-aware materials, water, stars.** All react to the sun via the existing `Globals.sun_direction`/`sun_color`, so a moving sun gives a cohesive **day/night** cycle for free.
-  - **`AtmosphereMaterial` is now sun-aware** — the halo glows on the **day limb**, fades on the **night side**, and warms to a **sunset tint** near the terminator.
-  - **`WaterMaterial`** (new) — day/night water shading, fresnel sky-reflection at grazing, and a sharp sun **glint**; unlit (16-byte `vec4` uniform: deep colour + fresnel power).
-  - **`manifoldx.sky.starfield(engine, count, radius)`** — a reusable point-sprite star backdrop for any space scene.
-  - `demos/planet_dive.py` now uses all three plus a swept sun (day→dusk→night), and a `starfield` backdrop.
-- **`AtmosphereMaterial` + planet-dive demo.** A new unlit **fresnel rim-glow** material (`pipeline_subtype == "glow"`) renders an atmosphere-halo shell; the renderer gained a small "glow" pipeline branch (alpha blend, depth-write off, no cull) following the label/volume/gui blended-pass precedent. `demos/planet_dive.py`: fly from orbit to the surface of a procedural planet — signed terrain displaces an icosphere into continents + ocean basins (biome-colored), a glossy ocean sphere fills the basins, the atmosphere shell gives the limb halo from space, and a frame-paced descent drives fog + background from space-black to sky-blue. The planet mesh is generated once in a worker process (`submit_process`). First Tier-1 slice of the planet arc (design: `.knowledge/analysis/2026-07-28-planet-dive-slice-design.md`); next is GPU field evaluation for near-surface detail.
-
-### Changed
-
-- **Examples reorganized into `examples/` (focused) + `demos/` (show-off).** `examples/` files each demonstrate one feature with minimal code (documentation), named by the feature (`pbr.py`, `shadows.py`, `fields.py`, `booleans.py`, `ffd.py`, `color_by.py`, `topology.py`, `deformers.py`, `textures.py`, `gui.py`, `volume.py`, `point_cloud.py`, `axes.py`, `spotlight.py`, `ibl.py` — dropping the `*_demo` suffix). Multi-system, game-like/sim-like showcases moved to a new `demos/` folder (`terrain_stream.py`, `labyrinth_fps.py`, `sun_earth_moon.py`, `smoke.py`). Each folder has a `README.md`; the long-term demo roadmap (Sebastian Lague-inspired) is at `.knowledge/analysis/2026-07-28-demo-roadmap-lague-inspired.md`. Removed the superseded naive `modeling_ridge_flyby.py` (replaced by `demos/terrain_stream.py`).
-
-### Features
-
-- **Geometric modeling v1 (foundation + deformers)** — new `manifoldx.modeling` subpackage: a host-side, numpy-first procedural geometry layer that builds and transforms meshes in code and bakes to the existing geometry dict — no renderer or ECS changes. Core is the immutable `modeling.Mesh` value type (`positions (N,3)` / `faces (M,3)` triangles / lazy `normals` / optional `uvs`) with area-weighted `recompute_normals()`, `with_positions()`, and the single integration seam `to_geometry()` ↔ `from_geometry()` (`modeling.Mesh` is namespaced and never re-exported at top level, so the ECS `Mesh` component keeps that name). Primitives `icosphere` (subdivided icosahedron) / `box` / `plane` / `cylinder` / `torus` generate a `Mesh`. Seeded, deterministic noise fields `noise.perlin` and `noise.fbm` (permutation-table gradient noise; `_resolve_rng`-compatible seeding, same seed ⇒ identical output) drive displacement. Four deformers compose fluently as `Mesh -> Mesh` methods: `displace(field, amount, along="normal"|vector)`, `twist(angle, axis)`, `bend(angle, axis, along)`, `taper(factor, axis)`, each recomputing normals. **Batch 2 — programmatic sculpt brushes:** a radial `Falloff` region model (`smooth`/`linear`/`constant` profiles), cached one-ring vertex `adjacency` (CSR), and the brushes `draw` (along region normal), `inflate` (per-vertex normal), `pinch` (toward center), `flatten` (project region to its best-fit plane), and `smooth` (Laplacian relaxation, global or local via a falloff gate) — all `Mesh -> Mesh`, no viewport. Demo `examples/modeling_asteroid.py` builds a procedural asteroid — `icosphere(4).displace(fbm).twist(...).taper(...).smooth(...)` — PBR-lit and rotating (renders to MP4 via `--render`). **Batch 3 — topology:** `subdivide(iterations, scheme="midpoint"|"loop")` (midpoint linear + Loop smooth subdivision with shared edge vertices), `extrude(face_mask, distance)` (raise a face region along vertex normals with stitched side walls), and `decimate(grid)` (grid vertex-clustering; QEM deferred). `recompute_normals` now gives degenerate/fold vertices a fallback direction so every normal is unit-length. Second demo `examples/modeling_topology.py`: a shadow-casting sun over a gallery of three orbiting, spinning procedural forms — a Loop-subdivided noise blob, an icosphere with an extruded crystal facet, and a decimated low-poly asteroid. **Batch 4 — booleans (CSG):** `union`/`difference`/`intersection` on `Mesh` values via a pure-numpy BSP-tree algorithm (faithful port of the classic Naylor-Amanatides-Thibault / csg.js approach — reimplemented, no vendored `manifold3d`), plus a `translate` convenience. Latent inward winding in the `box` and `torus` primitives was fixed (now CCW-from-outside / outward normals), required for correct CSG orientation. Third demo `examples/modeling_boolean.py`: a shadow-casting sun over three orbiting, spinning CSG solids — a rounded die (box ∩ sphere), a square-drilled ball (sphere − bar), and a fused two-sphere bond (∪). The Manifold-style exact-predicate kernel remains the deferred robustness tier. Design: `.knowledge/analysis/2026-07-28-modeling-booleans-v1-design.md`. This completes geometric-modeling v1 (batches 0-4).
-- **Free-form deformation (FFD).** New `manifoldx.modeling.FFD` (and `Mesh.ffd(resolution)`): a Bezier control lattice embedding a mesh over its bounding box. Move the `(I, J, K, 3)` `points` array, call `apply()` to get the warped `Mesh`; an unmoved lattice reproduces the original exactly. Demo `examples/modeling_ffd.py` oscillates the lattice per frame and writes the deformed vertices straight into the live GPU vertex buffer (FFD preserves vertex count), producing a real-time breathing mesh whose cast shadow warps with it — the first example of animated *geometry* (not just transforms) in the repo.
-- **Composable field algebra (`manifoldx.modeling.fields` + `Field`).** A scalar field is a callable `(points (K,3)) -> (K,)`; the new `Field` type wraps it with operator overloading (`+ - * /`, unary `-`, scalar coercion) and combinators (`mix`, `minimum`/`maximum`, `clamp`, `remap`, `abs`, `power`, `scale`/`bias`, and domain-warp `warp(amount, fx, fy, fz)`) so developers compose their own terrain/deformation fields from primitives — no opinionated terrain generator. Sources: `perlin`/`fbm` (moved here from `noise`, now returning `Field`; `noise` is a back-compat shim), `ridged` (mountain ridges), `billow` (dunes), `worley` (cellular/Voronoi, `f1` or `f2f1` for cracks), `constant`, `coord` (axis ramps/masks), `distance` (radial/island masks). Because a `Field` is callable, `Mesh.displace(field)` consumes it unchanged. Demo `examples/modeling_fields.py`: a developer-composed terrain (ridged + fbm, domain-warped, island-masked) displacing a plane, lit + shadowed. First of four composable-primitive sub-projects for PCG (fields → colour → curves/sweep → scatter). Design: `.knowledge/analysis/2026-07-28-modeling-fields-v1-design.md`.
-- **Per-vertex colour (`color_by` + `Gradient`).** Second PCG primitive: shade a mesh by any field. New `Gradient([(pos, "#rrggbb"), ...])` maps a scalar to RGB (piecewise-linear, clamped; accepts `#rgb`/`#rrggbb`/`(r,g,b)`). `Mesh` gains a `colors` attribute, `with_colors(colors)`, and `color_by(field, gradient)` (samples the field at each vertex → gradient → per-vertex colour); colours ride through deformers and are emitted by `to_geometry()`. On the GPU, `StandardMaterial(vertex_colors=True)` selects a new `"vcolor"` pipeline subtype: geometry interleaves `[pos, normal, colour]` (stride 36) and a WGSL variant tints the PBR albedo by the vertex colour across all light paths (point/sun/spot/IBL/ambient) — full lighting + shadows preserved. Additive behind the new subtype; the scalar and textured paths are untouched. Demo `examples/modeling_colored_terrain.py`: the composed terrain coloured by a developer-defined height gradient (water→sand→grass→rock→snow), lit + shadowed. Design: `.knowledge/analysis/2026-07-28-modeling-color-by-field-design.md`.
-- **`engine.background_color`** — the render-pass clear color is now a settable `(r, g, b)` attribute (default unchanged), so scenes can match a fog/horizon color.
-- **Real-time terrain streaming + supporting primitives.** Amortizes CPU terrain generation off the render loop (~1.7 → ~30 fps): world-aligned patches are generated on a background thread and swapped into a fixed pool of recycled mesh slots. New reusable pieces:
-  - **`@engine.background` + `Task`** — decorate a pure function to run it on the engine's worker thread; the call returns a `Task` (`.ready`, `.result`, `.wait()`, `.on_ready(cb)` with callbacks fired on the main thread at the frame boundary).
-  - **`engine.submit_process(fn, *args) -> Task`** — run a heavy CPU-bound `fn` in a separate *process* (spawn context) so it shares no GIL with the render loop. A patch takes ~1 s of numpy, which holds the GIL through its Python-level parts and would freeze a threaded render loop for ~0.9 s; the process worker drops the worst render-thread stall to ~5 ms. The streaming demo uses this (its patch builder is a top-level function; setup is under `if __name__ == "__main__":`).
-  - **`engine.spawn(...)` returns an `EntityHandle`** (was `None`; backward-compatible) with a `.transform` proxy (read/write pos/rot/scale) and **`.set_geometry(mesh)`** — overwrites the entity's vertex buffer in place (requires equal vertex count), hiding the raw buffer poke. `examples/modeling_ffd.py` and `modeling_ridge_flyby.py` were refactored onto it.
-  - **`engine.enable_fog(start, end, color=None)`** — linear distance fog for `StandardMaterial`, added to the base fragment shader (inherited by scalar/textured/vcolor variants) and applied after tonemap so full fog exactly matches `background_color` for a seamless horizon (`Globals` grew 416→432).
-  - **`Field.shift(offset)`** — sample a field at translated coordinates (turns "the patch at world Z" into one line).
-  - Demo `examples/modeling_terrain_stream.py`. Design: `.knowledge/analysis/2026-07-28-terrain-streaming-and-background-tasks-design.md`.
-- **Infinite ridge flyby demo** — `examples/modeling_ridge_flyby.py`: a real-time procedural mountain range with distance fog, built entirely from the composable primitives. The terrain field is sampled through a forward-scrolling window each frame and poked into the live vertex buffer (constant vertex count), so an endless ridge system flows toward a fixed camera; per-vertex color is a height gradient mixed toward the horizon color by camera distance (CPU-composed fog — no fog shader), with `engine.background_color` set to match so distant peaks dissolve into the sky. Design: `.knowledge/analysis/2026-07-28-geometric-modeling-v1-design.md`. Plans: `.knowledge/plans/2026-07-28-geometric-modeling-v1-plan-1-foundation-deformers.md`, `.knowledge/plans/2026-07-28-geometric-modeling-v1-plan-2-sculpt-brushes.md`.
-
-- **`examples/labyrinth_fps.py`** — a first-person flashlight demo: walk a procedurally-generated maze in the dark. Showcases `engine.input` (WASD grounded movement + right-drag mouse look) and the spot-light + spot-shadow subsystem together. Recursive-backtracker maze rendered as one shared cube mesh per wall cell (two draw batches), grid-based axis-separated wall collision (slides along walls), a `SpotLight` mounted on the camera that casts shadows down the corridors, and a wide FPS FOV. Under `--render` a scripted forward-only flythrough (BFS solution path) walks the corridors so the headless MP4 needs no live input.
-
-- **Spot lights + spot shadows (flashlight)** — `engine.set_spot(SpotLight(...))` gives `StandardMaterial` a flashlight: a cone with smooth inner→outer angular falloff, inverse-square distance attenuation, and a range cutoff. Like `DirectionalLight` before it, `SpotLight` gains its first real consumer (it was previously unused). When shadows are enabled the spot is the caster (priority over the sun): `light_view_proj` becomes a **perspective** projection (vertical FOV = 2·`outer_angle`) from the spot's position/direction (`manifoldx.shadow.compute_spot_light_view_proj`), the depth-only pass renders from the spot's POV, and the fragment samples it to shadow the spot term. A `shadow_caster` field (0=none/1=sun/2=spot) in `Globals` routes the slope-scaled bias + shadow factor to the correct light. `Globals` grew 352 → 416 bytes (spot position/range, direction/cos-inner, color/intensity, cos-outer, caster). Demo: `examples/spot_demo.py` — a flashlight sweeping a dark scene, every object's shadow swinging around the floor as the light orbits.
-
-- **Shadow mapping v1 (directional)** — `StandardMaterial` now casts and receives hard shadows from a single directional sun. New `engine.set_sun(DirectionalLight(...))` adds a real directional term to the PBR shader — previously `DirectionalLight` was silently packed into the point-light array and never worked as a directional light, so this gives the class its first correct consumer. `engine.enable_shadows(target, extent, resolution, near, far, bias)` makes the sun cast: a new depth-only shadow pass (`src/manifoldx/render/passes/shadow.py`, encoded before the main pass in `Engine._draw_frame`) rasterizes all mesh geometry from the sun's POV into a `depth24plus` shadow map, which the `StandardMaterial` fragment shader samples through a comparison sampler (`textureSampleCompareLevel`, hardware 2×2 PCF) to attenuate the sun term. Fragments outside the sun's ortho frustum stay lit; a constant `bias` kills shadow acne. Light-space matrix math is the pure-numpy `manifoldx.shadow.compute_light_view_proj` (ortho × look-at, wgpu z∈[0,1]). The `Globals` uniform grew 240 → 352 bytes (`light_view_proj` mat4 + sun direction/color/intensity + `shadow_enabled`/`shadow_bias`/`shadow_map_size`); the shadow map binds as `@group(2)` on the `StandardMaterial` pipeline, with a 1×1 placeholder depth texture when shadows are off so the pipeline layout is always satisfied. Point-light and IBL contributions are unshadowed in v1 (ambient does not cast a directional shadow). Only `StandardMaterial` casts/receives; sprite/label/volume/axis/GUI paths are untouched. Demo at `examples/shadow_demo.py` (four objects — three spheres + a cube in metallic/matte/polished materials — orbiting and bobbing at different heights over a central pillar and floor, their cast shadows sweeping the ground, climbing the pillar, and crossing each other). **PCF soft shadows (VS2):** `enable_shadows(pcf_radius=...)` averages a `(2r+1)²` grid of comparison taps around each shadow lookup for soft edges — `0` = a single hard tap (VS1 behaviour), `1` = 3×3 (default), `2` = 5×5, etc.; the radius rides in the previously-unused `Globals` pad slot, so the uniform size is unchanged. **Auto-fit + slope-scaled bias:** `enable_shadows(auto_fit=True)` (the default) fits the shadow frustum to the scene's bounding sphere every frame (computed from each geometry's local AABB transformed by its instances), so `target`/`extent`/`near`/`far` no longer need hand-tuning — tighter frustum, sharper shadows; pass `auto_fit=False` to drive the box manually. The fragment bias is now slope-scaled (`bias·(1 + 4·(1−N·L))`), so grazing surfaces stop self-shadowing (acne) without peter-panning on faces toward the sun. Spot/point-light shadows and cascaded maps remain follow-ups. Design: `.knowledge/analysis/2026-07-17-shadow-mapping-v1-design.md`. Plan: `.knowledge/plans/2026-07-17-shadow-mapping-v1-plan.md`.
-
-- **IBL v1 (Image-Based Lighting)** — split-sum physically-based environment lighting for `StandardMaterial`. New `manifoldx.ibl` module: `EnvironmentMap` dataclass with builders `from_color(rgb)`, `from_sky(zenith, horizon, ground)`, `from_image(path, exposure)`, and `from_hdr(path)` (Radiance RGBE decoder included). `engine.set_environment(env_or_preset)` activates an environment; built-in presets: `"studio"`, `"sky"`, `"neutral"`, `"dark"`. On first use, `_precompute()` runs CPU-side: equirectangular → 128 px cubemap, 64 px irradiance map (256 cosine-weighted samples), 8-mip prefiltered specular chain (512 GGX-importance samples per mip), all stored as float16. Pre-baked 512×512 Smith-GGX BRDF LUT ships as a binary asset (`src/manifoldx/assets/ibl/brdf_lut.npy`; regenerable via `scripts/gen_brdf_lut.py`). The `StandardMaterial` WGSL shader was extended to add a correct `proj: mat4x4<f32>` field (fixing a latent `camera_pos` offset bug), `@group(1)` IBL texture bindings, `fresnelSchlickRoughness`, and a split-sum IBL block that additively combines diffuse irradiance + specular split-sum with existing directional/point lights. The `Globals` uniform was extended from 224 → 240 bytes to add `ibl_intensity f32`, `ibl_enabled u32`, and 8 bytes of pad. Optional skybox: new `src/manifoldx/render/passes/skybox.py` draws a fullscreen triangle at depth=1.0 (far plane) sampling the prefiltered map with Reinhard tone map + sRGB gamma; activated when `env.show_skybox = True`. Demo at `examples/ibl_demo.py` (4×4 metallic-roughness grid, press 1/2/3 to cycle environments, S to toggle skybox). Design: `.knowledge/analysis/2026-07-05-ibl-v1-design.md`. Plan: `.knowledge/plans/2026-07-05-ibl-v1-plan.md`.
-
-- **Textured PBR v1** — first slice of texture support in the core mesh-PBR path. New `manifoldx.textures` module exposes `load_texture(engine, path) -> TextureHandle`, backed by a per-engine `TextureRegistry`; images decode via Pillow and upload as `Rgba8UnormSrgb` (so sampling auto-decodes sRGB to linear in the shader). `StandardMaterial` accepts a new `albedo_map: TextureHandle | None` kwarg; when set, the fragment shader samples `textureSample(albedo_tex, albedo_sampler, uv).rgb` instead of using the scalar `material.albedo`. Geometry dicts now carry an optional `"uvs"` key; `sphere()` and `plane()` emit UVs by default. `GeometryRegistry.create_buffers` interleaves `[pos, normal, uv]` (stride 32B) when UVs are present, else falls back to `[pos, normal]` (stride 24B); the mesh-pass pipeline now reads the geometry's actual buffer stride so a scalar `StandardMaterial` bound to a UV-bearing geometry still renders correctly. The pipeline cache key includes `material_subtype` so scalar and textured `StandardMaterial` coexist in one scene without collision. Trying to attach a textured `StandardMaterial` to a geometry without UVs raises `MaterialGeometryMismatchError` at pipeline-cache time. New `manifoldx.assets.obj.load_obj` (re-exported as `manifoldx.load_obj`) parses Wavefront OBJ files with all four face-line forms (`f v`, `f v/vt`, `f v/vt/vn`, `f v//vn`); fan-triangulates polygon faces; rejects mixed forms and negative indices with line-numbered errors. First bundled binary assets: `examples/assets/teapot/teapot.obj` (UV-mapped Newell teapot, ~93 KB) and a procedural `teapot_albedo.png` regenerable via `scripts/gen_teapot_albedo.py`; and `examples/assets/sun_earth_moon/{earth,moon}.jpg` (public-domain NASA imagery). Two new demos: `examples/teapot_demo.py` and `examples/sun_earth_moon_demo.py`. Plan: `.knowledge/plans/2026-06-09-textured-pbr-v1.md`. Design: `.knowledge/analysis/2026-06-09-textured-pbr-v1-design.md`.
-
-- **GUI v1** — in-engine retained-mode GUI for sim controls + HUD readouts. New `manifoldx.gui` package: `Panel`, `Text`, `ValueDisplay`, `Button`, `Slider`, `Toggle`; stack + flex layout; theme + named-class styling with per-widget overrides. Rendering via a new `gui` render pass at the end of the order, using `RectMaterial` (WGSL signed-distance rounded rect) for backgrounds and the existing `LabelTextureAtlas` for glyphs (no new font dependency). Interaction via `_GuiBridge` — subscribes to pointer events on the bus, hit-tests the widget tree top-down, dispatches per-widget state mutations, and exposes `engine.gui.pointer_over_gui` for cooperative consume by user systems. Slider supports drag capture and emits `:change` continuously plus `:commit` on pointer-up. Example at `examples/gui_demo.py`.
-
-### Fixes
-
 - **`Engine.w` / `Engine.h` follow window resizes.** They were fixed at construction, so
   a resized or fullscreen window drew the construction size stretched: the camera aspect,
   the GUI layout and the GUI hit-tests all used the old size. They now track the canvas'
@@ -735,6 +728,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Offline render was paced by the wall clock, not the video clock.** `render()` computed `dt = 1.0 / fps` under a "use fixed timestep for video rendering" comment but never called `set_fixed_timestep`, so `_compute_dt()` kept taking the wall-clock branch and overwrote `self.elapsed` with real elapsed seconds on every frame — clobbering the `self.elapsed = (frame_idx + 1) * dt` the render loop assigned. Systems reading `engine.elapsed` therefore saw *how long the render had been running*, so a scripted camera path advanced at whatever rate the host GPU happened to achieve. Concretely, a `--render --duration 26 --fps 12` pass on an Intel iGPU produced 312 correct frames containing only ~12 s of animation (the flythrough never left its first phase), and the same script on faster hardware would produce different motion. Every `demos/` flythrough was affected. Fixed by routing the computed `dt` through `set_fixed_timestep(dt)`; regression test in `tests/test_render_clock.py` asserts frame `i` observes `elapsed == i / fps` and that systems receive `dt == 1 / fps`.
 - **Mesh-pass per-material uniform buffers** — `mesh_batches` previously keyed only on `(geom_id, mat_type, mat_subtype)`, so two material instances of the same class on the same geometry collapsed into one batch and the first instance's uniform data won. The bug had been silently affecting `pbr_demo.py` for a while (every cube rendered with the first cube's color; every sphere with the first sphere's). Made visible by the new textured-PBR work: Earth and Moon — both textured `StandardMaterial` on `sphere()` — initially rendered with the same texture. Fixed by extending the batching key to include `mat_id` and allocating one material-uniform buffer per `mat_id` in the mesh pass.
+
+- **Fixes found while writing the guide.** Indices given as `(M, 3)` triangles draw every
+  triangle (they drew only the first M indices); a camera looking straight down its up axis has
+  a view matrix (it divided by zero); `mxv.points` after `mxv.mesh` syncs its own rows (it
+  overwrote the mesh's transform) and `AtlasOverflowError` is exported from `manifoldx.viz`; an
+  OBJ without normals gets vertex normals and renders (its first frame failed); a pointer event
+  after `clear_scene` reaches the GUI (it raised `AttributeError`); `engine.delay` resolves on
+  its own frame when a step sum lands one ulp short; a `Color` object works as a material colour.
+
+### Known limitations
+
+- **glTF export writes a skinned entity in its rest pose.** `Engine.export_gltf` writes the
+  geometry's rest positions and no joints or skin, and its report does not mention it (#79).
+- **IBL skybox: first-frame device lockup on NVIDIA Quadro M2000M / Vulkan** — enabling `env.show_skybox = True` on the *very first* presented frame deadlocks the device (the frame's submit never completes) on this GPU/driver (580.159.03). It is a driver first-frame-init lockup, not a code defect: depth format (`depth24plus` everywhere), depth config, bind group, and pipeline layout are all correct, and the pass renders perfectly once *any* prior frame has been presented — a constant-colour skybox renders, and the mesh IBL path samples the same cube fine. The skybox therefore stays **default-OFF**; `examples/ibl_demo.py` is unaffected because it only toggles the skybox via the `S` key after startup (post-first-frame). The only broken usage is scripting `show_skybox = True` before the first present. No warm-up-frame workaround was added (would mask an old-GPU driver quirk in the shared render loop). Investigation + evidence table: `.knowledge/analysis/2026-07-05-ibl-v1-design.md` (§ "Known limitation: first-frame device lockup").
 
 ## [0.9.0] - 2026-05-10
 
