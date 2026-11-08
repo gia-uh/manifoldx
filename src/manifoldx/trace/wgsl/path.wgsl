@@ -1,14 +1,9 @@
 // One path per pixel per dispatch: GGX + Lambert, dielectrics, emission, environment and sun,
 // punctual lights and emissive triangles, next-event estimation with MIS, Russian roulette.
 
-@group(0) @binding(7) var<storage, read_write> accum: array<vec4<f32>>;
-@group(0) @binding(8) var<storage, read_write> aov_albedo: array<vec4<f32>>;
-@group(0) @binding(9) var<storage, read_write> aov_normal_depth: array<vec4<f32>>;
-@group(0) @binding(10) var<storage, read> env: array<vec4<f32>>;         // radiance, pdf over uv
-@group(0) @binding(11) var<storage, read> env_marginal: array<f32>;
-@group(0) @binding(12) var<storage, read> env_conditional: array<f32>;
-@group(0) @binding(13) var<storage, read> lights: array<vec4<f32>>;      // 3 per light
-@group(0) @binding(14) var<storage, read> emissive: array<vec4<f32>>;    // tri (bits), cdf, -, -
+@group(0) @binding(5) var<storage, read_write> accum: array<vec4<f32>>;
+// 2 per pixel: first-hit albedo and the second moment of luminance; normal and distance
+@group(0) @binding(6) var<storage, read_write> aov: array<vec4<f32>>;
 
 const DIFFUSE_ONLY: u32 = 1u;
 
@@ -39,7 +34,7 @@ fn env_texel(d: vec3<f32>) -> vec4<f32> {
     let uv = env_uv(d);
     let x = min(u32(uv.x * f32(P.env_width)), P.env_width - 1u);
     let y = min(u32(uv.y * f32(P.env_height)), P.env_height - 1u);
-    return env[y * P.env_width + x];
+    return aux[P.env_off + y * P.env_width + x];
 }
 
 fn env_pdf(d: vec3<f32>, pdf_uv: f32) -> f32 {
@@ -55,7 +50,7 @@ fn search(lo: u32, n: u32, u: f32, which: u32) -> u32 {
         if (a >= b) { break; }
         let m = (a + b) / 2u;
         var v: f32;
-        if (which == 0u) { v = env_marginal[lo + m]; } else { v = env_conditional[lo + m]; }
+        if (which == 0u) { v = aux_f32(P.marginal_off, lo + m); } else { v = aux_f32(P.conditional_off, lo + m); }
         if (v > u) { b = m; } else { a = m + 1u; }
     }
     return a;
@@ -71,7 +66,7 @@ fn sample_env(r: ptr<function, Rng>) -> LightSample {
     let phi = (u - 0.5) * 2.0 * PI;
     let lat = (0.5 - v) * PI;
     let d = vec3<f32>(cos(lat) * cos(phi), sin(lat), cos(lat) * sin(phi));
-    let e = env[y * P.env_width + x];
+    let e = aux[P.env_off + y * P.env_width + x];
     return LightSample(d, INF, e.xyz, env_pdf(d, e.w));
 }
 
@@ -224,9 +219,9 @@ fn sample_emissive(p: vec3<f32>, r: ptr<function, Rng>) -> LightSample {
     loop {
         if (a >= b) { break; }
         let m = (a + b) / 2u;
-        if (emissive[m].y > u) { b = m; } else { a = m + 1u; }
+        if (aux[P.emissive_off + m].y > u) { b = m; } else { a = m + 1u; }
     }
-    let tri = bitcast<u32>(emissive[a].x);
+    let tri = bitcast<u32>(aux[P.emissive_off + a].x);
     var u1 = rand(r);
     var u2 = rand(r);
     if (u1 + u2 > 1.0) { u1 = 1.0 - u1; u2 = 1.0 - u2; }
@@ -237,7 +232,7 @@ fn sample_emissive(p: vec3<f32>, r: ptr<function, Rng>) -> LightSample {
     let ng = normalize(cross(tris[3u * tri + 1u].xyz, tris[3u * tri + 2u].xyz));
     let cos_l = abs(dot(ng, d));
     let mat = bitcast<u32>(shade[5u * tri].w);
-    let e = mats[3u * mat + 1u].xyz;
+    let e = material(mat, 1u).xyz;
     if (cos_l < 1.0e-6) { return LightSample(d, dist, vec3<f32>(0.0), 0.0); }
     return LightSample(d, dist * (1.0 - 1.0e-3), e, emissive_pdf(tri, e, cos_l, dist));
 }
@@ -276,9 +271,9 @@ fn direct(s: Surface, wo: vec3<f32>, r: ptr<function, Rng>) -> vec3<f32> {
     }
     if (P.light_count > 0u) {
         let k = min(u32(rand(r) * f32(P.light_count)), P.light_count - 1u);
-        let l0 = lights[3u * k];
-        let l1 = lights[3u * k + 1u];
-        let l2 = lights[3u * k + 2u];
+        let l0 = aux[P.light_off + 3u * k + 0u];
+        let l1 = aux[P.light_off + 3u * k + 1u];
+        let l2 = aux[P.light_off + 3u * k + 2u];
         var d: vec3<f32>;
         var dist = INF;
         var radiance = l2.xyz;
@@ -410,6 +405,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (any(radiance != radiance) || any(abs(radiance) > vec3<f32>(1.0e20))) { radiance = vec3<f32>(0.0); }
     accum[pixel] += vec4<f32>(radiance, 1.0);
     let l = luminance(radiance);
-    aov_albedo[pixel] += vec4<f32>(first_albedo, l * l);  // .w: second moment, for the denoiser
-    aov_normal_depth[pixel] += first_nd;
+    aov[2u * pixel] += vec4<f32>(first_albedo, l * l);  // .w: second moment, for the denoiser
+    aov[2u * pixel + 1u] += first_nd;
 }

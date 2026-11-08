@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>manifoldx · plan · trace in the browser (#178)</title>
+<style>
+:root{--fg:#1d1f23;--mute:#5d6470;--line:#dde1e6;--bg:#fbfbfa;--acc:#2b6cb0;--code:#f1f3f5}
+@media (prefers-color-scheme:dark){:root{--fg:#e6e7e9;--mute:#9aa1ab;--line:#33373d;--bg:#17191c;--acc:#7fb2ec;--code:#22252a}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:860px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:1.6rem;margin:0 0 4px}h2{font-size:1.15rem;margin:32px 0 8px;border-bottom:1px solid var(--line);padding-bottom:4px}
+.sub{color:var(--mute);margin:0 0 20px}
+code{background:var(--code);padding:1px 5px;border-radius:4px;font-size:.92em}
+table{border-collapse:collapse;width:100%;font-size:.95rem;display:block;overflow-x:auto}
+td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--mute);font-weight:600}
+li{margin:4px 0}
+.task{border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:10px 0}
+.task[data-state=done]{opacity:.65}.task b{color:var(--acc)}
+</style>
+</head>
+<body><main>
+<h1>Trace in the browser</h1>
+<p class="sub">gia-uh/manifoldx#178 · follow-up to #175 and #177 · 2026-11-08</p>
+
+<h2>Goal</h2>
+<p>Run <code>manifoldx.trace</code>'s WGSL kernels on the visitor's GPU through WebGPU. A page shows its raster view while the camera moves; when the camera stops, it shows a progressive, denoised trace of the same glb. Python and the page dispatch the same <code>.wgsl</code> files, so they compute the same picture.</p>
+
+<h2>Decisions</h2>
+<table>
+<tr><th>Question</th><th>Choice</th><th>Why</th></tr>
+<tr><td>Fit 8 storage buffers per stage</td><td>Four read-only scene buffers: <code>nodes</code>, <code>tris</code>, <code>shade</code> and one <code>aux</code> array of vec4 that holds materials, the texture table, texels, lights, emissive CDF and the environment tables, at offsets passed in <code>Params</code>. The two AOV buffers become one (two vec4 per pixel).</td><td>path: 4 + 2 written = 6; à-trous: 4 + 3 = 7; denoise prep: 4 + 4 = 8. The hot traversal buffers stay apart.</td></tr>
+<tr><td>Denoiser prep</td><td><code>prep.wgsl</code>: demodulation, variance and its 3×3 blur, the normalised guide. Python's <code>denoised()</code> uses it too.</td><td>No CPU pass in the page; one code path.</td></tr>
+<tr><td>Scene transport</td><td>The page reads the .glb itself (<code>glb.js</code>, a port of <code>gltf_read.py</code>) and builds the BVH in JS (<code>bvh.js</code>, binned SAH, recursive over typed arrays). No packed file.</td><td>Overrides and hide globs (Oikos's trace settings) change materials and drop nodes per view, so the scene has to be assembled in the page anyway; a build-time packed file would freeze one view. The glb is already served.</td></tr>
+<tr><td>Sky</td><td><code>sky.js</code>: <code>Environment.sky</code> and its sampling tables ported.</td><td>Oikos passes <code>sun_direction</code>, <code>turbidity</code>, <code>ground</code>.</td></tr>
+<tr><td>Output</td><td>Auto exposure by a one-workgroup reduction, ACES and sRGB in a fragment shader that draws a full-screen triangle onto a canvas.</td><td>Works with any canvas format; no readback.</td></tr>
+<tr><td>Shipping</td><td>JS in <code>src/manifoldx/trace/web/</code>, loading the WGSL by URL; <code>manifoldx.trace.web.copy_to(dest)</code> writes JS + WGSL into one folder a site serves.</td><td>The WGSL files stay single-sourced.</td></tr>
+</table>
+
+<h2>API in the page</h2>
+<pre><code>import { createTracer, loadGlb } from './trace/trace.js';
+const scene = await loadGlb(url, { overrides, hide });    // Oikos's settings format
+const tracer = await createTracer(scene, { width, height, environment, canvas });
+tracer.setCamera({ position, target, up, fov });        // resets the accumulation if it moved
+tracer.frame();                                         // a few samples within a time budget, then draw
+</code></pre>
+
+<h2>Tasks</h2>
+<div class="task" data-state="pending"><b>1. Pack the buffers.</b> WGSL bindings and <code>Params</code> offsets; Python <code>_upload</code>; one AOV buffer. The existing <code>tests/trace</code> stay green.</div>
+<div class="task" data-state="pending"><b>2. Prep in WGSL.</b> <code>prep.wgsl</code>; <code>denoised()</code> through it; a test against the old numpy prep.</div>
+<div class="task" data-state="pending"><b>3. JS scene.</b> <code>glb.js</code>, <code>bvh.js</code>, <code>sky.js</code>; overrides and hide as Oikos's service applies them.</div>
+<div class="task" data-state="pending"><b>4. trace.js.</b> Device, pipelines, step loop with a frame budget, reset on camera change, denoise, display. First image of an Oikos house in headless Chromium.</div>
+<div class="task" data-state="pending"><b>5. Tests.</b> Playwright on SwiftShader WebGPU: the page's radiance at a fixed seed against Python's on the reference scenes; skipped without an adapter; run in the CI browser job.</div>
+<div class="task" data-state="pending"><b>6. Docs and hand-over.</b> Know-how section, CHANGELOG, a demo page; samples per second recorded on the issue as devices report them.</div>
+
+<h2>Risks</h2>
+<ul>
+<li>SwiftShader is slow: tests use 48×48 scenes and a few samples.</li>
+<li>Some integrated GPUs time out long dispatches (TDR): the loop dispatches one sample per submit and measures the time with <code>onSubmittedWorkDone</code>.</li>
+<li>The JS BVH differs in shape from numpy's; closest hits are the same, so images match up to float order.</li>
+</ul>
+</main></body></html>

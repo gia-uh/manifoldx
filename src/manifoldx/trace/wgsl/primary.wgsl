@@ -1,7 +1,7 @@
 // Primary rays through pixel centres: albedo, shading normal and distance of the first hit.
 
-@group(0) @binding(7) var<storage, read_write> out_albedo: array<vec4<f32>>;
-@group(0) @binding(8) var<storage, read_write> out_normal_depth: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> out_albedo: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> out_normal_depth: array<vec4<f32>>;
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
