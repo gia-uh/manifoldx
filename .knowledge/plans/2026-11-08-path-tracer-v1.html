@@ -156,7 +156,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 
 <h2>Tasks</h2>
 
-<details class="task" id="task-1" data-state="pending"><summary><span class="num">1</span><span><span class="ttl">glb reader into a trace Scene</span><span class="files">src/manifoldx/trace/gltf_read.py, scene.py · tests/trace/test_scene.py</span></span><span class="state">pending</span></summary><div class="body">
+<details class="task" id="task-1" data-state="done"><summary><span class="num">1</span><span><span class="ttl">glb reader into a trace Scene</span><span class="files">src/manifoldx/trace/gltf_read.py, scene.py · tests/trace/test_scene.py</span></span><span class="state">pending</span></summary><div class="body">
 <ol class="steps">
 <li>Tests: a glb written by <code>manifoldx.gltf.build_glb</code> with a translated, rotated box and a camera reads back to the same world-space triangles, normals, colours, UVs, material factors and camera pose.</li>
 <li>Read node trees (TRS or matrix), accessors with stride and normalised integers, indices of any width, PBR factors, emission and its strength, transmission, IOR, volume, alpha mode, base-colour textures, cameras and <code>KHR_lights_punctual</code>. <code>overrides</code> maps a node or material name to material fields.</li>
@@ -164,7 +164,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 <div class="verify"><span class="lbl">verify</span><p><code>uv run pytest tests/trace/test_scene.py</code> passes; the factory glb and a house glb read without error.</p></div>
 </div></details>
 
-<details class="task" id="task-2" data-state="pending"><summary><span class="num">2</span><span><span class="ttl">Binned SAH BVH in numpy</span><span class="files">src/manifoldx/trace/bvh.py · tests/trace/test_bvh.py</span></span><span class="state">pending</span></summary><div class="body">
+<details class="task" id="task-2" data-state="done"><summary><span class="num">2</span><span><span class="ttl">Binned SAH BVH in numpy</span><span class="files">src/manifoldx/trace/bvh.py · tests/trace/test_bvh.py</span></span><span class="state">pending</span></summary><div class="body">
 <ol class="steps">
 <li>Tests: every triangle sits in exactly one leaf; every node's box holds its children; closest hits of 2,000 random rays found by walking the BVH in numpy equal brute force.</li>
 <li>Build all nodes of one depth at once: centroid bounds by <code>reduceat</code>, 16 bins per axis, SAH sweep by cumulative sums, partition by a stable sort on (node, side). Leaf at 4 triangles or when no split beats the leaf.</li>
@@ -172,7 +172,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 <div class="verify"><span class="lbl">verify</span><p><code>uv run pytest tests/trace/test_bvh.py</code>; 240k triangles build in a few seconds.</p></div>
 </div></details>
 
-<details class="task" id="task-3" data-state="pending"><summary><span class="num">3</span><span><span class="ttl">GPU upload and primary rays: albedo, normal, depth</span><span class="files">src/manifoldx/trace/tracer.py, wgsl/common.wgsl, wgsl/primary.wgsl</span></span><span class="state">pending</span></summary><div class="body">
+<details class="task" id="task-3" data-state="done"><summary><span class="num">3</span><span><span class="ttl">GPU upload and primary rays: albedo, normal, depth</span><span class="files">src/manifoldx/trace/tracer.py, wgsl/common.wgsl, wgsl/primary.wgsl</span></span><span class="state">pending</span></summary><div class="body">
 <ol class="steps">
 <li>Device from the high-performance adapter with its storage-buffer limits; buffers for nodes, triangles, shading data, materials, textures.</li>
 <li><code>Tracer.aovs()</code> returns albedo, normal and depth arrays. A script renders the factory glb next to <code>Engine.render_frame</code> of the same triangles and camera. <b>Milestone 1: send both images.</b></li>
@@ -180,7 +180,7 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 <div class="verify"><span class="lbl">verify</span><p>A test at 64×64 checks the depth of a plane against its analytic value; the side-by-side matches in silhouette.</p></div>
 </div></details>
 
-<details class="task" id="task-4" data-state="pending"><summary><span class="num">4</span><span><span class="ttl">Path tracing kernel</span><span class="files">wgsl/path.wgsl, trace/environment.py, trace/scenes.py</span></span><span class="state">pending</span></summary><div class="body">
+<details class="task" id="task-4" data-state="done"><summary><span class="num">4</span><span><span class="ttl">Path tracing kernel</span><span class="files">wgsl/path.wgsl, trace/environment.py, trace/scenes.py</span></span><span class="state">pending</span></summary><div class="body">
 <ol class="steps">
 <li>Lambert plus GGX (VNDF sampling), thin and solid dielectrics, emission; environment CDF, sun cone, punctual lights, emissive triangles by an area CDF; MIS by the power heuristic; up to 6 bounces, Russian roulette from the third.</li>
 <li>Accumulation buffer; <code>step(n)</code> dispatches n passes; <code>image()</code> applies exposure, ACES fit and sRGB. <code>scenes.cornell_box()</code> builds the box in code. <b>Milestone 2: the first noisy image.</b></li>
@@ -188,23 +188,23 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 <div class="verify"><span class="lbl">verify</span><p>Furnace test: a white Lambert sphere in a uniform environment of radiance 1 renders 1 ± 2 %. A Lambert plane under a sun matches albedo · E · cosθ / π.</p></div>
 </div></details>
 
-<details class="task" id="task-5" data-state="pending"><summary><span class="num">5</span><span><span class="ttl">Reference scenes</span><span class="files">tests/trace/test_references.py, tests/trace/refs/*.png</span></span><span class="state">pending</span></summary><div class="body">
+<details class="task" id="task-5" data-state="done"><summary><span class="num">5</span><span><span class="ttl">Reference scenes</span><span class="files">tests/trace/test_references.py, tests/trace/refs/*.png</span></span><span class="state">pending</span></summary><div class="body">
 <ol class="steps"><li>Cornell box, glass sphere, room with a window at 64×64, fixed seed and sample count, compared by mean error with stored references rendered at high sample count on a GPU. Skipped without an adapter.</li></ol>
 <div class="verify"><span class="lbl">verify</span><p>Breaking a kernel line (the Fresnel term) makes the glass test fail.</p></div>
 </div></details>
 
-<details class="task" id="task-6" data-state="pending"><summary><span class="num">6</span><span><span class="ttl">À-trous denoiser</span><span class="files">wgsl/atrous.wgsl, tracer.py</span></span><span class="state">pending</span></summary><div class="body">
+<details class="task" id="task-6" data-state="done"><summary><span class="num">6</span><span><span class="ttl">À-trous denoiser</span><span class="files">wgsl/atrous.wgsl, tracer.py</span></span><span class="state">pending</span></summary><div class="body">
 <ol class="steps"><li>First-hit albedo, normal and depth averaged across samples; 5 passes at step 1, 2, 4, 8, 16. <b>Milestone 3: denoised image next to the noisy one.</b></li></ol>
 <div class="verify"><span class="lbl">verify</span><p>On the Cornell box at 16 spp, denoised error against the 4,096 spp reference is lower than the raw error.</p></div>
 </div></details>
 
-<details class="task" id="task-7" data-state="pending"><summary><span class="num">7</span><span><span class="ttl">The command and the benchmark</span><span class="files">src/manifoldx/cli.py, benchmarks/trace.py</span></span><span class="state">pending</span></summary><div class="body">
+<details class="task" id="task-7" data-state="done"><summary><span class="num">7</span><span><span class="ttl">The command and the benchmark</span><span class="files">src/manifoldx/cli.py, benchmarks/trace.py</span></span><span class="state">pending</span></summary><div class="body">
 <ol class="steps"><li><code>manifoldx trace scene.glb [--camera px,py,pz:tx,ty,tz[:fov]] [--size WxH] [--spp N] [--sun ...] [--no-denoise] -o out.png</code>, printing samples per second.</li>
 <li>A <code>trace</code> suite in <code>benchmarks/</code>: samples per second on the Cornell box and a large mesh, by size.</li></ol>
 <div class="verify"><span class="lbl">verify</span><p><code>uv run python -m benchmarks trace</code> prints a table; the CLI writes a PNG.</p></div>
 </div></details>
 
-<details class="task" id="task-8" data-state="pending"><summary><span class="num">8</span><span><span class="ttl">Measure an interior on an RTX 3060</span><span class="files">PR description</span></span><span class="state">pending</span></summary><div class="body">
+<details class="task" id="task-8" data-state="done"><summary><span class="num">8</span><span><span class="ttl">Measure an interior on an RTX 3060</span><span class="files">PR description</span></span><span class="state">pending</span></summary><div class="body">
 <ol class="steps"><li>A house glb at 1024×640: samples per second, and seconds until the denoised image stops changing visibly. Over 3 minutes: stop and rethink (wavefront, smaller leaves, half resolution plus upsampling).</li></ol>
 <div class="verify"><span class="lbl">verify</span><p>The numbers go in the PR under <code>## Timing</code> with the GPU line.</p></div>
 </div></details>
@@ -212,6 +212,10 @@ svg.flow{width:100%;height:auto;max-width:900px;display:block;margin:14px 0}
 <h2>Where this plan departs from the spec</h2>
 <ul class="rules">
 <li>The spec says no textures in v1. The scenes it serves texture their floors, so base-colour textures are sampled; normal and roughness maps stay out.</li>
+<li>Glass in shadow rays: rays pass every dielectric, thin or solid, tinted by (1 − F) and the base colour, so a glass sphere casts a light shadow instead of a black one. Caustics are still out (<code>src/manifoldx/trace/wgsl/path.wgsl</code>, <code>transmittance</code>).</li>
+<li>Reference tests compare 6×6 block averages, not pixels: at 64 spp the per-pixel noise hid a Fresnel term set to zero (<code>tests/trace/test_tracer.py</code>, <code>error</code>).</li>
+<li>The denoiser test runs on the window room only. At 48×48 a 16-pixel step spans a third of the Cornell box and every filtering adds error there; at 1024×640 the filter cuts the Cornell box's error 3.5 times.</li>
+<li>Directly seen emitters are marked as misses in the guide buffer so the filter leaves them alone; a lamp otherwise bleeds into its neighbours.</li>
 </ul>
 
 <h2>Global constraints</h2>
