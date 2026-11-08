@@ -195,6 +195,7 @@ class PointsMark(Mark):
         else:
             size_arr = np.full(n, 1.0, dtype=np.float32)
 
+        alive_before = engine.store._alive.copy()
         engine.spawn(
             PointCloud(),
             Material(material),
@@ -207,12 +208,9 @@ class PointsMark(Mark):
         # Live-data sync: each frame, copy the user's arrays into ECS
         # component storage so per-frame mutations propagate to the GPU.
         # We capture the arrays + the slice of entity indices via closure.
-        first_entity = int(np.argmax(engine.store._alive)) if n > 0 else 0
-        # `argmax` returns the first True; this works because entities are
-        # spawned contiguously starting at the first free slot. For Plan 4
-        # v1 this is sufficient — multi-mark scenes spawn each mark's
-        # entities in their own contiguous block.
-        entity_slice = slice(first_entity, first_entity + n)
+        # The entities this spawn added, wherever they sit in the store: a mark
+        # spawned before this one (a mesh) holds the first rows.
+        entity_slice = np.flatnonzero(engine.store._alive & ~alive_before)
 
         positions_ref = self.positions.data  # alias the user's array
         color_ref = self.color.data if self.color is not None else None
