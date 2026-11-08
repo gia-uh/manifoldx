@@ -21,11 +21,11 @@ def along_z(mesh):
 # The paving: two noise fields settle it, and a cellular field shades its stones.
 settle = fields.fbm(seed=4, freq=0.12, octaves=3) * 0.05
 wear = fields.fbm(seed=11, freq=0.9, octaves=3) * 0.03
-paving = GeoMesh.plane(width=40, depth=40, segments=128).displace(settle + wear, amount=1.0)
-stones = fields.worley(seed=3, freq=1.6, feature="f2f1")
+paving = GeoMesh.plane(width=40, depth=40, segments=200).displace(settle + wear, amount=1.0)
+stones = fields.worley(seed=3, freq=0.6, feature="f2f1")
 paving = paving.color_by(
     stones,
-    Gradient([(0.00, "#6f685c"), (0.05, "#9a907e"), (0.30, "#c3b7a0"), (0.80, "#cfc4ac")]),
+    Gradient([(0.00, "#5f584c"), (0.12, "#8d8472"), (0.35, "#c3b7a0"), (0.85, "#d8cdb5")]),
 )
 engine.spawn(
     Mesh(paving.to_geometry()),
@@ -92,14 +92,14 @@ engine.spawn(
 )
 # The dome: a dented, smoothed sphere, cut in half, welded and crowned.
 sphere = GeoMesh.icosphere(subdivisions=1, radius=4.2).subdivide(iterations=1, scheme="loop")
-sphere = sphere.inflate(center=(3.0, 2.4, 1.6), radius=1.4, strength=-0.45)
-sphere = sphere.smooth(iterations=2, strength=0.6, center=(3.0, 2.4, 1.6), radius=1.9)
+sphere = sphere.inflate(center=(3.0, 2.4, 1.6), radius=2.0, strength=-0.35)
+sphere = sphere.smooth(iterations=3, strength=0.5, center=(3.0, 2.4, 1.6), radius=2.8)
 dome = sphere.intersection(GeoMesh.box(20, 20, 20).translate((0, 10, 0)))
 dome = dome.decimate(grid=128)
 lattice = dome.ffd(resolution=(3, 3, 3))
 for i in range(4):
     for k in range(4):
-        lattice.move(i, 3, k, (0.0, 0.85, 0.0))
+        lattice.move(i, 3, k, (0.0, 0.25, 0.0))
 dome = lattice.apply().translate((0, 13.0, -24.5))
 engine.spawn(
     Mesh(dome.to_geometry()),

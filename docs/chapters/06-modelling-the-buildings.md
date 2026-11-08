@@ -145,7 +145,9 @@ The copper is old and dented. A sculpt brush is a radial selection with a
 strength: `Falloff` is the region, with weight 1 at its centre and 0 at its rim,
 and `inflate` pushes the selected vertices along their normals. A negative
 strength pushes them inward. We build one by hand to inspect its weights, then
-give its centre and radius to the brush. `smooth` then relaxes the dent with the
+give its centre and radius to the brush. The brush is wide and shallow, a
+two-metre radius and a third of a metre deep, so the copper reads as dented
+rather than pinched. `smooth` then relaxes the dent with the
 one-ring neighbourhood from `adjacency()`, which returns a `VertexAdjacency`: two
 arrays in CSR form, so vertex *i*'s neighbours are
 `neighbors[offsets[i]:offsets[i + 1]]`. `draw`, `pinch` and `flatten` are the
@@ -171,13 +173,13 @@ engine.set_sun(DirectionalLight(color="#fff3dd", intensity=3.2, direction=(-0.45
 engine.enable_shadows(resolution=1024, bias=0.004, pcf_radius=2)
 
 sphere = GeoMesh.icosphere(subdivisions=1, radius=4.2).subdivide(iterations=1, scheme="loop")
-dent = Falloff((3.0, 2.4, 1.6), 1.4)
+dent = Falloff((3.0, 2.4, 1.6), 2.0)
 print(dent.weights(np.array([[3.0, 2.4, 1.6]])), (dent.weights(sphere.positions) > 0).sum())
 adjacency = sphere.adjacency()
 print(type(adjacency).__name__, adjacency.offsets.shape, adjacency.neighbors.shape)
 
-sphere = sphere.inflate(center=dent.center, radius=dent.radius, strength=-0.45)
-sphere = sphere.smooth(iterations=2, strength=0.6, center=dent.center, radius=dent.radius + 0.5)
+sphere = sphere.inflate(center=dent.center, radius=dent.radius, strength=-0.35)
+sphere = sphere.smooth(iterations=3, strength=0.5, center=dent.center, radius=dent.radius + 0.8)
 
 keeper = GeoMesh.box(20, 20, 20).translate((0, 10, 0))
 dome = sphere.intersection(keeper)
@@ -188,7 +190,7 @@ print(dome.positions.shape, dome.faces.shape)
 lattice = dome.ffd(resolution=(3, 3, 3))
 for i in range(4):
     for k in range(4):
-        lattice.move(i, 3, k, (0.0, 0.85, 0.0))
+        lattice.move(i, 3, k, (0.0, 0.25, 0.0))
 dome = lattice.apply().translate((0, 13.0, -24.5))
 
 drum = GeoMesh.cylinder(radius=4.05, height=3.0, segments=40).translate((0, 11.5, -24.5))
@@ -217,9 +219,10 @@ one smooth surface.
 
 `ffd` returns an `FFD`: a Bezier control lattice embedding the mesh, here
 4 × 4 × 4 points over its bounding box. `move` offsets one control point and
-returns the lattice, and `apply` evaluates it. We lift the top row, which turns the hemisphere into a
-slightly pointed crown. With no point moved, the lattice reproduces the original
-mesh within rounding error.
+returns the lattice, and `apply` evaluates it. We lift the top row by a quarter
+of a metre, which gives the hemisphere a gentle crown while it stays a dome.
+With no point moved, the lattice reproduces the original mesh within rounding
+error.
 
 ## Old paving
 
@@ -238,7 +241,9 @@ The stone pattern is another field. `worley` returns the cellular distance
 `Gradient` maps that scalar to colour by interpolating between stops. `color_by`
 does the two steps at once: it samples the field at every vertex and stores the
 result with `with_colors`, and a `StandardMaterial` with `vertex_colors=True`
-draws it.
+draws it. The field's `freq` sets the cells: at 0.6 a cell is about 1.7 m across,
+eight times the plane's 0.2 m vertex spacing, because the pattern lives only in
+vertex colours and a cell narrower than a few vertices dissolves into noise.
 
 ```python {run}
 from PIL import Image
@@ -255,13 +260,13 @@ engine.enable_shadows(resolution=1024, bias=0.004, pcf_radius=2)
 
 settle = fields.fbm(seed=4, freq=0.12, octaves=3) * 0.05
 wear = fields.fbm(seed=11, freq=0.9, octaves=3) * 0.03
-paving = GeoMesh.plane(width=40, depth=40, segments=128).displace(settle + wear, amount=1.0)
+paving = GeoMesh.plane(width=40, depth=40, segments=200).displace(settle + wear, amount=1.0)
 print(paving.positions.shape, paving.faces.shape)
 
-stones = fields.worley(seed=3, freq=1.6, feature="f2f1")
+stones = fields.worley(seed=3, freq=0.6, feature="f2f1")
 paving = paving.color_by(
     stones,
-    Gradient([(0.00, "#6f685c"), (0.05, "#9a907e"), (0.30, "#c3b7a0"), (0.80, "#cfc4ac")]),
+    Gradient([(0.00, "#5f584c"), (0.12, "#8d8472"), (0.35, "#c3b7a0"), (0.85, "#d8cdb5")]),
 )
 engine.spawn(
     Mesh(paving.to_geometry()),
@@ -287,7 +292,7 @@ the message of the missing tree rather than naming the source.
 from manifoldx.modeling import FieldNotTranspilable, field_to_wgsl, fields
 
 settle = fields.fbm(seed=4, freq=0.12, octaves=3) * 0.05
-stones = fields.worley(seed=3, freq=1.6, feature="f2f1")
+stones = fields.worley(seed=3, freq=0.6, feature="f2f1")
 print(field_to_wgsl(settle, name="settle").splitlines()[-2])
 try:
     field_to_wgsl(stones, name="stones")
@@ -400,11 +405,11 @@ def along_z(mesh):
 # The paving: two noise fields settle it, and a cellular field shades its stones.
 settle = fields.fbm(seed=4, freq=0.12, octaves=3) * 0.05
 wear = fields.fbm(seed=11, freq=0.9, octaves=3) * 0.03
-paving = GeoMesh.plane(width=40, depth=40, segments=128).displace(settle + wear, amount=1.0)
-stones = fields.worley(seed=3, freq=1.6, feature="f2f1")
+paving = GeoMesh.plane(width=40, depth=40, segments=200).displace(settle + wear, amount=1.0)
+stones = fields.worley(seed=3, freq=0.6, feature="f2f1")
 paving = paving.color_by(
     stones,
-    Gradient([(0.00, "#6f685c"), (0.05, "#9a907e"), (0.30, "#c3b7a0"), (0.80, "#cfc4ac")]),
+    Gradient([(0.00, "#5f584c"), (0.12, "#8d8472"), (0.35, "#c3b7a0"), (0.85, "#d8cdb5")]),
 )
 engine.spawn(
     Mesh(paving.to_geometry()),
@@ -477,14 +482,14 @@ engine.spawn(
 ```python {run continue export=examples/buildings.py}
 # The dome: a dented, smoothed sphere, cut in half, welded and crowned.
 sphere = GeoMesh.icosphere(subdivisions=1, radius=4.2).subdivide(iterations=1, scheme="loop")
-sphere = sphere.inflate(center=(3.0, 2.4, 1.6), radius=1.4, strength=-0.45)
-sphere = sphere.smooth(iterations=2, strength=0.6, center=(3.0, 2.4, 1.6), radius=1.9)
+sphere = sphere.inflate(center=(3.0, 2.4, 1.6), radius=2.0, strength=-0.35)
+sphere = sphere.smooth(iterations=3, strength=0.5, center=(3.0, 2.4, 1.6), radius=2.8)
 dome = sphere.intersection(GeoMesh.box(20, 20, 20).translate((0, 10, 0)))
 dome = dome.decimate(grid=128)
 lattice = dome.ffd(resolution=(3, 3, 3))
 for i in range(4):
     for k in range(4):
-        lattice.move(i, 3, k, (0.0, 0.85, 0.0))
+        lattice.move(i, 3, k, (0.0, 0.25, 0.0))
 dome = lattice.apply().translate((0, 13.0, -24.5))
 engine.spawn(
     Mesh(dome.to_geometry()),
