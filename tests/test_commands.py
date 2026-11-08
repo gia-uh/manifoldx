@@ -58,4 +58,4 @@ def test_command_execution_order():
     buf.execute(store)
     
     # Final state: entities should be dead
-    assert np.all(store._alive[indices] == False)
+    assert not store._alive[indices].any()
