@@ -8,10 +8,16 @@ on:
 
 jobs:
   test:
+    # lavapipe (mesa-vulkan-drivers) gives the runner a software Vulkan
+    # adapter, so the render tests run here instead of skipping in
+    # tests/conftest.py. tests/web has its own jobs.
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,16 +31,20 @@ jobs:
 
       - name: Install dependencies
         # Offline backend for headless rendering, Pillow (viz) for the texture
-        # tests. The runner has no GPU: tests/conftest.py turns every GPU
-        # adapter request into a skip, so render tests skip instead of erroring.
-        run: uv sync --extra offline --extra viz --extra svg --dev
+        # tests.
+        run: uv sync --locked --extra offline --extra viz --extra svg --dev
 
       - name: Run tests
-        # Tests should pass with OFFSCREEN backend only
-        run: uv run pytest tests/ -v --tb=short
+        # The whole suite on the offscreen backend with the software adapter.
+        # A skip that says there is no adapter means lavapipe did not load.
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest tests/ --ignore=tests/web -v --tb=short -rs | tee tests.log
+          if grep -qE 'SKIPPED.*no GPU adapter' tests.log; then echo "render tests skipped without a GPU adapter"; exit 1; fi
 
       - name: Run linter
-        run: uv run ruff check src/
+        run: uv run ruff check src/ tests/
 
   web:
     # The export and replay tests create an offscreen device for the app's
