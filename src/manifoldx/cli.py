@@ -16,6 +16,7 @@ running under `manifoldx run` in this folder (see manifoldx.devchannel).
     manifoldx look | events | state [key.path] | set '<merge patch>' | emit <event> ['<payload>']
     manifoldx log [-n N] [--after SEQ] [--match REGEX] [--wait S]
     manifoldx metrics [-n N]
+    manifoldx trace scene.glb -o out.png [--camera ...] [--size WxH] [--spp N] [--sun X,Y,Z]
 """
 
 import argparse
@@ -61,7 +62,14 @@ def main(argv=None):
     lg.add_argument("--after", type=int, help="only lines after this sequence number")
     lg.add_argument("--match", help="only lines matching this regex")
     lg.add_argument("--wait", type=float, default=0.0, help="seconds to wait for a line (at most 300)")
+    from manifoldx.trace.command import add_parser as add_trace
+
+    add_trace(sub)
     args = parser.parse_args(argv)
+    if args.command == "trace":
+        from manifoldx.trace.command import run as trace
+
+        return trace(args)
     if args.command in ("look", "state", "set", "emit", "events", "log", "metrics"):
         return dev_command(args)
     if args.command == "run":
