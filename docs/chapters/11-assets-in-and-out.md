@@ -12,8 +12,10 @@ Wavefront OBJ is a text format: `v` lines are positions, `vn` lines are
 normals, `vt` lines are texture coordinates, and `f` lines join them into
 faces. Numbers on a face are 1-indexed references into those lists. That is
 almost the geometry dictionary the engine already draws, so `load_obj` reads a
-file and gives you the dictionary directly: `positions`, `indices`, and
-`normals` or `uvs` when the file carries them.
+file and gives you the dictionary directly: `positions`, `indices`,
+`normals`, and `uvs` when the file carries them. A file without `vn` lines
+gets smooth vertex normals computed from its faces, since a lit surface needs
+them.
 
 The file below is the whole bench, written out so the chapter needs no binary
 asset. It is two boxes: a seat and the plinth under it. The faces use the

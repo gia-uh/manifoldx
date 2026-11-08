@@ -31,11 +31,29 @@ def load_obj(path: str | Path) -> dict:
     Returns:
         {"name": str,
          "positions": (N, 3) float32,
-         "normals":   (N, 3) float32,   # present if file has normals
+         "normals":   (N, 3) float32,   # the file's, or area-weighted vertex normals
          "uvs":       (N, 2) float32,   # present if file has UVs; v flipped to top-left origin
          "indices":   (M,)   uint32}
     """
-    p = Path(path)
+    geo = _load_obj(Path(path))
+    if "normals" not in geo:  # the mesh pipeline needs them
+        geo["normals"] = _vertex_normals(geo["positions"], geo["indices"])
+    return geo
+
+
+def _vertex_normals(positions, indices):
+    """Area-weighted vertex normals of an indexed triangle list."""
+    tri = np.asarray(indices, dtype=np.int64).reshape(-1, 3)
+    a, b, c = (positions[tri[:, k]] for k in range(3))
+    face = np.cross(b - a, c - a)
+    normals = np.zeros_like(positions, dtype=np.float32)
+    for k in range(3):
+        np.add.at(normals, tri[:, k], face)
+    length = np.linalg.norm(normals, axis=1, keepdims=True)
+    return (normals / np.where(length > 0, length, 1)).astype(np.float32)
+
+
+def _load_obj(p: Path) -> dict:
     text = p.read_text()
     geo = _load_triangles(text)
     if geo is not None:
