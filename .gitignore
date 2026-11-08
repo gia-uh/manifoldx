@@ -176,3 +176,6 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 *.mp4
 .manifoldx/
+docs/site/
+docs/.scriptorium/
+docs/build/

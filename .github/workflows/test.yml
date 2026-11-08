@@ -99,3 +99,9 @@ jobs:
           if grep -q SKIPPED browser-tests.log; then echo "browser tests skipped on CI"; exit 1; fi
           # run --web drives the real CLI, the manifoldx script beside sys.executable.
           if ! grep -q "test_run_web.py::.* PASSED" browser-tests.log; then echo "test_run_web.py did not run"; exit 1; fi
+
+  docs:
+    uses: ./.github/workflows/docs.yml
+    with:
+      # docs-check once every chapter is written (0.10 release)
+      target: docs-test
