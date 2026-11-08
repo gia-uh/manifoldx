@@ -429,6 +429,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`demos/labyrinth_fps.py` exports to the web.** The flashlight is a `SpotLight` whose
+  position and aim read the camera rather than frame-code writes the page cannot apply, and
+  the controller keeps the wall grid as a flat list, so the whole demo is inside the subset.
+  Lights stay setup-only in the page, as `know-how/web-export.md` now says (#155).
 - **export --web: a member of an engine object outside the page's runtime surface fails the
   export.** Frame code that called an `Engine` method `RUNTIME_SURFACE` lacks — a bare
   `engine.enable_shadows()`, or the same call inside an expression — transpiled to a call the
