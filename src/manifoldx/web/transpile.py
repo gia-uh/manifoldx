@@ -27,6 +27,7 @@ from .types import (
     ND_ONLY_OPS,
     RANDOM_FUNCTIONS,
     RUNTIME_KEYWORDS,
+    RUNTIME_NAMES,
     RUNTIME_SURFACE,
     STATE,
     STR_METHODS,
@@ -994,6 +995,14 @@ class _Module:
             return f"{self.e(n.value)}.data"
         if not t.all("obj", "none"):
             self.fail(n, f"the attribute .{n.attr} of a {t}")
+        for m in t.members:  # a manifoldx object has only what RUNTIME_SURFACE lists
+            surface = RUNTIME_SURFACE.get(m.name) if m.kind == "obj" else None
+            if surface is not None and m.name not in self.env.classes and n.attr not in surface:
+                what = RUNTIME_NAMES.get(m.name, f"a {m.name.rsplit('.', 1)[-1]}")
+                self.fail(
+                    n,
+                    f"`{ast.unparse(n)}`, a member of {what} outside the page's runtime surface,",
+                )
         if self.env.methods(t, n.attr):  # a bound method keeps its object, as in Python
             return f"{self.rt('bound')}({self.e(n.value)}, {json.dumps(n.attr)})"
         return f"{self.e(n.value)}.{n.attr}"
