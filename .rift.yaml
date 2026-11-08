@@ -1,0 +1,88 @@
+# The guide covers the library: every public class is named in the chapters
+# (error), and every public function and method is named somewhere (warning,
+# because a short name such as `fit` passes on any use of the word).
+# `manifoldx.web` is left out: it is the implementation of `manifoldx export
+# --web`, reached through the command line, which chapter 13 covers.
+
+rules:
+
+  - name: "every class in manifoldx's top-level modules is named in the docs"
+    extract:
+      file: "src/manifoldx/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
+  - name: "every class in manifoldx.assets is named in the docs"
+    extract:
+      file: "src/manifoldx/assets/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
+  - name: "every class in manifoldx.compute is named in the docs"
+    extract:
+      file: "src/manifoldx/compute/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
+  - name: "every class in manifoldx.gltf is named in the docs"
+    extract:
+      file: "src/manifoldx/gltf/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
+  - name: "every class in manifoldx.gui is named in the docs"
+    extract:
+      file: "src/manifoldx/gui/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
+  - name: "every class in manifoldx.humanoid is named in the docs"
+    extract:
+      file: "src/manifoldx/humanoid/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
+  - name: "every class in manifoldx.modeling is named in the docs"
+    extract:
+      file: "src/manifoldx/modeling/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
+  - name: "every class in manifoldx.trace is named in the docs"
+    extract:
+      file: "src/manifoldx/trace/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
+  - name: "every class in manifoldx.viz is named in the docs"
+    extract:
+      file: "src/manifoldx/viz/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
+  - name: "every public function and method is named in the docs"
+    severity: warning
+    extract:
+      file: "src/manifoldx/**/*.py"
+      regex: '^def ([a-z]\w*)|^    def ([a-z]\w*)\((?:self|cls)\b'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
