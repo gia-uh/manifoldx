@@ -53,8 +53,10 @@ and the world; you put things in the world and it draws them.
 
 ```python {run export=examples/first_frame.py}
 import manifoldx as mx
+import numpy as np
 from manifoldx.components import Material, Mesh, Transform
 from manifoldx.resources import DirectionalLight, StandardMaterial, cube, plane
+from PIL import Image
 
 engine = mx.Engine("plaza", width=480, height=270)
 ```
@@ -66,7 +68,7 @@ geometry the engine uploads once; `StandardMaterial` is a physically based
 surface with a colour and a roughness.
 
 ```python {run continue export=examples/first_frame.py}
-FLOOR = (-0.70710678, 0.0, 0.0, 0.70710678)  # a quarter turn about x: lay the plane flat
+FLOOR = Transform.rotation(x=-np.pi / 2)  # a quarter turn about x: lay the plane flat
 
 engine.spawn(
     Mesh(plane(40, 40)),
@@ -81,28 +83,25 @@ engine.spawn(
 ```
 
 `plane` lies in the x-y plane, facing +z, so the floor needs a quarter turn to
-lie flat. A `Transform` takes its rotation as a quaternion `(x, y, z, w)`;
-`FLOOR` is the quarter turn about the x axis.
+lie flat. A `Transform` stores its rotation as a quaternion `(x, y, z, w)`;
+`Transform.rotation` builds one from angles in radians about x, y and z, so
+`FLOOR` is a quarter turn about the x axis.
 
 The `Camera` comes with the engine. `set_pose` puts it at the visitor's eye
 and points it at the fountain; a `DirectionalLight` is the sun.
 
 ```python {run continue export=examples/first_frame.py}
 engine.camera.set_pose(position=(14, 9, 14), target=(0, 0, 0))
-engine.set_sun(
-    DirectionalLight(color="#ffffff", intensity=3.0, direction=(-0.4, -1, -0.3))
-)
+engine.set_sun(DirectionalLight(color="#ffffff", intensity=3.0, direction=(-0.4, -1, -0.3)))
 ```
 
 ## Seeing it
 
 `render_frame` draws one frame offscreen and returns it as a numpy array of
 shape `(height, width, 3)`, so it works on a server, in a notebook and in this
-guide. Pillow turns the array into an image.
+guide. Pillow, imported at the top, turns the array into an image.
 
 ```python {run continue export=examples/first_frame.py}
-from PIL import Image
-
 frame = engine.render_frame()
 print(frame.shape, frame.dtype)
 Image.fromarray(frame)
