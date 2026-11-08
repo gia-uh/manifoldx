@@ -434,6 +434,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `engine.enable_shadows()`, or the same call inside an expression — transpiled to a call the
   page has no member for and threw only there; the export now stops at its file and line, as
   it does for other constructs outside the subset (#171).
+- **`set_geometry` moves the shadow auto-fit bounds.** The renderer cached each geometry's
+  local bounding box; after `EntityHandle.set_geometry` wrote vertices outside it, a
+  `enable_shadows(auto_fit=True)` frustum was still fit to the old box and clipped the new
+  shape's shadow. `set_geometry` now mirrors the new positions into the registry and drops
+  the cached box (#83).
 - **`engine.elapsed` advances under a fixed timestep.** `_compute_dt` returns the fixed
   step without touching the clock, so `engine.elapsed` stayed at its start value and
   `engine.delay()` and `elapsed_at()` never resolved. Each frame now adds its fixed dt

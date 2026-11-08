@@ -1,14 +1,50 @@
 name: Release
 
+# A tag v<version> publishes manifold-gfx to PyPI and makes a GitHub release
+# with that version's CHANGELOG section. Nothing publishes unless the whole
+# test suite passes on lavapipe, the docs gate passes, and the tag matches
+# pyproject.toml. Re-running it on the same tag is safe.
 on:
   push:
     tags:
       - 'v*'
 
 jobs:
-  release:
+  test:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies from the lockfile
+        run: uv sync --locked --extra offline --extra viz --extra svg --dev
+
+      - name: Tag matches the version in pyproject.toml
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          [ "$tag" = "$declared" ] || { echo "::error::tag $GITHUB_REF_NAME != pyproject version $declared"; exit 1; }
+
+      - name: Run the whole suite
+        run: uv run pytest tests/ -q --tb=short
+
+  docs:
+    uses: ./.github/workflows/docs.yml
+    with:
+      target: docs-check
+
+  publish:
+    needs: [test, docs]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -17,8 +53,34 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Build package
+      - name: Build the sdist and the wheel
         run: uv build
 
+      - name: Install the wheel in a clean environment and import it
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke dist/*.whl
+          /tmp/smoke/bin/python -c "import manifoldx, sys; print(manifoldx.Engine); sys.exit(0)"
+
       - name: Publish to PyPI
-        run: uv publish --token ${{ secrets.PYPI_TOKEN }}
+        # --check-url skips files PyPI already has, so a re-run does not fail on them.
+        run: uv publish --token "${{ secrets.PYPI_TOKEN }}" --check-url https://pypi.org/simple/
+
+      - name: GitHub release with the CHANGELOG section
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          text = pathlib.Path("CHANGELOG.md").read_text()
+          m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
+          pathlib.Path("notes.md").write_text(m.group(1).strip() + "\n" if m else "")
+          PY
+          if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" "${notes[@]}"
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${notes[@]}" dist/*
+          fi
