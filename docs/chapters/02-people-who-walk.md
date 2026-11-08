@@ -255,7 +255,7 @@ batches for 200 people; one person with a material of their own adds a fifth.
 `Colors` is the short list of named hex strings we spawned from, and `Color` is
 the value behind them: `Color(Colors.CYAN).r` reads a channel, `to_linear` and
 `to_srgb` convert between the two meanings of a colour. A material takes the hex
-string or the three sRGB floats, not the `Color` object.
+string, the three sRGB floats or the `Color` itself.
 
 ```python {run continue export=examples/walkers.py}
 leader = walkers[0]

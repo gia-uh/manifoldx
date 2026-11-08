@@ -53,6 +53,9 @@ def material_rgb(color) -> np.ndarray:
     sRGB and decoded on sampling: `#cc2222` as `color=` and as an albedo map
     render alike.
     """
+    if hasattr(color, "to_linear"):  # a manifoldx.types.Color knows its own space
+        lin = color.to_linear()
+        return np.array([lin.r, lin.g, lin.b], dtype=np.float32)
     if isinstance(color, str):
         h = color.lstrip("#")
         rgb = [int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0]
