@@ -38,7 +38,7 @@ def test_spawn_single():
     store.register_component("position", np.dtype("f4"), shape=(3,))
     indices = store.spawn(n=1, position=[[1, 2, 3]])
     assert len(indices) == 1
-    assert store._alive[indices[0]] == True
+    assert store._alive[indices[0]]
 
 
 def test_spawn_multiple():
@@ -70,8 +70,8 @@ def test_destroy():
     store.register_component("position", np.dtype("f4"), shape=(3,))
     indices = store.spawn(n=10, position=np.random.rand(10, 3))
     store.destroy(indices[:5])
-    assert np.all(store._alive[indices[:5]] == False)
-    assert np.all(store._alive[indices[5:]] == True)
+    assert not store._alive[indices[:5]].any()
+    assert store._alive[indices[5:]].all()
 
 
 def test_query_basic():

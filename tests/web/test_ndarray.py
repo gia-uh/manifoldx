@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from manifoldx.web import transpile_app
@@ -155,7 +156,6 @@ ULPS = {"sin": 1, "cos": 1, "exp": 2}
 
 def ulps(want, got) -> "np.ndarray":
     """How many representable values of want's dtype lie between want and got."""
-    import numpy as np
 
     ints = {np.float32: np.int32, np.float64: np.int64}[want.dtype.type]
     got = np.asarray(got, dtype=want.dtype)

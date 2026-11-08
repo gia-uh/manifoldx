@@ -10,12 +10,12 @@ def test_transform_cache_dirty_flag():
     cache = TransformCache(max_entities=100)
     
     # Initially all dirty
-    assert np.all(cache._dirty == True)
+    assert cache._dirty.all()
     
     # Mark some as clean
     cache._dirty[5:10] = False
-    assert np.all(cache._dirty[:5] == True)
-    assert np.all(cache._dirty[5:10] == False)
+    assert cache._dirty[:5].all()
+    assert not cache._dirty[5:10].any()
 
 
 def test_transform_cache_mark_dirty():
@@ -25,15 +25,15 @@ def test_transform_cache_mark_dirty():
     cache = TransformCache(max_entities=100)
     
     # Initially all dirty
-    assert np.all(cache._dirty == True)
+    assert cache._dirty.all()
     
     indices = np.array([0, 5, 10])
     cache.mark_dirty(indices)
     
     # Those indices should be dirty
-    assert cache._dirty[0] == True
-    assert cache._dirty[5] == True
-    assert cache._dirty[10] == True
+    assert cache._dirty[0]
+    assert cache._dirty[5]
+    assert cache._dirty[10]
 
 
 def test_render_pipeline():

@@ -64,5 +64,5 @@ def test_blender_imports_the_example(tmp_path):
               "print('COUNTS', len(bpy.data.meshes), len(bpy.data.materials))")
     res = subprocess.run(["blender", "-b", "--factory-startup", "--python-expr", script],
                          capture_output=True, text=True, timeout=300)
-    line = next(l for l in res.stdout.splitlines() if l.startswith("COUNTS"))
+    line = next(ln for ln in res.stdout.splitlines() if ln.startswith("COUNTS"))
     assert line == "COUNTS 1 1", res.stdout[-2000:]
