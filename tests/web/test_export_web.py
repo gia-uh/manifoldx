@@ -822,6 +822,46 @@ def test_a_runtime_write_the_page_does_not_apply_fails_the_export(
     assert f"app.py:{line}: writing {what} the page does not apply, is outside the subset" in err
 
 
+ENGINE_MEMBER = """
+import manifoldx as mx
+
+engine = mx.Engine("surface", width=320, height=200)
+
+
+def tick(query, dt: float):
+    {use}
+
+
+engine.system(tick)
+engine.run()
+"""
+
+
+@pytest.mark.parametrize(
+    "use, member",
+    [
+        ("engine.enable_shadows()", "engine.enable_shadows"),
+        ("on = engine.enable_shadows()", "engine.enable_shadows"),
+        ("if engine.enable_shadows():\n        engine.log('on')", "engine.enable_shadows"),
+    ],
+)
+def test_an_engine_member_outside_the_runtime_surface_fails_the_export(
+    app_dir, tmp_path, capsys, use, member
+):
+    """gia-uh/manifoldx#171: a bare call to an Engine method RUNTIME_SURFACE lacks transpiled
+    and threw only in the page; a read, or a call inside an expression, was the same gap."""
+    out = tmp_path / "out"
+    src = ENGINE_MEMBER.replace("{use}", use)
+    assert _export(app_dir, out, src) == 1
+    line = src.splitlines().index(f"    {use.splitlines()[0]}") + 1
+    err = capsys.readouterr().err
+    assert (
+        f"app.py:{line}: `{member}`, a member of the engine outside the page's runtime surface, "
+        "is outside the subset (reached from system tick)"
+    ) in err
+    assert not out.exists()
+
+
 @pytest.mark.parametrize(
     "write, what",
     [
