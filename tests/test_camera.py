@@ -595,3 +595,20 @@ class TestRendererCameraIntegration:
         assert "get_view_projection_matrix" in source, (
             "Renderer should use camera.get_view_projection_matrix() for VP matrix"
         )
+
+
+def test_a_camera_looking_along_its_up_axis_has_a_view_matrix():
+    """A top view (looking straight down, up = +y) used to divide by zero."""
+    import numpy as np
+
+    from manifoldx.camera import Camera
+
+    cam = Camera()
+    cam.set_pose(position=(0, 9, 0), target=(0, 0, 0))
+    view = cam.get_view_matrix()
+    assert np.all(np.isfinite(view))
+    # The target is straight ahead (-z in view space), 9 m away.
+    np.testing.assert_allclose(view @ np.array([0, 0, 0, 1.0]), [0, 0, -9, 1], atol=1e-5)
+    # North (-z in the world) is up on the screen.
+    assert (view @ np.array([0, 0, -1, 1.0]))[1] > 0
+    assert np.all(np.isfinite(cam.get_right())) and np.all(np.isfinite(cam.get_up()))

@@ -44,6 +44,10 @@ class Camera:
         ux, uy, uz = (float(v) for v in self.up)
         rx, ry, rz = fy * uz - fz * uy, fz * ux - fx * uz, fx * uy - fy * ux  # forward x up
         n = math.sqrt(rx * rx + ry * ry + rz * rz)
+        if n < 1e-9:  # looking along up (a top view): world -z, north, is up on screen
+            ux, uy, uz = (0.0, 0.0, -1.0) if abs(fz) < 0.9 else (0.0, 1.0, 0.0)
+            rx, ry, rz = fy * uz - fz * uy, fz * ux - fx * uz, fx * uy - fy * ux
+            n = math.sqrt(rx * rx + ry * ry + rz * rz)
         rx, ry, rz = rx / n, ry / n, rz / n
         tx, ty, tz = ry * fz - rz * fy, rz * fx - rx * fz, rx * fy - ry * fx  # right x forward
 
@@ -61,15 +65,10 @@ class Camera:
         return direction / np.linalg.norm(direction)
 
     def get_right(self):
-        forward = self.get_forward()
-        right = np.cross(forward, self.up)
-        return right / np.linalg.norm(right)
+        return self.get_view_matrix()[0, :3]  # the view's first row, top views included
 
     def get_up(self):
-        right = self.get_right()
-        forward = self.get_forward()
-        up = np.cross(right, forward)
-        return up / np.linalg.norm(up)
+        return self.get_view_matrix()[1, :3]
 
     def get_view_projection_matrix(self, aspect):
         view = self.get_view_matrix()
