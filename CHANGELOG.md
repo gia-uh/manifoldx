@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The path tracer in a web page.** `src/manifoldx/trace/web/trace.js` runs `manifoldx.trace`'s
+  WGSL kernels on the page's WebGPU device: `loadGlb(url, {overrides, hide})` reads a .glb as
+  `Scene.from_glb` does, the BVH is built in a worker, `createTracer(scene, {canvas, environment})`
+  refines on a canvas with `start()` and restarts when `setCamera` moves the camera; `image()`,
+  `radiance()` and `denoised()` read the result back. `manifoldx.trace.web.copy_to(dest)` writes
+  the files a site serves. The kernels now bind at most 8 storage buffers per stage (WebGPU's
+  default): the read-only tables share one buffer, and the denoiser's preparation runs in WGSL
+  (`prep.wgsl`) in Python too (#178).
+
 - **A path tracer, `manifoldx.trace`.** `Scene.from_glb(path, overrides)` reads any .glb
   (node trees, PBR factors, emission, transmission and volume, alpha blend as thin glass,
   base-colour textures, vertex colours, cameras, `KHR_lights_punctual`, the environment map
