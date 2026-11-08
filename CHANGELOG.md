@@ -429,6 +429,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`set_geometry` moves the shadow auto-fit bounds.** The renderer cached each geometry's
+  local bounding box; after `EntityHandle.set_geometry` wrote vertices outside it, a
+  `enable_shadows(auto_fit=True)` frustum was still fit to the old box and clipped the new
+  shape's shadow. `set_geometry` now mirrors the new positions into the registry and drops
+  the cached box (#83).
 - **GUI panels honour all nine anchors on the desktop.** A root panel anchored anywhere but
   top-left painted and hit-tested at the top-left. Paint and hit-test now place it through
   one function, `gui.layout.anchored_slot`, by the page's rule: the offset measured inward

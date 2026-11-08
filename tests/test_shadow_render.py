@@ -190,6 +190,24 @@ def test_scene_bounds_matches_known_scene():
     assert abs(radius - (np.sqrt(72.0) / 2)) < 0.1
 
 
+def test_set_geometry_moves_the_auto_fit_bounds():
+    eng = _make_offscreen_engine()
+    eng.set_sun(DirectionalLight(color="#ffffff", intensity=3.0, direction=(-0.3, -1.0, -0.3)))
+    eng.enable_shadows(auto_fit=True)
+    geo = sphere(1.0, 16)
+    h = eng.spawn(Mesh(geo), Material(StandardMaterial(color="#ffffff")), Transform())
+    _render_array(eng)  # the vertex buffer exists, so set_geometry rewrites it
+    eng._render_pipeline._scene_bounds(eng)  # warm the per-geometry local-bounds cache
+
+    moved = {**geo, "positions": np.asarray(geo["positions"], np.float32) + np.float32([8, 0, 0])}
+    h.set_geometry(moved)
+    center, radius = eng._render_pipeline._scene_bounds(eng)
+
+    np.testing.assert_allclose(center, [8, 0, 0], atol=0.2)
+    dist = np.linalg.norm(moved["positions"] - center, axis=1)
+    assert dist.max() <= radius + 1e-4  # the fitted sphere contains the new vertices
+
+
 def test_auto_fit_casts_shadow_without_manual_extent():
     # No target/extent given — auto-fit must produce a working frustum on its own.
     eng = _make_offscreen_engine(w=192, h=192)
