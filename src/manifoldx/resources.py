@@ -1529,7 +1529,7 @@ class GeometryRegistry:
             )
             queue.write_buffer(index_buffer, 0, data)
             buffers["index_buffer"] = index_buffer
-            buffers["index_count"] = len(indices)
+            buffers["index_count"] = int(np.asarray(indices).size)  # (M, 3) triangles too
 
         self._gpu_buffers[geometry_id] = buffers
         return buffers
