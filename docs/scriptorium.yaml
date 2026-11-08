@@ -1,0 +1,36 @@
+# ManifoldX, the guide. Every Python block runs against the installed package when
+# the docs render (`make docs`): the frames you see were drawn by the code above
+# them, on a software GPU when no hardware one is present. The chapters follow one
+# project, a small town plaza, and each one tangles its finished program into
+# docs/examples/.
+theme: book
+execute: {timeout: 300, freeze: file}
+
+vars:
+  title: "ManifoldX"
+  subtitle: "Simulations and scenes in 3D, from Python and numpy"
+
+files:
+  - chapters/00-index.md
+  - chapters/01-a-first-frame.md
+  - chapters/02-people-who-walk.md
+  - chapters/03-reacting-to-the-visitor.md
+  - chapters/04-light-and-surface.md
+  - chapters/05-sky-water-and-textures.md
+  - chapters/06-modelling-the-buildings.md
+  - chapters/07-bodies-and-poses.md
+  - chapters/08-measuring-the-plaza.md
+  - chapters/09-a-control-panel.md
+  - chapters/10-crowds-on-the-gpu.md
+  - chapters/11-assets-in-and-out.md
+  - chapters/12-a-still-worth-printing.md
+  - chapters/13-working-with-an-agent.md
+  - chapters/14-the-plaza-end-to-end.md
+
+outputs:
+  site:
+    format: docs
+    dir: site
+    repo-url: https://github.com/gia-uh/manifoldx
+    version: auto
+    footer: "ManifoldX is MIT-licensed. Made at GIA-UH."

@@ -62,6 +62,9 @@ dev = [
     "manifold-gfx[offline]",
     "pygltflib>=1.16.5",
 ]
+docs = [
+    "scriptorium",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -73,3 +76,6 @@ markers = [
     "slow: marks tests as slow (CPU-heavy precompute; excluded from default `make test`)",
 ]
 addopts = "-m 'not slow'"
+
+[tool.uv.sources]
+scriptorium = { git = "https://github.com/apiad/scriptorium", rev = "v0.14.0" }
