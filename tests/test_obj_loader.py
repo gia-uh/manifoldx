@@ -159,9 +159,10 @@ HEAD = (
 
 
 def _check(geo, name, pos, idx, uv=None, nrm=None):
+    # A file without normals gets computed ones, appended last.
     assert list(geo) == ["name", "positions", "indices"] + (["normals"] if nrm is not None else []) + (
         ["uvs"] if uv is not None else []
-    )
+    ) + (["normals"] if nrm is None else [])
     assert geo["name"] == name
     assert geo["positions"].dtype == np.float32 and geo["indices"].dtype == np.uint32
     np.testing.assert_array_equal(geo["positions"], np.array([P[i] for i in pos], np.float32))
@@ -270,3 +271,26 @@ def test_vectorised_path_matches_the_line_parser(tmp_path, monkeypatch, form):
         if k != "name":
             assert fast[k].dtype == slow[k].dtype
             np.testing.assert_array_equal(fast[k], slow[k])
+
+
+def test_an_obj_without_normals_gets_vertex_normals_and_renders(tmp_path):
+    """A position-only OBJ loaded fine but the mesh pipeline needs normals:
+    the first frame failed with a vertex-stride validation error."""
+    import manifoldx as mx
+    from manifoldx.assets import load_obj
+    from manifoldx.components import Material, Mesh, Transform
+    from manifoldx.resources import FlatMaterial
+
+    p = tmp_path / "tri.obj"
+    p.write_text("v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n")
+    geo = load_obj(p)
+    np.testing.assert_allclose(geo["normals"], [[0, 0, 1]] * 3, atol=1e-6)
+    try:
+        from manifoldx.backends import get_offscreen_canvas
+        get_offscreen_canvas(width=8, height=8)
+    except Exception as e:
+        pytest.skip(f"offscreen canvas unavailable: {e}")
+    e = mx.Engine("obj", width=16, height=16)
+    e.camera.set_pose(position=(0, 0, 3), target=(0, 0, 0))
+    e.spawn(Mesh(geo), Material(FlatMaterial("#cc2222")), Transform())
+    assert e.render_frame(supersample=1)[8, 8, 0] > 150
