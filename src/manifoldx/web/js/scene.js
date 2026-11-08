@@ -15,12 +15,19 @@ export const CALIBRATION = { environment: 1.45, sun: 1.0 };
 
 // The desktop lights BasicMaterial and PhongMaterial with a fixed light from (1, 1, 1) in world
 // space: 0.3 ambient + 0.7 Lambert (resources.py, the basic shader).
-// A skinned mesh's normal is its joint-posed one (objectNormal, skinnormal_vertex's).
+// A skinned mesh's normal is its joint-posed one (objectNormal, skinnormal_vertex's). An
+// InstancedMesh's instanceMatrix turns the instance before modelMatrix does, so the normal takes
+// both, as three.js's own defaultnormal_vertex chunk does under USE_INSTANCING.
 const BASIC_VERTEX = [
-  "#ifdef USE_SKINNING",
-  "\tvMxNormal = normalize( mat3( modelMatrix ) * objectNormal );",
+  "#ifdef USE_INSTANCING",
+  "\tmat3 mxNormalMatrix = mat3( modelMatrix ) * mat3( instanceMatrix );",
   "#else",
-  "\tvMxNormal = normalize( mat3( modelMatrix ) * normal );",
+  "\tmat3 mxNormalMatrix = mat3( modelMatrix );",
+  "#endif",
+  "#ifdef USE_SKINNING",
+  "\tvMxNormal = normalize( mxNormalMatrix * objectNormal );",
+  "#else",
+  "\tvMxNormal = normalize( mxNormalMatrix * normal );",
   "#endif",
 ].join("\n");
 const BASIC_FRAGMENT = "\tdiffuseColor.rgb *= 0.3 + 0.7 * max( dot( normalize( vMxNormal ), normalize( vec3( 1.0 ) ) ), 0.0 );";

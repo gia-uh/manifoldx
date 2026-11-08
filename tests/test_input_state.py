@@ -3,6 +3,7 @@ import pytest
 from dataclasses import FrozenInstanceError
 
 from manifoldx.input import (
+    InputState,
     KeyEvent,
     PointerEvent,
     WheelEvent,
@@ -45,8 +46,6 @@ def test_resize_event_fields():
     with pytest.raises(FrozenInstanceError):
         ev.width = 0
 
-
-from manifoldx.input import InputState
 
 
 def test_is_pressed_reflects_live_state_without_frame_swap():
@@ -108,8 +107,6 @@ def test_modifiers_property_reflects_latest_event():
     state._record_key_up("a", modifiers=())
     assert state.modifiers == ()
 
-
-from manifoldx.input import PointerEvent, WheelEvent, ResizeEvent
 
 
 def _pmove(x: float, y: float, dx: float, dy: float) -> PointerEvent:

@@ -433,6 +433,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position and aim read the camera rather than frame-code writes the page cannot apply, and
   the controller keeps the wall grid as a flat list, so the whole demo is inside the subset.
   Lights stay setup-only in the page, as `know-how/web-export.md` now says (#155).
+- **The test job runs the suite on a software GPU, and lint covers the tests.** CI's `test`
+  job installs lavapipe (`mesa-vulkan-drivers`), so the render tests run instead of
+  skipping: it runs `tests/ --ignore=tests/web`, prints skip reasons with `-rs` and fails
+  on a skip that says no GPU adapter. `ruff check` now covers `tests/` too, and the old
+  test files' lint errors are fixed.
+
 - **export --web: a member of an engine object outside the page's runtime surface fails the
   export.** Frame code that called an `Engine` method `RUNTIME_SURFACE` lacks — a bare
   `engine.enable_shadows()`, or the same call inside an expression — transpiled to a call the
@@ -448,6 +454,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `engine.delay()` and `elapsed_at()` never resolved. Each frame now adds its fixed dt
   once its systems have run, keeping the page's rule: 0 before the first step, then one
   dt per simulated step (#168).
+- **export --web: instanced meshes are lit with their instance rotation.** The page's fixed
+  light for `BasicMaterial` and `PhongMaterial` built the normal from `modelMatrix` alone, so
+  every instance of a batch was shaded as if unrotated; it now takes `instanceMatrix` too,
+  under `USE_INSTANCING`, as three.js's own chunks do, and rotated boxes match the desktop
+  (#172).
 - **GUI panels honour all nine anchors on the desktop.** A root panel anchored anywhere but
   top-left painted and hit-tested at the top-left. Paint and hit-test now place it through
   one function, `gui.layout.anchored_slot`, by the page's rule: the offset measured inward

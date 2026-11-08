@@ -25,7 +25,7 @@ def _make_offscreen_engine():
 def test_transpiled_gravity_matches_hand_written_wgsl_after_one_frame():
     """Same initial state → run one frame each → arrays agree to rtol=1e-5."""
     from manifoldx.compute import Compute, Reads, ReadsWrites, Uniform
-    from manifoldx.compute.shader import vec3, dot, sqrt
+    from manifoldx.compute.shader import vec3, dot, sqrt, u32
     from manifoldx.components import Component, Material, Mesh, Transform
     from manifoldx.types import Float, Vector3
     from manifoldx.resources import BasicMaterial, sphere
