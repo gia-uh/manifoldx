@@ -91,8 +91,9 @@ class CarParams:
     cladding: bool = False  # black lower body
     door_strip: bool = True  # a black strip with a chrome line low on the doors
     fog_rings: bool = True  # a lit ring at each end of the grille
-    # Resolution.
+    # Resolution and shading.
     sections: int = 28
+    crease: float = 40.0  # degrees: an edge that turns more than this is shaded sharp
 
 
 @dataclass
@@ -340,7 +341,7 @@ def _body_faces(p: CarParams, u, P, raised):
     verts = P.reshape(-1, 3)
     def vid(i, j):
         return i * RING + j % RING
-    tris, mats, parts = [], [], []
+    tris, mats, parts, bands = [], [], [], []
     for i in range(S - 1):
         um = (u[i] + u[i + 1]) / 2
         for j in range(RING):
@@ -368,6 +369,7 @@ def _body_faces(p: CarParams, u, P, raised):
             tris += [(a, c, e), (c, d, e)] if far else [(a, c, d), (a, d, e)]
             mats += pair
             parts += [part, part]
+            bands += [b, b]
     # Close the ends with fans; the nose and tail are bumper paint.
     verts = list(verts)
     for i, part in ((0, "body"), (S - 1, "body")):
@@ -378,13 +380,14 @@ def _body_faces(p: CarParams, u, P, raised):
             tris.append(t)
             mats.append("paint")
             parts.append(part)
+            bands.append(-1)
     verts = np.array(verts)
     tris = np.array(tris)
     # Outward normals: the enclosed volume must be positive.
     a, b, c = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
     if np.einsum("ij,ij->i", a, np.cross(b, c)).sum() < 0:
         tris = tris[:, ::-1]
-    return verts, tris, np.array(mats), np.array(parts)
+    return verts, tris, np.array(mats), np.array(parts), np.array(bands)
 
 
 def _region(p: CarParams, u, b, ut, v):
@@ -490,7 +493,7 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         if np.dot(np.cross(pts[tri[0, 1]] - pts[tri[0, 0]], pts[tri[0, 2]] - pts[tri[0, 0]]), d) > 0:
             tri = tri[:, ::-1]  # face the viewer, not the skin
         if view in ("front", "rear"):  # the same projection the skin under it uses in its view's island
-            Wv, Hv = p.width + 0.3, p.height + 0.1
+            Wv, Hv = p.width + VIEW_MARGIN[1], p.height + VIEW_MARGIN[2]
             uv = _island(view, (Wv / 2 - sign * pts[:, 2]) / Wv, (Hv - pts[:, 1]) / Hv)
         out.append((mat, str(names[counts.argmax()]), pts, tri, uv))
 
@@ -568,19 +571,18 @@ def _wheel(p: CarParams, x, side):
 
 # --- texture atlas ------------------------------------------------------------------------------------------
 
-# Islands of the atlas as (s0, t0, s1, t1), with t growing down the image as in glTF. The exterior skin is one
-# strip unrolled like a paper model, in the car's own proportions but for a shrunk underbody: the front at the left, the rear at the right;
-# from the top, the underbody, the right side upside down, its windows, the roof, the left windows and the left
-# side the right way up. Faces that look forward or back are projected as seen from the front and from behind
-# instead, so lamps and grille get the resolution they need.
+# Islands of the atlas as (s0, t0, s1, t1), with t growing down the image as in glTF. Each face of the skin goes
+# to the view that sees it best and is drawn there as that view shows it: the left side (front at the left), the
+# right side (front at the right), the top (front at the left, the car's right side up), the front and the rear.
+# So every island is a picture of the car a person, a paint program or an image model reads at a glance, and a
+# photo taken from that side lines up with it.
 ATLAS = {
-    "body": (0.01, 0.01, 0.74, 0.66), "front": (0.01, 0.67, 0.41, 0.99), "rear": (0.42, 0.67, 0.82, 0.99),
-    "wheel": (0.75, 0.01, 0.99, 0.25), "cabin": (0.75, 0.26, 0.99, 0.45), "interior": (0.75, 0.46, 0.99, 0.66),
-    "small": (0.83, 0.67, 0.99, 0.82),
+    "left": (0.01, 0.01, 0.71, 0.29), "right": (0.01, 0.30, 0.71, 0.58), "top": (0.01, 0.59, 0.71, 0.95),
+    "front": (0.72, 0.01, 0.99, 0.22), "rear": (0.72, 0.23, 0.99, 0.44), "wheel": (0.72, 0.45, 0.99, 0.72),
+    "cabin": (0.72, 0.73, 0.99, 0.86), "small": (0.72, 0.87, 0.85, 0.99), "interior": (0.86, 0.87, 0.99, 0.99),
+    "bottom": (0.01, 0.96, 0.35, 0.99),
 }
-
-
-UNDERBODY_SCALE = 0.25  # the underbody takes this much of its true height in the strip: nobody looks at it
+VIEW_MARGIN = (0.1, 0.3, 0.1)  # what a view shows beyond the car's length, width and height (m)
 
 
 def _island(name, s, t):
@@ -588,37 +590,69 @@ def _island(name, s, t):
     return np.column_stack([s0 + np.clip(s, 0, 1) * (s1 - s0), t0 + np.clip(t, 0, 1) * (t1 - t0)])
 
 
-def _planar_uv(v, island):
-    """Project a part side-on (x, y) into its island, fitted to its own bounds."""
+def _planar_uv(v, island, cell=(0, 1)):
+    """Project a part side-on (x, y) into its island, fitted to its own bounds; cell (i, n) keeps it to the i-th
+    of n columns, so parts that share an island do not overlap."""
     lo, hi = v[:, :2].min(0), v[:, :2].max(0)
     span = np.maximum(hi - lo, 1e-6).max()
-    return _island(island, (v[:, 0] - lo[0]) / span, (hi[1] - v[:, 1]) / span)
+    return _island(island, (cell[0] + 0.96 * (v[:, 0] - lo[0]) / span) / cell[1], (hi[1] - v[:, 1]) / span)
 
 
-def _body_uvs(p: CarParams, u, verts, tris):
-    """Per-corner texture coordinates of the skin (outside and inside), from the loft's own coordinates."""
+def _corner_normals(verts, tris, crease):
+    """A normal per triangle corner: the area-weighted mean of the faces round its vertex that turn less than
+    `crease` degrees from the corner's own face. Soft bends shade smooth and sharp ones keep an edge."""
+    a, b, c = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+    area = np.cross(b - a, c - a)
+    unit = area / (np.linalg.norm(area, axis=1, keepdims=True) + 1e-12)
+    out = np.zeros((len(tris), 3, 3))
+    order = np.argsort(tris.ravel(), kind="stable")
+    cuts = np.flatnonzero(np.concatenate([[True], np.diff(tris.ravel()[order]) > 0, [True]]))
+    for s0, s1 in zip(cuts[:-1], cuts[1:]):
+        face, corner = order[s0:s1] // 3, order[s0:s1] % 3
+        near = unit[face] @ unit[face].T > np.cos(np.radians(crease))
+        out[face, corner] = near @ area[face]
+    return out / (np.linalg.norm(out, axis=2, keepdims=True) + 1e-12)
+
+
+def _body_uvs(p: CarParams, u, verts, tris, bands):
+    """Per-corner texture coordinates of the skin, outside and inside. Outside, a face is drawn in the view that
+    sees it best; inside, it takes the loft's own coordinates (along the car, round the section)."""
     S = len(u)
+    pts = verts[tris]
+    x, y, z = pts[..., 0].ravel(), pts[..., 1].ravel(), pts[..., 2].ravel()
+    n = np.cross(pts[:, 1] - pts[:, 0], pts[:, 2] - pts[:, 0])
+    k = int((bands >= 0).sum())  # the loft's triangles come two to a quad: both go where the quad's normal says
+    n[:k] = np.repeat(n[0:k:2] + n[1:k:2], 2, axis=0)
+    n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
+    Lv, Wv, Hv = p.length + VIEW_MARGIN[0], p.width + VIEW_MARGIN[1], p.height + VIEW_MARGIN[2]
+    def view(name, s, t):
+        return _island(name, s, t).reshape(-1, 3, 2)
+    views = {
+        "left": view("left", (Lv / 2 - x) / Lv, (Hv - y) / Hv), "right": view("right", (Lv / 2 + x) / Lv, (Hv - y) / Hv),
+        "top": view("top", (Lv / 2 - x) / Lv, (Wv / 2 - z) / Wv), "bottom": view("bottom", (Lv / 2 - x) / Lv, (Wv / 2 + z) / Wv),
+        "front": view("front", (Wv / 2 - z) / Wv, (Hv - y) / Hv), "rear": view("rear", (Wv / 2 + z) / Wv, (Hv - y) / Hv),
+    }
+    # Bands say most of it: the floor looks down, the roof bands look up, the flank looks sideways. The two bands
+    # between belt and roof are glass beside the cabin, but the shoulder of the hood ahead of it and of the tail
+    # behind it, which look up.
+    caps = bands < 0
+    uc = 0.5 - pts[..., 0].mean(1) / p.length
+    up = (bands >= 8) | ((bands >= 6) & ((uc < p.cowl_u - 0.01) | (uc >= p.hatch_u)))
+    side = np.where(n[:, 2] < 0, "left", "right")
+    where = np.where(bands <= 1, "bottom", np.where(up, "top", side))
+    where = np.where((n[:, 0] > 0.55) | (caps & (pts[..., 0].mean(1) > 0)), "front", where)
+    where = np.where((n[:, 0] < -0.55) | (caps & (pts[..., 0].mean(1) < 0)), "rear", where)
+    out = np.zeros((len(tris), 3, 2))
+    for name, uv in views.items():
+        out[where == name] = uv[where == name]
     grid = verts[: S * RING].reshape(S, RING, 3)
     seg = np.linalg.norm(np.diff(np.concatenate([grid, grid[:, :1]], 1), axis=1), axis=2).mean(0)
-    seg *= np.where(np.array([_band(j) for j in range(RING)]) <= 1, UNDERBODY_SCALE, 1.0)
     V = np.concatenate([[0], np.cumsum(seg)]) / seg.sum()  # around the ring, by mean arc length; RING + 1 values
     U = np.concatenate([np.repeat(u, RING), [0.0, 1.0]])  # the two cap centres last
     J = np.concatenate([np.tile(np.arange(RING), S), [0, 0]])
-    a, b, c = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
-    nx = np.cross(b - a, c - a)
-    nx = nx[:, 0] / (np.linalg.norm(nx, axis=1) + 1e-12)
-    caps = tris.max(1) >= S * RING
     loft = np.stack([U[tris], V[J[tris]]], -1)
     wrap = loft[..., 1].max(1) - loft[..., 1].min(1) > 0.5  # the quad that closes the ring: 0 means 1 there
     loft[wrap] = np.where(loft[wrap][..., 1:2] < 0.25, loft[wrap] + [0, 1], loft[wrap])
-    W, H = p.width + 0.3, p.height + 0.1
-    pts = verts[tris]
-    front = _island("front", (W / 2 - pts[..., 2].ravel()) / W, (H - pts[..., 1].ravel()) / H).reshape(-1, 3, 2)
-    rear = _island("rear", (W / 2 + pts[..., 2].ravel()) / W, (H - pts[..., 1].ravel()) / H).reshape(-1, 3, 2)
-    out = _island("body", loft[..., 0].ravel(), loft[..., 1].ravel()).reshape(-1, 3, 2)
-    is_front = (nx > 0.55) | (caps & (pts[..., 0].mean(1) > 0))
-    is_rear = (nx < -0.55) | (caps & (pts[..., 0].mean(1) < 0))
-    out[is_front], out[is_rear] = front[is_front], rear[is_rear]
     inner = _island("interior", loft[..., 0].ravel(), loft[..., 1].ravel()).reshape(-1, 3, 2)
     return out, inner
 
@@ -631,17 +665,17 @@ def build_car(p: CarParams | None = None) -> Car:
     x_front_axle = p.length / 2 - p.front_overhang
     axles = (x_front_axle, x_front_axle - p.wheelbase)
     u, P, raised, halfw = _body_grid(p, axles)
-    verts, tris, mats, owners = _body_faces(p, u, P, raised)
+    verts, tris, mats, owners, bands = _body_faces(p, u, P, raised)
 
     parts: dict[str, Part] = {}
 
-    def piece(part_name, mat, v, t, uv=None, n=None, island="small"):
+    def piece(part_name, mat, v, t, uv=None, n=None, island="small", cell=(0, 1)):
         """Add triangles to a part's mesh of one material. Without uv, the piece is projected flat into its
         atlas island; without normals, it is smooth-shaded on its own."""
         part = parts[part_name]
         v, t = np.asarray(v, float), np.asarray(t)
         n = _mesh(v, t).normals if n is None else n
-        uv = _planar_uv(v, island) if uv is None else uv
+        uv = _planar_uv(v, island, cell) if uv is None else uv
         if mat in part.pieces:
             old = part.pieces[mat]
             t = np.concatenate([old.faces, t + len(old.positions)])
@@ -667,19 +701,19 @@ def build_car(p: CarParams | None = None) -> Car:
                           axis=np.array([0.0, 0.0, 1.0]), open_angle=-75.0)
 
     # Body faces, split by part and material, one vertex per triangle corner so each face can take its own
-    # place in the texture atlas; normals stay smooth, taken from the welded skin.
-    corner_uv, inner_uv = _body_uvs(p, u, verts, tris)
-    smooth = _mesh(verts, tris).normals
+    # place in the texture atlas; normals stay smooth across soft bends, taken from the welded skin.
+    corner_uv, inner_uv = _body_uvs(p, u, verts, tris, bands)
+    smooth = _corner_normals(verts, tris, p.crease)
     for name in parts:
         for mat in np.unique(mats[owners == name]):
             sel = (owners == name) & (mats == mat)
             t = tris[sel]
             k = np.arange(3 * len(t)).reshape(-1, 3)
-            piece(name, str(mat), verts[t].reshape(-1, 3), k, corner_uv[sel].reshape(-1, 2), smooth[t].reshape(-1, 3))
+            piece(name, str(mat), verts[t].reshape(-1, 3), k, corner_uv[sel].reshape(-1, 2), smooth[sel].reshape(-1, 3))
             # The inside: the same triangles reversed, so every panel shows from both sides and an open door
             # shows its inner card. Glass stays glass; the rest is interior trim, in its own atlas island.
             piece(name, "glass" if mat == "glass" else "interior", verts[t].reshape(-1, 3), k[:, ::-1],
-                  inner_uv[sel].reshape(-1, 2), -smooth[t].reshape(-1, 3))
+                  inner_uv[sel].reshape(-1, 2), -smooth[sel].reshape(-1, 3))
     for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv):
         piece(owner, mat, v, t, uv)
 
@@ -690,13 +724,13 @@ def build_car(p: CarParams | None = None) -> Car:
             zr = s * np.interp(p.belt_front + 0.05, ring[:, 1], ring[:, 2])  # the skin at the mirror's foot
             v1, t1 = _box([xu(uu), p.belt_front + 0.10, zr + s * 0.13], (0.10, 0.12, 0.17))
             v2, t2 = _box([xu(uu) + 0.01, p.belt_front + 0.06, zr + s * 0.03], (0.05, 0.03, 0.10))
-            piece(f"door_f{side}", "paint", v1, t1)
-            piece(f"door_f{side}", "black", v2, t2)
+            piece(f"door_f{side}", "paint", v1, t1, cell=(0, 3))
+            piece(f"door_f{side}", "black", v2, t2, cell=(1, 3))
     if p.spoiler:
         ring = sections_at(p.roof_end_u)
         v, t = _box([xu(p.roof_end_u) - 0.07, p.height - p.roof_end_drop - 0.03, 0.0],
                     (0.16, 0.03, 2 * 0.62 * ring[:, 2].max() * (1 - p.tumblehome)), pitch=np.radians(-12))
-        piece("hatch", "paint", v, t)
+        piece("hatch", "paint", v, t, cell=(2, 3))
 
     _cabin(p, parts, piece, xu)
 
