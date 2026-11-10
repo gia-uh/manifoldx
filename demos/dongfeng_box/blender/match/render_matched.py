@@ -19,11 +19,24 @@ sys.path.insert(0, os.path.dirname(__file__))
 import calib  # noqa: E402
 
 report, out = sys.argv[sys.argv.index("--") + 1 :][:2]
+os.makedirs(out, exist_ok=True)
 views = json.load(open(report))["views"]
 scene = bpy.context.scene
 scene.render.engine = "BLENDER_EEVEE"
 scene.render.resolution_x, scene.render.resolution_y = 1400, 933
-scene.view_settings.view_transform = "AgX"
+# Overrides for the colour search: VIEW names a view transform, PAINT is "#rrggbb,metallic,roughness".
+# Khronos PBR Neutral keeps base colours (AgX desaturated the paint's highlights from chroma 24 to 17), and +1.1
+# exposure brings the paint's lightness to the photos'; both were measured, see the colour table in the report.
+scene.view_settings.view_transform = os.environ.get("VIEW", "Khronos PBR Neutral")
+scene.view_settings.exposure = float(os.environ.get("EXPOSURE", "1.1"))
+if os.environ.get("PAINT"):
+    hex_, metal, rough = os.environ["PAINT"].split(",")
+    lin = [int(hex_[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+    lin = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in lin]
+    bsdf = bpy.data.materials["Paint"].node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = (*lin, 1)
+    bsdf.inputs["Metallic"].default_value = float(metal)
+    bsdf.inputs["Roughness"].default_value = float(rough)
 world = bpy.data.worlds.new("W")
 scene.world = world
 nt = world.node_tree

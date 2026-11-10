@@ -27,69 +27,16 @@ TYRE_W = 0.205
 RIM_R = 17 * 25.4 / 2 * MM
 TRACK_HALF = 0.775  # tyre centre plane
 
-# --- the body's shape: points on the surface --------------------------------------------------------------------
-# One row per section, front to back, in mm: x, roof (or hood) top, underside, half-width at the widest point of
-# the side, belt height (where the glass starts), half-width of the roof at the top of the glass.
-SECTIONS = [
-    # x      top   bottom  half  belt  roof
-    (-2022, 650, 420, 300, 600, 220),
-    (-2010, 770, 355, 480, 700, 360),
-    (-1990, 865, 298, 620, 790, 480),
-    (-1950, 935, 262, 740, 840, 580),
-    (-1880, 988, 242, 830, 880, 650),
-    (-1780, 1015, 237, 880, 900, 690),
-    (-1650, 1035, 236, 903, 968, 750),
-    (-1450, 1065, 238, 907, 1000, 755),
-    (-1250, 1095, 236, 907, 1035, 745),
-    (-1050, 1130, 232, 905, 1105, 730),
-    (-850, 1235, 228, 905, 1122, 690),
-    (-600, 1390, 226, 905, 1130, 640),
-    (-350, 1520, 225, 905, 1136, 610),
-    (-150, 1560, 225, 905, 1140, 600),
-    (250, 1570, 225, 905, 1146, 600),
-    (700, 1568, 226, 905, 1155, 595),
-    (1100, 1558, 230, 905, 1166, 585),
-    (1360, 1540, 236, 905, 1175, 570),
-    (1560, 1505, 245, 900, 1180, 545),
-    (1700, 1390, 255, 885, 1150, 560),
-    (1840, 1220, 270, 860, 1100, 600),
-    (1950, 1080, 290, 820, 1000, 600),
-    (2005, 950, 310, 750, 900, 580),
-    (2022, 800, 340, 600, 760, 450),
-]
+# --- the body's shape: points on the surface, from shape.py (fitted values when BOX_SHAPE names a JSON) ---------
 
+sys.path.insert(0, __import__("os").path.dirname(__file__))
+import shape  # noqa: E402
 
-def section(top, bottom, half, belt, roof):
-    """Half a section on the surface, from the bottom centre round the right side (+Y) to the roof centre, (y, z)."""
-    body, upper = belt - bottom, top - belt
-    lerp = lambda a, b, t: a + (b - a) * t
-    return [
-        (0, bottom),
-        (0.62 * half, bottom),
-        (0.86 * half, bottom + 0.035 * body),
-        (0.96 * half, bottom + 0.16 * body),
-        (half, bottom + 0.48 * body),
-        (0.985 * half, belt - 0.14 * body),
-        (0.94 * half, belt - 0.01 * body),
-        (lerp(0.92 * half, roof, 0.45), belt + 0.45 * upper),
-        (roof, top - 0.10 * upper),
-        (0.80 * roof, top - 0.025 * upper),
-        (0.42 * roof, top - 0.004 * upper),
-        (0, top),
-    ]
+SECTIONS, FACTORS = shape.load()
 
 
 def targets():
-    """The surface points as an (S, R, 3) array in metres, with each section's full ring: right side, then left."""
-    rings = []
-    for x, top, bottom, half_w, belt, roof in SECTIONS:
-        if x < -1080:
-            # The hood is a dome: its edge (the "belt" here) sits well below the crown and well inside the side.
-            belt, roof = min(belt, top - 120), min(roof, 0.80 * half_w)
-        half = section(top, bottom, half_w, belt, roof)
-        full = half + [(-y, z) for y, z in reversed(half[1:-1])]
-        rings.append([(x * MM, y * MM, z * MM) for y, z in full])
-    return np.array(rings)
+    return shape.targets(SECTIONS, FACTORS)
 
 
 def cage_mesh(points, name="BodyCage"):
@@ -187,7 +134,8 @@ MAT = {}
 
 
 def materials():
-    MAT["paint"] = material("Paint", "#8cbad3", rough=0.28, metal=0.45, coat=1.0)
+    # Fitted against the photos' paint in CIELAB (match/render_matched.py, Khronos PBR Neutral, exposure +1.1).
+    MAT["paint"] = material("Paint", "#96c0cf", rough=0.3, metal=0.15, coat=1.0)
     MAT["liner"] = material("ArchLiner", "#121315", rough=0.95)
     MAT["black"] = material("GlossBlack", "#060708", rough=0.1, coat=1.0)
     MAT["glass"] = material("Glass", "#20292f", rough=0.02, coat=1.0, alpha=0.42)
@@ -373,15 +321,28 @@ def body():
 
     # Front: the LED bar across the nose bending down into C-shaped headlamps, a wide black grille, silver-framed
     # corner intakes, the plate and the badge.
-    ys = np.linspace(-865, 865, 61)
-    front(band([(y, 930 - 115 * (abs(y) / 865) ** 4) for y in ys], 16), MAT["drl"])
-    for lens in mirrored([(530, 905), (610, 912), (710, 905), (800, 890), (858, 862), (872, 815), (845, 778),
-                          (765, 768), (680, 782), (600, 830)]):
-        front(lens, MAT["lens"], hi=-1.75)
-    for drl in mirrored(band([(575, 838), (650, 800), (760, 784), (838, 790), (866, 815)], 13)):
-        front(drl, MAT["drl"], hi=-1.75)
-    for lamp in (circle(770, 840, 28), circle(-770, 840, 28)):
-        front(lamp, MAT["drl"], hi=-1.75)
+    lamps_path = __import__("os").environ.get("BOX_LAMPS")
+    if lamps_path:
+        # Traced off the front photo where the LEDs are lit (match/lamps.py): the bar, then per side the eye in
+        # LED white, its lens inset by one LED stroke, and the projector.
+        L = __import__("json").load(open(lamps_path))
+        bar = np.array(L["bar"])
+        z0, z1, half = bar[:, 1].min(), bar[:, 1].max(), L["bar_half_length"]
+        front([(-half, z0), (half, z0), (half, z1), (-half, z1)], MAT["drl"])
+        for key, mat in (("eye", MAT["drl"]), ("eye_inner", MAT["lens"]), ("projector", MAT["drl"])):
+            if L[key]:
+                for poly in mirrored([tuple(q) for q in L[key]]):
+                    front(poly, mat, hi=-1.70)
+    else:
+        ys = np.linspace(-865, 865, 61)
+        front(band([(y, 930 - 115 * (abs(y) / 865) ** 4) for y in ys], 16), MAT["drl"])
+        for lens in mirrored([(530, 905), (610, 912), (710, 905), (800, 890), (858, 862), (872, 815), (845, 778),
+                              (765, 768), (680, 782), (600, 830)]):
+            front(lens, MAT["lens"], hi=-1.75)
+        for drl in mirrored(band([(575, 838), (650, 800), (760, 784), (838, 790), (866, 815)], 13)):
+            front(drl, MAT["drl"], hi=-1.75)
+        for lamp in (circle(770, 840, 28), circle(-770, 840, 28)):
+            front(lamp, MAT["drl"], hi=-1.75)
     front([(-650, 290), (650, 290), (705, 425), (-705, 425)], MAT["trim"])
     for frame in mirrored([(600, 300), (805, 332), (845, 440), (640, 448)]):
         front(frame, MAT["chrome"], hi=-1.75)
