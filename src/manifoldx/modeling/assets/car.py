@@ -676,8 +676,8 @@ def _wheel(p: CarParams, x, side):
 def _mirror(shape, size, side, yaw=0.0):
     """A door mirror from a shape, as (material, verts, tris, normals, (u, v)) pieces about the foot of its
     stalk, on the car's right (side 1) or left (-1). The mirror is a row of sections from the door outward: each
-    is as tall as the front view at that point and as deep as the plan, round ahead and flat behind where the
-    glass is. The cap is the part of each section above the lower edge of the front view's painted region. The
+    is as tall as the front view at that point and as deep as the plan, round ahead and above, flat behind where
+    the glass is and squarer below. The cap is the part of each section above the lower edge of the front view's painted region. The
     strip and the glass are laid on the result from ahead and from behind. Last, the whole mirror turns `yaw`
     degrees about its foot, its outer end toward the rear."""
     a, bh = size[0] / 2, size[1] / 2
@@ -705,12 +705,12 @@ def _mirror(shape, size, side, yaw=0.0):
         d0, d1 = span(plan, u) or (foot - 0.25 * deep, foot + 0.25 * deep)
         cd, rd, cv, rv = (d0 + d1) / 2, (d1 - d0) / 2, (v0 + v1) / 2, max((v1 - v0) / 2, 1e-6)
         t = np.clip(((over[0] if over else v1) - cv) / rv, -1, 1)  # where the cap ends, on the section's height
-        ahead = np.arcsin(np.sign(t) * abs(t) ** 1.3)
+        ahead = np.arcsin(np.sign(t) * abs(t) ** (1.3 if t > 0 else 2.5))
         ang = np.concatenate([np.linspace(ahead, np.pi - ahead, points // 2),
                               np.linspace(np.pi - ahead, 2 * np.pi + ahead, points // 2 + 2)[1:-1]])
         d = cd + rd * np.where(np.cos(ang) > 0, bend(np.cos(ang), 2.4), bend(np.cos(ang), 5.0))
-        rings.append(np.column_stack([(d - foot) * a, (cv + rv * bend(np.sin(ang), 2.6) - av) * bh,
-                                      np.full(points, (u - au) * a), np.full(points, u), cv + rv * bend(np.sin(ang), 2.6)]))
+        v = cv + rv * np.where(np.sin(ang) > 0, bend(np.sin(ang), 2.6), bend(np.sin(ang), 5.0))
+        rings.append(np.column_stack([(d - foot) * a, (v - av) * bh, np.full(points, (u - au) * a), np.full(points, u), v]))
     grid = np.array(rings)  # (stations, points, 5): position, then the front view's (u, v)
     n = len(grid)
     verts = np.concatenate([grid.reshape(-1, 5), grid[[0, -1]].mean(1)])
@@ -919,7 +919,7 @@ def build_car(p: CarParams | None = None) -> Car:
                 at = np.array([xu(uu), p.belt_front + 0.01, s * (zr - 0.01)])
                 # In the island the shell takes three columns of five, as the front view shows it; frame, glass
                 # and strip share the fourth, one above the other.
-                names = {"frame": ("black", 0), "glass": ("chrome", 1), "lit": ("chrome", 2)}
+                names = {"frame": ("black", 0), "glass": ("chrome", 1), "lit": ("black", 2)}  # the strip, unlit
                 for mat, v, t, n, flat in _mirror(shape, p.mirror_size, s, p.mirror_yaw):
                     su, tv = 0.02 + 0.48 * (flat[:, 0] + 1), (1 - flat[:, 1]) / 2
                     if mat in names:
