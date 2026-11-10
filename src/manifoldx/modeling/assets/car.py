@@ -408,7 +408,7 @@ def _raycast(origins, direction, verts, tris, batch=128):
     return t[np.arange(len(origins)), k], k
 
 
-def _decals(p: CarParams, verts, tris, parts):
+def _decals(p: CarParams, verts, tris, parts, corner_uv):
     """Flat outlines projected onto the skin: (material, view, outline) -> (material, part, vertices, triangles)."""
     W, L = p.width, p.length
     out = []
@@ -448,9 +448,21 @@ def _decals(p: CarParams, verts, tris, parts):
         pts = o + (t - 0.006)[:, None] * d
         owner = parts[k]
         names, counts = np.unique(owner, return_counts=True)
+        # Texture coordinates: those of the skin under each point, by its barycentric weights.
+        a, b, c = verts[tris[k, 0]], verts[tris[k, 1]], verts[tris[k, 2]]
+        hit = o + t[:, None] * d
+        v0, v1, v2 = b - a, c - a, hit - a
+        d00, d01, d11 = (v0 * v0).sum(1), (v0 * v1).sum(1), (v1 * v1).sum(1)
+        d20, d21 = (v2 * v0).sum(1), (v2 * v1).sum(1)
+        den = np.where(np.abs(d00 * d11 - d01**2) > 1e-18, d00 * d11 - d01**2, 1.0)
+        wb, wc = (d11 * d20 - d01 * d21) / den, (d00 * d21 - d01 * d20) / den
+        uv = (1 - wb - wc)[:, None] * corner_uv[k, 0] + wb[:, None] * corner_uv[k, 1] + wc[:, None] * corner_uv[k, 2]
         if np.dot(np.cross(pts[tri[0, 1]] - pts[tri[0, 0]], pts[tri[0, 2]] - pts[tri[0, 0]]), d) > 0:
             tri = tri[:, ::-1]  # face the viewer, not the skin
-        out.append((mat, str(names[counts.argmax()]), pts, tri))
+        if view in ("front", "rear"):  # the same projection the skin under it uses in its view's island
+            Wv, Hv = p.width + 0.3, p.height + 0.1
+            uv = _island(view, (Wv / 2 - sign * pts[:, 2]) / Wv, (Hv - pts[:, 1]) / Hv)
+        out.append((mat, str(names[counts.argmax()]), pts, tri, uv))
 
     def both(mat, view, outline):
         add(mat, view, outline)
@@ -506,6 +518,59 @@ def _wheel(p: CarParams, x, side):
     return {m: (np.asarray(v) + hub, t) for m, (v, t) in out.items()}, hub
 
 
+# --- texture atlas ------------------------------------------------------------------------------------------
+
+# Islands of the atlas as (s0, t0, s1, t1), with t growing down the image as in glTF. The exterior skin is one
+# strip unrolled like a paper model: the front at the left, the rear at the right; from the top, the underbody,
+# the right side upside down, its windows, the roof, the left windows and the left side the right way up.
+# Faces that look forward or back are projected as seen from the front and from behind instead, so lamps and
+# grille get the resolution they need.
+ATLAS = {
+    "front": (0.01, 0.01, 0.25, 0.15), "rear": (0.26, 0.01, 0.50, 0.15), "wheel": (0.51, 0.01, 0.62, 0.15),
+    "cabin": (0.63, 0.01, 0.86, 0.15), "small": (0.87, 0.01, 0.99, 0.15),
+    "interior": (0.01, 0.16, 0.99, 0.30), "body": (0.01, 0.31, 0.99, 0.99),
+}
+
+
+def _island(name, s, t):
+    s0, t0, s1, t1 = ATLAS[name]
+    return np.column_stack([s0 + np.clip(s, 0, 1) * (s1 - s0), t0 + np.clip(t, 0, 1) * (t1 - t0)])
+
+
+def _planar_uv(v, island):
+    """Project a part side-on (x, y) into its island, fitted to its own bounds."""
+    lo, hi = v[:, :2].min(0), v[:, :2].max(0)
+    span = np.maximum(hi - lo, 1e-6).max()
+    return _island(island, (v[:, 0] - lo[0]) / span, (hi[1] - v[:, 1]) / span)
+
+
+def _body_uvs(p: CarParams, u, verts, tris):
+    """Per-corner texture coordinates of the skin (outside and inside), from the loft's own coordinates."""
+    S = len(u)
+    grid = verts[: S * RING].reshape(S, RING, 3)
+    seg = np.linalg.norm(np.diff(np.concatenate([grid, grid[:, :1]], 1), axis=1), axis=2).mean(0)
+    V = np.concatenate([[0], np.cumsum(seg)]) / seg.sum()  # around the ring, by mean arc length; RING + 1 values
+    U = np.concatenate([np.repeat(u, RING), [0.0, 1.0]])  # the two cap centres last
+    J = np.concatenate([np.tile(np.arange(RING), S), [0, 0]])
+    a, b, c = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+    nx = np.cross(b - a, c - a)
+    nx = nx[:, 0] / (np.linalg.norm(nx, axis=1) + 1e-12)
+    caps = tris.max(1) >= S * RING
+    loft = np.stack([U[tris], V[J[tris]]], -1)
+    wrap = loft[..., 1].max(1) - loft[..., 1].min(1) > 0.5  # the quad that closes the ring: 0 means 1 there
+    loft[wrap] = np.where(loft[wrap][..., 1:2] < 0.25, loft[wrap] + [0, 1], loft[wrap])
+    W, H = p.width + 0.3, p.height + 0.1
+    pts = verts[tris]
+    front = _island("front", (W / 2 - pts[..., 2].ravel()) / W, (H - pts[..., 1].ravel()) / H).reshape(-1, 3, 2)
+    rear = _island("rear", (W / 2 + pts[..., 2].ravel()) / W, (H - pts[..., 1].ravel()) / H).reshape(-1, 3, 2)
+    out = _island("body", loft[..., 0].ravel(), loft[..., 1].ravel()).reshape(-1, 3, 2)
+    is_front = (nx > 0.55) | (caps & (pts[..., 0].mean(1) > 0))
+    is_rear = (nx < -0.55) | (caps & (pts[..., 0].mean(1) < 0))
+    out[is_front], out[is_rear] = front[is_front], rear[is_rear]
+    inner = _island("interior", loft[..., 0].ravel(), loft[..., 1].ravel()).reshape(-1, 3, 2)
+    return out, inner
+
+
 # --- the car -------------------------------------------------------------------------------------------------
 
 
@@ -518,14 +583,19 @@ def build_car(p: CarParams | None = None) -> Car:
 
     parts: dict[str, Part] = {}
 
-    def piece(part_name, mat, v, t):
+    def piece(part_name, mat, v, t, uv=None, n=None, island="small"):
+        """Add triangles to a part's mesh of one material. Without uv, the piece is projected flat into its
+        atlas island; without normals, it is smooth-shaded on its own."""
         part = parts[part_name]
+        v, t = np.asarray(v, float), np.asarray(t)
+        n = _mesh(v, t).normals if n is None else n
+        uv = _planar_uv(v, island) if uv is None else uv
         if mat in part.pieces:
             old = part.pieces[mat]
-            n = len(old.positions)
-            v = np.concatenate([old.positions, v])
-            t = np.concatenate([old.faces, np.asarray(t) + n])
-        part.pieces[mat] = _mesh(v, t)
+            t = np.concatenate([old.faces, t + len(old.positions)])
+            v, n, uv = (np.concatenate([a, b]) for a, b in ((old.positions, v), (old.normals, n), (old.uvs, uv)))
+        part.pieces[mat] = Mesh(positions=v.astype(np.float32), faces=t.astype(np.uint32),
+                                normals=np.asarray(n, np.float32), uvs=np.asarray(uv, np.float32))
 
     L = p.length
     def xu(uu):
@@ -544,17 +614,22 @@ def build_car(p: CarParams | None = None) -> Car:
     parts["hatch"] = Part("hatch", "hatch", pivot=np.array([xu(p.roof_end_u - 0.01), p.height - p.roof_end_drop, 0.0]),
                           axis=np.array([0.0, 0.0, 1.0]), open_angle=-75.0)
 
-    # Body faces, split by part and material; each part keeps only the vertices it uses.
+    # Body faces, split by part and material, one vertex per triangle corner so each face can take its own
+    # place in the texture atlas; normals stay smooth, taken from the welded skin.
+    corner_uv, inner_uv = _body_uvs(p, u, verts, tris)
+    smooth = _mesh(verts, tris).normals
     for name in parts:
         for mat in np.unique(mats[owners == name]):
-            t = tris[(owners == name) & (mats == mat)]
-            used, inv = np.unique(t, return_inverse=True)
-            piece(name, str(mat), verts[used], inv.reshape(-1, 3))
-            # The inside: the same triangles reversed on their own vertices, so every panel shows from both
-            # sides and an open door shows its inner card. Glass stays glass; the rest is interior trim.
-            piece(name, "glass" if mat == "glass" else "interior", verts[used], inv.reshape(-1, 3)[:, ::-1])
-    for mat, owner, v, t in _decals(p, verts, tris, owners):
-        piece(owner, mat, v, t)
+            sel = (owners == name) & (mats == mat)
+            t = tris[sel]
+            k = np.arange(3 * len(t)).reshape(-1, 3)
+            piece(name, str(mat), verts[t].reshape(-1, 3), k, corner_uv[sel].reshape(-1, 2), smooth[t].reshape(-1, 3))
+            # The inside: the same triangles reversed, so every panel shows from both sides and an open door
+            # shows its inner card. Glass stays glass; the rest is interior trim, in its own atlas island.
+            piece(name, "glass" if mat == "glass" else "interior", verts[t].reshape(-1, 3), k[:, ::-1],
+                  inner_uv[sel].reshape(-1, 2), -smooth[t].reshape(-1, 3))
+    for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv):
+        piece(owner, mat, v, t, uv)
 
     if p.mirrors:
         uu = p.cowl_u + 0.035
@@ -578,7 +653,9 @@ def build_car(p: CarParams | None = None) -> Car:
             meshes, hub = _wheel(p, xa, s)
             parts[name] = Part(name, "wheel", pivot=hub, axis=np.array([0.0, 0.0, 1.0]), steer=front)
             for mat, (v, t) in meshes.items():
-                piece(name, mat, v, t)
+                v = np.asarray(v)
+                piece(name, mat, v, t, _island("wheel", (v[:, 0] - hub[0]) / (2.2 * p.wheel_radius) + 0.5,
+                                               (hub[1] - v[:, 1]) / (2.2 * p.wheel_radius) + 0.5))
     return Car(p, [pt for pt in parts.values() if pt.pieces])
 
 
@@ -592,7 +669,7 @@ def _cabin(p: CarParams, parts, piece, xu):
     seat_z = 0.22 * p.width
 
     def box(mat, center, size, pitch=0.0):
-        piece("cabin", mat, *_box(center, size, pitch=pitch))
+        piece("cabin", mat, *_box(center, size, pitch=pitch), island="cabin")
 
     box("carpet", [(xc + xu(p.roof_end_u)) / 2, floor - 0.02, 0.0], (xc - xu(p.roof_end_u) - 0.2, 0.04, inner))
     box("dash", [xc - 0.25, p.belt_front - 0.13, 0.0], (0.42, 0.34, inner))
@@ -609,7 +686,7 @@ def _cabin(p: CarParams, parts, piece, xu):
     to_x = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])  # the ring's axis (Z) turned to point along -X
     tilt = np.array([[np.cos(lean), np.sin(lean), 0], [-np.sin(lean), np.cos(lean), 0], [0, 0, 1]])
     hub = np.array([xc - 0.52, p.belt_front + 0.02, -seat_z])
-    piece("cabin", "dash", v @ to_x.T @ tilt + hub, t)
+    piece("cabin", "dash", v @ to_x.T @ tilt + hub, t, island="cabin")
     box("dash", [xc - 0.42, p.belt_front - 0.02, -seat_z], (0.24, 0.05, 0.05), pitch=-lean)
 
 
