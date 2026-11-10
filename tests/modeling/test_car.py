@@ -102,9 +102,11 @@ def test_a_wheel_shape_stands_inside_the_rim_and_both_sides_wear_one_picture():
     assert np.hypot(*(face[:, :2] - left.pivot[:2]).T).max() <= p.wheel_radius * p.rim_ratio * 1.01
     assert abs(face[:, 2] - left.pivot[2]).max() < p.tyre_width / 2  # behind the tyre's sidewall
     assert np.allclose(left.pieces["alloy"].uvs, right.pieces["alloy"].uvs, atol=1e-6)
-    plain = build_car(CarParams(wheel="spokes", mirror="box", grille_style="bar", grille=(0.60, 0.27, 0.43)))
+    plain = build_car(CarParams(wheel="spokes", mirror="box", grille_style="bar", grille=(0.60, 0.27, 0.43), dash="box",
+                                steering="ring"))
     assert "spoke" in plain.part("wheel_fl").pieces and "alloy" not in plain.part("wheel_fl").pieces
     assert len(_low_lamps(plain)) > 0
+    assert "dash" in plain.part("cabin").pieces and "chrome" not in plain.part("cabin").pieces
 
 
 def test_a_mirror_shape_faces_outward_and_fills_its_size():
@@ -145,3 +147,26 @@ def test_a_grille_shape_fills_its_box_and_keeps_its_ends():
     bar = np.array([(0, 0), (1, 0), (1, 0.1), (0.5, 0.2), (0, 0.1)])
     cut = _slabs(bar, 0.3)
     assert np.isclose(sum(abs(np.sum(q[:, 0] * np.roll(q[:, 1], -1) - np.roll(q[:, 0], -1) * q[:, 1])) / 2 for q in cut), 0.15)
+
+
+def _volume(pieces):
+    return sum(np.einsum("ij,ij->i", v[t[:, 0]], np.cross(v[t[:, 1]], v[t[:, 2]])).sum() / 6 for v, t in pieces)
+
+
+def test_a_dashboard_shape_spans_the_cabin_and_its_screens_stand_over_the_deck():
+    from manifoldx.modeling.assets.car import _dash, _steering
+    from manifoldx.modeling.assets.dashboards import DASHBOARDS
+    from manifoldx.modeling.assets.steering import STEERING
+
+    width, deck, rear, front = 1.5, 1.06, 0.40, 0.84
+    pieces = _dash(DASHBOARDS["deck"], width, deck, rear, front, 40.0)
+    solid = np.concatenate([v for m, v, _, _, _ in pieces if m == "dash"])
+    assert np.allclose([solid[:, 2].min(), solid[:, 2].max()], [-width / 2, width / 2], atol=0.01)
+    assert solid[:, 1].max() <= deck + 1e-6 and abs(solid[:, 0].min() - rear) < 0.01 and solid[:, 0].max() <= front + 1e-6
+    assert _volume([(v, t) for m, v, t, _, _ in pieces if m == "dash"]) > 0  # its faces look outward
+    screens = np.concatenate([v for m, v, _, _, shown in pieces if m == "black" and shown])
+    assert screens[:, 1].max() > deck + 0.05 and screens[:, 0].max() < rear  # over the deck, on the cabin's side
+    assert {"seat", "chrome"} <= {m for m, *_ in pieces}  # the leather panel and the vent's frame are laid on it
+    wheel = _steering(STEERING["tri"], 0.19)
+    rim = [(v, t) for m, v, t, _ in wheel if m == "dash"]
+    assert _volume(rim) > 0 and max(np.hypot(v[:, 0], v[:, 1]).max() for v, _ in rim) < 0.19 * 1.1  # wider than tall

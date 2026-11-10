@@ -9,9 +9,9 @@ booleans.
 Regions are tags on the loft's faces, in its own coordinates (position along the car, band around the section),
 so they follow any shape: glass, pillars, doors, hood and hatch. Small parts that sit on the skin (lamps, grille,
 plate, handles) are decals: flat outlines projected onto the body along a view direction, so a lamp style is
-just an outline. Lamps, the grille, wheels and door mirrors take a shape: outlines traced from a flat drawing of the real
-part (`assets.lamps`, `assets.grilles`, `assets.wheels`, `assets.mirrors`), or a plain style built from boxes
-and ellipses.
+just an outline. Lamps, the grille, wheels, door mirrors, the dashboard and the steering wheel take a shape: outlines traced from a flat drawing of the real
+part (`assets.lamps`, `assets.grilles`, `assets.wheels`, `assets.mirrors`, `assets.dashboards`,
+`assets.steering`), or a plain style built from boxes and ellipses.
 
 Doors, hood and hatch are separate parts with a hinge; wheels spin and the front ones steer. `Car.pose` gives
 each part's transform for an opening, a wheel turn and a steering angle.
@@ -25,9 +25,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from manifoldx.modeling.assets.dashboards import DASHBOARDS
 from manifoldx.modeling.assets.grilles import GRILLES
 from manifoldx.modeling.assets.lamps import LAMPS
 from manifoldx.modeling.assets.mirrors import MIRRORS
+from manifoldx.modeling.assets.steering import STEERING
 from manifoldx.modeling.assets.wheels import WHEELS
 from manifoldx.modeling.mesh import Mesh
 
@@ -108,6 +110,8 @@ class CarParams:
     mirror_yaw: float = 22.0  # degrees its outer end is swept back
     wheel: str | dict = "swirl"  # a shape, or "spokes"
     spokes: int = 5  # of the plain wheel
+    dash: str | dict = "deck"  # a shape, or "box"
+    steering: str | dict = "tri"  # a shape, or "ring"
     cladding: bool = False  # black lower body
     handles: bool = True  # a chrome bar on each door; leave it out when a texture paints the handles
     door_strip: bool = True  # a black strip with a chrome line low on the doors
@@ -504,6 +508,47 @@ def _split(outline, metres=1.0, step=0.04, least=4):
     return np.array(pts2), np.array(tri)
 
 
+def _span(poly, at):
+    """Where the line through `at` on its first axis crosses an outline: the lowest and the highest crossing on
+    the second axis, or None when it misses."""
+    lo, hi = poly, np.roll(poly, -1, axis=0)
+    cross = (lo[:, 0] - at) * (hi[:, 0] - at) < 0
+    if not cross.any():
+        return None
+    y = lo[cross, 1] + (at - lo[cross, 0]) / (hi[cross, 0] - lo[cross, 0]) * (hi[cross, 1] - lo[cross, 1])
+    return y.min(), y.max()
+
+
+def _prism(outline, lo, hi):
+    """A flat outline (u, v) made solid between two offsets along w: the face at `hi`, its back at `lo` and the
+    wall between them, each with corners of its own so the edges stay sharp. Returns (u, v, w) and triangles."""
+    q = np.asarray(outline, float)
+    if np.sum(q[:, 0] * np.roll(q[:, 1], -1) - np.roll(q[:, 0], -1) * q[:, 1]) < 0:
+        q = q[::-1]
+    n = len(q)
+    top, back = np.column_stack([q, np.full(n, hi)]), np.column_stack([q, np.full(n, lo)])
+    face = _triangulate(q)
+    wall = [t for i in range(n) for j in [(i + 1) % n] for t in ((2 * n + i, 3 * n + i, 3 * n + j), (2 * n + i, 3 * n + j, 2 * n + j))]
+    return np.concatenate([top, back, top, back]), face + [(n + c, n + b, n + a) for a, b, c in face] + wall
+
+
+def _drape(outline, metres, origin, across, up, toward, verts, tris, lift, step=0.03):
+    """Lay a flat outline on a mesh: split it small, put each point at origin + u * across + v * up and drop it
+    along `toward` onto the mesh, `lift` short of it. A point past the mesh's edge misses it and takes its
+    triangles with it. Returns the points' own (u, v), the points and the triangles, or None."""
+    flat, tri = _split(outline, metres, step=step, least=1)
+    o = origin + np.outer(flat[:, 0], across) + np.outer(flat[:, 1], up)
+    t, _ = _raycast(o, toward, verts, tris)
+    ok = np.isfinite(t)
+    tri = (np.cumsum(ok) - 1)[tri[ok[tri].all(1)]]
+    if not len(tri):
+        return None
+    flat, pts = flat[ok], o[ok] + (t[ok] - lift)[:, None] * toward
+    if np.dot(np.cross(pts[tri[0, 1]] - pts[tri[0, 0]], pts[tri[0, 2]] - pts[tri[0, 0]]), toward) > 0:
+        tri = tri[:, ::-1]
+    return flat, pts, tri
+
+
 def _slabs(outline, width):
     """Cut an outline into pieces no wider than `width` along its first axis. A long thin shape then triangulates
     into compact triangles instead of slivers as long as itself, which split into thousands."""
@@ -721,14 +766,6 @@ def _mirror(shape, size, side, yaw=0.0):
     body, cap, plan = np.asarray(shape["layers"][0][1], float), layers["paint"], np.asarray(shape["plan"], float)
     au, av = shape["anchor"]
 
-    def span(poly, at):  # where the line through `at` on its first axis crosses an outline: lowest and highest
-        lo, hi = poly, np.roll(poly, -1, axis=0)
-        cross = (lo[:, 0] - at) * (hi[:, 0] - at) < 0
-        if not cross.any():
-            return None
-        y = lo[cross, 1] + (at - lo[cross, 0]) / (hi[cross, 0] - lo[cross, 0]) * (hi[cross, 1] - lo[cross, 1])
-        return y.min(), y.max()
-
     def bend(c, n):  # a superellipse's coordinate: n = 2 is a circle, a large n a box
         return np.sign(c) * np.abs(c) ** (2 / n)
 
@@ -736,9 +773,9 @@ def _mirror(shape, size, side, yaw=0.0):
     foot = 0.7 * deep  # how far ahead of the glass the stalk stands
     rings, points = [], 14
     for u in -0.985 * np.cos(np.linspace(0.0, np.pi, 16)):
-        v0, v1 = span(body, u)
-        over = span(cap, u)
-        d0, d1 = span(plan, u) or (foot - 0.25 * deep, foot + 0.25 * deep)
+        v0, v1 = _span(body, u)
+        over = _span(cap, u)
+        d0, d1 = _span(plan, u) or (foot - 0.25 * deep, foot + 0.25 * deep)
         cd, rd, cv, rv = (d0 + d1) / 2, (d1 - d0) / 2, (v0 + v1) / 2, max((v1 - v0) / 2, 1e-6)
         t = np.clip(((over[0] if over else v1) - cv) / rv, -1, 1)  # where the cap ends, on the section's height
         ahead = np.arcsin(np.sign(t) * abs(t) ** (1.3 if t > 0 else 2.5))
@@ -769,18 +806,12 @@ def _mirror(shape, size, side, yaw=0.0):
     out = [(m, xyz, tris[(mats == m) & (area > 1e-9)], normals, verts[:, 3:]) for m in ("paint", "black")]
 
     def lay(mat, outline, toward, lift):  # an outline of the front view, dropped on the mirror along x
-        flat, tri = _split(outline, np.array([a, bh]), step=0.03, least=1)
-        o = np.column_stack([np.full(len(flat), -toward * 1.0), (flat[:, 1] - av) * bh, side * (flat[:, 0] - au) * a])
         d = np.array([float(toward), 0.0, 0.0])
-        t, _ = _raycast(o, d, xyz, tris)
-        ok = np.isfinite(t)  # a point past the mirror's edge misses it, and takes its triangles with it
-        tri = (np.cumsum(ok) - 1)[tri[ok[tri].all(1)]]
-        if not len(tri):
-            return
-        flat, pts = flat[ok], o[ok] + (t[ok] - lift)[:, None] * d
-        if np.dot(np.cross(pts[tri[0, 1]] - pts[tri[0, 0]], pts[tri[0, 2]] - pts[tri[0, 0]]), d) > 0:
-            tri = tri[:, ::-1]
-        out.append((mat, pts, tri, np.tile(-d, (len(pts), 1)), flat))
+        laid = _drape(outline, np.array([a, bh]), np.array([-toward * 1.0, -av * bh, -side * au * a]),
+                      np.array([0.0, 0.0, side * a]), np.array([0.0, bh, 0.0]), d, xyz, tris, lift)
+        if laid:
+            flat, pts, tri = laid
+            out.append((mat, pts, tri, np.tile(-d, (len(pts), 1)), flat))
 
     if "lit" in layers:
         lay("lit", layers["lit"], -1, 0.002)
@@ -993,6 +1024,77 @@ def build_car(p: CarParams | None = None) -> Car:
     return Car(p, [pt for pt in parts.values() if pt.pieces])
 
 
+def _dash(shape, width, deck, rear, front, crease):
+    """A dashboard from a shape, as (material, verts, tris, normals, shown) pieces in car coordinates: `width` across,
+    its rear edge at the height `deck`, its rear face at `rear` and nothing ahead of `front`. The section is
+    swept across the car, and at each point across it is cut to the height the front view has there, up to the
+    deck, which gives the footwells. The front view's layers are laid on the result from the cabin; a screen
+    stands off it, and may rise above the deck. A piece is `shown` when it faces the cabin, so the front view
+    is its picture; the deck's top, the ends and the back of a screen are not."""
+    a = width / 2
+    bh = a / shape["aspect"]
+    top = deck + (1 - shape["deck"]) * bh  # where the front view's upper edge would be
+    body = np.asarray(shape["layers"][0][1], float)
+    sec = np.asarray(shape["section"], float)
+    x = np.minimum(rear + (sec[:, 0].max() - sec[:, 0]) * bh, front)
+    n, stations = len(sec), np.linspace(-0.999, 0.999, 25)
+    rings = []
+    for u in stations:
+        v0, v1 = _span(body, u)
+        rings.append(np.column_stack([x, top - (1 - np.clip(sec[:, 1], v0, min(v1, shape["deck"]))) * bh, np.full(n, u * a)]))
+    verts = np.concatenate(rings)
+    tris = []
+    for i in range(len(stations) - 1):
+        for j in range(n):
+            p0, p1, q0, q1 = i * n + j, i * n + (j + 1) % n, (i + 1) * n + j, (i + 1) * n + (j + 1) % n
+            tris += [(p0, q0, q1), (p0, q1, p1)]
+    cap = _triangulate(sec)
+    tris += [(c, b, a_) for a_, b, c in cap] + [((len(stations) - 1) * n + a_, (len(stations) - 1) * n + b, (len(stations) - 1) * n + c) for a_, b, c in cap]
+    tris = np.array(tris)
+    centre = verts.mean(0)
+    out_of = np.einsum("ij,ij->i", np.cross(verts[tris[:, 1]] - verts[tris[:, 0]], verts[tris[:, 2]] - verts[tris[:, 0]]),
+                       verts[tris].mean(1) - centre).sum()
+    if out_of < 0:
+        tris = tris[:, ::-1]
+    area = np.linalg.norm(np.cross(verts[tris[:, 1]] - verts[tris[:, 0]], verts[tris[:, 2]] - verts[tris[:, 0]]), axis=1)
+    tris = tris[area > 1e-10]
+    flat_n = np.cross(verts[tris[:, 1]] - verts[tris[:, 0]], verts[tris[:, 2]] - verts[tris[:, 0]])
+    faces_cabin = flat_n[:, 0] < -0.5 * np.linalg.norm(flat_n, axis=1)
+    smooth = _corner_normals(verts, tris, crease)
+    out = [("dash", verts[tris[sel]].reshape(-1, 3), np.arange(3 * sel.sum()).reshape(-1, 3), smooth[sel].reshape(-1, 3), shown)
+           for sel, shown in ((faces_cabin, True), (~faces_cabin, False))]
+    names = {"dark": "dash", "leather": "seat", "chrome": "chrome"}
+    origin, across, up, ahead = np.array([rear - 1.0, top - bh, 0.0]), np.array([0.0, 0.0, a]), np.array([0.0, bh, 0.0]), np.array([1.0, 0.0, 0.0])
+    for i, (m, outline) in enumerate(shape["layers"][1:]):
+        if m == "screen":  # a slab of its own, 3 cm off the dashboard's rear face; its face looks into the cabin
+            v, f = _prism(np.asarray(outline, float) * [a, bh], 0.0, 0.012)  # (z, y, thickness)
+            pts, f, front = np.column_stack([rear - 0.03 - v[:, 2], origin[1] + v[:, 1], v[:, 0]]), np.array(f), len(outline) - 2
+            out += [("black", pts, f[:front], None, True), ("black", pts, f[front:], None, False)]
+            continue
+        laid = _drape(outline, np.array([a, bh]), origin, across, up, ahead, verts, tris, 0.003 + 0.002 * i, step=0.08)
+        if laid:
+            out.append((names[m], laid[1], laid[2], np.tile(-ahead, (len(laid[1]), 1)), True))
+    return out
+
+
+def _steering(shape, radius, thick=0.03):
+    """A steering wheel from a shape, as (material, verts, tris, shown) pieces about its hub, in its own frame: x
+    to the driver's right, y up, z toward the driver. The face's pieces are solid; the layers lie on its near
+    side. A piece is `shown` when it faces the driver, so the shape's own view is its picture."""
+    names = {"rim": "dash", "pad": "seat", "mark": "plate"}
+    out = []
+    for m, outline in shape["face"]:
+        v, t = _prism(np.asarray(outline, float) * radius, -thick / 2, thick / 2)
+        t, front = np.array(t), len(outline) - 2
+        out += [(names.get(m, m), v, t[:front], True), (names.get(m, m), v, t[front:], False)]
+    for k, (m, outline) in enumerate(shape["layers"]):
+        q = np.asarray(outline, float) * radius
+        if np.sum(q[:, 0] * np.roll(q[:, 1], -1) - np.roll(q[:, 0], -1) * q[:, 1]) < 0:
+            q = q[::-1]
+        out.append((names.get(m, m), np.column_stack([q, np.full(len(q), thick / 2 + 0.002 * (k + 1))]), np.array(_triangulate(q)), True))
+    return out
+
+
 def _cabin(p: CarParams, parts, piece, xu):
     """Carpet, dashboard, steering wheel, two front seats and a rear bench, placed from the cowl, the B-pillar,
     the belt and the sill, so they move with the car's measurements."""
@@ -1013,25 +1115,46 @@ def _cabin(p: CarParams, parts, piece, xu):
         piece("cabin", mat, v, t, seen(v, island, facing, *y))
 
     dash_y = (floor, p.belt_front + 0.30)
+
+    def plain(v):
+        """Texture coordinates for what the dashboard's view does not show (a top, a back, a side): a small spot
+        in a free corner of the island, where nothing is drawn and the material's own colour stays."""
+        return _island("dash", 0.93 + 0.02 * (wide / 2 + v[:, 2]) / wide, 0.93 + 0.02 * (v[:, 1] - floor))
+
     v, t = _box([(xc + xu(p.roof_end_u)) / 2, floor - 0.02, 0.0], (xc - xu(p.roof_end_u) - 0.2, 0.04, inner))
     piece("cabin", "carpet", v, t, _island("carpet", (xc - v[:, 0]) / (xc - xu(p.roof_end_u)), (wide / 2 - v[:, 2]) / wide))
-    box("dash", [xc - 0.25, p.belt_front - 0.13, 0.0], (0.42, 0.34, inner), island="dash", facing=1, y=dash_y)
+    dash = DASHBOARDS.get(p.dash) if isinstance(p.dash, str) else p.dash
+    if dash:
+        for mat, v, t, n, shown in _dash(dash, inner, p.belt_front + 0.03, xc - 0.46, xc - 0.02, p.crease):
+            piece("cabin", mat, v, t, seen(v, "dash", 1, *dash_y) if shown else plain(v), n)
+    else:
+        box("dash", [xc - 0.25, p.belt_front - 0.13, 0.0], (0.42, 0.34, inner), island="dash", facing=1, y=dash_y)
     for z in (-seat_z, seat_z):
         box("seat", [xb + 0.30, floor + 0.24, z], (0.50, 0.12, 0.50))
         box("seat", [xb + 0.02, floor + 0.58, z], (0.12, 0.62, 0.50), pitch=0.25)
         box("seat", [xb - 0.08, floor + 0.98, z], (0.10, 0.18, 0.28), pitch=0.25)
     box("seat", [xb - 0.55, floor + 0.24, 0.0], (0.48, 0.12, inner - 0.08), island="bench", y=(floor, floor + 0.9))
     box("seat", [xb - 0.84, floor + 0.55, 0.0], (0.12, 0.58, inner - 0.08), pitch=0.25, island="bench", y=(floor, floor + 0.9))
-    # Steering wheel: a ring on the driver's side (left), facing the seat and leaning back, on a column.
-    v, t = _revolve([(0.17 + 0.02 * np.cos(a), 0.02 * np.sin(a)) for a in np.linspace(0, 2 * np.pi, 8, endpoint=False)],
-                    24, 1)
+    # Steering wheel: on the driver's side (left), facing the seat with its top leaning away, on a column that
+    # runs down and ahead from its hub.
     lean = np.radians(25)
-    to_x = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])  # the ring's axis (Z) turned to point along -X
-    tilt = np.array([[np.cos(lean), np.sin(lean), 0], [-np.sin(lean), np.cos(lean), 0], [0, 0, 1]])
-    hub = np.array([xc - 0.52, p.belt_front + 0.02, -seat_z])
-    v = v @ to_x.T @ tilt + hub
-    piece("cabin", "dash", v, t, seen(v, "dash", 1, *dash_y))
-    box("dash", [xc - 0.42, p.belt_front - 0.02, -seat_z], (0.24, 0.05, 0.05), pitch=-lean, island="dash", facing=1, y=dash_y)
+    to_x = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])  # the wheel's axis (Z) turned to point along -X
+    tilt = np.array([[np.cos(lean), -np.sin(lean), 0], [np.sin(lean), np.cos(lean), 0], [0, 0, 1]])
+    hub = np.array([xc - 0.62, p.belt_front - 0.05, -seat_z])
+    wheel = STEERING.get(p.steering) if isinstance(p.steering, str) else p.steering
+    if wheel:
+        # The wheel stands in front of the dashboard, so it is not drawn into that view: it has a picture of its
+        # own, straight on, in the free part of the island under the dashboard.
+        for mat, v, t, shown in _steering(wheel, 0.19):
+            uv = _island("dash", 0.25 + 0.101 * v[:, 0] / 0.19, 0.83 - 0.16 * v[:, 1] / 0.19) if shown else plain(v + hub)
+            piece("cabin", mat, v @ to_x.T @ tilt + hub, t, uv)
+    else:
+        v, t = _revolve([(0.17 + 0.02 * np.cos(a), 0.02 * np.sin(a)) for a in np.linspace(0, 2 * np.pi, 8, endpoint=False)],
+                        24, 1)
+        v = v @ to_x.T @ tilt + hub
+        piece("cabin", "dash", v, t, seen(v, "dash", 1, *dash_y))
+    box("dash", hub + 0.11 * np.array([np.cos(lean), -np.sin(lean), 0.0]), (0.24, 0.05, 0.05), pitch=-lean, island="dash",
+        facing=1, y=dash_y)
 
 
 # The materials a car uses, as (sRGB colour, roughness, metallic); "lamp" is drawn unlit when the lights are on.
