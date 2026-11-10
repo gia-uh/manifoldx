@@ -29,7 +29,7 @@ canvas{display:block;position:fixed;inset:0}
 @media (max-height:420px){.btn{width:70px;height:70px;font-size:26px}.btn.gas{height:100px;width:66px}.btn.brake{width:70px;height:70px}}
 </style></head><body>
 <div class="loading" id="loading">CARGANDO…</div>
-<div class="hud"><div class="brand">DONGFENG<small id="model">BOX · prueba de manejo</small></div><div class="speed"><b id="kmh">0</b><span>km/h</span></div></div>
+<div class="hud"><div class="brand">DONGFENG<small id="model">BOX · prueba de manejo</small></div><div class="speed"><b id="kmh">0</b><span>km/h</span><span id="fps"></span></div></div>
 <div class="top-btns"><button class="chip" id="swap">Cambiar carro</button><button class="chip" id="cam">Cámara</button><button class="chip" id="fs">Pantalla completa</button></div>
 <div class="pad left"><div class="btn" data-k="left">◀</div><div class="btn" data-k="right">▶</div></div>
 <div class="pad right"><div class="btn brake" data-k="brake">FRENO</div><div class="btn gas" data-k="gas">GAS</div></div>
@@ -54,12 +54,16 @@ const CARS = {
   box: { id: "car-box", name: "BOX · prueba de manejo", wheelbase: 2.66, top: 140 / 3.6, accel: 3.6 },
   friday: { id: "car-friday", name: "Friday EV · prueba de manejo", wheelbase: 2.715, top: 180 / 3.6, accel: 4.2 },
 };
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+// Phones pay for every pixel: no MSAA on dense screens, and the render scale adapts to hold the frame rate.
+const dense = devicePixelRatio > 1.3;
+const renderer = new THREE.WebGLRenderer({ antialias: !dense, powerPreference: "high-performance" });
+const MAX_SCALE = Math.min(devicePixelRatio, dense ? 1.5 : 2), MIN_SCALE = 0.6;
+let scale = Math.min(MAX_SCALE, dense ? 1.0 : devicePixelRatio);
+renderer.setPixelRatio(scale);
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
 document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#e9ebee");
@@ -75,8 +79,8 @@ for (const [x, y, z, sx, sz] of [[0, 5.9, 0, 14, 8], [-14.9, 3, 0, 0.2, 10], [14
 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(room, 0.04).texture;
 scene.add(new THREE.HemisphereLight("#ffffff", "#9aa0a8", 0.6));
 const sun = new THREE.DirectionalLight("#ffffff", 1.6);
-sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, { left: -12, right: 12, top: 12, bottom: -12, near: 1, far: 60 });
+sun.castShadow = true; sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 1, far: 40 });
 scene.add(sun, sun.target);
 
 // The grounds: a pale concrete floor with a faint grid, a ring road, cones and a few plinths.
@@ -88,20 +92,24 @@ const floorTex = (() => {
   const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(40, 40); t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = 8; return t;
 })();
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.92 }));
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshLambertMaterial({ map: floorTex }));
 floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
 const R_IN = 14, R_OUT = 22;
-const road = new THREE.Mesh(new THREE.RingGeometry(R_IN, R_OUT, 128, 1), new THREE.MeshStandardMaterial({ color: "#4a4f57", roughness: 0.85 }));
+const road = new THREE.Mesh(new THREE.RingGeometry(R_IN, R_OUT, 128, 1), new THREE.MeshLambertMaterial({ color: "#4a4f57" }));
 road.rotation.x = -Math.PI / 2; road.position.y = 0.005; road.receiveShadow = true; scene.add(road);
 for (const r of [R_IN + 0.25, R_OUT - 0.25]) {
   const line = new THREE.Mesh(new THREE.RingGeometry(r - 0.08, r + 0.08, 128, 1), new THREE.MeshBasicMaterial({ color: "#f3f4f6" }));
   line.rotation.x = -Math.PI / 2; line.position.y = 0.01; scene.add(line);
 }
-for (let i = 0; i < 48; i++) {
-  if (i % 2) continue;
-  const a = (i / 48) * Math.PI * 2, r = (R_IN + R_OUT) / 2;
-  const dash = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.14), new THREE.MeshBasicMaterial({ color: "#f3f4f6" }));
-  dash.rotation.set(-Math.PI / 2, 0, -a + Math.PI / 2); dash.position.set(Math.cos(a) * r, 0.012, Math.sin(a) * r); scene.add(dash);
+{ // the centre line's dashes: one instanced draw
+  const dashes = new THREE.InstancedMesh(new THREE.PlaneGeometry(1.6, 0.14), new THREE.MeshBasicMaterial({ color: "#f3f4f6" }), 24);
+  const m = new THREE.Object3D();
+  for (let i = 0; i < 24; i++) {
+    const a = (i / 24) * Math.PI * 2, r = (R_IN + R_OUT) / 2;
+    m.rotation.set(-Math.PI / 2, 0, -a + Math.PI / 2); m.position.set(Math.cos(a) * r, 0.012, Math.sin(a) * r);
+    m.updateMatrix(); dashes.setMatrixAt(i, m.matrix);
+  }
+  scene.add(dashes);
 }
 const solids = []; // circles the car bumps into: {x, z, r}
 const coneGeo = new THREE.ConeGeometry(0.22, 0.6, 18), coneMat = new THREE.MeshStandardMaterial({ color: "#e8682a", roughness: 0.6 });
@@ -110,7 +118,7 @@ const cones = [];
 for (let i = 0; i < 30; i++) {
   const a = (i / 30) * Math.PI * 2, r = i % 2 ? R_IN - 1.2 : R_OUT + 1.2;
   const g = new THREE.Group();
-  const c = new THREE.Mesh(coneGeo, coneMat); c.position.y = 0.3; c.castShadow = true; g.add(c);
+  const c = new THREE.Mesh(coneGeo, coneMat); c.position.y = 0.3; g.add(c);
   const s = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.14, 0.09, 18), stripe); s.position.y = 0.36; g.add(s);
   g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r); scene.add(g);
   cones.push({ g, vx: 0, vz: 0, spin: 0 });
@@ -118,7 +126,7 @@ for (let i = 0; i < 30; i++) {
 const plinthMat = new THREE.MeshStandardMaterial({ color: "#131f35", roughness: 0.4, metalness: 0.2 });
 for (const [x, z] of [[0, 0], [-5, 4], [5, -4]]) {
   const p = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.4, 0.25, 64), plinthMat);
-  p.position.set(x, 0.125, z); p.receiveShadow = p.castShadow = true; scene.add(p);
+  p.position.set(x, 0.125, z); p.receiveShadow = true; scene.add(p);
   solids.push({ x, z, r: 2.4 });
 }
 
@@ -133,8 +141,8 @@ const loadCar = (key) => new Promise((ok, fail) => {
       if (!o.isMesh) return;
       o.geometry.computeBoundingSphere();
       if (o.geometry.boundingSphere.radius > 4) { drop.push(o); return; }
-      o.castShadow = true; o.receiveShadow = true;
-      if (o.material.map) o.material.map.anisotropy = 8;
+      o.castShadow = true;
+      if (o.material.map) o.material.map.anisotropy = 4;
       if (o.geometry.boundingSphere.radius < 0.5 && Math.abs(o.position.y - 0.33) < 0.12) {
         const base = o.quaternion.clone();
         wheels.push({ o, base, flip: Math.abs(base.y) > 0.5 ? -1 : 1, front: o.position.x < 0 });
@@ -215,16 +223,33 @@ function step(dt) {
   // A little body roll and pitch sell the motion.
   car.children[0] && (car.children[0].rotation.x = -state.steer * Math.min(1, Math.abs(state.v) / 15) * 0.05);
   const c = cams[cam], back = c.back, tx = state.x - fx * back, tz = state.z - fz * back;
-  camera.position.lerp(new THREE.Vector3(tx, c.up, tz), Math.min(1, dt * 3.5));
+  camera.position.lerp(camGoal.set(tx, c.up, tz), Math.min(1, dt * 3.5));
   camera.lookAt(state.x + fx * 2, c.look, state.z + fz * 2);
   sun.position.set(state.x - 8, 18, state.z + 6); sun.target.position.set(state.x, 0, state.z);
-  document.getElementById("kmh").textContent = Math.round(Math.abs(state.v) * 3.6);
+  const kmh = Math.round(Math.abs(state.v) * 3.6);
+  if (kmh !== shownKmh) { kmhEl.textContent = kmh; shownKmh = kmh; }
 }
+const camGoal = new THREE.Vector3(), kmhEl = document.getElementById("kmh"); let shownKmh = -1;
+
+// Every 1.5 s, step the render scale down when frames are slow and back up when there is room.
+const perf = { frames: 0, since: performance.now(), fps: 0 };
+const fpsEl = document.getElementById("fps");
+function adapt(now) {
+  perf.frames++;
+  if (now - perf.since < 1500) return;
+  perf.fps = (perf.frames * 1000) / (now - perf.since); perf.frames = 0; perf.since = now;
+  let next = scale;
+  if (perf.fps < 45 && scale > MIN_SCALE) next = Math.max(MIN_SCALE, scale * 0.8);
+  else if (perf.fps > 58 && scale < MAX_SCALE) next = Math.min(MAX_SCALE, scale * 1.1);
+  if (next !== scale) { scale = next; renderer.setPixelRatio(scale); renderer.setSize(innerWidth, innerHeight); }
+  fpsEl.textContent = `${Math.round(perf.fps)} fps · ${scale.toFixed(2)}×`;
+}
+window.__perf = () => ({ fps: perf.fps, scale, calls: renderer.info.render.calls, tris: renderer.info.render.triangles });
 
 await useCar("box");
 camera.position.set(state.x + 7, 3, state.z);
 document.getElementById("loading").remove();
 let last = performance.now();
-renderer.setAnimationLoop((now) => { const dt = Math.min(0.05, (now - last) / 1000); last = now; step(dt); renderer.render(scene, camera); });
+renderer.setAnimationLoop((now) => { const dt = Math.min(0.05, (now - last) / 1000); last = now; step(dt); renderer.render(scene, camera); adapt(now); });
 window.__ready = true;
 </script></body></html>
