@@ -1,21 +1,19 @@
-"""Bundle game.html with three.js, its GLTF loader and the cars' GLBs into one offline HTML file."""
+"""Assemble the site: index.html, three.js r170 (vendored, minified) and one GLB per car under cars/."""
 
-import base64
+import shutil
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent
-THREE = Path("/home/apiad/Workspace/repos/webfair/viewer/vendor/three")  # r170, minified
-b64 = lambda p: base64.b64encode(Path(p).read_bytes()).decode()
-page = (HERE / "game.html").read_text()
-for key, path in {
-    "__THREE__": THREE / "three.module.js",
-    "__BGU__": THREE / "addons/utils/BufferGeometryUtils.js",
-    "__GLTF__": THREE / "addons/loaders/GLTFLoader.js",
-    "__CAR_BOX__": HERE.parent / "out/box/box-poster.glb",
-    "__CAR_FRIDAY__": HERE.parent / "out/friday/box-photo.glb",
-}.items():
-    page = page.replace(key, b64(path))
+THREE = Path("/home/apiad/Workspace/repos/webfair/viewer/vendor/three")
+CARS = {"box": "box/box-poster.glb", "friday": "friday/box-photo.glb", "voyah": "voyah/box-photo.glb",
+        "rich7": "rich7/box-photo.glb", "m5": "m5/box-photo.glb"}
 out = Path(sys.argv[1])
-out.write_text(page)
-print(out.stat().st_size // 1024, "KiB")
+(out / "cars").mkdir(parents=True, exist_ok=True)
+shutil.copy(HERE / "game.html", out / "index.html")
+for rel in ("three.module.js", "addons/loaders/GLTFLoader.js", "addons/utils/BufferGeometryUtils.js"):
+    (out / "vendor/three" / rel).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(THREE / rel, out / "vendor/three" / rel)
+for key, rel in CARS.items():
+    shutil.copy(HERE.parent / "out" / rel, out / "cars" / f"{key}.glb")
+print(sum(f.stat().st_size for f in out.rglob("*") if f.is_file()) // 1024, "KiB in", out)

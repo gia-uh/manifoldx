@@ -31,7 +31,7 @@ STATIONS, RING = 160, 72
 def plan(x):
     """Half-width factor along the car seen from above: rounder at the nose than at the tail."""
     u = np.clip(2 * x / L, -1, 1)
-    p = np.where(u < 0, 6.0, 7.0)
+    p = np.where(u < 0, *P.get("plan_p", (6.0, 7.0)))
     return np.clip(1 - np.abs(u) ** p, 0, 1) ** (1 / p)
 
 

@@ -3,59 +3,100 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#131f35"><meta name="mobile-web-app-capable" content="yes">
 <title>Dongfeng · prueba de manejo</title>
+<script type="importmap">{"imports":{"three":"./vendor/three/three.module.js","three/addons/":"./vendor/three/addons/"}}</script>
 <style>
-:root{--ink:#131f35;--paper:#eef0f3}
+:root{--ink:#131f35;--paper:#eef0f3;--mute:#5b6577}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
-html,body{margin:0;height:100%;overflow:hidden;background:var(--paper);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;touch-action:none;overscroll-behavior:none}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--paper);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;touch-action:none;overscroll-behavior:none;color:var(--ink)}
 body>canvas{display:block;position:fixed;inset:0}
-.hud{position:fixed;top:max(10px,env(safe-area-inset-top));left:max(14px,env(safe-area-inset-left));right:max(14px,env(safe-area-inset-right));display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;color:var(--ink)}
+.hud{position:fixed;top:max(10px,env(safe-area-inset-top));left:max(14px,env(safe-area-inset-left));right:max(14px,env(safe-area-inset-right));display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none}
 .brand{font-weight:700;letter-spacing:.14em;font-size:13px}.brand small{display:block;font-weight:500;letter-spacing:.02em;opacity:.65;font-size:12px;margin-top:2px}
-#map{display:block;margin-top:8px;background:rgba(255,255,255,.55);border-radius:8px}
 #lap{font-variant-numeric:tabular-nums;font-weight:600!important;opacity:.85!important}
+#map{display:block;margin-top:8px;background:rgba(255,255,255,.55);border-radius:8px}
 .speed{text-align:right;font-variant-numeric:tabular-nums}.speed b{font-size:34px;line-height:1}.speed span{font-size:12px;opacity:.65;display:block}
 .top-btns{position:fixed;top:max(10px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);display:flex;gap:8px}
-.chip{pointer-events:auto;border:1px solid rgba(19,31,53,.25);background:rgba(255,255,255,.8);color:var(--ink);border-radius:18px;padding:7px 12px;font-size:13px;font-weight:600}
-.pad{position:fixed;bottom:max(16px,env(safe-area-inset-bottom));display:flex;gap:14px}
-.pad.left{left:max(18px,env(safe-area-inset-left))}.pad.right{right:max(18px,env(safe-area-inset-right));align-items:flex-end}
-.btn{width:84px;height:84px;border-radius:20px;background:rgba(19,31,53,.82);color:#fff;display:grid;place-items:center;font-size:30px;border:2px solid rgba(255,255,255,.18);box-shadow:0 6px 18px rgba(19,31,53,.25);touch-action:none}
-.btn.on{background:#2c4a7c;transform:scale(.96)}
-.btn.gas{height:118px;width:76px;border-radius:16px;font-size:14px;font-weight:700;letter-spacing:.08em}
-.btn.brake{height:84px;width:84px;font-size:14px;font-weight:700;letter-spacing:.08em;background:rgba(80,86,98,.85)}
-.rotate{position:fixed;inset:0;background:var(--ink);color:#fff;display:none;place-items:center;text-align:center;padding:30px;z-index:5}
+.chip{pointer-events:auto;border:1px solid rgba(19,31,53,.25);background:rgba(255,255,255,.85);color:var(--ink);border-radius:18px;padding:7px 12px;font:600 13px system-ui,sans-serif}
+/* analog controls: a horizontal stick for steering, a vertical one for throttle (up) and brake (down) */
+.stick{position:fixed;bottom:max(14px,env(safe-area-inset-bottom));background:rgba(19,31,53,.16);border:2px solid rgba(19,31,53,.28);border-radius:44px;touch-action:none}
+.stick .knob{position:absolute;width:70px;height:70px;border-radius:50%;background:rgba(19,31,53,.88);box-shadow:0 6px 16px rgba(19,31,53,.3);left:50%;top:50%;transform:translate(-50%,-50%);display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700;letter-spacing:.06em;pointer-events:none}
+.stick.steer{left:max(16px,env(safe-area-inset-left));width:230px;height:84px}
+.stick.pedal{right:max(16px,env(safe-area-inset-right));width:84px;height:200px;bottom:max(30px,env(safe-area-inset-bottom))}
+.stick .lab{position:absolute;font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--ink);opacity:.7;pointer-events:none}
+.stick.pedal .up{top:-20px;left:50%;transform:translateX(-50%)}.stick.pedal .down{bottom:-18px;left:50%;transform:translateX(-50%)}
+.stick.steer .l{left:14px;top:50%;transform:translateY(-50%);font-size:18px}.stick.steer .r{right:14px;top:50%;transform:translateY(-50%);font-size:18px}
+@media (max-height:420px){.stick.pedal{height:170px;width:78px}.stick.steer{width:210px;height:78px}.stick .knob{width:62px;height:62px}}
+/* the car select screen */
+#select{position:fixed;inset:0;display:grid;grid-template-columns:1fr minmax(260px,36%);pointer-events:none;z-index:3}
+#select.hidden{display:none}
+#select .stage{position:relative;pointer-events:auto}
+#select .arrow{position:absolute;top:50%;transform:translateY(-50%);width:52px;height:52px;border-radius:50%;border:1px solid rgba(19,31,53,.25);background:rgba(255,255,255,.85);font-size:22px;color:var(--ink);pointer-events:auto}
+#select .prev{left:max(14px,env(safe-area-inset-left))}#select .next{right:14px}
+#select .dots{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);display:flex;gap:7px}
+#select .dots i{width:8px;height:8px;border-radius:50%;background:rgba(19,31,53,.25)}#select .dots i.on{background:var(--ink)}
+#select .card{pointer-events:auto;background:rgba(255,255,255,.92);border-left:1px solid rgba(19,31,53,.12);padding:max(16px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) 14px 18px;display:flex;flex-direction:column;gap:8px;overflow:auto}
+.card .brand2{font-weight:700;letter-spacing:.16em;font-size:11px;color:var(--mute)}
+.card h2{margin:0;font-size:24px;line-height:1.1}.card .tag{font-size:13px;color:var(--mute)}
+.card .price{font-size:18px;font-weight:700}
+.card dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:2px 0;font-size:13px}.card dt{color:var(--mute)}.card dd{margin:0;font-weight:600}
+.bars{display:grid;gap:6px;font-size:12px}.bars div{display:grid;grid-template-columns:86px 1fr;align-items:center;gap:8px}
+.bars span{color:var(--mute)}.bars b{display:block;height:7px;border-radius:4px;background:#dfe3e9;overflow:hidden}.bars b i{display:block;height:100%;background:var(--ink);border-radius:4px}
+.go{margin-top:auto;border:0;background:var(--ink);color:#fff;border-radius:12px;padding:13px;font:700 15px system-ui,sans-serif;letter-spacing:.1em}
+.note{font-size:11px;color:var(--mute)}
+@media (max-height:460px){#select .card{gap:5px;padding-top:max(10px,env(safe-area-inset-top));padding-bottom:10px}.card h2{font-size:20px}
+  .card .price{font-size:15px}.card dl{font-size:12px;gap:1px 10px}.bars{gap:4px}.note{display:none}.go{padding:10px}}
+.rotate{position:fixed;inset:0;background:var(--ink);color:#fff;display:none;place-items:center;text-align:center;padding:30px;z-index:9}
 .rotate div{max-width:280px;font-size:17px;line-height:1.45}.rotate svg{width:72px;height:72px;margin-bottom:14px;animation:tilt 2.2s ease-in-out infinite}
 @keyframes tilt{0%,20%{transform:rotate(0)}50%,80%{transform:rotate(-90deg)}100%{transform:rotate(0)}}
 @media (orientation:portrait) and (pointer:coarse){.rotate{display:grid}}
-.loading{position:fixed;inset:0;display:grid;place-items:center;color:var(--ink);font-weight:600;letter-spacing:.1em;font-size:13px;z-index:4;background:var(--paper)}
-.hint{position:fixed;bottom:max(18px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);color:var(--ink);opacity:.6;font-size:12px;pointer-events:none;text-align:center}
-@media (pointer:coarse){.hint .keys{display:none}}
-@media (max-height:420px){.btn{width:70px;height:70px;font-size:26px}.btn.gas{height:100px;width:66px}.btn.brake{width:70px;height:70px}}
+.loading{position:fixed;inset:0;display:grid;place-items:center;font-weight:600;letter-spacing:.1em;font-size:13px;z-index:8;background:var(--paper)}
+.hint{position:fixed;bottom:max(18px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);opacity:.6;font-size:12px;pointer-events:none;text-align:center}
+@media (pointer:coarse){.hint{display:none}}
+.driving-only{display:none}body.driving .driving-only{display:block}body.driving .top-btns.driving-only{display:flex}body.driving .hud.driving-only{display:flex}
 </style></head><body>
 <div class="loading" id="loading">CARGANDO…</div>
-<div class="hud"><div class="brand">DONGFENG<small id="model">BOX · prueba de manejo</small><small id="lap">en pits</small><canvas id="map" width="150" height="104"></canvas></div><div class="speed"><b id="kmh">0</b><span>km/h</span><span id="fps"></span></div></div>
-<div class="top-btns"><button class="chip" id="swap">Cambiar carro</button><button class="chip" id="cam">Cámara</button><button class="chip" id="reset">A pits</button><button class="chip" id="fs">Pantalla completa</button></div>
-<div class="pad left"><div class="btn" data-k="left">◀</div><div class="btn" data-k="right">▶</div></div>
-<div class="pad right"><div class="btn brake" data-k="brake">FRENO</div><div class="btn gas" data-k="gas">GAS</div></div>
-<div class="hint"><span class="keys">Teclado: flechas o WASD · C cambia la cámara</span></div>
+<div class="hud driving-only"><div class="brand">DONGFENG<small id="model"></small><small id="lap">en pits</small><canvas id="map" width="150" height="104"></canvas></div>
+  <div class="speed"><b id="kmh">0</b><span>km/h</span><span id="fps"></span></div></div>
+<div class="top-btns driving-only"><button class="chip" id="swap">Cambiar carro</button><button class="chip" id="reset">A pits</button><button class="chip" id="fs">Pantalla completa</button></div>
+<div class="stick steer driving-only" id="steer"><span class="lab l">◀</span><span class="lab r">▶</span><div class="knob"></div></div>
+<div class="stick pedal driving-only" id="pedal"><span class="lab up">ACELERAR</span><span class="lab down">FRENAR</span><div class="knob"></div></div>
+<div class="hint driving-only">Teclado: flechas o WASD · arrastra para girar la cámara</div>
+<div id="select" class="hidden">
+  <div class="stage"><button class="arrow prev" id="prev">‹</button><button class="arrow next" id="next">›</button><div class="dots" id="dots"></div></div>
+  <div class="card">
+    <div class="brand2" id="s-brand">DONGFENG</div><h2 id="s-name"></h2><div class="tag" id="s-tag"></div>
+    <div class="price" id="s-price"></div><dl id="s-specs"></dl>
+    <div class="bars" id="s-bars"></div>
+    <div class="note" id="s-note"></div>
+    <button class="go" id="go">MANEJAR</button>
+  </div>
+</div>
 <div class="rotate"><div><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.6"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg><br>Gira el teléfono para manejar</div></div>
-<script id="src-three" type="text/plain">__THREE__</script>
-<script id="src-bgu" type="text/plain">__BGU__</script>
-<script id="src-gltf" type="text/plain">__GLTF__</script>
-<script id="car-box" type="text/plain">__CAR_BOX__</script>
-<script id="car-friday" type="text/plain">__CAR_FRIDAY__</script>
 <script type="module">
-// three.js and its GLTF loader travel inside this page (base64), so it opens offline from one file.
-const b64 = (id) => atob(document.getElementById(id).textContent.trim());
-const blobUrl = (code) => URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
-const threeUrl = blobUrl(b64("src-three"));
-const bguUrl = blobUrl(b64("src-bgu").replaceAll('from"three"', `from"${threeUrl}"`));
-const gltfUrl = blobUrl(b64("src-gltf").replaceAll('from"three"', `from"${threeUrl}"`).replaceAll('"../utils/BufferGeometryUtils.js"', `"${bguUrl}"`));
-const THREE = await import(threeUrl);
-const { GLTFLoader } = await import(gltfUrl);
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
-const CARS = {
-  box: { id: "car-box", name: "BOX · prueba de manejo", wheelbase: 2.66, top: 140 / 3.6, accel: 3.6 },
-  friday: { id: "car-friday", name: "Friday EV · prueba de manejo", wheelbase: 2.715, top: 180 / 3.6, accel: 4.2 },
-};
+// The cars, with what the catalogue says about them; accel (m/s²), top (m/s) and grip drive the arcade physics.
+const CARS = [
+  { key: "box", brand: "DONGFENG", name: "BOX", tag: "SUV compacto · Eléctrico", price: "€ 21.900",
+    specs: [["Potencia", "70 kW · 160 Nm"], ["Velocidad máx.", "140 km/h"], ["Autonomía", "430 km"], ["Plazas", "5"]],
+    wheelbase: 2.66, top: 140 / 3.6, accel: 3.6, grip: 1.0 },
+  { key: "friday", brand: "DONGFENG", name: "Friday EV", tag: "SUV · Eléctrico", price: "€ 29.900",
+    specs: [["Potencia", "150 kW · 340 Nm"], ["Velocidad máx.", "180 km/h"], ["Autonomía", "500 km"], ["Maletero", "541 L"]],
+    wheelbase: 2.715, top: 180 / 3.6, accel: 4.4, grip: 0.95 },
+  { key: "voyah", brand: "VOYAH", name: "Free", tag: "SUV de lujo · Híbrido", price: "€ 44.900",
+    specs: [["Potencia", "360 kW (489 hp)"], ["Velocidad máx.", "200 km/h"], ["Autonomía eléctrica", "318 km"], ["Carga rápida", "20–80 % en 12 min"]],
+    wheelbase: 2.96, top: 200 / 3.6, accel: 6.8, grip: 0.92 },
+  { key: "rich7", brand: "DONGFENG", name: "Rich 7 Tiger", tag: "Pickup 4x4 · Diésel", price: "€ 28.900",
+    specs: [["Motor", "2,3 L · 122 kW · 420 Nm"], ["Velocidad máx.", "170 km/h"], ["Carga", "715 kg"], ["Neumáticos", "255/65 R18"]],
+    wheelbase: 3.15, top: 170 / 3.6, accel: 3.9, grip: 0.8 },
+  { key: "m5", brand: "DONGFENG", name: "Van M5 Cargo", tag: "Van de carga · Gasolina", price: "€ 19.100",
+    specs: [["Motor", "1,6 L · 90 kW · 150 Nm"], ["Velocidad máx.", "145 km/h"], ["Carga", "715 kg"], ["Plazas", "2"]],
+    wheelbase: 3.0, top: 145 / 3.6, accel: 2.8, grip: 0.74 },
+];
+const byKey = Object.fromEntries(CARS.map((c) => [c.key, c]));
+const stat = { accel: [2.5, 7], top: [130 / 3.6, 205 / 3.6], grip: [0.7, 1.0] };
+const pct = (v, [a, b]) => Math.round(18 + 82 * Math.max(0, Math.min(1, (v - a) / (b - a))));
+
 // Phones pay for every pixel: no MSAA on dense screens, and the render scale adapts to hold the frame rate.
 const dense = devicePixelRatio > 1.3;
 const renderer = new THREE.WebGLRenderer({ antialias: !dense, powerPreference: "high-performance" });
@@ -69,7 +110,6 @@ renderer.shadowMap.type = THREE.PCFShadowMap;
 document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#e9ebee");
-scene.fog = new THREE.Fog("#e9ebee", 40, 120);
 
 // A studio for the paint's reflections: a grey room with light panels, baked into an environment map.
 const room = new THREE.Scene();
@@ -78,7 +118,8 @@ for (const [x, y, z, sx, sz] of [[0, 5.9, 0, 14, 8], [-14.9, 3, 0, 0.2, 10], [14
   const p = new THREE.Mesh(new THREE.BoxGeometry(sx, sx < 1 ? 5 : 0.2, sz), new THREE.MeshBasicMaterial({ color: "#ffffff" }));
   p.position.set(x, y, z); room.add(p);
 }
-scene.environment = new THREE.PMREMGenerator(renderer).fromScene(room, 0.04).texture;
+const envMap = new THREE.PMREMGenerator(renderer).fromScene(room, 0.04).texture;
+scene.environment = envMap;
 scene.add(new THREE.HemisphereLight("#ffffff", "#9aa0a8", 0.6));
 const sun = new THREE.DirectionalLight("#ffffff", 1.6);
 sun.castShadow = true; sun.shadow.mapSize.set(1024, 1024);
@@ -229,12 +270,12 @@ for (const at of [0.30, 0.33]) addCone(along(Math.floor(at * N), -outside(Math.f
   scene.add(city);
 }
 
-// The car: a GLB from manifoldx. Its floor disc goes; wheels spin about their axle and the front ones steer.
+// The cars: GLBs from manifoldx, fetched when first shown. Their floor disc goes; wheels spin about their axle and
+// the front ones steer.
 const loader = new GLTFLoader();
-const loadCar = (key) => new Promise((ok, fail) => {
-  const bin = b64(CARS[key].id), buf = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-  loader.parse(buf.buffer, "", (gltf) => {
+const cache = {};
+function loadCar(key) {
+  cache[key] ??= loader.loadAsync(`cars/${key}.glb`).then((gltf) => {
     const model = gltf.scene, wheels = [], drop = [];
     model.traverse((o) => {
       if (!o.isMesh) return;
@@ -242,15 +283,17 @@ const loadCar = (key) => new Promise((ok, fail) => {
       if (o.geometry.boundingSphere.radius > 4) { drop.push(o); return; }
       o.castShadow = true;
       if (o.material.map) o.material.map.anisotropy = 4;
-      if (o.geometry.boundingSphere.radius < 0.5 && Math.abs(o.position.y - 0.33) < 0.12) {
+      if (o.geometry.boundingSphere.radius < 0.6 && o.position.y > 0.25 && o.position.y < 0.5) {
         const base = o.quaternion.clone();
         wheels.push({ o, base, flip: Math.abs(base.y) > 0.5 ? -1 : 1, front: o.position.x < 0 });
       }
     });
     drop.forEach((o) => o.parent.remove(o));
-    ok({ model, wheels });
-  }, fail);
-});
+    const box = new THREE.Box3().setFromObject(model);
+    return { model, wheels, length: box.max.x - box.min.x };
+  });
+  return cache[key];
+}
 
 const car = new THREE.Group(); scene.add(car);
 const headingOf = (t) => Math.atan2(t.z, -t.x);  // forward is (-cos h, sin h)
@@ -265,47 +308,120 @@ function nearest(x, z, from, span) {
 }
 const onPit = (x, z) => pitPts.some((p) => (p.x - x) ** 2 + (p.z - z) ** 2 < 4.2 ** 2);
 let current = "box", wheels = [];
-async function useCar(key) {
-  const { model, wheels: w } = await loadCar(key);
-  car.clear(); car.add(model); wheels = w; current = key;
-  document.getElementById("model").textContent = CARS[key].name;
-}
 
-// Input: on-screen pedals and steering (multi-touch), keyboard on a desktop.
-const keys = { left: false, right: false, gas: false, brake: false };
-const held = new Map();
-for (const el of document.querySelectorAll(".btn")) {
-  const k = el.dataset.k;
-  const down = (e) => { e.preventDefault(); el.setPointerCapture?.(e.pointerId); held.set(e.pointerId, k); keys[k] = true; el.classList.add("on"); };
-  const up = (e) => { if (held.get(e.pointerId) !== k) return; held.delete(e.pointerId); if (![...held.values()].includes(k)) { keys[k] = false; el.classList.remove("on"); } };
-  el.addEventListener("pointerdown", down);
-  for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) el.addEventListener(t, up);
+// The select screen: the car on a turntable in the showroom's light, its card on the right.
+const studio = new THREE.Scene();
+studio.background = new THREE.Color("#e9ebee");
+studio.environment = envMap;
+studio.add(new THREE.HemisphereLight("#ffffff", "#9aa0a8", 0.7));
+const key = new THREE.DirectionalLight("#ffffff", 1.4); key.position.set(-4, 7, 5); key.castShadow = true;
+key.shadow.mapSize.set(1024, 1024); Object.assign(key.shadow.camera, { left: -4, right: 4, top: 4, bottom: -4 }); studio.add(key);
+const turntable = new THREE.Group(); studio.add(turntable);
+const disc = new THREE.Mesh(new THREE.CylinderGeometry(3.4, 3.5, 0.16, 72), new THREE.MeshStandardMaterial({ color: "#131f35", roughness: 0.35, metalness: 0.2 }));
+disc.position.y = -0.08; disc.receiveShadow = true; studio.add(disc);
+const studioFloor = new THREE.Mesh(new THREE.CircleGeometry(30, 64), new THREE.MeshLambertMaterial({ color: "#dfe2e6" }));
+studioFloor.rotation.x = -Math.PI / 2; studioFloor.position.y = -0.16; studioFloor.receiveShadow = true; studio.add(studioFloor);
+const studioCam = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.1, 100);
+let mode = "select", pick = 0, spinAngle = 0.6, shown = null;
+const sel = document.getElementById("select");
+document.getElementById("dots").innerHTML = CARS.map(() => "<i></i>").join("");
+async function showCar(i) {
+  pick = (i + CARS.length) % CARS.length;
+  const c = CARS[pick];
+  document.getElementById("s-brand").textContent = c.brand;
+  document.getElementById("s-name").textContent = c.name;
+  document.getElementById("s-tag").textContent = c.tag;
+  document.getElementById("s-price").textContent = `${c.price} · precio de referencia`;
+  document.getElementById("s-specs").innerHTML = c.specs.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  document.getElementById("s-bars").innerHTML = [["Aceleración", pct(c.accel, stat.accel)], ["Velocidad", pct(c.top, stat.top)], ["Manejo", pct(c.grip, stat.grip)]]
+    .map(([k, v]) => `<div><span>${k}</span><b><i style="width:${v}%"></i></b></div>`).join("");
+  document.getElementById("s-note").textContent = "Precio sin costos de importación ni aranceles. Modelo 3D aproximado, hecho desde las fotos del catálogo.";
+  [...document.querySelectorAll("#dots i")].forEach((d, k) => d.classList.toggle("on", k === pick));
+  const want = c.key, { model } = await loadCar(want);
+  if (CARS[pick].key !== want) return;  // the visitor moved on while it loaded
+  turntable.clear(); model.position.set(0, 0, 0); model.rotation.set(0, 0, 0); turntable.add(model); shown = want;
 }
-const keyMap = { ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right", ArrowUp: "gas", KeyW: "gas", ArrowDown: "brake", KeyS: "brake", Space: "brake" };
-addEventListener("keydown", (e) => { if (keyMap[e.code]) { keys[keyMap[e.code]] = true; e.preventDefault(); } if (e.code === "KeyC") nextCam(); });
-addEventListener("keyup", (e) => { if (keyMap[e.code]) keys[keyMap[e.code]] = false; });
-const auto = new URLSearchParams(location.search).get("auto");
-const overview = new URLSearchParams(location.search).get("overview");  // a fixed view from above, for checks
-const simSteps = Number(new URLSearchParams(location.search).get("sim") || 1);  // steps per frame, for headless checks  // ?auto=1 drives itself, for a headless check
-const cams = [{ back: 7.5, up: 2.6, look: 1.0 }, { back: 4.2, up: 1.5, look: 0.9 }, { back: 13, up: 7.5, look: 0 }];
-let cam = 0; const nextCam = () => { cam = (cam + 1) % cams.length; };
-document.getElementById("cam").onclick = nextCam;
+function openSelect() {
+  mode = "select"; document.body.classList.remove("driving"); sel.classList.remove("hidden");
+  showCar(CARS.findIndex((c) => c.key === current));
+}
+async function drive() {
+  const c = CARS[pick], { model, wheels: w } = await loadCar(c.key);
+  car.clear(); model.position.set(0, 0, 0); model.rotation.set(0, 0, 0); car.add(model);
+  wheels = w; current = c.key; shown = null;
+  document.getElementById("model").textContent = `${c.name} · prueba de manejo`;
+  mode = "drive"; sel.classList.add("hidden"); document.body.classList.add("driving");
+  camera.position.set(state.x + 4, 3, state.z - 8);
+}
+document.getElementById("prev").onclick = () => showCar(pick - 1);
+document.getElementById("next").onclick = () => showCar(pick + 1);
+document.getElementById("go").onclick = drive;
+
+// Input. Steering and pedal are analog sticks (multi-touch); the keyboard gives full deflection.
+const input = { steer: 0, throttle: 0, brake: 0 };
+function stick(el, onMove) {
+  const knob = el.querySelector(".knob");
+  let id = null;
+  const move = (e) => {
+    const r = el.getBoundingClientRect();
+    const x = Math.max(-1, Math.min(1, (e.clientX - (r.left + r.width / 2)) / (r.width / 2 - 30)));
+    const y = Math.max(-1, Math.min(1, (e.clientY - (r.top + r.height / 2)) / (r.height / 2 - 30)));
+    onMove(x, y);
+    knob.style.transform = el.classList.contains("steer")
+      ? `translate(calc(-50% + ${x * (r.width / 2 - 38)}px),-50%)` : `translate(-50%,calc(-50% + ${y * (r.height / 2 - 38)}px))`;
+  };
+  el.addEventListener("pointerdown", (e) => { e.preventDefault(); id = e.pointerId; el.setPointerCapture(id); move(e); });
+  el.addEventListener("pointermove", (e) => { if (e.pointerId === id) move(e); });
+  const end = (e) => { if (e.pointerId !== id) return; id = null; onMove(0, 0); knob.style.transform = "translate(-50%,-50%)"; };
+  for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) el.addEventListener(t, end);
+}
+stick(document.getElementById("steer"), (x) => { input.steer = -x * Math.min(1, Math.abs(x) * 1.15); });
+stick(document.getElementById("pedal"), (_, y) => { input.throttle = Math.max(0, -y); input.brake = Math.max(0, y); });
+const keys = {};
+addEventListener("keydown", (e) => {
+  keys[e.code] = true;
+  if (mode === "select") { if (e.code === "ArrowLeft") showCar(pick - 1); if (e.code === "ArrowRight") showCar(pick + 1); if (e.code === "Enter") drive(); }
+});
+addEventListener("keyup", (e) => { keys[e.code] = false; });
+const keyAxis = () => ({
+  steer: (keys.ArrowLeft || keys.KeyA ? 1 : 0) - (keys.ArrowRight || keys.KeyD ? 1 : 0),
+  throttle: keys.ArrowUp || keys.KeyW ? 1 : 0, brake: keys.ArrowDown || keys.KeyS || keys.Space ? 1 : 0,
+});
+
+// Drag on the scene to look around: in the showroom it turns the car, on the circuit it orbits the camera, which
+// drifts back behind the car once you are moving and let go.
+const orbit = { yaw: 0, pitch: 0.18, id: null, x: 0, y: 0 };
+renderer.domElement.addEventListener("pointerdown", (e) => { orbit.id = e.pointerId; orbit.x = e.clientX; orbit.y = e.clientY; renderer.domElement.setPointerCapture(e.pointerId); });
+renderer.domElement.addEventListener("pointermove", (e) => {
+  if (e.pointerId !== orbit.id) return;
+  const dx = e.clientX - orbit.x, dy = e.clientY - orbit.y; orbit.x = e.clientX; orbit.y = e.clientY;
+  if (mode === "select") spinAngle += dx * 0.01;
+  else { orbit.yaw -= dx * 0.008; orbit.pitch = Math.max(0.03, Math.min(1.1, orbit.pitch + dy * 0.005)); }
+});
+for (const t of ["pointerup", "pointercancel"]) renderer.domElement.addEventListener(t, (e) => { if (e.pointerId === orbit.id) orbit.id = null; });
+
+const params = new URLSearchParams(location.search);
+const auto = params.get("auto");            // drives itself, for headless checks
+const overview = params.get("overview");    // a fixed view from above, for checks
+const simSteps = Number(params.get("sim") || 1);
+document.getElementById("swap").onclick = openSelect;
+document.getElementById("fs").onclick = async () => {
+  try { await document.documentElement.requestFullscreen(); await screen.orientation?.lock?.("landscape"); } catch {}
+};
 document.getElementById("reset").onclick = () => {
   Object.assign(state, START, { v: 0, steer: 0 }); Object.assign(lap, { idx: -1, running: false, marks: new Set() });
   for (const c of cones) { c.g.position.copy(c.home); c.g.rotation.set(0, 0, 0); c.vx = c.vz = c.spin = 0; }
 };
-document.getElementById("swap").onclick = () => useCar(current === "box" ? "friday" : "box");
-document.getElementById("fs").onclick = async () => {
-  try { await document.documentElement.requestFullscreen(); await screen.orientation?.lock?.("landscape"); } catch {}
-};
 
-const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 300);
-addEventListener("resize", () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 500);
+addEventListener("resize", () => {
+  renderer.setSize(innerWidth, innerHeight);
+  for (const c of [camera, studioCam]) { c.aspect = innerWidth / innerHeight; c.updateProjectionMatrix(); }
+});
 
-const qSteer = new THREE.Quaternion(), qSpin = new THREE.Quaternion(), Y = new THREE.Vector3(0, 1, 0), Z = new THREE.Vector3(0, 0, 1);
+let simClock = 0;  // seconds of driving: laps are timed on it, so a slow frame never shortens a lap
 const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 const lapEl = document.getElementById("lap");
-let simClock = 0;  // seconds of driving: laps are timed on it, so a slow frame never shortens a lap
 function updateLap() {
   const now = simClock;
   const [i, d] = lap.idx < 0 ? nearest(state.x, state.z, 0, N / 2) : nearest(state.x, state.z, lap.idx, 40);
@@ -323,22 +439,40 @@ function updateLap() {
   const txt = `Vuelta ${lap.n + 1} · ${cur}${lap.best < Infinity ? ` · mejor ${fmt(lap.best)}` : ""}`;
   if (txt !== lapEl.textContent) lapEl.textContent = txt;
 }
+const map = document.getElementById("map"), mg = map.getContext("2d");
+const bounds = pts.concat(pitPts).reduce((b, p) => [Math.min(b[0], p.x), Math.max(b[1], p.x), Math.min(b[2], p.z), Math.max(b[3], p.z)], [1e9, -1e9, 1e9, -1e9]);
+const mapXY = (x, z) => { const s = Math.min((map.width - 16) / (bounds[1] - bounds[0]), (map.height - 16) / (bounds[3] - bounds[2]));
+  return [8 + (x - bounds[0]) * s, 8 + (z - bounds[2]) * s]; };
+const mapBase = (() => { const c = document.createElement("canvas"); c.width = map.width; c.height = map.height; const g = c.getContext("2d");
+  g.lineCap = g.lineJoin = "round";
+  for (const [line, w, col] of [[pts, 7, "rgba(19,31,53,.85)"], [pitPts, 4, "rgba(19,31,53,.45)"]]) {
+    g.strokeStyle = col; g.lineWidth = w; g.beginPath(); line.forEach((p, i) => (i ? g.lineTo : g.moveTo).call(g, ...mapXY(p.x, p.z)));
+    if (line === pts) g.closePath(); g.stroke();
+  }
+  return c; })();
+function drawMap() {
+  mg.clearRect(0, 0, map.width, map.height); mg.drawImage(mapBase, 0, 0);
+  const [x, y] = mapXY(state.x, state.z); mg.fillStyle = "#e8682a"; mg.beginPath(); mg.arc(x, y, 4, 0, 7); mg.fill();
+}
+const camGoal = new THREE.Vector3(), kmhEl = document.getElementById("kmh"); let shownKmh = -1;
+const qSteer = new THREE.Quaternion(), qSpin = new THREE.Quaternion(), Y = new THREE.Vector3(0, 1, 0), Z = new THREE.Vector3(0, 0, 1);
+
 // Arcade driving: a bicycle model with speed-sensitive steering, rolling drag and a soft bump off solids.
 function step(dt) {
   simClock += dt;
-  const spec = CARS[current];
-  const gas = keys.gas || auto, brake = keys.brake;
-  let steerIn = (keys.left ? 1 : 0) - (keys.right ? 1 : 0);
+  const spec = byKey[current], k = keyAxis();
+  let steerIn = Math.abs(k.steer) > 0 ? k.steer : input.steer;
+  const throttle = Math.max(k.throttle, input.throttle, auto ? 1 : 0), brake = Math.max(k.brake, input.brake);
   if (auto) {  // follow the pit lane, then the racing line, by aiming at a point ahead
     const aim = lap.idx < 0 ? pitPts[Math.min(160, pitPts.findIndex((p) => Math.hypot(p.x - state.x, p.z - state.z) < 6) + 10)] : pts[(lap.idx + 14) % N];
     const want = Math.atan2(aim.z - state.z, -(aim.x - state.x));
     let d = want - state.heading; d = Math.atan2(Math.sin(d), Math.cos(d));
     steerIn = Math.max(-1, Math.min(1, d * 2.5));
   }
-  const maxSteer = 0.6 / (1 + Math.abs(state.v) / 9);
+  const maxSteer = (0.6 * spec.grip) / (1 + Math.abs(state.v) / (9 * spec.grip));
   state.steer += (steerIn * maxSteer - state.steer) * Math.min(1, dt * 7);
-  if (gas) state.v += spec.accel * dt * (1 - Math.max(0, state.v) / spec.top);
-  if (brake) state.v -= (state.v > 0.3 ? 9 : 2.5) * dt;
+  state.v += spec.accel * throttle * dt * (1 - Math.max(0, state.v) / spec.top);
+  if (brake > 0) state.v -= (state.v > 0.3 ? 9 : 2.5) * brake * dt;
   state.v = Math.max(-5, state.v);
   const grass = lap.offTrack ? 1.4 : 0;  // the verge slows you down hard
   state.v -= state.v * (0.12 + grass) * dt + Math.sign(state.v) * Math.min(Math.abs(state.v), 0.35 * dt);
@@ -359,39 +493,33 @@ function step(dt) {
     if (c.spin > 0) { c.g.rotation.z += c.spin * dt; c.spin -= dt * 4; } else if (Math.abs(c.g.rotation.z) > 0.01) c.g.rotation.z = Math.min(Math.PI / 2, Math.abs(c.g.rotation.z));
   }
   car.position.set(state.x, 0, state.z); car.rotation.y = state.heading;
-  state.spin += (state.v / 0.33) * dt;
+  state.spin += (state.v / 0.34) * dt;
   // Rolling forward (-x) turns a wheel about +z; a face loaded turned 180° about y spins the other way locally.
   for (const w of wheels) {
     qSteer.setFromAxisAngle(Y, w.front ? state.steer : 0); qSpin.setFromAxisAngle(Z, state.spin * w.flip);
     w.o.quaternion.copy(qSteer).multiply(w.base).multiply(qSpin);
   }
-  // A little body roll and pitch sell the motion.
-  car.children[0] && (car.children[0].rotation.x = -state.steer * Math.min(1, Math.abs(state.v) / 15) * 0.05);
-  if (overview) { scene.fog = null; camera.far = 1500; camera.updateProjectionMatrix(); camera.position.set(0, 330, 75); camera.lookAt(0, 0, 70); } else {
-  const c = cams[cam], back = c.back, tx = state.x - fx * back, tz = state.z - fz * back;
-  camera.position.lerp(camGoal.set(tx, c.up, tz), Math.min(1, dt * 3.5));
-  camera.lookAt(state.x + fx * 2, c.look, state.z + fz * 2);
+  if (orbit.id === null && Math.abs(state.v) > 2) { orbit.yaw *= 1 - Math.min(1, dt * 1.5); orbit.pitch += (0.18 - orbit.pitch) * Math.min(1, dt * 1.5); }
+  if (overview) { scene.fog = null; camera.far = 1500; camera.updateProjectionMatrix(); camera.position.set(0, 330, 75); camera.lookAt(0, 0, 70); }
+  else {
+    const dist = 7.5, a = state.heading + orbit.yaw;
+    const bx = Math.cos(a), bz = -Math.sin(a);  // behind the car, turned by the orbit
+    const up = 1.0 + Math.sin(orbit.pitch) * dist, flat = Math.cos(orbit.pitch) * dist;
+    camera.position.lerp(camGoal.set(state.x + bx * flat, up, state.z + bz * flat), Math.min(1, dt * (orbit.id === null ? 3.5 : 12)));
+    camera.lookAt(state.x, 0.9, state.z);
   }
   sun.position.set(state.x - 8, 18, state.z + 6); sun.target.position.set(state.x, 0, state.z);
   const kmh = Math.round(Math.abs(state.v) * 3.6);
   if (kmh !== shownKmh) { kmhEl.textContent = kmh; shownKmh = kmh; }
 }
-const map = document.getElementById("map"), mg = map.getContext("2d");
-const bounds = pts.concat(pitPts).reduce((b, p) => [Math.min(b[0], p.x), Math.max(b[1], p.x), Math.min(b[2], p.z), Math.max(b[3], p.z)], [1e9, -1e9, 1e9, -1e9]);
-const mapXY = (x, z) => { const s = Math.min((map.width - 16) / (bounds[1] - bounds[0]), (map.height - 16) / (bounds[3] - bounds[2]));
-  return [8 + (x - bounds[0]) * s, 8 + (z - bounds[2]) * s]; };
-const mapBase = (() => { const c = document.createElement("canvas"); c.width = map.width; c.height = map.height; const g = c.getContext("2d");
-  g.lineCap = g.lineJoin = "round";
-  for (const [line, w, col] of [[pts, 7, "rgba(19,31,53,.85)"], [pitPts, 4, "rgba(19,31,53,.45)"]]) {
-    g.strokeStyle = col; g.lineWidth = w; g.beginPath(); line.forEach((p, i) => (i ? g.lineTo : g.moveTo).call(g, ...mapXY(p.x, p.z)));
-    if (line === pts) g.closePath(); g.stroke();
-  }
-  return c; })();
-function drawMap() {
-  mg.clearRect(0, 0, map.width, map.height); mg.drawImage(mapBase, 0, 0);
-  const [x, y] = mapXY(state.x, state.z); mg.fillStyle = "#e8682a"; mg.beginPath(); mg.arc(x, y, 4, 0, 7); mg.fill();
+
+// The showroom view: the car turns slowly unless the visitor is turning it.
+function stepSelect(dt) {
+  if (orbit.id === null) spinAngle += dt * 0.35;
+  turntable.rotation.y = spinAngle;
+  const len = shown ? 5.2 : 4.6, wide = innerWidth > innerHeight * 1.2;
+  studioCam.position.set(len * 0.2, 1.9, len * 1.75); studioCam.lookAt(wide ? 1.6 : 0, 0.6, 0);
 }
-const camGoal = new THREE.Vector3(), kmhEl = document.getElementById("kmh"); let shownKmh = -1;
 
 // Every 1.5 s, step the render scale down when frames are slow and back up when there is room.
 const perf = { frames: 0, since: performance.now(), fps: 0 };
@@ -407,11 +535,18 @@ function adapt(now) {
   fpsEl.textContent = `${Math.round(perf.fps)} fps · ${scale.toFixed(2)}×`;
 }
 window.__perf = () => ({ fps: perf.fps, scale, calls: renderer.info.render.calls, tris: renderer.info.render.triangles });
+window.__game = { showCar, drive, openSelect, get mode() { return mode; }, get pick() { return pick; } };
 
-await useCar("box");
-camera.position.set(state.x + 4, 3, state.z - 8);
+sel.classList.remove("hidden");
+await showCar(0);
 document.getElementById("loading").remove();
+if (auto) { const want = CARS.findIndex((c) => c.key === auto); if (want > 0) await showCar(want); await drive(); }
 let last = performance.now();
-renderer.setAnimationLoop((now) => { const dt = Math.min(0.05, (now - last) / 1000); last = now; for (let k = 0; k < simSteps; k++) step(dt); renderer.render(scene, camera); adapt(now); });
+renderer.setAnimationLoop((now) => {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (mode === "drive") { for (let k = 0; k < simSteps; k++) step(dt); renderer.render(scene, camera); }
+  else { stepSelect(dt); renderer.render(studio, studioCam); }
+  adapt(now);
+});
 window.__ready = true;
 </script></body></html>
