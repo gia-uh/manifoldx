@@ -66,6 +66,8 @@ class CarParams:
     round_front: float = 0.18  # how far the front corners are pulled back (m)
     round_rear: float = 0.19
     round_power: float = 2.1
+    nose_bulge: float = 0.06  # how far the middle of the nose stands proud of its edge (m)
+    tail_bulge: float = 0.05
     tumblehome: float = 0.31  # how much narrower the roof is than the body
     shoulder: float = 0.95  # belt half-width over the half-width
     # Greenhouse.
@@ -311,6 +313,8 @@ def _body_grid(p: CarParams, axles):
         P[i, :, 1] = [y for _, y in full]
         P[i, :, 0] = p.length / 2 - u[i] * p.length
     P[..., 0] = _rounded(P[..., 0], P[..., 2], halfw[:, None], p)
+    # Leave room for the domes that close the ends, so the car keeps its length.
+    P[..., 0] = P[..., 0] * (1 - (p.nose_bulge + p.tail_bulge) / p.length) + (p.tail_bulge - p.nose_bulge) / 2
     # Wheel arches: raise every point that falls inside the arch circle onto it.
     R = p.wheel_radius + p.arch_gap
     raised = np.zeros(P.shape[:2], bool)
@@ -370,24 +374,39 @@ def _body_faces(p: CarParams, u, P, raised):
             mats += pair
             parts += [part, part]
             bands += [b, b]
-    # Close the ends with fans; the nose and tail are bumper paint.
+    # Close each end with a shallow dome: copies of the end ring shrinking toward its middle, pushed out by the
+    # bulge, then a fan. The nose and tail are bumper paint.
     verts = list(verts)
-    for i, part in ((0, "body"), (S - 1, "body")):
-        verts.append(P[i].mean(0))
-        c = len(verts) - 1
-        for j in range(RING):
-            t = (c, vid(i, j + 1), vid(i, j)) if i == 0 else (c, vid(i, j), vid(i, j + 1))
-            tris.append(t)
-            mats.append("paint")
-            parts.append(part)
-            bands.append(-1)
+    U, J = list(np.repeat(u, RING)), list(np.tile(np.arange(RING), S))
+    for i, sign, bulge in ((0, 1, p.nose_bulge), (S - 1, -1, p.tail_bulge)):
+        ring = P[i]
+        c = np.array([ring[:, 0].max() if sign > 0 else ring[:, 0].min(), (ring[:, 1].min() + ring[:, 1].max()) / 2, 0.0])
+        outer = [vid(i, j) for j in range(RING)]
+        for k in (0.66, 0.33, 0.0):
+            inner = []
+            for j in range(RING if k else 1):
+                q = c + k * (ring[j] - c)
+                q[0] += sign * bulge * (1 - k * k)
+                verts.append(q)
+                U.append(float(i > 0))
+                J.append(j)
+                inner.append(len(verts) - 1)
+            for j in range(RING):
+                o0, o1, n0, n1 = outer[j], outer[(j + 1) % RING], inner[j % len(inner)], inner[(j + 1) % len(inner)]
+                quad = [(n0, n1, o1), (n0, o1, o0)] if sign > 0 else [(o0, o1, n1), (o0, n1, n0)]
+                for t in quad if k else quad[1:] if sign > 0 else quad[:1]:
+                    tris.append(t)
+                    mats.append("paint")
+                    parts.append("body")
+                    bands.append(-1)
+            outer = inner
     verts = np.array(verts)
     tris = np.array(tris)
     # Outward normals: the enclosed volume must be positive.
     a, b, c = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
     if np.einsum("ij,ij->i", a, np.cross(b, c)).sum() < 0:
         tris = tris[:, ::-1]
-    return verts, tris, np.array(mats), np.array(parts), np.array(bands)
+    return verts, tris, np.array(mats), np.array(parts), np.array(bands), (np.array(U), np.array(J))
 
 
 def _region(p: CarParams, u, b, ut, v):
@@ -614,7 +633,7 @@ def _corner_normals(verts, tris, crease):
     return out / (np.linalg.norm(out, axis=2, keepdims=True) + 1e-12)
 
 
-def _body_uvs(p: CarParams, u, verts, tris, bands):
+def _body_uvs(p: CarParams, u, verts, tris, bands, loft_of):
     """Per-corner texture coordinates of the skin, outside and inside. Outside, a face is drawn in the view that
     sees it best; inside, it takes the loft's own coordinates (along the car, round the section)."""
     S = len(u)
@@ -648,8 +667,7 @@ def _body_uvs(p: CarParams, u, verts, tris, bands):
     grid = verts[: S * RING].reshape(S, RING, 3)
     seg = np.linalg.norm(np.diff(np.concatenate([grid, grid[:, :1]], 1), axis=1), axis=2).mean(0)
     V = np.concatenate([[0], np.cumsum(seg)]) / seg.sum()  # around the ring, by mean arc length; RING + 1 values
-    U = np.concatenate([np.repeat(u, RING), [0.0, 1.0]])  # the two cap centres last
-    J = np.concatenate([np.tile(np.arange(RING), S), [0, 0]])
+    U, J = loft_of  # each vertex's place along the car and round the section
     loft = np.stack([U[tris], V[J[tris]]], -1)
     wrap = loft[..., 1].max(1) - loft[..., 1].min(1) > 0.5  # the quad that closes the ring: 0 means 1 there
     loft[wrap] = np.where(loft[wrap][..., 1:2] < 0.25, loft[wrap] + [0, 1], loft[wrap])
@@ -665,7 +683,7 @@ def build_car(p: CarParams | None = None) -> Car:
     x_front_axle = p.length / 2 - p.front_overhang
     axles = (x_front_axle, x_front_axle - p.wheelbase)
     u, P, raised, halfw = _body_grid(p, axles)
-    verts, tris, mats, owners, bands = _body_faces(p, u, P, raised)
+    verts, tris, mats, owners, bands, loft_of = _body_faces(p, u, P, raised)
 
     parts: dict[str, Part] = {}
 
@@ -702,7 +720,7 @@ def build_car(p: CarParams | None = None) -> Car:
 
     # Body faces, split by part and material, one vertex per triangle corner so each face can take its own
     # place in the texture atlas; normals stay smooth across soft bends, taken from the welded skin.
-    corner_uv, inner_uv = _body_uvs(p, u, verts, tris, bands)
+    corner_uv, inner_uv = _body_uvs(p, u, verts, tris, bands, loft_of)
     smooth = _corner_normals(verts, tris, p.crease)
     for name in parts:
         for mat in np.unique(mats[owners == name]):
@@ -792,19 +810,29 @@ PALETTE = {
 # --- in an engine --------------------------------------------------------------------------------------------
 
 
-def spawn_car(engine, car: Car, at=(0.0, 0.0, 0.0), yaw=0.0, palette=None, lights=True) -> dict:
-    """Spawn every piece of the car; returns {part name: [entity handles]}. With lights, lamps draw unlit."""
+def spawn_car(engine, car: Car, at=(0.0, 0.0, 0.0), yaw=0.0, palette=None, lights=True, texture=None) -> dict:
+    """Spawn every piece of the car; returns {part name: [entity handles]}. With lights, lamps draw unlit.
+
+    texture: the path of an albedo image laid out as ATLAS; it replaces the palette's colours on everything but
+    the glass and the lit lamps.
+    """
     from manifoldx.components import Material, Mesh as MeshComponent, Transform
     from manifoldx.resources import BasicMaterial, StandardMaterial
+    from manifoldx.textures import load_texture
 
     pal = {**PALETTE, **(palette or {})}
+    albedo = load_texture(engine, texture) if texture else None
     handles = {}
     for part in car.parts:
         handles[part.name] = []
         for mat, mesh in part.pieces.items():
             colour, rough, metal = pal[mat]
-            m = BasicMaterial(color=colour) if (lights and mat in ("lamp", "tail")) else \
-                StandardMaterial(color=colour, roughness=rough, metallic=metal, opacity=0.55 if mat == "glass" else 1.0)
+            if lights and mat in ("lamp", "tail"):
+                m = BasicMaterial(color=colour)
+            elif mat == "glass":
+                m = StandardMaterial(color=colour, roughness=rough, metallic=metal, opacity=0.55)
+            else:
+                m = StandardMaterial(color=colour, roughness=rough, metallic=metal, albedo_map=albedo)
             handles[part.name].append(engine.spawn(MeshComponent(mesh.to_geometry()), Material(m), Transform()))
     place_car(handles, car, at, yaw)
     return handles
