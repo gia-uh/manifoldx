@@ -9,7 +9,8 @@ booleans.
 Regions are tags on the loft's faces, in its own coordinates (position along the car, band around the section),
 so they follow any shape: glass, pillars, doors, hood and hatch. Small parts that sit on the skin (lamps, grille,
 plate, handles) are decals: flat outlines projected onto the body along a view direction, so a lamp style is
-just an outline.
+just an outline. Lamps, wheels and door mirrors take a shape: outlines traced from a flat drawing of the real
+part (`assets.lamps`, `assets.wheels`, `assets.mirrors`), or a plain style built from boxes and ellipses.
 
 Doors, hood and hatch are separate parts with a hinge; wheels spin and the front ones steer. `Car.pose` gives
 each part's transform for an opening, a wheel turn and a steering angle.
@@ -24,6 +25,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from manifoldx.modeling.assets.lamps import LAMPS
+from manifoldx.modeling.assets.mirrors import MIRRORS
+from manifoldx.modeling.assets.wheels import WHEELS
 from manifoldx.modeling.mesh import Mesh
 
 
@@ -41,7 +44,7 @@ class CarParams:
     track: float = 1.55
     wheel_radius: float = 0.318
     tyre_width: float = 0.205
-    rim_ratio: float = 0.62  # rim radius over wheel radius
+    rim_ratio: float = 0.70  # rim radius over wheel radius
     arch_gap: float = 0.045  # between the tyre and the arch
     # Side profile.
     nose_top: float = 0.75  # top of the nose at the very front
@@ -97,7 +100,11 @@ class CarParams:
     taillamp_yaw: float = 35.0
     spoiler: bool = True
     mirrors: bool = True
-    spokes: int = 5
+    mirror: str | dict = "pod"  # a shape, or "box"
+    mirror_size: tuple = (0.20, 0.165)  # across and up, stalk included, as seen from ahead of the car
+    mirror_yaw: float = 22.0  # degrees its outer end is swept back
+    wheel: str | dict = "swirl"  # a shape, or "spokes"
+    spokes: int = 5  # of the plain wheel
     cladding: bool = False  # black lower body
     handles: bool = True  # a chrome bar on each door; leave it out when a texture paints the handles
     door_strip: bool = True  # a black strip with a chrome line low on the doors
@@ -472,36 +479,39 @@ def _raycast(origins, direction, verts, tris, batch=128):
     return t[np.arange(len(origins)), k], k
 
 
+def _split(outline, metres=1.0, step=0.04, least=4):
+    """Triangulate a flat outline, then split each triangle k x k times so its edges are about `step` long
+    (`metres` is the size of one unit of the outline). Returns the points and the triangles."""
+    flat = np.asarray(outline, float)
+    pts2, tri = [], []
+    for t3 in _triangulate(flat):
+        a2, b2, c2 = flat[list(t3)]
+        longest = max(np.linalg.norm((q - r) * metres) for q, r in ((a2, b2), (b2, c2), (c2, a2)))
+        k = int(np.clip(longest / step, least, 40))
+        ids = {}
+        for i in range(k + 1):
+            for j in range(k + 1 - i):
+                ids[i, j] = len(pts2)
+                pts2.append(a2 + (b2 - a2) * i / k + (c2 - a2) * j / k)
+        for i in range(k):
+            for j in range(k - i):
+                tri.append((ids[i, j], ids[i + 1, j], ids[i, j + 1]))
+                if i + j < k - 1:
+                    tri.append((ids[i + 1, j], ids[i + 1, j + 1], ids[i, j + 1]))
+    return np.array(pts2), np.array(tri)
+
+
 def _decals(p: CarParams, verts, tris, parts, corner_uv):
     """Flat outlines projected onto the skin: (material, view, outline) -> (material, part, vertices, triangles)."""
     W, L = p.width, p.length
     out = []
 
     def add(mat, view, outline, lift=0.006, close=None, frame=None):
-        # Triangulate flat, then split each triangle k x k times (about 4 cm apart), so the decal bends with the
-        # skin it lands on instead of cutting through it. A frame (anchor on the skin, view direction, the
+        # The outline is split into small triangles, so the decal bends with the skin it lands on instead of
+        # cutting through it. A frame (anchor on the skin, view direction, the
         # outline's own right axis, half-size, the outline's anchor, island) places an outline drawn in units of
         # its half-size as seen along that direction, and maps it whole into the island.
-        flat = np.asarray(outline, float)
-        metres = np.array(frame[3:5]) if frame else 1.0
-        pts2, tri = [], []
-        for t3 in _triangulate(flat):
-            a2, b2, c2 = flat[list(t3)]
-            longest = max(np.linalg.norm((q - r) * metres) for q, r in ((a2, b2), (b2, c2), (c2, a2)))
-            k = int(np.clip(longest / 0.04, 1 if frame else 4, 40))
-            base = len(pts2)
-            ids = {}
-            for i in range(k + 1):
-                for j in range(k + 1 - i):
-                    ids[i, j] = len(pts2)
-                    pts2.append(a2 + (b2 - a2) * i / k + (c2 - a2) * j / k)
-            for i in range(k):
-                for j in range(k - i):
-                    tri.append((ids[i, j], ids[i + 1, j], ids[i, j + 1]))
-                    if i + j < k - 1:
-                        tri.append((ids[i + 1, j], ids[i + 1, j + 1], ids[i, j + 1]))
-        outline = np.array(pts2)
-        tri = np.array(tri)
+        outline, tri = _split(outline, np.array(frame[3:5]) if frame else 1.0, least=1 if frame else 4)
         if frame:
             anchor, d, right, a, bh, au, av, island = frame
             o = anchor + np.outer((outline[:, 0] - au) * a, right) - 1.5 * d
@@ -624,23 +634,126 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
 
 
 def _wheel(p: CarParams, x, side):
-    """Tyre, rim and spokes of one wheel at its hub, as {material: (verts, tris)} in car coordinates."""
+    """Tyre, rim and spokes of one wheel at its hub, as {material: (verts, tris)} in car coordinates. A shape
+    gives the wheel its face: the pieces of the face stand on the dish of the rim as solid metal, and the
+    shape's layers lie on them."""
     r, w, rr = p.wheel_radius, p.tyre_width, p.wheel_radius * p.rim_ratio
     hub = np.array([x, r, side * (p.track / 2)])
     tyre = _revolve([(rr, -w / 2), (r - 0.035, -w / 2), (r, -w / 2 + 0.035), (r, w / 2 - 0.035),
                      (r - 0.035, w / 2), (rr, w / 2)], 32, side)
     rim = _revolve([(0.0, w / 2 - 0.05), (rr, w / 2 - 0.05), (rr, -w / 2 + 0.03), (0.0, -w / 2 + 0.03)], 32, side)
-    spokes_v, spokes_t = [], []
-    for k in range(p.spokes):
-        ang = 2 * np.pi * k / p.spokes
-        c = np.array([np.cos(ang) * rr / 2, np.sin(ang) * rr / 2, side * (w / 2 - 0.035)])
-        v, t = _box(c, (rr, 0.05, 0.03))
-        rot = np.array([[np.cos(ang), np.sin(ang), 0], [-np.sin(ang), np.cos(ang), 0], [0, 0, 1]])
-        v = (v - c) @ rot + c
-        spokes_t += [tuple(i + len(spokes_v) * 8 for i in tri) for tri in t]
-        spokes_v.append(v)
-    out = {"tyre": tyre, "rim": rim, "spoke": (np.concatenate(spokes_v), spokes_t)}
-    return {m: (np.asarray(v) + hub, t) for m, (v, t) in out.items()}, hub
+    out = {"tyre": [tyre], "rim": [rim]}
+    shape = WHEELS.get(p.wheel) if isinstance(p.wheel, str) else p.wheel
+    if shape:
+        names = {"dark": "alloy", "metal": "spoke"}
+        top, dish = w / 2 - 0.012, w / 2 - 0.05
+
+        def flat(outline, offset):  # an outline as seen from outside the car, at an offset along the axle
+            q = np.asarray(outline, float) * rr
+            if np.sum(q[:, 0] * np.roll(q[:, 1], -1) - np.roll(q[:, 0], -1) * q[:, 1]) < 0:
+                q = q[::-1]
+            return q, np.column_stack([side * q[:, 0], q[:, 1], np.full(len(q), side * offset)])
+
+        for mat, outline in shape["face"]:
+            q, v = flat(outline, top)
+            n = len(q)
+            wall = np.concatenate([v, flat(q / rr, dish)[1]])  # its own corners, so the face keeps a sharp edge
+            sides = [t for i in range(n) for j in [(i + 1) % n] for t in ((i, n + i, n + j), (i, n + j, j))]
+            out.setdefault(names.get(mat, mat), []).extend([(v, _triangulate(q)), (wall, sides)])
+        for k, (mat, outline) in enumerate(shape["layers"]):
+            q, v = flat(outline, top + 0.002 * (k + 1))
+            out.setdefault(names.get(mat, mat), []).append((v, _triangulate(q)))
+    else:
+        for k in range(p.spokes):
+            ang = 2 * np.pi * k / p.spokes
+            c = np.array([np.cos(ang) * rr / 2, np.sin(ang) * rr / 2, side * (w / 2 - 0.035)])
+            v, t = _box(c, (rr, 0.05, 0.03))
+            rot = np.array([[np.cos(ang), np.sin(ang), 0], [-np.sin(ang), np.cos(ang), 0], [0, 0, 1]])
+            out.setdefault("spoke", []).append(((v - c) @ rot + c, t))
+    return {m: [(np.asarray(v) + hub, t) for v, t in pieces] for m, pieces in out.items()}, hub
+
+
+def _mirror(shape, size, side, yaw=0.0):
+    """A door mirror from a shape, as (material, verts, tris, normals, (u, v)) pieces about the foot of its
+    stalk, on the car's right (side 1) or left (-1). The mirror is a row of sections from the door outward: each
+    is as tall as the front view at that point and as deep as the plan, round ahead and flat behind where the
+    glass is. The cap is the part of each section above the lower edge of the front view's painted region. The
+    strip and the glass are laid on the result from ahead and from behind. Last, the whole mirror turns `yaw`
+    degrees about its foot, its outer end toward the rear."""
+    a, bh = size[0] / 2, size[1] / 2
+    layers = {m: np.asarray(o, float) for m, o in reversed(shape["layers"][1:])}
+    body, cap, plan = np.asarray(shape["layers"][0][1], float), layers["paint"], np.asarray(shape["plan"], float)
+    au, av = shape["anchor"]
+
+    def span(poly, at):  # where the line through `at` on its first axis crosses an outline: lowest and highest
+        lo, hi = poly, np.roll(poly, -1, axis=0)
+        cross = (lo[:, 0] - at) * (hi[:, 0] - at) < 0
+        if not cross.any():
+            return None
+        y = lo[cross, 1] + (at - lo[cross, 0]) / (hi[cross, 0] - lo[cross, 0]) * (hi[cross, 1] - lo[cross, 1])
+        return y.min(), y.max()
+
+    def bend(c, n):  # a superellipse's coordinate: n = 2 is a circle, a large n a box
+        return np.sign(c) * np.abs(c) ** (2 / n)
+
+    deep = plan[:, 1].max()
+    foot = 0.7 * deep  # how far ahead of the glass the stalk stands
+    rings, points = [], 14
+    for u in -0.985 * np.cos(np.linspace(0.0, np.pi, 16)):
+        v0, v1 = span(body, u)
+        over = span(cap, u)
+        d0, d1 = span(plan, u) or (foot - 0.25 * deep, foot + 0.25 * deep)
+        cd, rd, cv, rv = (d0 + d1) / 2, (d1 - d0) / 2, (v0 + v1) / 2, max((v1 - v0) / 2, 1e-6)
+        t = np.clip(((over[0] if over else v1) - cv) / rv, -1, 1)  # where the cap ends, on the section's height
+        ahead = np.arcsin(np.sign(t) * abs(t) ** 1.3)
+        ang = np.concatenate([np.linspace(ahead, np.pi - ahead, points // 2),
+                              np.linspace(np.pi - ahead, 2 * np.pi + ahead, points // 2 + 2)[1:-1]])
+        d = cd + rd * np.where(np.cos(ang) > 0, bend(np.cos(ang), 2.4), bend(np.cos(ang), 5.0))
+        rings.append(np.column_stack([(d - foot) * a, (cv + rv * bend(np.sin(ang), 2.6) - av) * bh,
+                                      np.full(points, (u - au) * a), np.full(points, u), cv + rv * bend(np.sin(ang), 2.6)]))
+    grid = np.array(rings)  # (stations, points, 5): position, then the front view's (u, v)
+    n = len(grid)
+    verts = np.concatenate([grid.reshape(-1, 5), grid[[0, -1]].mean(1)])
+    tris, mats = [], []
+    for i in range(n - 1):
+        for j in range(points):
+            p0, p1, q0, q1 = i * points + j, i * points + (j + 1) % points, (i + 1) * points + j, (i + 1) * points + (j + 1) % points
+            tris += [(p0, q0, q1), (p0, q1, p1)]
+            mats += ["paint" if j < points // 2 - 1 else "black"] * 2
+    for end, ring in ((n * points, 0), (n * points + 1, (n - 1) * points)):
+        for j in range(points):
+            tris.append((end, ring + (j + 1) % points, ring + j) if ring == 0 else (end, ring + j, ring + (j + 1) % points))
+            mats.append("black")
+    tris, mats = np.array(tris), np.array(mats)
+    xyz = verts[:, :3] * np.array([1.0, 1.0, side])
+    if side > 0:  # as built the faces look inward; mirrored to the left side they look outward
+        tris = tris[:, ::-1]
+    normals = _mesh(xyz, tris).normals
+    area = np.linalg.norm(np.cross(xyz[tris[:, 1]] - xyz[tris[:, 0]], xyz[tris[:, 2]] - xyz[tris[:, 0]]), axis=1)
+    out = [(m, xyz, tris[(mats == m) & (area > 1e-9)], normals, verts[:, 3:]) for m in ("paint", "black")]
+
+    def lay(mat, outline, toward, lift):  # an outline of the front view, dropped on the mirror along x
+        flat, tri = _split(outline, np.array([a, bh]), step=0.03, least=1)
+        o = np.column_stack([np.full(len(flat), -toward * 1.0), (flat[:, 1] - av) * bh, side * (flat[:, 0] - au) * a])
+        d = np.array([float(toward), 0.0, 0.0])
+        t, _ = _raycast(o, d, xyz, tris)
+        ok = np.isfinite(t)  # a point past the mirror's edge misses it, and takes its triangles with it
+        tri = (np.cumsum(ok) - 1)[tri[ok[tri].all(1)]]
+        if not len(tri):
+            return
+        flat, pts = flat[ok], o[ok] + (t[ok] - lift)[:, None] * d
+        if np.dot(np.cross(pts[tri[0, 1]] - pts[tri[0, 0]], pts[tri[0, 2]] - pts[tri[0, 0]]), d) > 0:
+            tri = tri[:, ::-1]
+        out.append((mat, pts, tri, np.tile(-d, (len(pts), 1)), flat))
+
+    if "lit" in layers:
+        lay("lit", layers["lit"], -1, 0.002)
+    glass = np.asarray(shape["glass"], float)
+    lay("frame", glass.mean(0) + 1.1 * (glass - glass.mean(0)), 1, 0.002)
+    lay("glass", glass, 1, 0.004)
+    c, sn = np.cos(np.radians(yaw)), side * np.sin(np.radians(yaw))
+    turn = np.array([[c, 0.0, sn], [0.0, 1.0, 0.0], [-sn, 0.0, c]])  # applied to rows: x gives way as z grows outward
+    return [(m, v @ turn, t, nrm @ turn, flat) for m, v, t, nrm, flat in out]
 
 
 # --- texture atlas ------------------------------------------------------------------------------------------
@@ -799,17 +912,33 @@ def build_car(p: CarParams | None = None) -> Car:
     if p.mirrors:
         uu = p.cowl_u + 0.05
         ring = sections_at(uu)[:HALF]
+        shape = MIRRORS.get(p.mirror) if isinstance(p.mirror, str) else p.mirror
         for side, s in (("l", -1), ("r", 1)):
-            zr = s * np.interp(p.belt_front + 0.05, ring[:, 1], ring[:, 2])  # the skin at the mirror's foot
-            v1, t1 = _box([xu(uu), p.belt_front + 0.10, zr + s * 0.13], (0.10, 0.12, 0.17))
-            v2, t2 = _box([xu(uu) + 0.01, p.belt_front + 0.06, zr + s * 0.03], (0.05, 0.03, 0.10))
-            piece(f"door_f{side}", "paint", v1, t1, cell=(0, 3))
-            piece(f"door_f{side}", "black", v2, t2, cell=(1, 3))
+            if shape:
+                zr = np.interp(p.belt_front + 0.01, ring[:, 1], ring[:, 2])  # the skin at the stalk's foot
+                at = np.array([xu(uu), p.belt_front + 0.01, s * (zr - 0.01)])
+                # In the island the shell takes three columns of five, as the front view shows it; frame, glass
+                # and strip share the fourth, one above the other.
+                names = {"frame": ("black", 0), "glass": ("chrome", 1), "lit": ("chrome", 2)}
+                for mat, v, t, n, flat in _mirror(shape, p.mirror_size, s, p.mirror_yaw):
+                    su, tv = 0.02 + 0.48 * (flat[:, 0] + 1), (1 - flat[:, 1]) / 2
+                    if mat in names:
+                        mat, row = names[mat]
+                        uv = _island("small", (3 + su) / 5, (row + tv) / 3)
+                    else:
+                        uv = _island("small", 3 * su / 5, tv)
+                    piece(f"door_f{side}", mat, v + at, t, uv, n)
+            else:
+                zr = s * np.interp(p.belt_front + 0.05, ring[:, 1], ring[:, 2])  # the skin at the mirror's foot
+                v1, t1 = _box([xu(uu), p.belt_front + 0.10, zr + s * 0.13], (0.10, 0.12, 0.17))
+                v2, t2 = _box([xu(uu) + 0.01, p.belt_front + 0.06, zr + s * 0.03], (0.05, 0.03, 0.10))
+                piece(f"door_f{side}", "paint", v1, t1, cell=(0, 5))
+                piece(f"door_f{side}", "black", v2, t2, cell=(1, 5))
     if p.spoiler:
         ring = sections_at(p.roof_end_u)
         v, t = _box([xu(p.roof_end_u) - 0.07, p.height - p.roof_end_drop - 0.03, 0.0],
                     (0.16, 0.03, 2 * 0.62 * ring[:, 2].max() * (1 - p.tumblehome)), pitch=np.radians(-12))
-        piece("hatch", "paint", v, t, cell=(2, 3))
+        piece("hatch", "paint", v, t, cell=(4, 5))
 
     _cabin(p, parts, piece, xu)
 
@@ -818,10 +947,13 @@ def build_car(p: CarParams | None = None) -> Car:
             name = f"wheel_{'f' if front else 'r'}{side}"
             meshes, hub = _wheel(p, xa, s)
             parts[name] = Part(name, "wheel", pivot=hub, axis=np.array([0.0, 0.0, 1.0]), steer=front)
-            for mat, (v, t) in meshes.items():
-                v = np.asarray(v)
-                piece(name, mat, v, t, _island("wheel", (v[:, 0] - hub[0]) / (2.2 * p.wheel_radius) + 0.5,
-                                               (hub[1] - v[:, 1]) / (2.2 * p.wheel_radius) + 0.5))
+            # A wheel is drawn in its island as seen from outside the car, so both sides wear the same picture.
+            # The dish of the rim lies behind the face: it goes to a spot on the tyre's tread, which is plain and
+            # dark, or the face's picture would show again on what one sees through the windows.
+            for mat, pieces in meshes.items():
+                for v, t in pieces:
+                    a, b = s * (v[:, 0] - hub[0]) / (2.2 * p.wheel_radius), (hub[1] - v[:, 1]) / (2.2 * p.wheel_radius)
+                    piece(name, mat, v, t, _island("wheel", *((0.946 + 0.012 * a, 0.5 + 0.012 * b) if mat == "rim" else (a + 0.5, b + 0.5))))
     return Car(p, [pt for pt in parts.values() if pt.pieces])
 
 
@@ -874,7 +1006,7 @@ PALETTE = {
     "trim": ("#17181a", 0.75, 0.0), "underbody": ("#101010", 0.9, 0.0), "liner": ("#0e0e0e", 0.95, 0.0),
     "lamp": ("#eef3ff", 0.2, 0.0), "tail": ("#c41a12", 0.25, 0.0), "plate": ("#e3e8ea", 0.6, 0.0),
     "chrome": ("#d6dbe0", 0.1, 1.0), "tyre": ("#141414", 0.9, 0.0), "rim": ("#2a2c30", 0.45, 0.3),
-    "spoke": ("#c8cdd2", 0.2, 1.0),
+    "spoke": ("#c8cdd2", 0.2, 1.0), "alloy": ("#33363b", 0.3, 0.8),
 }
 
 

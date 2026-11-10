@@ -92,3 +92,32 @@ def test_every_face_sits_in_one_island_of_the_atlas():
     flank = (door.uvs[:, 0] >= s0) & (door.uvs[:, 0] <= s1) & (door.uvs[:, 1] <= ATLAS["left"][3])
     x, s = door.positions[order, 0][flank[order]], door.uvs[order, 0][flank[order]]
     assert np.corrcoef(x, s)[0, 1] < -0.99
+
+
+def test_a_wheel_shape_stands_inside_the_rim_and_both_sides_wear_one_picture():
+    p = CarParams()
+    car = build_car(p)
+    left, right = car.part("wheel_fl"), car.part("wheel_fr")
+    face = left.pieces["alloy"].positions
+    assert np.hypot(*(face[:, :2] - left.pivot[:2]).T).max() <= p.wheel_radius * p.rim_ratio * 1.01
+    assert abs(face[:, 2] - left.pivot[2]).max() < p.tyre_width / 2  # behind the tyre's sidewall
+    assert np.allclose(left.pieces["alloy"].uvs, right.pieces["alloy"].uvs, atol=1e-6)
+    plain = build_car(CarParams(wheel="spokes", mirror="box")).part("wheel_fl")
+    assert "spoke" in plain.pieces and "alloy" not in plain.pieces
+
+
+def test_a_mirror_shape_faces_outward_and_fills_its_size():
+    from manifoldx.modeling.assets.car import _mirror
+    from manifoldx.modeling.assets.mirrors import MIRRORS
+
+    size = (0.20, 0.165)
+    for side in (1, -1):
+        pieces = _mirror(MIRRORS["pod"], size, side)
+        shell = [(v, t) for m, v, t, _, _ in pieces if m in ("paint", "black")]
+        volume = sum(np.einsum("ij,ij->i", v[t[:, 0]], np.cross(v[t[:, 1]], v[t[:, 2]])).sum() / 6 for v, t in shell)
+        assert volume > 0  # the faces look out of the shell, not into it
+        v = shell[0][0]
+        assert np.allclose([np.ptp(v[:, 2]), np.ptp(v[:, 1])], size, rtol=0.06)
+        glass = next(v for m, v, _, _, _ in pieces if m == "glass")
+        assert glass[:, 0].mean() < v[:, 0].mean()  # the glass is on the rear side
+        assert (side * v[:, 2]).max() > 0.1  # and the mirror stands out from the door
