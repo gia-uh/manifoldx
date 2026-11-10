@@ -45,6 +45,7 @@ class CarParams:
     # Side profile.
     nose_top: float = 0.75  # top of the nose at the very front
     hood_front: float = 0.925  # the hood just behind the nose
+    nose_blunt: float = 0.4  # how much of the rise from nose to hood the face makes in its first 4 cm: 0 is a wedge
     cowl_u: float = 0.29  # where the hood meets the windscreen
     cowl_height: float = 1.20
     windscreen_u: float = 0.46  # where the windscreen meets the roof
@@ -57,7 +58,7 @@ class CarParams:
     belt_front: float = 1.03  # belt (bottom of the side glass) at the cowl
     belt_rear: float = 1.11  # and at the end of the roof
     sill: float = 0.20  # underside between the wheels
-    bumper_bottom_front: float = 0.33
+    bumper_bottom_front: float = 0.36
     bumper_bottom_rear: float = 0.35
     hood_crown: float = 0.13  # how far the hood's edge sits below its crown
     # Plan and section.
@@ -66,8 +67,8 @@ class CarParams:
     round_front: float = 0.18  # how far the front corners are pulled back (m)
     round_rear: float = 0.19
     round_power: float = 2.1
-    nose_bulge: float = 0.06  # how far the middle of the nose stands proud of its edge (m)
-    tail_bulge: float = 0.05
+    nose_bulge: float = 0.02  # how far the middle of the nose stands proud of its edge (m)
+    tail_bulge: float = 0.03
     tumblehome: float = 0.31  # how much narrower the roof is than the body
     shoulder: float = 0.95  # belt half-width over the half-width
     # Greenhouse.
@@ -277,11 +278,11 @@ def _stations(p: CarParams, axles):
 
 def _profiles(p: CarParams, u):
     half = p.width / 2
-    top = _pchip([0, 0.04, p.cowl_u, p.windscreen_u, p.roof_peak_u, p.roof_end_u, p.hatch_u, 1],
-                 [p.nose_top, p.hood_front, p.cowl_height, p.height - 0.015, p.height,
+    top = _pchip([0, 0.01, 0.04, p.cowl_u, p.windscreen_u, p.roof_peak_u, p.roof_end_u, p.hatch_u, 1],
+                 [p.nose_top, p.nose_top + p.nose_blunt * (p.hood_front - p.nose_top), p.hood_front, p.cowl_height, p.height - 0.015, p.height,
                   p.height - p.roof_end_drop, p.hatch_height, p.tail_top], u)
     fo, ro = p.front_overhang / p.length, 1 - (p.front_overhang + p.wheelbase) / p.length
-    bottom = _pchip([0, 0.6 * fo, 1 - 0.6 * ro, 1], [p.bumper_bottom_front, p.sill, p.sill, p.bumper_bottom_rear], u)
+    bottom = _pchip([0, 0.4 * fo, 1 - 0.6 * ro, 1], [p.bumper_bottom_front, p.sill, p.sill, p.bumper_bottom_rear], u)
     halfw = _pchip([0, 0.05, 0.15, 0.85, 0.95, 1], [p.nose_half * half, 0.97 * half, half, half, 0.97 * half,
                                                     p.tail_half * half], u)
     g = np.clip((u - (p.cowl_u - 0.03)) / 0.04, 0, 1)  # 0 over the hood, 1 under the glass
@@ -375,19 +376,22 @@ def _body_faces(p: CarParams, u, P, raised):
             mats += pair
             parts += [part, part]
             bands += [b, b]
-    # Close each end with a shallow dome: copies of the end ring shrinking toward its middle, pushed out by the
-    # bulge, then a fan. The nose and tail are bumper paint.
+    # Close each end: copies of the end ring shrinking toward its middle, then a fan. Seen from above the end
+    # keeps the rounding of the corners (a cone would come to a point), and the bulge pushes its middle out a
+    # little, flat in the centre. The nose and tail are bumper paint.
     verts = list(verts)
     U, J = list(np.repeat(u, RING)), list(np.tile(np.arange(RING), S))
     for i, sign, bulge in ((0, 1, p.nose_bulge), (S - 1, -1, p.tail_bulge)):
         ring = P[i]
         c = np.array([ring[:, 0].max() if sign > 0 else ring[:, 0].min(), (ring[:, 1].min() + ring[:, 1].max()) / 2, 0.0])
         outer = [vid(i, j) for j in range(RING)]
-        for k in (0.66, 0.33, 0.0):
+        wide = np.abs(ring[:, 2]).max()
+        pull = np.abs(c[0] - ring[np.abs(ring[:, 2]).argmax(), 0])  # how far the corners sit behind the middle
+        for k in (0.8, 0.6, 0.4, 0.2, 0.0):
             inner = []
             for j in range(RING if k else 1):
                 q = c + k * (ring[j] - c)
-                q[0] += sign * bulge * (1 - k * k)
+                q[0] = c[0] - sign * pull * (abs(q[2]) / wide) ** p.round_power + sign * bulge * (1 - k**4)
                 verts.append(q)
                 U.append(float(i > 0))
                 J.append(j)
