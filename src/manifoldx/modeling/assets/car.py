@@ -78,12 +78,12 @@ class CarParams:
     black_pillars: bool = True
     roof: str = "paint"  # or "black"
     # Parts.
-    headlamp: str = "almond"  # "almond", "round" or "bar"
+    headlamp: str = "wedge"  # "wedge", "almond", "round" or "bar"
     headlamp_center: tuple = (0.676, 0.765)  # (lateral, height)
     headlamp_size: tuple = (0.26, 0.15)
     drl_bar: bool = True
     drl_height: float = 0.826
-    drl_half_length: float = 0.49
+    drl_half_length: float = 0.79  # to the outer corner of the headlamps
     grille: tuple = (0.60, 0.27, 0.43)  # half-width, bottom, top
     taillamp_center: tuple = (0.66, 1.00)
     taillamp_size: tuple = (0.30, 0.17)
@@ -461,12 +461,17 @@ def _raycast(origins, direction, verts, tris, batch=128):
     return t[np.arange(len(origins)), k], k
 
 
+# The wedge headlamp's outline in units of its half-size, from its inner point round the bottom and the outer side.
+WEDGE = [(-1.0, -0.2), (-0.9, -0.41), (-0.48, -0.67), (0.21, -0.95), (0.43, -1.0), (0.69, -1.0), (0.84, -0.83),
+         (0.89, -0.63), (1.0, 0.48), (0.98, 0.71), (0.92, 1.0), (0.81, 1.0)]
+
+
 def _decals(p: CarParams, verts, tris, parts, corner_uv):
     """Flat outlines projected onto the skin: (material, view, outline) -> (material, part, vertices, triangles)."""
     W, L = p.width, p.length
     out = []
 
-    def add(mat, view, outline, lift=0.006):
+    def add(mat, view, outline, lift=0.006, close=None):
         # Triangulate flat, then split each triangle k x k times (about 4 cm apart), so the decal bends with the
         # skin it lands on instead of cutting through it.
         flat = np.asarray(outline, float)
@@ -515,19 +520,29 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         if view in ("front", "rear"):  # the same projection the skin under it uses in its view's island
             Wv, Hv = p.width + VIEW_MARGIN[1], p.height + VIEW_MARGIN[2]
             uv = _island(view, (Wv / 2 - sign * pts[:, 2]) / Wv, (Hv - pts[:, 1]) / Hv)
+        if close:  # a lamp's own island: its box (lateral 0-1, height 0-1), mirrored for the lamp on the other side
+            name, (y0, z0, y1, z1), side = close
+            uv = _island(name, (side * pts[:, 2] - y0) / (y1 - y0), (z1 - pts[:, 1]) / (z1 - z0))
         out.append((mat, str(names[counts.argmax()]), pts, tri, uv))
 
-    def both(mat, view, outline, lift=0.006):
-        add(mat, view, outline, lift)
-        add(mat, view, [(-a, b) for a, b in reversed(outline)], lift)
+    def both(mat, view, outline, lift=0.006, close=None):
+        add(mat, view, outline, lift, close and (*close, 1))
+        add(mat, view, [(-a, b) for a, b in reversed(outline)], lift, close and (*close, -1))
 
-    def lens(mat, view, outline, rim=0.72, core=0.34):
-        """A lamp as a lit rim round a dark lens with a chrome core, each a smaller copy of the outline on top."""
-        c = np.mean(outline, axis=0)
-        both(mat, view, outline)
-        both("black", view, [tuple(c + rim * (np.array(q) - c)) for q in outline], 0.009)
+    def lens(mat, view, outline, rim=0.72, core=0.34, about=None, island=None):
+        """A lamp as a lit rim round a dark lens with a chrome core on top. The lens is the outline shrunk toward
+        `about` (its middle by default): off-centre, the rim is wide on the far side and thin on the near one.
+        The core is the outline shrunk again, or an outline of its own. With an island, the lamp is drawn there
+        in close-up instead of in its view."""
+        c = np.mean(outline, axis=0) if about is None else np.asarray(about, float)
+        lo, hi = np.min(outline, axis=0), np.max(outline, axis=0)
+        pad = 0.06 * (hi - lo)
+        close = island and (island, (*(lo - pad), *(hi + pad)))
+        both(mat, view, outline, close=close)
+        both("black", view, [tuple(c + rim * (np.array(q) - c)) for q in outline], 0.009, close)
         if core:
-            both("chrome", view, [tuple(c + core * (np.array(q) - c)) for q in outline], 0.012)
+            both("chrome", view, core if isinstance(core, list) else [tuple(c + core * (np.array(q) - c)) for q in outline],
+                 0.012, close)
 
     def pill(cx, cy, a, b):
         return [(cx + a * np.sign(np.cos(v)) * abs(np.cos(v)) ** 0.5, cy + b * np.sign(np.sin(v)) * abs(np.sin(v)) ** 0.5)
@@ -539,13 +554,20 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         eye = [(cy + bh * np.cos(s), cz + bh * np.sin(s)) for s in np.linspace(0, 2 * np.pi, 16, endpoint=False)]
     elif p.headlamp == "bar":
         eye = [(cy - a, cz - bh / 3), (cy + a, cz - bh / 3), (cy + a, cz + bh / 3), (cy - a, cz + bh / 3)]
-    else:  # almond: an ellipse drawn to a point on its inner side, toward the middle of the car
+    elif p.headlamp == "almond":  # an ellipse drawn to a point on its inner side, toward the middle of the car
         s = np.linspace(0, 2 * np.pi, 20, endpoint=False)
         eye = [(cy + a * np.cos(v), cz + bh * np.sin(v) * (1 - 0.75 * max(0.0, -np.cos(v)))) for v in s]
-    lens("lamp", "front", eye)
+    else:  # wedge: a point toward the middle of the car, a tall rounded outer side, a straight upper edge
+        eye = [(cy + a * u, cz + bh * v) for u, v in WEDGE]
+    if p.headlamp == "wedge":
+        # Lit along the two edges that meet at the point, dark at the outer side, a projector lens inside.
+        lens("lamp", "front", eye, rim=0.84, about=(cy + 0.62 * a, cz + 0.05 * bh),
+             core=pill(cy + 0.24 * a, cz - 0.10 * bh, 0.38 * a, 0.48 * bh), island="headlamp")
+    else:
+        lens("lamp", "front", eye, island="headlamp")
     if p.drl_bar:
         h, w = p.drl_height, p.drl_half_length
-        add("lamp", "front", [(-w, h - 0.009), (w, h - 0.009), (w, h + 0.009), (-w, h + 0.009)])
+        add("lamp", "front", [(-w, h - 0.009), (w, h - 0.009), (w, h + 0.009), (-w, h + 0.009)], 0.010)
     gw, g0, g1 = p.grille
     add("trim", "front", [(-gw, g0), (gw, g0), (gw * 1.06, g1), (-gw * 1.06, g1)], 0.003)
     if p.fog_rings:
@@ -553,7 +575,7 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     add("plate", "front", [(-0.26, 0.47), (0.26, 0.47), (0.26, 0.59), (-0.26, 0.59)])
     ty, tz = p.taillamp_center
     ta, tb = p.taillamp_size[0] / 2, p.taillamp_size[1] / 2
-    lens("tail", "rear", pill(ty, tz, ta, tb))
+    lens("tail", "rear", pill(ty, tz, ta, tb), island="taillamp")
     add("plate", "rear", [(-0.26, 0.52), (0.26, 0.52), (0.26, 0.64), (-0.26, 0.64)])
     for view in ("left", "right"):
         for u0, u1, s0, s1 in ((p.cowl_u, p.b_pillar_u, 0.05, 0.0), (p.b_pillar_u, p.c_pillar_u, 0.0, 0.025)):
@@ -599,7 +621,10 @@ def _wheel(p: CarParams, x, side):
 # photo taken from that side lines up with it. The right-hand column of the atlas is free for the cabin's views.
 ATLAS = {
     "left": (0.01, 0.01, 0.71, 0.29), "right": (0.01, 0.30, 0.71, 0.58), "top": (0.01, 0.59, 0.51, 0.845),
-    "front": (0.72, 0.01, 0.99, 0.22), "rear": (0.72, 0.23, 0.99, 0.44), "wheel": (0.72, 0.45, 0.99, 0.72),
+    "front": (0.72, 0.01, 0.99, 0.22), "rear": (0.72, 0.23, 0.99, 0.44), "wheel": (0.72, 0.45, 0.89, 0.62),
+    # A lamp is small on the car and the first thing an eye goes to: each kind gets a close-up of its own, shared by
+    # the two sides (the left lamp as seen from outside the car, its outer edge at the right).
+    "headlamp": (0.72, 0.63, 0.855, 0.708), "taillamp": (0.86, 0.63, 0.99, 0.705),
     "small": (0.72, 0.87, 0.85, 0.99), "interior": (0.86, 0.87, 0.99, 0.99), "bottom": (0.01, 0.96, 0.35, 0.99),
     # The cabin: the dashboard as the driver sees it, the seats and the bench as seen from the front, the carpet
     # from above.
