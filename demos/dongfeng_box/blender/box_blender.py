@@ -3,105 +3,160 @@
 Run: blender -b --python box_blender.py -- OUT_DIR
 Writes OUT_DIR/box-blender.glb and OUT_DIR/box-blender.blend.
 
-Axes: metres, X along the car with the front at -X, Z up, Y across. The glTF exporter turns Z up into Y up,
-which gives the game's axes (x along the car, front at -x, y up).
+Axes: metres, X along the car with the front at -X, Z up, Y across (+Y is the car's right). The glTF exporter
+turns Z up into Y up, which gives the game's axes (x along the car, front at -x, y up).
+
+The body is a Catmull-Clark surface. Its shape is given as points that must lie on the surface (read off the
+photos and the spec sheet), and the control cage is solved so that the limit surface passes through them.
+Colour regions (glass, lamps, trims) are cut into the skin with exact booleans against prisms drawn in side,
+front or top view, so every region has a crisp edge and no texture is needed.
 """
 
 import sys
-from math import pi, radians
+from math import cos, pi, radians, sin
 
 import bmesh
 import bpy
 import numpy as np
-from mathutils import Vector
 
 OUT = sys.argv[sys.argv.index("--") + 1] if "--" in sys.argv else "/tmp"
 MM = 0.001
 AXLES = (-1.302, 1.358)  # wheel centres along X, wheelbase 2660 mm
 TYRE_R = 0.3184  # 205/50 R17
 TYRE_W = 0.205
+RIM_R = 17 * 25.4 / 2 * MM
 TRACK_HALF = 0.775  # tyre centre plane
 
-# --- the control cage ---------------------------------------------------------------------------------------
-# One row per station, front to back, in mm: x, top of the section, bottom, half-width at the shoulder,
-# belt height, roof half-width. The cage is the control net of a subdivision surface, so it sits a little
-# outside the final skin and its rows are where the surface is pulled, not points on it.
-STATIONS = [
+# --- the body's shape: points on the surface --------------------------------------------------------------------
+# One row per section, front to back, in mm: x, roof (or hood) top, underside, half-width at the widest point of
+# the side, belt height (where the glass starts), half-width of the roof at the top of the glass.
+SECTIONS = [
     # x      top   bottom  half  belt  roof
-    (-2030, 700, 330, 560, 680, 360),
-    (-2010, 900, 260, 760, 880, 560),
-    (-1940, 985, 240, 860, 960, 700),
-    (-1750, 1040, 235, 905, 1015, 790),
-    (-1450, 1080, 240, 915, 1055, 800),
-    (-1150, 1125, 235, 915, 1100, 790),
-    (-980, 1165, 230, 915, 1130, 770),
-    (-650, 1360, 225, 915, 1140, 700),
-    (-300, 1545, 225, 915, 1145, 660),
-    (150, 1585, 225, 915, 1155, 650),
-    (700, 1585, 225, 915, 1170, 640),
-    (1150, 1565, 230, 910, 1185, 620),
-    (1500, 1530, 235, 900, 1200, 590),
-    (1700, 1420, 250, 880, 1190, 570),
-    (1880, 1200, 270, 840, 1130, 600),
-    (1990, 960, 290, 780, 920, 600),
-    (2030, 700, 320, 640, 680, 470),
+    (-2022, 650, 420, 300, 600, 220),
+    (-2010, 770, 355, 480, 700, 360),
+    (-1990, 865, 298, 620, 790, 480),
+    (-1950, 935, 262, 740, 840, 580),
+    (-1880, 988, 242, 830, 880, 650),
+    (-1780, 1015, 237, 880, 900, 690),
+    (-1650, 1035, 236, 903, 968, 750),
+    (-1450, 1065, 238, 907, 1000, 755),
+    (-1250, 1095, 236, 907, 1035, 745),
+    (-1050, 1130, 232, 905, 1105, 730),
+    (-850, 1235, 228, 905, 1122, 690),
+    (-600, 1390, 226, 905, 1130, 640),
+    (-350, 1520, 225, 905, 1136, 610),
+    (-150, 1560, 225, 905, 1140, 600),
+    (250, 1570, 225, 905, 1146, 600),
+    (700, 1568, 226, 905, 1155, 595),
+    (1100, 1558, 230, 905, 1166, 585),
+    (1360, 1540, 236, 905, 1175, 570),
+    (1560, 1505, 245, 900, 1180, 545),
+    (1700, 1390, 255, 885, 1150, 560),
+    (1840, 1220, 270, 860, 1100, 600),
+    (1950, 1080, 290, 820, 1000, 600),
+    (2005, 950, 310, 750, 900, 580),
+    (2022, 800, 340, 600, 760, 450),
 ]
 
 
-def ring(top, bottom, half, belt, roof):
-    """Half a section, from the bottom centre round the right side (+Y) to the roof centre, as (y, z) in mm."""
-    body = belt - bottom
-    upper = max(top - belt, 20)
+def section(top, bottom, half, belt, roof):
+    """Half a section on the surface, from the bottom centre round the right side (+Y) to the roof centre, (y, z)."""
+    body, upper = belt - bottom, top - belt
+    lerp = lambda a, b, t: a + (b - a) * t
     return [
         (0, bottom),
-        (0.78 * half, bottom),
-        (0.97 * half, bottom + 0.12 * body),
-        (half, bottom + 0.55 * body),
-        (0.985 * half, belt - 0.04 * body),
-        (0.95 * half, belt),
-        (roof, belt + 0.80 * upper),
-        (0.72 * roof, top - 0.01 * upper),
+        (0.62 * half, bottom),
+        (0.86 * half, bottom + 0.035 * body),
+        (0.96 * half, bottom + 0.16 * body),
+        (half, bottom + 0.48 * body),
+        (0.985 * half, belt - 0.14 * body),
+        (0.94 * half, belt - 0.01 * body),
+        (lerp(0.92 * half, roof, 0.45), belt + 0.45 * upper),
+        (roof, top - 0.10 * upper),
+        (0.80 * roof, top - 0.025 * upper),
+        (0.42 * roof, top - 0.004 * upper),
         (0, top),
     ]
 
 
-def cage():
-    """The right half of the body as a quad cage, open along the centre plane, with both ends capped."""
-    mesh = bpy.data.meshes.new("BodyCage")
+def targets():
+    """The surface points as an (S, R, 3) array in metres, with each section's full ring: right side, then left."""
+    rings = []
+    for x, top, bottom, half_w, belt, roof in SECTIONS:
+        if x < -1080:
+            # The hood is a dome: its edge (the "belt" here) sits well below the crown and well inside the side.
+            belt, roof = min(belt, top - 120), min(roof, 0.80 * half_w)
+        half = section(top, bottom, half_w, belt, roof)
+        full = half + [(-y, z) for y, z in reversed(half[1:-1])]
+        rings.append([(x * MM, y * MM, z * MM) for y, z in full])
+    return np.array(rings)
+
+
+def cage_mesh(points, name="BodyCage"):
+    """A closed quad mesh: rings joined section to section, both ends capped with one n-gon."""
+    S, R, _ = points.shape
+    mesh = bpy.data.meshes.new(name)
     bm = bmesh.new()
-    rows = []
-    for x, top, bottom, half, belt, roof in STATIONS:
-        rows.append([bm.verts.new((x * MM, y * MM, z * MM)) for y, z in ring(top, bottom, half, belt, roof)])
-    for a, b in zip(rows, rows[1:]):
-        for j in range(len(a) - 1):
-            bm.faces.new((a[j], a[j + 1], b[j + 1], b[j]))
-    bm.faces.new(rows[0])
-    bm.faces.new(list(reversed(rows[-1])))
+    vs = [[bm.verts.new(tuple(points[i, j])) for j in range(R)] for i in range(S)]
+    for a, b in zip(vs, vs[1:]):
+        for j in range(R):
+            bm.faces.new((a[j], a[(j + 1) % R], b[(j + 1) % R], b[j]))
+    bm.faces.new(vs[0])
+    bm.faces.new(list(reversed(vs[-1])))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     bm.to_mesh(mesh)
     bm.free()
     return mesh
 
 
+def limit_points(cage_obj, n):
+    """Where the cage's vertices land on the limit surface: the first n vertices of a level-1 limit evaluation."""
+    dg = bpy.context.evaluated_depsgraph_get()
+    ev = cage_obj.evaluated_get(dg)
+    me = ev.to_mesh()
+    co = np.empty(len(me.vertices) * 3)
+    me.vertices.foreach_get("co", co)
+    ev.to_mesh_clear()
+    return co.reshape(-1, 3)[:n]
+
+
+def fit_cage(iterations=30, step=1.5):
+    """Solve the control cage whose Catmull-Clark limit surface passes through the target points.
+
+    The limit position of each vertex is a fixed weighted average of its neighbours, so the error can be pushed back
+    onto the cage and the evaluation repeated; it converges because the averaging weights are positive.
+    """
+    T = targets()
+    S, R, _ = T.shape
+    flat_t = T.reshape(-1, 3)
+    cage = flat_t.copy()
+    obj = link(bpy.data.objects.new("Body", cage_mesh(T)))
+    sub = obj.modifiers.new("fit", "SUBSURF")
+    sub.levels = 1
+    sub.use_limit_surface = True
+    for it in range(iterations):
+        obj.data.vertices.foreach_set("co", cage.ravel())
+        obj.data.update()
+        bpy.context.view_layer.update()
+        lim = limit_points(obj, len(flat_t))
+        err = flat_t - lim
+        if it == 0:
+            print(f"FIT start rms {np.sqrt((err ** 2).sum(1).mean()) * 1000:.1f} mm, max {np.abs(err).max() * 1000:.1f} mm")
+            # The first evaluation must keep the cage's vertex order; check it before trusting the update.
+            assert np.abs(err).max() < 0.25, f"limit vertices do not follow cage order: {np.abs(err).max()}"
+        cage += step * err
+        cage[np.abs(flat_t[:, 1]) < 1e-9, 1] = 0.0  # the centre line stays on the mirror plane
+    print(f"FIT rms {np.sqrt((err ** 2).sum(1).mean()) * 1000:.1f} mm, max {np.abs(err).max() * 1000:.1f} mm")
+    obj.data.vertices.foreach_set("co", cage.ravel())
+    obj.data.update()
+    obj.modifiers.remove(sub)
+    final = obj.modifiers.new("subdiv", "SUBSURF")
+    final.levels = final.render_levels = 2
+    apply_all(obj)
+    return obj
+
+
 # --- materials ------------------------------------------------------------------------------------------------
-
-
-def material(name, color, rough=0.5, metal=0.0, coat=0.0, emit=None, alpha=1.0, trans=0.0):
-    m = bpy.data.materials.new(name)
-    m.use_nodes = True
-    p = m.node_tree.nodes["Principled BSDF"]
-    p.inputs["Base Color"].default_value = (*color, 1)
-    p.inputs["Roughness"].default_value = rough
-    p.inputs["Metallic"].default_value = metal
-    p.inputs["Coat Weight"].default_value = coat
-    p.inputs["Coat Roughness"].default_value = 0.05
-    p.inputs["Transmission Weight"].default_value = trans
-    if emit:
-        p.inputs["Emission Color"].default_value = (*emit[0], 1)
-        p.inputs["Emission Strength"].default_value = emit[1]
-    if alpha < 1:
-        p.inputs["Alpha"].default_value = alpha
-    return m
 
 
 def srgb(hex_):
@@ -109,24 +164,47 @@ def srgb(hex_):
     return tuple(v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in c)
 
 
+def material(name, color, rough=0.5, metal=0.0, coat=0.0, emit=None, alpha=1.0, cull=True):
+    m = bpy.data.materials.new(name)
+    m.use_nodes = True
+    p = m.node_tree.nodes["Principled BSDF"]
+    p.inputs["Base Color"].default_value = (*srgb(color), 1)
+    p.inputs["Roughness"].default_value = rough
+    p.inputs["Metallic"].default_value = metal
+    p.inputs["Coat Weight"].default_value = coat
+    p.inputs["Coat Roughness"].default_value = 0.04
+    if emit:
+        p.inputs["Emission Color"].default_value = (*srgb(emit[0]), 1)
+        p.inputs["Emission Strength"].default_value = emit[1]
+    if alpha < 1:
+        p.inputs["Alpha"].default_value = alpha
+        m.surface_render_method = "BLENDED"
+    m.use_backface_culling = cull
+    return m
+
+
 MAT = {}
 
 
 def materials():
-    MAT["paint"] = material("Paint", srgb("#8fb8d6"), rough=0.35, metal=0.35, coat=1.0)
-    MAT["liner"] = material("ArchLiner", srgb("#141518"), rough=0.9)
-    MAT["black"] = material("GlossBlack", srgb("#08090b"), rough=0.12, coat=1.0)
-    MAT["glass"] = material("Glass", srgb("#1a2228"), rough=0.03, metal=0.0, coat=1.0)
-    MAT["trim"] = material("MatteTrim", srgb("#1d1f22"), rough=0.7)
-    MAT["chrome"] = material("Chrome", srgb("#d8dde2"), rough=0.08, metal=1.0)
-    MAT["drl"] = material("DRL", srgb("#f4f8ff"), rough=0.2, emit=(srgb("#eef4ff"), 4.0))
-    MAT["lamp"] = material("HeadLamp", srgb("#1b1e22"), rough=0.05, metal=0.6)
-    MAT["tail"] = material("TailLamp", srgb("#5a0608"), rough=0.1, emit=(srgb("#ff1a1a"), 1.5))
-    MAT["tyre"] = material("Tyre", srgb("#151515"), rough=0.85)
-    MAT["rim"] = material("Rim", srgb("#2a2d31"), rough=0.3, metal=0.8)
-    MAT["rimlip"] = material("RimLip", srgb("#c9ced3"), rough=0.15, metal=1.0)
-    MAT["cut"] = material("_cut", (1, 0, 1))  # faces a cutter leaves behind, deleted after each boolean
-    MAT["plate"] = material("Plate", srgb("#e8ecef"), rough=0.6)
+    MAT["paint"] = material("Paint", "#8cbad3", rough=0.28, metal=0.45, coat=1.0)
+    MAT["liner"] = material("ArchLiner", "#121315", rough=0.95)
+    MAT["black"] = material("GlossBlack", "#060708", rough=0.1, coat=1.0)
+    MAT["glass"] = material("Glass", "#20292f", rough=0.02, coat=1.0, alpha=0.42)
+    MAT["trim"] = material("MatteTrim", "#18191b", rough=0.75)
+    MAT["chrome"] = material("Chrome", "#dfe4e8", rough=0.06, metal=1.0)
+    MAT["drl"] = material("DRL", "#f6f9ff", rough=0.2, emit=("#eef4ff", 6.0))
+    MAT["lens"] = material("Lens", "#14171b", rough=0.04, metal=0.5, coat=1.0)
+    MAT["tail"] = material("TailLED", "#ff2a1a", rough=0.2, emit=("#ff2410", 5.0))
+    MAT["taillens"] = material("TailLens", "#3a0507", rough=0.05, coat=1.0)
+    MAT["plate"] = material("Plate", "#dfe8ec", rough=0.6)
+    MAT["cut"] = material("_cut", "#ff00ff")  # faces a cutter leaves behind, deleted after each boolean
+    MAT["cabin"] = material("Cabin", "#1d1e21", rough=0.9)
+    MAT["seat"] = material("Seat", "#2b2d31", rough=0.75)
+    MAT["tyre"] = material("Tyre", "#141414", rough=0.88)
+    MAT["rim"] = material("Rim", "#2a2c30", rough=0.45, metal=0.3)
+    MAT["machined"] = material("Machined", "#c8cdd2", rough=0.18, metal=1.0)
+    MAT["disc"] = material("Disc", "#6d7075", rough=0.45, metal=1.0)
 
 
 # --- helpers --------------------------------------------------------------------------------------------------
@@ -145,7 +223,7 @@ def apply_all(obj):
     obj.select_set(False)
 
 
-def prism(name, outline, axis, lo, hi, mat):
+def prism(name, outline, axis, lo, hi, mat=None):
     """A closed prism: a 2-D outline extruded from lo to hi along X, Y or Z (metres).
 
     For axis 'Y' the outline is (x, z), for 'X' it is (y, z), for 'Z' it is (x, y).
@@ -168,7 +246,7 @@ def prism(name, outline, axis, lo, hi, mat):
     bm.to_mesh(mesh)
     bm.free()
     obj = link(bpy.data.objects.new(name, mesh))
-    obj.data.materials.append(mat)
+    obj.data.materials.append(mat or MAT["cut"])
     return obj
 
 
@@ -199,10 +277,8 @@ def paint_region(body, cutter, mat):
     inside = body.copy()
     inside.data = body.data.copy()
     link(inside)
-    n0 = len(body.data.polygons)
     boolean(body, cutter, "DIFFERENCE")
     boolean(inside, cutter, "INTERSECT")
-    print(f"REGION {cutter.name} {mat.name}: body {n0} -> diff {len(body.data.polygons)}, inter {len(inside.data.polygons)}")
     keep = slot(inside, mat)
     cut_b, cut_i = slot(body, MAT["cut"]), slot(inside, MAT["cut"])
     for obj, cut in ((body, cut_b), (inside, cut_i)):
@@ -231,91 +307,104 @@ def mm(points):
     return [(a * MM, b * MM) for a, b in points]
 
 
+def mirrored(points):
+    """A right-hand (+Y) outline in front or rear view, and the same outline mirrored to the left."""
+    return [points, [(-y, z) for y, z in reversed(points)]]
+
+
+def band(curve, thickness):
+    """A thin strip in a 2-D view: the polyline curve and the same curve shifted up by thickness."""
+    return curve + [(a, b + thickness) for a, b in reversed(curve)]
+
+
+def circle(cy, cz, r, n=24):
+    return [(cy + r * cos(2 * pi * k / n), cz + r * sin(2 * pi * k / n)) for k in range(n)]
+
+
+def rounded_rect(y0, z0, y1, z1, r, n=6):
+    pts = []
+    for cy, cz, a0 in ((y1 - r, z0 + r, -90), (y1 - r, z1 - r, 0), (y0 + r, z1 - r, 90), (y0 + r, z0 + r, 180)):
+        pts += [(cy + r * cos(radians(a0 + 90 * k / n)), cz + r * sin(radians(a0 + 90 * k / n))) for k in range(n + 1)]
+    return pts
+
+
 # --- the body -------------------------------------------------------------------------------------------------
 
 
 def body():
-    obj = link(bpy.data.objects.new("Body", cage()))
+    obj = fit_cage()
     # Every material in one fixed order, so the boolean copies and the body agree on slot indices when joined.
+    obj.data.materials.clear()
     for m in MAT.values():
         obj.data.materials.append(m)
-    mirror = obj.modifiers.new("mirror", "MIRROR")
-    mirror.use_axis = (False, True, False)
-    mirror.use_clip = True
-    mirror.use_mirror_merge = True
-    sub = obj.modifiers.new("subdiv", "SUBSURF")
-    sub.levels = sub.render_levels = 3
-    apply_all(obj)
+    for p in obj.data.polygons:
+        p.material_index = 0
 
     # Wheel arches: cylinders across the car. Their walls stay as the arch liners, in matte black.
     for x in AXLES:
-        bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=TYRE_R + 0.045, depth=2.4,
-                                            location=(x, 0, TYRE_R + 0.01), rotation=(pi / 2, 0, 0))
+        bpy.ops.mesh.primitive_cylinder_add(vertices=72, radius=TYRE_R + 0.05, depth=2.4,
+                                            location=(x, 0, TYRE_R + 0.015), rotation=(pi / 2, 0, 0))
         cyl = bpy.context.active_object
         cyl.data.materials.append(MAT["liner"])
         boolean(obj, cyl, "DIFFERENCE")
         bpy.data.objects.remove(cyl)
-    # Inner wheel-well walls: an inset box across the arch so the arch does not see through the car.
+    # Inner wheel-well walls, so the arch does not look into the cabin.
     for x in AXLES:
-        cut = prism("well", mm([(x * 1000 - 420, 260), (x * 1000 + 420, 260), (x * 1000 + 420, 760),
-                                (x * 1000 - 420, 760)]), "Y", -0.66, 0.66, MAT["liner"])
-        # keep only the walls: the box's ends become the well's inner sides
-        boolean(obj, cut, "UNION")
-        bpy.data.objects.remove(cut)
+        well = prism("well", mm([(x * 1000 - 430, 270), (x * 1000 + 430, 270), (x * 1000 + 430, 760),
+                                 (x * 1000 - 430, 760)]), "Y", -0.66, 0.66, MAT["liner"])
+        boolean(obj, well, "UNION")
+        bpy.data.objects.remove(well)
 
-    # Material regions, all from exact intersections with prisms seen from the side (Y), front or back (X).
-    greenhouse = mm([(-1000, 1120), (-280, 1560), (1460, 1545), (1620, 1450), (1760, 1175), (1500, 1180),
-                     (300, 1150), (-950, 1110)])
-    paint_region(obj, prism("gh", greenhouse, "Y", -1.2, 1.2, MAT["cut"]), MAT["black"])
-    roof = mm([(-300, 1490), (1440, 1490), (1440, 1700), (-300, 1700)])
-    roof_c = prism("roof", roof, "Y", -0.60, 0.60, MAT["cut"])
-    paint_region(obj, roof_c, MAT["paint"])
-    windshield = mm([(-990, 1150), (-320, 1520), (-320, 1700), (-1100, 1700)])
-    paint_region(obj, prism("ws", windshield, "Y", -0.72, 0.72, MAT["cut"]), MAT["glass"])
-    for poly in (
-        [(-860, 1175), (-380, 1450), (40, 1470), (40, 1185)],  # front door window
-        [(150, 1470), (980, 1465), (1180, 1290), (1180, 1200), (150, 1190)],  # rear door window
-        [(1260, 1240), (1260, 1440), (1380, 1440), (1440, 1290)],  # quarter glass
-    ):
-        paint_region(obj, prism("win", mm(poly), "Y", -1.2, 1.2, MAT["cut"]), MAT["glass"])
-    rear = mm([(-560, 1200), (560, 1200), (500, 1470), (-500, 1470)])
-    paint_region(obj, prism("rw", rear, "X", 1.55, 2.2, MAT["cut"]), MAT["glass"])
+    side = lambda poly, mat, half=1.2: paint_region(obj, prism("s", mm(poly), "Y", -half, half), mat)
+    front = lambda poly, mat, lo=-2.3, hi=-1.8: paint_region(obj, prism("f", mm(poly), "X", lo, hi), mat)
+    rear = lambda poly, mat, lo=1.85, hi=2.3: paint_region(obj, prism("r", mm(poly), "X", lo, hi), mat)
+    top = lambda poly, mat, lo, hi: paint_region(obj, prism("t", mm(poly), "Z", lo, hi), mat)
 
-    # Front: LED bar along the hood's leading edge, headlamps below it, a dark lower intake and the plate.
-    bar = mm([(-760, 925), (760, 925), (760, 950), (-760, 950)])
-    paint_region(obj, prism("drl", bar, "X", -2.3, -1.6, MAT["cut"]), MAT["drl"])
-    for s in (1, -1):
-        lamp = mm([(s * 520, 760), (s * 800, 790), (s * 830, 900), (s * 470, 900)])
-        paint_region(obj, prism("lamp", lamp, "X", -2.3, -1.7, MAT["cut"]), MAT["lamp"])
-        led = mm([(s * 480, 885), (s * 820, 885), (s * 830, 900), (s * 470, 900)])
-        paint_region(obj, prism("led", led, "X", -2.3, -1.7, MAT["cut"]), MAT["drl"])
-    intake = mm([(-600, 300), (600, 300), (650, 470), (-650, 470)])
-    paint_region(obj, prism("intake", intake, "X", -2.3, -1.85, MAT["cut"]), MAT["trim"])
-    plate = mm([(-260, 480), (260, 480), (260, 600), (-260, 600)])
-    paint_region(obj, prism("plate", plate, "X", -2.3, -1.85, MAT["cut"]), MAT["plate"])
+    # Greenhouse: gloss black from the belt up, the roof back in paint, then the glass.
+    side([(-1060, 1100), (-330, 1600), (1500, 1600), (1960, 1200), (2060, 1010), (2060, 960), (1900, 1180),
+          (1300, 1168), (-1000, 1112)], MAT["black"])
+    rear([(-800, 1000), (800, 1000), (800, 1600), (-800, 1600)], MAT["black"], lo=1.6)
+    top([(-330, -560), (1590, -520), (1590, 520), (-330, 560)], MAT["paint"], 1.49, 1.8)
+    side([(-1035, 1135), (-370, 1528), (-280, 1528), (-280, 1700), (-1400, 1700)], MAT["glass"], half=0.74)
+    side([(-900, 1165), (-420, 1468), (60, 1500), (60, 1178)], MAT["glass"])
+    side([(150, 1500), (1000, 1496), (1180, 1300), (1180, 1185), (150, 1180)], MAT["glass"])
+    side([(1270, 1250), (1270, 1470), (1400, 1470), (1500, 1300)], MAT["glass"])
+    rear([(-540, 1210), (540, 1210), (500, 1470), (-500, 1470)], MAT["glass"], lo=1.6)
 
-    # Rear: a red light bar across the tailgate and a black diffuser.
-    tail = mm([(-830, 1000), (830, 1000), (800, 1080), (-800, 1080)])
-    paint_region(obj, prism("tail", tail, "X", 1.8, 2.3, MAT["cut"]), MAT["tail"])
-    diff = mm([(-800, 300), (800, 300), (800, 420), (-800, 420)])
-    paint_region(obj, prism("diff", diff, "X", 1.9, 2.3, MAT["cut"]), MAT["trim"])
+    # Front: the LED bar across the nose bending down into C-shaped headlamps, a wide black grille, silver-framed
+    # corner intakes, the plate and the badge.
+    ys = np.linspace(-865, 865, 61)
+    front(band([(y, 930 - 115 * (abs(y) / 865) ** 4) for y in ys], 16), MAT["drl"])
+    for lens in mirrored([(530, 905), (610, 912), (710, 905), (800, 890), (858, 862), (872, 815), (845, 778),
+                          (765, 768), (680, 782), (600, 830)]):
+        front(lens, MAT["lens"], hi=-1.75)
+    for drl in mirrored(band([(575, 838), (650, 800), (760, 784), (838, 790), (866, 815)], 13)):
+        front(drl, MAT["drl"], hi=-1.75)
+    for lamp in (circle(770, 840, 28), circle(-770, 840, 28)):
+        front(lamp, MAT["drl"], hi=-1.75)
+    front([(-650, 290), (650, 290), (705, 425), (-705, 425)], MAT["trim"])
+    for frame in mirrored([(600, 300), (805, 332), (845, 440), (640, 448)]):
+        front(frame, MAT["chrome"], hi=-1.75)
+    for hole in mirrored([(628, 318), (792, 344), (818, 425), (655, 430)]):
+        front(hole, MAT["trim"], hi=-1.75)
+    front([(-260, 470), (260, 470), (260, 590), (-260, 590)], MAT["plate"])
+    front(circle(0, 985, 32), MAT["chrome"], hi=-1.85)
 
-    # Side: the black door strip with its chrome lower line.
-    strip = mm([(-760, 330), (1000, 330), (950, 400), (-700, 400)])
-    paint_region(obj, prism("strip", strip, "Y", -1.2, 1.2, MAT["cut"]), MAT["trim"])
-    line = mm([(-740, 315), (980, 315), (1000, 330), (-760, 330)])
-    paint_region(obj, prism("line", line, "Y", -1.2, 1.2, MAT["cut"]), MAT["chrome"])
+    # Rear: round-cornered lamps at the corners of the black band, a red LED ring, the bumper's black lip.
+    for y0, y1 in ((540, 850), (-850, -540)):
+        rear(rounded_rect(y0, 920, y1, 1100, 60), MAT["tail"], lo=1.7)
+        rear(rounded_rect(y0 + 22, 942, y1 - 22, 1078, 42), MAT["taillens"], lo=1.7)
+        rear(rounded_rect(y0 + 70, 990, y1 - 70, 1028, 14), MAT["plate"], lo=1.7)
+    rear([(-820, 290), (820, 290), (820, 380), (-820, 380)], MAT["trim"])
 
-    # Door shut lines (5 mm, gloss black) and the two handles.
-    for seam in (
-        [(-1000, 360), (-995, 360), (-955, 1112), (-960, 1112)],  # front door, front edge
-        [(95, 330), (100, 330), (100, 1180), (95, 1180)],  # between the doors
-        [(1060, 360), (1065, 360), (1245, 1195), (1240, 1195)],  # rear door, back edge
-    ):
-        paint_region(obj, prism("seam", mm(seam), "Y", -1.2, 1.2, MAT["cut"]), MAT["black"])
-    for hx in (-130, 1050):
-        handle = mm([(hx, 1015), (hx + 150, 1015), (hx + 150, 1040), (hx, 1040)])
-        paint_region(obj, prism("handle", handle, "Y", -1.2, 1.2, MAT["cut"]), MAT["chrome"])
+    # Side: shut lines, handles and the black door strip with its chrome line.
+    for seam in ([(-962, 360), (-957, 360), (-940, 1118), (-945, 1118)], [(300, 300), (305, 300), (305, 1150),
+                 (300, 1150)], [(1185, 700), (1190, 700), (1305, 950), (1425, 1175), (1420, 1175), (1300, 950)]):
+        side(seam, MAT["black"])
+    for hx in (60, 1150):
+        side([(hx, 915), (hx + 150, 915), (hx + 150, 937), (hx, 937)], MAT["chrome"])
+    side([(-760, 340), (1000, 340), (960, 450), (-700, 450)], MAT["trim"])
+    side([(-770, 325), (1010, 325), (1000, 340), (-760, 340)], MAT["chrome"])
 
     for p in obj.data.polygons:
         p.use_smooth = True
@@ -323,22 +412,80 @@ def body():
     return obj
 
 
-# --- details: mirrors and handles -----------------------------------------------------------------------------
+def cabin(body_obj):
+    """The inside: the body's skin without its glass, pulled in 25 mm and turned inside out, plus seats, dash
+    and wheel, so the glass shows a cabin instead of the far side of the paint."""
+    shell = body_obj.copy()
+    shell.data = body_obj.data.copy()
+    link(shell)
+    glass = slot(shell, MAT["glass"])
+    bm = bmesh.new()
+    bm.from_mesh(shell.data)
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.material_index == glass], context="FACES")
+    bm.normal_update()
+    for v in bm.verts:
+        v.co -= v.normal * 0.025
+    bmesh.ops.reverse_faces(bm, faces=bm.faces)
+    cab = slot(shell, MAT["cabin"])
+    for f in bm.faces:
+        f.material_index = cab
+    bm.to_mesh(shell.data)
+    bm.free()
+    shell.name = "CabinShell"
+    parts = [shell]
+
+    def block(loc, size, mat, rot=(0, 0, 0), level=2):
+        bpy.ops.mesh.primitive_cube_add(size=1, location=loc, rotation=rot)
+        b = bpy.context.active_object
+        b.scale = size
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        b.data.materials.append(mat)
+        sub = b.modifiers.new("s", "SUBSURF")
+        sub.levels = level
+        bev = b.modifiers.new("b", "BEVEL")
+        bev.width, bev.segments = 0.01, 2
+        b.modifiers.move(1, 0)
+        apply_all(b)
+        parts.append(b)
+
+    block((-0.75, 0, 0.98), (0.42, 1.44, 0.22), MAT["cabin"])  # dashboard
+    for y in (-0.37, 0.37):
+        block((-0.12, y, 0.56), (0.52, 0.50, 0.14), MAT["seat"])
+        block((0.16, y, 0.90), (0.14, 0.48, 0.62), MAT["seat"], rot=(0, radians(-14), 0))
+        block((0.24, y, 1.28), (0.10, 0.26, 0.16), MAT["seat"])
+    block((0.78, 0, 0.56), (0.50, 1.26, 0.14), MAT["seat"])
+    block((1.04, 0, 0.90), (0.14, 1.26, 0.60), MAT["seat"], rot=(0, radians(-12), 0))
+    bpy.ops.mesh.primitive_torus_add(major_radius=0.18, minor_radius=0.018, location=(-0.56, -0.37, 1.02),
+                                     rotation=(0, radians(-65), 0))
+    wheel_ = bpy.context.active_object
+    wheel_.data.materials.append(MAT["cabin"])
+    parts.append(wheel_)
+    return parts
+
+
+# --- details: mirrors -----------------------------------------------------------------------------------------
 
 
 def mirrors():
     out = []
     for s in (1, -1):
-        bpy.ops.mesh.primitive_cube_add(size=1, location=(-0.84, s * 0.99, 1.17))
+        bpy.ops.mesh.primitive_cube_add(size=1, location=(-0.86, s * 1.0, 1.17))
         m = bpy.context.active_object
-        m.scale = (0.11, 0.17, 0.09)
+        m.scale = (0.17, 0.24, 0.14)
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
         m.data.materials.append(MAT["paint"])
         sub = m.modifiers.new("s", "SUBSURF")
-        sub.levels = 2
+        sub.levels = 3
         apply_all(m)
-        bpy.ops.mesh.primitive_cube_add(size=1, location=(-0.80, s * 0.92, 1.14))
+        # The back of the housing (facing the driver, +X) and its base are black.
+        m.data.materials.append(MAT["black"])
+        for p in m.data.polygons:
+            if p.center.z < -0.035:  # local coordinates: the housing is centred on its origin
+                p.material_index = 1
+            p.use_smooth = True
+        bpy.ops.mesh.primitive_cube_add(size=1, location=(-0.84, s * 0.91, 1.13))
         arm = bpy.context.active_object
-        arm.scale = (0.08, 0.08, 0.04)
+        arm.scale = (0.09, 0.12, 0.035)
         arm.data.materials.append(MAT["black"])
         out += [m, arm]
     return out
@@ -347,77 +494,78 @@ def mirrors():
 # --- wheels ---------------------------------------------------------------------------------------------------
 
 
-def tyre():
-    """A tyre revolved from its cross-section with a Screw modifier: tread, rounded shoulders, sidewalls."""
-    r, w, rim = TYRE_R, TYRE_W, 17 * 25.4 / 2 * MM
-    half = w / 2
-    prof = [(rim, -half * 0.92), (rim + 0.02, -half), (r - 0.03, -half), (r - 0.008, -half * 0.85),
-            (r, -half * 0.55), (r, half * 0.55), (r - 0.008, half * 0.85), (r - 0.03, half), (rim + 0.02, half),
-            (rim, half * 0.92)]
+def revolve(name, profile, mat, steps=96):
+    """Revolve a (radius, y) polyline about the Y axis with a Screw modifier."""
     bm = bmesh.new()
-    vs = [bm.verts.new((0, z, rr)) for rr, z in prof]
+    vs = [bm.verts.new((0, y, r)) for r, y in profile]
     for a, b in zip(vs, vs[1:]):
         bm.edges.new((a, b))
-    mesh = bpy.data.meshes.new("Tyre")
+    mesh = bpy.data.meshes.new(name)
     bm.to_mesh(mesh)
     bm.free()
-    obj = link(bpy.data.objects.new("Tyre", mesh))
-    obj.data.materials.append(MAT["tyre"])
+    obj = link(bpy.data.objects.new(name, mesh))
+    obj.data.materials.append(mat)
     screw = obj.modifiers.new("screw", "SCREW")
     screw.axis = "Y"
-    screw.steps = screw.render_steps = 64
+    screw.steps = screw.render_steps = steps
     screw.use_smooth_shade = True
+    screw.use_merge_vertices = True
     apply_all(obj)
     return obj
 
 
-def rim():
-    """A rim: a dished barrel, a hub and five twisted spokes repeated by an Array modifier around an empty."""
-    rr = 17 * 25.4 / 2 * MM
-    parts = []
-    bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=rr, depth=TYRE_W * 0.9, rotation=(pi / 2, 0, 0))
-    barrel = bpy.context.active_object
-    barrel.data.materials.append(MAT["rim"])
-    parts.append(barrel)
-    bpy.ops.mesh.primitive_torus_add(major_radius=rr - 0.012, minor_radius=0.012, major_segments=64,
-                                     location=(0, -TYRE_W * 0.45, 0), rotation=(pi / 2, 0, 0))
-    lip = bpy.context.active_object
-    lip.data.materials.append(MAT["rimlip"])
-    parts.append(lip)
-    bpy.ops.mesh.primitive_cube_add(size=1, location=(0, -TYRE_W * 0.47, rr * 0.55))
-    spoke = bpy.context.active_object
-    spoke.scale = (0.06, 0.03, rr * 0.85)
-    spoke.rotation_euler = (0, radians(12), 0)
-    spoke.data.materials.append(MAT["rim"])
-    bev = spoke.modifiers.new("bevel", "BEVEL")
-    bev.width, bev.segments = 0.008, 3
-    apply_all(spoke)
-    # The array copies around the object's origin with the pivot's transform relative to the spoke, so the
-    # spoke's own scale and rotation are baked in first and its origin sits on the axle.
-    spoke.select_set(True)
-    bpy.context.view_layer.objects.active = spoke
-    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-    spoke.select_set(False)
-    pivot = link(bpy.data.objects.new("pivot", None))
-    pivot.rotation_euler = (0, radians(72), 0)
-    arr = spoke.modifiers.new("array", "ARRAY")
-    arr.count = 5
-    arr.use_relative_offset = False
-    arr.use_object_offset = True
-    arr.offset_object = pivot
-    apply_all(spoke)
-    bpy.data.objects.remove(pivot)
-    parts.append(spoke)
-    bpy.ops.mesh.primitive_cylinder_add(vertices=32, radius=0.07, depth=0.04, location=(0, -TYRE_W * 0.47, 0),
-                                        rotation=(pi / 2, 0, 0))
-    hub = bpy.context.active_object
-    hub.data.materials.append(MAT["rimlip"])
-    parts.append(hub)
-    return parts
+def spokes(count=5, face=-0.094, twist=12.0):
+    """Five broad spokes, twisted and dished: each a tapered outline in the wheel plane, extruded 28 mm."""
+    bm = bmesh.new()
+    rs = np.linspace(0.058, RIM_R - 0.03, 9)
+    for k in range(count):
+        base = 2 * pi * k / count
+        left, right = [], []
+        for r in rs:
+            t = (r - rs[0]) / (rs[-1] - rs[0])
+            a = base + radians(twist) * t
+            half = (0.046 - 0.008 * t + 0.03 * t ** 3) / r  # narrow in the middle, flaring into the rim
+            y = face + 0.032 * (1 - t) ** 1.5  # dish: the hub sits deeper than the rim
+            left.append((r * sin(a - half), y, r * cos(a - half)))
+            right.append((r * sin(a + half), y, r * cos(a + half)))
+        front_ = [bm.verts.new(p) for p in left + list(reversed(right))]
+        f = bm.faces.new(front_)
+        ext = bmesh.ops.extrude_face_region(bm, geom=[f])
+        bmesh.ops.translate(bm, vec=(0, 0.028, 0),
+                            verts=[v for v in ext["geom"] if isinstance(v, bmesh.types.BMVert)])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    mesh = bpy.data.meshes.new("Spokes")
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = link(bpy.data.objects.new("Spokes", mesh))
+    obj.data.materials.append(MAT["rim"])
+    obj.data.materials.append(MAT["machined"])
+    bev = obj.modifiers.new("bevel", "BEVEL")
+    bev.width, bev.segments, bev.limit_method = 0.004, 2, "ANGLE"
+    apply_all(obj)
+    return obj
 
 
-def wheel(name, x, side):
-    parts = [tyre()] + rim()
+def wheel(name, x, side_):
+    r, h = TYRE_R, TYRE_W / 2
+    parts = [
+        revolve("Tyre", [(RIM_R + 0.004, -h * 0.93), (RIM_R + 0.03, -h * 1.03), (r - 0.04, -h * 1.02),
+                         (r - 0.013, -h * 0.92), (r - 0.002, -h * 0.70), (r, -h * 0.35), (r, h * 0.35),
+                         (r - 0.002, h * 0.70), (r - 0.013, h * 0.92), (r - 0.04, h * 1.02), (RIM_R + 0.03, h * 1.03),
+                         (RIM_R + 0.004, h * 0.93)], MAT["tyre"]),
+        # Rim: machined outer face, a dark barrel and a dark back plate so the openings read as depth.
+        revolve("Lip", [(RIM_R - 0.035, -h * 0.90), (RIM_R + 0.004, -h * 0.93), (RIM_R + 0.004, -h * 0.80),
+                        (RIM_R - 0.012, -h * 0.80), (RIM_R - 0.012, h * 0.80)], MAT["machined"]),
+        revolve("Back", [(0.0, 0.03), (RIM_R - 0.012, 0.03)], MAT["liner"], steps=48),
+        revolve("Disc", [(0.06, -0.005), (0.145, -0.005), (0.145, 0.015), (0.06, 0.015)], MAT["disc"], steps=48),
+        revolve("Cap", [(0.0, -0.075), (0.04, -0.073), (0.052, -0.064), (0.058, -0.05)], MAT["machined"], steps=32),
+        spokes(),
+    ]
+    bpy.ops.mesh.primitive_cube_add(size=1, location=(0.0, 0.0, 0.12))
+    caliper = bpy.context.active_object
+    caliper.scale = (0.11, 0.05, 0.05)
+    caliper.data.materials.append(MAT["rim"])
+    parts.append(caliper)
     bpy.ops.object.select_all(action="DESELECT")
     for p in parts:
         p.select_set(True)
@@ -425,12 +573,10 @@ def wheel(name, x, side):
     bpy.ops.object.join()
     w = bpy.context.active_object
     w.name = name
-    for p in w.data.polygons:
-        p.use_smooth = True
     w.data.set_sharp_from_angle(angle=radians(35))
     # Built facing -Y (the left side); the right-hand wheels are turned round so the spokes face out.
-    w.location = (x, side * TRACK_HALF, TYRE_R)
-    if side > 0:
+    w.location = (x, side_ * TRACK_HALF, TYRE_R)
+    if side_ > 0:
         w.rotation_euler = (0, 0, pi)
     return w
 
@@ -439,17 +585,15 @@ def main():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     materials()
     b = body()
-    for m in mirrors():
+    inside = cabin(b)
+    for m in mirrors() + inside:
         m.parent = b
     wheels = [wheel(f"Wheel_{n}", x, s) for n, (x, s) in
               {"FL": (AXLES[0], -1), "FR": (AXLES[0], 1), "RL": (AXLES[1], -1), "RR": (AXLES[1], 1)}.items()]
-    for p in b.data.materials:
-        pass
-    # Drop the unused cutter material.
     for obj in bpy.data.objects:
         if obj.type == "MESH":
-            names = [m.name for m in obj.data.materials]
-            assert "_cut" not in [obj.data.materials[p.material_index].name for p in obj.data.polygons], obj.name
+            used = {obj.data.materials[p.material_index].name for p in obj.data.polygons}
+            assert "_cut" not in used, obj.name
     tris = sum(sum(len(p.vertices) - 2 for p in o.data.polygons) for o in bpy.data.objects if o.type == "MESH")
     bpy.ops.wm.save_as_mainfile(filepath=f"{OUT}/box-blender.blend")
     bpy.ops.export_scene.gltf(filepath=f"{OUT}/box-blender.glb", export_format="GLB", export_apply=True,

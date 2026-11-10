@@ -16,18 +16,19 @@ scene = bpy.context.scene
 scene.render.resolution_x, scene.render.resolution_y = 1200, 800
 if EEVEE:
     scene.render.engine = "BLENDER_EEVEE"
+    import os
     world = bpy.data.worlds.new("W")
     scene.world = world
     world.use_nodes = True
-    world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.55, 0.57, 0.6, 1)
-    world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.6
-    sun = bpy.data.objects.new("sun", bpy.data.lights.new("sun", "SUN"))
-    sun.data.energy = 3.5
-    sun.rotation_euler = (radians(50), 0, radians(-35))
-    scene.collection.objects.link(sun)
-    for loc, e in (((-4, -4, 4), 1500), ((4, 3, 3), 900), ((0, 0, 6), 800)):
+    nt = world.node_tree
+    env = nt.nodes.new("ShaderNodeTexEnvironment")
+    hdri = os.path.join(bpy.utils.system_resource("DATAFILES", path="studiolights/world"), "interior.exr")
+    env.image = bpy.data.images.load(hdri)
+    nt.links.new(env.outputs["Color"], nt.nodes["Background"].inputs["Color"])
+    nt.nodes["Background"].inputs["Strength"].default_value = 1.0
+    for loc, e in (((-3, -3, 4.5), 500), ((3.5, 2.5, 4), 300)):
         area = bpy.data.objects.new("a", bpy.data.lights.new("a", "AREA"))
-        area.data.energy, area.data.size = e, 4
+        area.data.energy, area.data.size = e, 5
         area.location = loc
         area.rotation_euler = (Vector((0, 0, 0.8)) - Vector(loc)).to_track_quat("-Z", "Y").to_euler()
         scene.collection.objects.link(area)
@@ -55,7 +56,7 @@ target = Vector((0, 0, 0.75))
 VIEWS = {
     "threequarter": ((-5.2, -4.6, 2.4), 35),
     "side": ((0, -9, 0.8), 35),
-    "front": ((-9, 0, 0.9), 35),
+    "front": ((-6.5, -0.6, 1.1), 50),
     "rear34": ((5.0, 4.4, 2.2), 35),
 }
 for name, (loc, lens) in VIEWS.items():
