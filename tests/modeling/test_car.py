@@ -102,8 +102,9 @@ def test_a_wheel_shape_stands_inside_the_rim_and_both_sides_wear_one_picture():
     assert np.hypot(*(face[:, :2] - left.pivot[:2]).T).max() <= p.wheel_radius * p.rim_ratio * 1.01
     assert abs(face[:, 2] - left.pivot[2]).max() < p.tyre_width / 2  # behind the tyre's sidewall
     assert np.allclose(left.pieces["alloy"].uvs, right.pieces["alloy"].uvs, atol=1e-6)
-    plain = build_car(CarParams(wheel="spokes", mirror="box")).part("wheel_fl")
-    assert "spoke" in plain.pieces and "alloy" not in plain.pieces
+    plain = build_car(CarParams(wheel="spokes", mirror="box", grille_style="bar", grille=(0.60, 0.27, 0.43)))
+    assert "spoke" in plain.part("wheel_fl").pieces and "alloy" not in plain.part("wheel_fl").pieces
+    assert len(_low_lamps(plain)) > 0
 
 
 def test_a_mirror_shape_faces_outward_and_fills_its_size():
@@ -121,3 +122,26 @@ def test_a_mirror_shape_faces_outward_and_fills_its_size():
         glass = next(v for m, v, _, _, _ in pieces if m == "glass")
         assert glass[:, 0].mean() < v[:, 0].mean()  # the glass is on the rear side
         assert (side * v[:, 2]).max() > 0.1  # and the mirror stands out from the door
+
+
+def _low_lamps(car):
+    v = car.part("body").pieces["lamp"].positions
+    return v[v[:, 1] < 0.6]  # the lamps under the number plate: the grille's
+
+
+def test_a_grille_shape_fills_its_box_and_keeps_its_ends():
+    from manifoldx.modeling.assets.car import _slabs
+
+    p = CarParams()
+    half, bottom, top = p.grille
+    rings = _low_lamps(build_car(p))
+    assert abs(abs(rings[:, 2]).max() - half) < 0.01
+    assert bottom - 0.01 < rings[:, 1].min() and rings[:, 1].max() < top + 0.01
+    # A shorter grille moves its rings together; it does not squeeze them.
+    shorter = _low_lamps(build_car(CarParams(grille=(half - 0.1, bottom, top))))
+    assert abs(abs(shorter[:, 2]).max() - (half - 0.1)) < 0.01
+    assert abs(np.ptp(abs(shorter[:, 2])) - np.ptp(abs(rings[:, 2]))) < 0.005
+    assert len(_low_lamps(build_car(CarParams(fog_rings=False)))) == 0
+    bar = np.array([(0, 0), (1, 0), (1, 0.1), (0.5, 0.2), (0, 0.1)])
+    cut = _slabs(bar, 0.3)
+    assert np.isclose(sum(abs(np.sum(q[:, 0] * np.roll(q[:, 1], -1) - np.roll(q[:, 0], -1) * q[:, 1])) / 2 for q in cut), 0.15)

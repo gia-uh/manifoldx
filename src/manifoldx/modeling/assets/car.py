@@ -9,8 +9,9 @@ booleans.
 Regions are tags on the loft's faces, in its own coordinates (position along the car, band around the section),
 so they follow any shape: glass, pillars, doors, hood and hatch. Small parts that sit on the skin (lamps, grille,
 plate, handles) are decals: flat outlines projected onto the body along a view direction, so a lamp style is
-just an outline. Lamps, wheels and door mirrors take a shape: outlines traced from a flat drawing of the real
-part (`assets.lamps`, `assets.wheels`, `assets.mirrors`), or a plain style built from boxes and ellipses.
+just an outline. Lamps, the grille, wheels and door mirrors take a shape: outlines traced from a flat drawing of the real
+part (`assets.lamps`, `assets.grilles`, `assets.wheels`, `assets.mirrors`), or a plain style built from boxes
+and ellipses.
 
 Doors, hood and hatch are separate parts with a hinge; wheels spin and the front ones steer. `Car.pose` gives
 each part's transform for an opening, a wheel turn and a steering angle.
@@ -24,6 +25,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from manifoldx.modeling.assets.grilles import GRILLES
 from manifoldx.modeling.assets.lamps import LAMPS
 from manifoldx.modeling.assets.mirrors import MIRRORS
 from manifoldx.modeling.assets.wheels import WHEELS
@@ -93,7 +95,8 @@ class CarParams:
     drl_bar: bool = True
     drl_height: float = 0.826
     drl_half_length: float = 0.505  # to the inner edge of the headlamps, whose own strip carries it on
-    grille: tuple = (0.60, 0.27, 0.43)  # half-width, bottom, top
+    grille: tuple = (0.83, 0.37, 0.50)  # half-width, bottom, top
+    grille_style: str | dict = "smile"  # a shape, or "bar"
     taillamp: str | dict = "ring"  # a shape, or "pill"
     taillamp_center: tuple = (0.68, 1.03)
     taillamp_size: tuple = (0.33, 0.22)
@@ -501,17 +504,38 @@ def _split(outline, metres=1.0, step=0.04, least=4):
     return np.array(pts2), np.array(tri)
 
 
+def _slabs(outline, width):
+    """Cut an outline into pieces no wider than `width` along its first axis. A long thin shape then triangulates
+    into compact triangles instead of slivers as long as itself, which split into thousands."""
+    poly = np.asarray(outline, float)
+    lo, hi = poly[:, 0].min(), poly[:, 0].max()
+    n = max(1, int(np.ceil((hi - lo) / width)))
+
+    def clip(pts, bound, sign):  # keep what lies on the side where sign * (x - bound) <= 0
+        out = []
+        for a, b in zip(pts, np.roll(pts, -1, axis=0)):
+            da, db = sign * (a[0] - bound), sign * (b[0] - bound)
+            if da <= 0:
+                out.append(a)
+            if da * db < 0:
+                out.append(a + (b - a) * da / (da - db))
+        return np.array(out).reshape(-1, 2)
+
+    pieces = [clip(clip(poly, lo + (hi - lo) * i / n, -1), lo + (hi - lo) * (i + 1) / n, 1) for i in range(n)]
+    return [q for q in pieces if len(q) >= 3]
+
+
 def _decals(p: CarParams, verts, tris, parts, corner_uv):
     """Flat outlines projected onto the skin: (material, view, outline) -> (material, part, vertices, triangles)."""
     W, L = p.width, p.length
     out = []
 
-    def add(mat, view, outline, lift=0.006, close=None, frame=None):
+    def add(mat, view, outline, lift=0.006, close=None, frame=None, least=4):
         # The outline is split into small triangles, so the decal bends with the skin it lands on instead of
         # cutting through it. A frame (anchor on the skin, view direction, the
         # outline's own right axis, half-size, the outline's anchor, island) places an outline drawn in units of
         # its half-size as seen along that direction, and maps it whole into the island.
-        outline, tri = _split(outline, np.array(frame[3:5]) if frame else 1.0, least=1 if frame else 4)
+        outline, tri = _split(outline, np.array(frame[3:5]) if frame else 1.0, least=1 if frame else least)
         if frame:
             anchor, d, right, a, bh, au, av, island = frame
             o = anchor + np.outer((outline[:, 0] - au) * a, right) - 1.5 * d
@@ -608,9 +632,21 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         h, w = p.drl_height, p.drl_half_length
         add("lamp", "front", [(-w, h - 0.009), (w, h - 0.009), (w, h + 0.009), (-w, h + 0.009)], 0.010)
     gw, g0, g1 = p.grille
-    add("trim", "front", [(-gw, g0), (gw, g0), (gw * 1.06, g1), (-gw * 1.06, g1)], 0.003)
-    if p.fog_rings:
-        lens("lamp", "front", pill(0.74 * gw, (g0 + g1) / 2, 0.20 * gw, 0.36 * (g1 - g0)), rim=0.78, core=0.0)
+    grille = GRILLES.get(p.grille_style) if isinstance(p.grille_style, str) else p.grille_style
+    if grille:
+        # The shape is as tall as the grille. Its ends keep their proportions and its middle takes up the length.
+        scale, ends = (g1 - g0) / 2 * grille["aspect"], grille["ends"]
+        for k, (m, outline) in enumerate(grille["layers"]):
+            if m == "lit" and not p.fog_rings:
+                continue
+            u, v = np.asarray(outline, float).T
+            across = np.where(abs(u) < ends, u * (gw - (1 - ends) * scale) / ends, np.sign(u) * (gw - (1 - abs(u)) * scale))
+            for slab in _slabs(np.column_stack([across, (g0 + g1) / 2 + v * (g1 - g0) / 2]), 0.12):
+                add("lamp" if m == "lit" else "trim", "front", slab, 0.006 + 0.003 * k, least=1)
+    else:
+        add("trim", "front", [(-gw, g0), (gw, g0), (gw * 1.06, g1), (-gw * 1.06, g1)], 0.003)
+        if p.fog_rings:
+            lens("lamp", "front", pill(0.74 * gw, (g0 + g1) / 2, 0.20 * gw, 0.36 * (g1 - g0)), rim=0.78, core=0.0)
     add("plate", "front", [(-0.26, 0.47), (0.26, 0.47), (0.26, 0.59), (-0.26, 0.59)])
     tail = LAMPS.get(p.taillamp) if isinstance(p.taillamp, str) else p.taillamp
     if tail:
