@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from manifoldx.modeling.assets.lamps import LAMPS
 from manifoldx.modeling.mesh import Mesh
 
 
@@ -79,15 +80,21 @@ class CarParams:
     black_pillars: bool = True
     roof: str = "paint"  # or "black"
     # Parts.
-    headlamp: str = "wedge"  # "wedge", "almond", "round" or "bar"
-    headlamp_center: tuple = (0.655, 0.765)  # (lateral, height)
-    headlamp_size: tuple = (0.31, 0.16)
+    # A lamp is a shape from `lamps.LAMPS` by name (or a shape of your own), or one of the plain outlines. A shape
+    # is placed by its anchor, sized in its own plane and turned `yaw` degrees from straight ahead toward its side
+    # of the car, so a lamp on a corner is drawn as it is seen straight on.
+    headlamp: str | dict = "wedge"  # a shape, or "almond", "round" or "bar"
+    headlamp_center: tuple = (0.505, 0.826)  # (lateral, height) of the lamp's anchor: here, the end of the light bar
+    headlamp_size: tuple = (0.36, 0.185)
+    headlamp_yaw: float = 30.0
     drl_bar: bool = True
     drl_height: float = 0.826
     drl_half_length: float = 0.505  # to the inner edge of the headlamps, whose own strip carries it on
     grille: tuple = (0.60, 0.27, 0.43)  # half-width, bottom, top
-    taillamp_center: tuple = (0.66, 1.00)
-    taillamp_size: tuple = (0.30, 0.17)
+    taillamp: str | dict = "ring"  # a shape, or "pill"
+    taillamp_center: tuple = (0.68, 1.03)
+    taillamp_size: tuple = (0.33, 0.22)
+    taillamp_yaw: float = 35.0
     spoiler: bool = True
     mirrors: bool = True
     spokes: int = 5
@@ -465,28 +472,23 @@ def _raycast(origins, direction, verts, tris, batch=128):
     return t[np.arange(len(origins)), k], k
 
 
-# The wedge headlamp, in units of its half-size (across, up). The unit: a light strip along the top that carries the
-# light bar on, hooks round the outer end and comes back along the bottom of a teardrop lens to its inner point.
-WEDGE = [(-1.0, 0.96), (0.55, 0.96), (0.85, 0.85), (1.0, 0.45), (1.0, -0.2), (0.9, -0.65), (0.7, -0.92), (0.4, -1.0),
-         (0.0, -0.88), (-0.4, -0.62), (-0.69, -0.19), (-1.0, 0.59)]
-# What the strip encloses and is not lit: the lens and, above it, a blade in the body's colour that a texture paints.
-WEDGE_DARK = [(-0.5, -0.3), (-0.33, -0.47), (0.02, -0.72), (0.38, -0.84), (0.62, -0.78), (0.78, -0.58), (0.86, -0.2),
-              (0.86, 0.38), (0.76, 0.56), (0.5, 0.59), (-1.02, 0.59), (-0.71, -0.2)]
-
-
 def _decals(p: CarParams, verts, tris, parts, corner_uv):
     """Flat outlines projected onto the skin: (material, view, outline) -> (material, part, vertices, triangles)."""
     W, L = p.width, p.length
     out = []
 
-    def add(mat, view, outline, lift=0.006, close=None):
+    def add(mat, view, outline, lift=0.006, close=None, frame=None):
         # Triangulate flat, then split each triangle k x k times (about 4 cm apart), so the decal bends with the
-        # skin it lands on instead of cutting through it.
+        # skin it lands on instead of cutting through it. A frame (anchor on the skin, view direction, the
+        # outline's own right axis, half-size, the outline's anchor, island) places an outline drawn in units of
+        # its half-size as seen along that direction, and maps it whole into the island.
         flat = np.asarray(outline, float)
-        k = int(np.clip(np.ptp(flat, axis=0).max() / 0.04, 4, 40))
+        metres = np.array(frame[3:5]) if frame else 1.0
         pts2, tri = [], []
         for t3 in _triangulate(flat):
             a2, b2, c2 = flat[list(t3)]
+            longest = max(np.linalg.norm((q - r) * metres) for q, r in ((a2, b2), (b2, c2), (c2, a2)))
+            k = int(np.clip(longest / 0.04, 1 if frame else 4, 40))
             base = len(pts2)
             ids = {}
             for i in range(k + 1):
@@ -500,7 +502,11 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
                         tri.append((ids[i + 1, j], ids[i + 1, j + 1], ids[i, j + 1]))
         outline = np.array(pts2)
         tri = np.array(tri)
-        if view in ("front", "rear"):
+        if frame:
+            anchor, d, right, a, bh, au, av, island = frame
+            o = anchor + np.outer((outline[:, 0] - au) * a, right) - 1.5 * d
+            o[:, 1] += (outline[:, 1] - av) * bh
+        elif view in ("front", "rear"):
             sign = 1 if view == "front" else -1
             d = np.array([-sign, 0.0, 0.0])
             o = np.column_stack([np.full(len(outline), sign * (L / 2 + 1)), outline[:, 1], outline[:, 0]])
@@ -525,7 +531,9 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         uv = (1 - wb - wc)[:, None] * corner_uv[k, 0] + wb[:, None] * corner_uv[k, 1] + wc[:, None] * corner_uv[k, 2]
         if np.dot(np.cross(pts[tri[0, 1]] - pts[tri[0, 0]], pts[tri[0, 2]] - pts[tri[0, 0]]), d) > 0:
             tri = tri[:, ::-1]  # face the viewer, not the skin
-        if view in ("front", "rear"):  # the same projection the skin under it uses in its view's island
+        if frame:
+            uv = _island(island, ((outline[:, 0] + 1) / 2 + 0.06) / 1.12, ((1 - outline[:, 1]) / 2 + 0.06) / 1.12)
+        elif view in ("front", "rear"):  # the same projection the skin under it uses in its view's island
             Wv, Hv = p.width + VIEW_MARGIN[1], p.height + VIEW_MARGIN[2]
             uv = _island(view, (Wv / 2 - sign * pts[:, 2]) / Wv, (Hv - pts[:, 1]) / Hv)
         if close:  # a lamp's own island: its box (lateral 0-1, height 0-1), mirrored for the lamp on the other side
@@ -537,40 +545,54 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         add(mat, view, outline, lift, close and (*close, 1))
         add(mat, view, [(-a, b) for a, b in reversed(outline)], lift, close and (*close, -1))
 
-    def lens(mat, view, outline, rim=0.72, core=0.34, about=None, island=None, dark=None):
+    def lens(mat, view, outline, rim=0.72, core=0.34, about=None, island=None):
         """A lamp as a lit rim round a dark lens with a chrome core on top. The lens is the outline shrunk toward
         `about` (its middle by default): off-centre, the rim is wide on the far side and thin on the near one.
-        The core is the outline shrunk again, or an outline of its own; so is the lens, with `dark`. With an
-        island, the lamp is drawn there in close-up instead of in its view."""
+        The core is the outline shrunk again, or an outline of its own. With an island, the lamp is drawn there
+        in close-up instead of in its view."""
         c = np.mean(outline, axis=0) if about is None else np.asarray(about, float)
         lo, hi = np.min(outline, axis=0), np.max(outline, axis=0)
         pad = 0.06 * (hi - lo)
         close = island and (island, (*(lo - pad), *(hi + pad)))
         both(mat, view, outline, close=close)
-        both("black", view, dark or [tuple(c + rim * (np.array(q) - c)) for q in outline], 0.009, close)
+        both("black", view, [tuple(c + rim * (np.array(q) - c)) for q in outline], 0.009, close)
         if core:
             both("chrome", view, core if isinstance(core, list) else [tuple(c + core * (np.array(q) - c)) for q in outline],
                  0.012, close)
+
+    def unit(shape, end, centre, size, yaw, island, lit):
+        """A lamp from a shape, on both sides of the car: at the front (end 1) or the rear (-1), its anchor where a
+        look straight along the car meets the skin at `centre`, facing `yaw` degrees toward its side."""
+        ang = np.radians(yaw)
+        ahead = np.array([-end, 0.0, 0.0])
+        for side in (1, -1):
+            start = np.array([[end * (L / 2 + 1), centre[1], side * centre[0]]])
+            t0, _ = _raycast(start, ahead, verts, tris)
+            if not np.isfinite(t0[0]):
+                continue
+            d = np.array([-end * np.cos(ang), 0.0, -side * np.sin(ang)])
+            right = np.array([-end * np.sin(ang), 0.0, side * np.cos(ang)])
+            frame = (start[0] + t0[0] * ahead, d, right, size[0] / 2, size[1] / 2, *shape["anchor"], island)
+            for k, (m, outline) in enumerate(shape["layers"]):
+                add(lit if m == "lit" else m, "unit", outline, 0.006 + 0.002 * k, frame=frame)
 
     def pill(cx, cy, a, b):
         return [(cx + a * np.sign(np.cos(v)) * abs(np.cos(v)) ** 0.5, cy + b * np.sign(np.sin(v)) * abs(np.sin(v)) ** 0.5)
                 for v in np.linspace(0, 2 * np.pi, 20, endpoint=False)]
 
-    cy, cz = p.headlamp_center
-    a, bh = p.headlamp_size[0] / 2, p.headlamp_size[1] / 2
-    if p.headlamp == "round":
-        eye = [(cy + bh * np.cos(s), cz + bh * np.sin(s)) for s in np.linspace(0, 2 * np.pi, 16, endpoint=False)]
-    elif p.headlamp == "bar":
-        eye = [(cy - a, cz - bh / 3), (cy + a, cz - bh / 3), (cy + a, cz + bh / 3), (cy - a, cz + bh / 3)]
-    elif p.headlamp == "almond":  # an ellipse drawn to a point on its inner side, toward the middle of the car
-        s = np.linspace(0, 2 * np.pi, 20, endpoint=False)
-        eye = [(cy + a * np.cos(v), cz + bh * np.sin(v) * (1 - 0.75 * max(0.0, -np.cos(v)))) for v in s]
-    else:  # wedge
-        eye = [(cy + a * u, cz + bh * v) for u, v in WEDGE]
-    if p.headlamp == "wedge":
-        lens("lamp", "front", eye, dark=[(cy + a * u, cz + bh * v) for u, v in WEDGE_DARK],
-             core=pill(cy + 0.2 * a, cz - 0.3 * bh, 0.26 * a, 0.3 * bh), island="headlamp")
+    head = LAMPS.get(p.headlamp) if isinstance(p.headlamp, str) else p.headlamp
+    if head:
+        unit(head, 1, p.headlamp_center, p.headlamp_size, p.headlamp_yaw, "headlamp", "lamp")
     else:
+        cy, cz = p.headlamp_center
+        a, bh = p.headlamp_size[0] / 2, p.headlamp_size[1] / 2
+        if p.headlamp == "round":
+            eye = [(cy + bh * np.cos(s), cz + bh * np.sin(s)) for s in np.linspace(0, 2 * np.pi, 16, endpoint=False)]
+        elif p.headlamp == "bar":
+            eye = [(cy - a, cz - bh / 3), (cy + a, cz - bh / 3), (cy + a, cz + bh / 3), (cy - a, cz + bh / 3)]
+        else:  # almond: an ellipse drawn to a point on its inner side, toward the middle of the car
+            s = np.linspace(0, 2 * np.pi, 20, endpoint=False)
+            eye = [(cy + a * np.cos(v), cz + bh * np.sin(v) * (1 - 0.75 * max(0.0, -np.cos(v)))) for v in s]
         lens("lamp", "front", eye, island="headlamp")
     if p.drl_bar:
         h, w = p.drl_height, p.drl_half_length
@@ -580,9 +602,11 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     if p.fog_rings:
         lens("lamp", "front", pill(0.74 * gw, (g0 + g1) / 2, 0.20 * gw, 0.36 * (g1 - g0)), rim=0.78, core=0.0)
     add("plate", "front", [(-0.26, 0.47), (0.26, 0.47), (0.26, 0.59), (-0.26, 0.59)])
-    ty, tz = p.taillamp_center
-    ta, tb = p.taillamp_size[0] / 2, p.taillamp_size[1] / 2
-    lens("tail", "rear", pill(ty, tz, ta, tb), island="taillamp")
+    tail = LAMPS.get(p.taillamp) if isinstance(p.taillamp, str) else p.taillamp
+    if tail:
+        unit(tail, -1, p.taillamp_center, p.taillamp_size, p.taillamp_yaw, "taillamp", "tail")
+    else:
+        lens("tail", "rear", pill(*p.taillamp_center, p.taillamp_size[0] / 2, p.taillamp_size[1] / 2), island="taillamp")
     add("plate", "rear", [(-0.26, 0.52), (0.26, 0.52), (0.26, 0.64), (-0.26, 0.64)])
     for view in ("left", "right"):
         for u0, u1, s0, s1 in ((p.cowl_u, p.b_pillar_u, 0.05, 0.0), (p.b_pillar_u, p.c_pillar_u, 0.0, 0.025)):

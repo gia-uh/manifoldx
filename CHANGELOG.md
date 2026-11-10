@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `manifoldx.modeling.assets`, procedural assets from named parameters. First asset: `build_car(CarParams(...))`, a low-poly car lofted from spec-sheet measurements and profile curves, with glass, pillars and doors as face tags, lamps and plates as projected outlines, and doors, hood, hatch and wheels as hinged parts (`Car.pose`, `spawn_car`, `place_car`). Its texture atlas (`ATLAS`) has one island per view of the car (left, right, top, front, rear, wheel, dashboard, seats), so an island is a picture a paint program or an image model reads at a glance; `spawn_car(..., texture=path)` wraps an albedo image laid out that way. numpy only.
+- `manifoldx.modeling.assets`, procedural assets from named parameters. First asset: `build_car(CarParams(...))`, a low-poly car lofted from spec-sheet measurements and profile curves, with glass, pillars and doors as face tags, lamps and plates as projected outlines, and doors, hood, hatch and wheels as hinged parts (`Car.pose`, `spawn_car`, `place_car`). Its texture atlas (`ATLAS`) has one island per view of the car (left, right, top, front, rear, wheel, dashboard, seats), so an island is a picture a paint program or an image model reads at a glance; `spawn_car(..., texture=path)` wraps an albedo image laid out that way. A lamp is a shape from `assets.lamps` (layers of flat outlines: housing, lit guides, painted parts, lens), placed by an anchor and turned to face its corner of the car. numpy only.
 
 ## [0.10.0] - 2026-11-08
 
