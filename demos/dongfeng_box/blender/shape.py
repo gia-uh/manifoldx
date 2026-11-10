@@ -40,7 +40,11 @@ SECTIONS = [
 ]
 # How a section bends between its measured heights and widths: fractions of the half-width or of the height.
 FACTORS = {"floor": 0.62, "tuck": 0.86, "rocker": 0.96, "belt_in": 0.94, "glass_mid": 0.45, "roof_side": 0.80,
-           "roof_mid": 0.42, "hood_drop": 120.0, "hood_roof": 0.80, "hood_end": -1080.0}
+           "roof_mid": 0.42, "hood_drop": 120.0, "hood_roof": 0.80, "hood_end": -1080.0,
+           "round_f": 0.0, "round_r": 0.0, "round_p": 2.0}
+# Plan rounding: within ROUND_ZONE mm of each end, a point is pulled toward the car's middle by up to round_f
+# (front) or round_r (rear) mm, growing with (|y| / half-width) ** round_p. The centre line keeps the spec length.
+ROUND_ZONE = 500.0
 
 
 def load():
@@ -83,5 +87,32 @@ def targets(sections, k):
         roof += w * (min(roof, k["hood_roof"] * half_w) - roof)
         half = section(top, bottom, half_w, belt, roof, k)
         full = half + [(-y, z) for y, z in reversed(half[1:-1])]
-        rings.append([(x / 1000, y / 1000, z / 1000) for y, z in full])
+        rings.append([(rounded(x, y, half_w, sections, k) / 1000, y / 1000, z / 1000) for y, z in full])
     return np.array(rings)
+
+
+def rounded(x, y, half_w, sections, k):
+    """x of a surface point after plan rounding. Inside the zone the distance d from the end maps to
+    s + d * (1 - s / ROUND_ZONE), which keeps the order of the sections as long as s < ROUND_ZONE."""
+    r = min(abs(y) / max(half_w, 1.0), 1.0) ** k["round_p"]
+    for end, s, sign in ((sections[0][0], k["round_f"] * r, 1), (sections[-1][0], k["round_r"] * r, -1)):
+        d = (x - end) * sign
+        if 0 <= d < ROUND_ZONE:
+            return end + sign * (s + d * (1 - s / ROUND_ZONE))
+    return x
+
+
+def fairness(T):
+    """How unevenly the surface bends, as (along the car, around the sections): the summed squared change of the
+    turning angle from one point to the next, per track along x and per ring around it. A smooth panel bends
+    steadily; a ripple flips the turn's sign every few points and costs much more."""
+
+    def signed(P, axis):  # signed turn in the plane normal to `axis`
+        a, b = P[..., 1:-1, :] - P[..., :-2, :], P[..., 2:, :] - P[..., 1:-1, :]
+        c = np.cross(a, b)[..., axis]
+        return np.arctan2(c, (a * b).sum(-1))
+
+    along = signed(np.swapaxes(T, 0, 1), 1)  # tracks: x-z plane turn (y component of the cross product)
+    ring = np.concatenate([T, T[:, :2]], axis=1)  # close each ring
+    around = signed(ring, 0)  # y-z plane turn
+    return float((np.diff(along, axis=-1) ** 2).sum()), float((np.diff(around, axis=-1) ** 2).sum())

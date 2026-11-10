@@ -308,15 +308,28 @@ def body():
     rear = lambda poly, mat, lo=1.85, hi=2.3: paint_region(obj, prism("r", mm(poly), "X", lo, hi), mat)
     top = lambda poly, mat, lo, hi: paint_region(obj, prism("t", mm(poly), "Z", lo, hi), mat)
 
-    # Greenhouse: gloss black from the belt up, the roof back in paint, then the glass.
-    side([(-1060, 1100), (-330, 1600), (1500, 1600), (1960, 1200), (2060, 1010), (2060, 960), (1900, 1180),
-          (1300, 1168), (-1000, 1112)], MAT["black"])
+    # Greenhouse: gloss black from the belt up, the roof back in paint, then the glass. With BOX_GREENHOUSE the
+    # black band and the side windows are the outlines traced off the side photo (match/greenhouse.py).
+    gh_path = __import__("os").environ.get("BOX_GREENHOUSE")
+    G = __import__("json").load(open(gh_path)) if gh_path else None
+    if G:
+        side([tuple(q) for q in G["dlo"]], MAT["black"])
+    else:
+        side([(-1060, 1100), (-330, 1600), (1500, 1600), (1960, 1200), (2060, 1010), (2060, 960), (1900, 1180),
+              (1300, 1168), (-1000, 1112)], MAT["black"])
     rear([(-800, 1000), (800, 1000), (800, 1600), (-800, 1600)], MAT["black"], lo=1.6)
     top([(-330, -560), (1590, -520), (1590, 520), (-330, 560)], MAT["paint"], 1.49, 1.8)
-    side([(-1035, 1135), (-370, 1528), (-280, 1528), (-280, 1700), (-1400, 1700)], MAT["glass"], half=0.74)
-    side([(-900, 1165), (-420, 1468), (60, 1500), (60, 1178)], MAT["glass"])
-    side([(150, 1500), (1000, 1496), (1180, 1300), (1180, 1185), (150, 1180)], MAT["glass"])
-    side([(1270, 1250), (1270, 1470), (1400, 1470), (1500, 1300)], MAT["glass"])
+    # Windscreen: from the cowl (where the hood ends) to the roof, everything above 0.95 m within 0.74 m of the
+    # centre line. Between those x the only skin there is the screen, so the cut follows any fitted shape.
+    cowl = FACTORS["hood_end"]
+    side([(cowl, 950), (-280, 950), (-280, 1700), (cowl, 1700)], MAT["glass"], half=0.74)
+    if G:
+        for pane in G["windows"]:
+            side([tuple(q) for q in pane], MAT["glass"])
+    else:
+        side([(-900, 1165), (-420, 1468), (60, 1500), (60, 1178)], MAT["glass"])
+        side([(150, 1500), (1000, 1496), (1180, 1300), (1180, 1185), (150, 1180)], MAT["glass"])
+        side([(1270, 1250), (1270, 1470), (1400, 1470), (1500, 1300)], MAT["glass"])
     rear([(-540, 1210), (540, 1210), (500, 1470), (-500, 1470)], MAT["glass"], lo=1.6)
 
     # Front: the LED bar across the nose bending down into C-shaped headlamps, a wide black grille, silver-framed

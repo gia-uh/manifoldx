@@ -8,7 +8,9 @@ by maximising silhouette IoU over the 7 camera parameters; a camera only bends t
 scale, turn), so a local difference of shape, such as a flatter nose, survives registration and shows in the score.
 
 Outputs per photo: IoU above the sills, contour distance (mean and 95th percentile, in px and mm), an overlay
-(green: photo only, magenta: model only), and the model's material regions outlined on the photo.
+(green: photo only, magenta: model only), the model's material regions outlined on the photo, and the regions
+score (regions.py): IoU of paint and of non-paint where both silhouettes show car, with its overlay. The outline
+alone says nothing about where windows, pillars and lamps sit, and a fit on it alone moves them freely.
 With --render-dir, the matched Blender renders (render_matched.py) give the paint colour comparison in CIELAB.
 """
 
@@ -27,7 +29,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent.parent))
 import calib  # noqa: E402
-from mask import car_mask  # noqa: E402
+import regions  # noqa: E402
 
 import os
 
@@ -132,7 +134,7 @@ def main():
     cams = json.load(open(HERE / "cameras.json"))
     report = {"model": args.glb, "triangles": int(len(tris)), "views": {}}
     for photo, mode in VIEWS.items():
-        img, pmask = car_mask(PHOTOS / f"{photo}.webp", width=W)
+        img, pmask, cls = regions.classes(PHOTOS / f"{photo}.webp", width=W)
         if photo in cams:
             c = cams[photo]
             p0 = c["position"] + [c["yaw"], c["pitch"], c["roll"], c["focal_px"]]
@@ -160,6 +162,8 @@ def main():
         Image.fromarray(ov).save(out / f"sil-{photo[:2]}.png")
         # Material regions of the model drawn as outlines over the photo.
         idimg = raster(params, tris, ids)
+        view["regions"] = regions.score(cls, idimg, names, cut)
+        Image.fromarray(regions.overlay(img, cls, idimg, names, cut)).save(out / f"paint-{photo[:2]}.png")
         lines = img.copy()
         palette = {"DRL": (255, 255, 0), "Lens": (0, 255, 255), "TailLED": (255, 0, 0), "TailLens": (255, 120, 0),
                    "Glass": (0, 120, 255), "GlossBlack": (255, 0, 255), "MatteTrim": (0, 255, 0), "Chrome": (255, 255, 255)}

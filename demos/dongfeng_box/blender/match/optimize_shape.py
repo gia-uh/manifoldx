@@ -11,7 +11,10 @@ Constraints, all by construction or as penalties:
   - symmetric: only the right half of each section is a parameter, mirrored;
   - spec sheet: length fixed by the sections' x, roof crown 1570 mm and half-width 905 mm held within 5 mm;
   - each section's points stay in order (underside < belt < top, roof inside the side);
-  - smooth: the second difference of every profile along the car is penalised.
+  - smooth: the second difference of every profile along the car is penalised;
+  - fair: the change of turning angle along the car and around every section of the interpolated surface
+    (shape.fairness), against the hand-drawn shape's, so the inside of a panel cannot ripple while its outline
+    fits. The silhouette sees only the outline, and a search on it alone buys IoU with a wavy hood.
 Cost: mean over the three photos of (1 - IoU above the sills), plus the penalties. Every few hundred steps the
 two registered cameras are re-registered to the current shape (the side camera stays measured).
 """
@@ -28,13 +31,19 @@ from scipy.optimize import minimize
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
+import regions  # noqa: E402
 import register  # noqa: E402
 import shape  # noqa: E402
 
 SCALE = 0.25  # 700 px wide is enough for a silhouette and keeps one step near 0.1 s
 W, H = int(register.calib.W * SCALE), int(register.calib.H * SCALE)
 COLS = ("top", "bottom", "half", "belt", "roof")
-FACTOR_KEYS = ("floor", "tuck", "rocker", "belt_in", "glass_mid", "roof_side", "roof_mid", "hood_drop", "hood_roof")
+FACTOR_KEYS = ("floor", "tuck", "rocker", "belt_in", "glass_mid", "roof_side", "roof_mid", "hood_drop", "hood_roof",
+               "round_f", "round_r", "round_p")
+FACTOR_LO = np.array([0.3, 0.6, 0.8, 0.8, 0.1, 0.5, 0.1, 30, 0.5, 0, 0, 1.0])
+FACTOR_HI = np.array([0.9, 1.0, 1.0, 1.0, 0.9, 0.98, 0.8, 250, 0.98, 300, 300, 6.0])
+FACTOR_STEP = np.array([0.04, 0.02, 0.01, 0.01, 0.05, 0.03, 0.05, 15, 0.03, 20, 20, 0.3])
+FAIR_W = 0.01  # cost of bending as unevenly as the hand-drawn shape, per direction
 
 
 def project(params, pts):
@@ -113,13 +122,15 @@ class Problem:
         self.static = static_tris(glb)
         self.views = {}
         for photo, mode in register.VIEWS.items():
-            _, pmask = register.car_mask(register.PHOTOS / f"{photo}.webp", width=W)
+            _, pmask = regions.car_mask(register.PHOTOS / f"{photo}.webp", width=W)
             params = np.array(rep[photo]["params"], float)
             self.views[photo] = {"mask": pmask, "params": params, "fixed": mode == "fixed"}
             self.redraw_static(photo)
         self.x = np.array([s[0] for s in self.sections0], float)
-        rows0 = np.array([s[1:] for s in self.sections0], float)
+        # References for smoothness: the hand-drawn shape, not the start, so a wavy start is not taken as normal.
+        rows0 = np.array([s[1:] for s in shape.SECTIONS], float)
         self.bend0 = [max(float((self.bend(c) ** 2).sum()), 1e-9) for c in rows0.T]
+        self.fair0 = shape.fairness(grid(shape.SECTIONS, shape.FACTORS))
 
     def bend(self, col):
         """How much a profile's slope changes from one section to the next."""
@@ -160,10 +171,10 @@ class Problem:
         n /= np.linalg.norm(n, axis=-1, keepdims=True) + 1e-12
         folds = ((n[1:] * n[:-1]).sum(-1) < 0.5).sum() + ((n * np.roll(n, -1, 1)).sum(-1) < 0.5).sum()
         pen += float(folds)
+        pen += FAIR_W * sum(a / b for a, b in zip(shape.fairness(T), self.fair0))
         f = p[S * 5 :]
-        lo = np.array([0.3, 0.6, 0.8, 0.8, 0.1, 0.5, 0.1, 30, 0.5])
-        hi = np.array([0.9, 1.0, 1.0, 1.0, 0.9, 0.98, 0.8, 250, 0.98])
-        pen += float((np.clip(lo - f, 0, None) + np.clip(f - hi, 0, None)).sum()) * 5
+        pen += float((np.clip(FACTOR_LO - f, 0, None) / (FACTOR_HI - FACTOR_LO)
+                      + np.clip(f - FACTOR_HI, 0, None) / (FACTOR_HI - FACTOR_LO)).sum()) * 5
         return pen
 
     def ious(self, p):
@@ -208,7 +219,7 @@ def main():
     prob = Problem(glb, report)
     p = prob.pack()
     S = len(prob.x)
-    step = np.concatenate([np.full(S * 5, 25.0), [0.04, 0.02, 0.01, 0.01, 0.05, 0.03, 0.05, 15, 0.03]])
+    step = np.concatenate([np.full(S * 5, 25.0), FACTOR_STEP])
     best = prob.cost(p)
     start = dict(prob.ious(p))
     print(f"start cost {best:.4f} ious {[round(v, 4) for v in start.values()]}", flush=True)
@@ -224,7 +235,7 @@ def main():
             accepted += 1
         else:
             step[idx] *= 0.97
-        step = np.clip(step, np.concatenate([np.full(S * 5, 2.0), np.full(9, 0.002)]), None)
+        step = np.clip(step, np.concatenate([np.full(S * 5, 2.0), FACTOR_STEP / 20]), None)
         if it % 500 == 0:
             prob.reregister(p)
             best = prob.cost(p)
