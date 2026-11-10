@@ -550,6 +550,9 @@ def build_car(p: CarParams | None = None) -> Car:
             t = tris[(owners == name) & (mats == mat)]
             used, inv = np.unique(t, return_inverse=True)
             piece(name, str(mat), verts[used], inv.reshape(-1, 3))
+            # The inside: the same triangles reversed on their own vertices, so every panel shows from both
+            # sides and an open door shows its inner card. Glass stays glass; the rest is interior trim.
+            piece(name, "glass" if mat == "glass" else "interior", verts[used], inv.reshape(-1, 3)[:, ::-1])
     for mat, owner, v, t in _decals(p, verts, tris, owners):
         piece(owner, mat, v, t)
 
@@ -567,6 +570,8 @@ def build_car(p: CarParams | None = None) -> Car:
                     (0.12, 0.025, 2 * 0.9 * ring[:, 2].max() * (1 - p.tumblehome / 2)), pitch=np.radians(-6))
         piece("hatch", "paint", v, t)
 
+    _cabin(p, parts, piece, xu)
+
     for xa, front in ((axles[0], True), (axles[1], False)):
         for side, s in (("l", -1), ("r", 1)):
             name = f"wheel_{'f' if front else 'r'}{side}"
@@ -577,8 +582,41 @@ def build_car(p: CarParams | None = None) -> Car:
     return Car(p, [pt for pt in parts.values() if pt.pieces])
 
 
+def _cabin(p: CarParams, parts, piece, xu):
+    """Carpet, dashboard, steering wheel, two front seats and a rear bench, placed from the cowl, the B-pillar,
+    the belt and the sill, so they move with the car's measurements."""
+    parts["cabin"] = Part("cabin", "body")
+    xc, xb = xu(p.cowl_u), xu(p.b_pillar_u)
+    inner = p.width - 0.30
+    floor = p.sill + 0.08
+    seat_z = 0.22 * p.width
+
+    def box(mat, center, size, pitch=0.0):
+        piece("cabin", mat, *_box(center, size, pitch=pitch))
+
+    box("carpet", [(xc + xu(p.roof_end_u)) / 2, floor - 0.02, 0.0], (xc - xu(p.roof_end_u) - 0.2, 0.04, inner))
+    box("dash", [xc - 0.25, p.belt_front - 0.13, 0.0], (0.42, 0.34, inner))
+    for z in (-seat_z, seat_z):
+        box("seat", [xb + 0.30, floor + 0.24, z], (0.50, 0.12, 0.50))
+        box("seat", [xb + 0.02, floor + 0.58, z], (0.12, 0.62, 0.50), pitch=0.25)
+        box("seat", [xb - 0.08, floor + 0.98, z], (0.10, 0.18, 0.28), pitch=0.25)
+    box("seat", [xb - 0.55, floor + 0.24, 0.0], (0.48, 0.12, inner - 0.08))
+    box("seat", [xb - 0.84, floor + 0.55, 0.0], (0.12, 0.58, inner - 0.08), pitch=0.25)
+    # Steering wheel: a ring on the driver's side (left), facing the seat and leaning back, on a column.
+    v, t = _revolve([(0.17 + 0.02 * np.cos(a), 0.02 * np.sin(a)) for a in np.linspace(0, 2 * np.pi, 8, endpoint=False)],
+                    24, 1)
+    lean = np.radians(25)
+    to_x = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])  # the ring's axis (Z) turned to point along -X
+    tilt = np.array([[np.cos(lean), np.sin(lean), 0], [-np.sin(lean), np.cos(lean), 0], [0, 0, 1]])
+    hub = np.array([xc - 0.52, p.belt_front + 0.02, -seat_z])
+    piece("cabin", "dash", v @ to_x.T @ tilt + hub, t)
+    box("dash", [xc - 0.42, p.belt_front - 0.02, -seat_z], (0.24, 0.05, 0.05), pitch=-lean)
+
+
 # The materials a car uses, as (sRGB colour, roughness, metallic); "lamp" is drawn unlit when the lights are on.
 PALETTE = {
+    "interior": ("#2a2c30", 0.85, 0.0), "carpet": ("#1a1b1d", 0.95, 0.0), "dash": ("#1f2023", 0.6, 0.0),
+    "seat": ("#3a3c41", 0.8, 0.0),
     "paint": ("#8fbccc", 0.32, 0.15), "black": ("#0b0c0e", 0.15, 0.0), "glass": ("#1d262c", 0.05, 0.0),
     "trim": ("#17181a", 0.75, 0.0), "underbody": ("#101010", 0.9, 0.0), "liner": ("#0e0e0e", 0.95, 0.0),
     "lamp": ("#eef3ff", 0.2, 0.0), "tail": ("#c41a12", 0.25, 0.0), "plate": ("#e3e8ea", 0.6, 0.0),
