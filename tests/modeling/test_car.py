@@ -72,3 +72,23 @@ def test_same_parameters_same_car():
     for pa, pb in zip(a.parts, b.parts):
         for m in pa.pieces:
             assert np.array_equal(pa.pieces[m].positions, pb.pieces[m].positions)
+
+
+def test_every_face_sits_in_one_island_of_the_atlas():
+    from manifoldx.modeling.assets.car import ATLAS
+
+    car = build_car()
+    boxes = np.array(list(ATLAS.values()))
+    for part in car.parts:
+        for mesh in part.pieces.values():
+            uv = mesh.uvs[mesh.faces]  # (faces, 3, 2)
+            lo, hi = uv.min(1), uv.max(1)
+            inside = ((lo[:, None, :] >= boxes[None, :, :2] - 1e-5) & (hi[:, None, :] <= boxes[None, :, 2:] + 1e-5)).all(2)
+            assert inside.any(1).all()
+    # The left flank is drawn as a side view: further back on the car is further right in its island.
+    door = car.part("door_fl").pieces["paint"]
+    order = np.argsort(-door.positions[:, 0])
+    s0, _, s1, _ = ATLAS["left"]
+    flank = (door.uvs[:, 0] >= s0) & (door.uvs[:, 0] <= s1) & (door.uvs[:, 1] <= ATLAS["left"][3])
+    x, s = door.positions[order, 0][flank[order]], door.uvs[order, 0][flank[order]]
+    assert np.corrcoef(x, s)[0, 1] < -0.99

@@ -91,6 +91,7 @@ class CarParams:
     mirrors: bool = True
     spokes: int = 5
     cladding: bool = False  # black lower body
+    handles: bool = True  # a chrome bar on each door; leave it out when a texture paints the handles
     door_strip: bool = True  # a black strip with a chrome line low on the doors
     fog_rings: bool = True  # a lit ring at each end of the grille
     # Resolution and shading.
@@ -557,7 +558,8 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     for view in ("left", "right"):
         for u0, u1, s0, s1 in ((p.cowl_u, p.b_pillar_u, 0.05, 0.0), (p.b_pillar_u, p.c_pillar_u, 0.0, 0.025)):
             x = L / 2 - (u0 + 0.62 * (u1 - u0)) * L
-            add("chrome", view, [(x - 0.08, 0.93), (x + 0.08, 0.93), (x + 0.08, 0.955), (x - 0.08, 0.955)])
+            if p.handles:
+                add("chrome", view, [(x - 0.08, 0.93), (x + 0.08, 0.93), (x + 0.08, 0.955), (x - 0.08, 0.955)])
             if p.door_strip:
                 x0, x1 = L / 2 - (u1 + s1) * L, L / 2 - (u0 + s0) * L
                 add("trim", view, [(x0, 0.40), (x1, 0.40), (x1, 0.47), (x0, 0.47)])
@@ -594,12 +596,15 @@ def _wheel(p: CarParams, x, side):
 # to the view that sees it best and is drawn there as that view shows it: the left side (front at the left), the
 # right side (front at the right), the top (front at the left, the car's right side up), the front and the rear.
 # So every island is a picture of the car a person, a paint program or an image model reads at a glance, and a
-# photo taken from that side lines up with it.
+# photo taken from that side lines up with it. The right-hand column of the atlas is free for the cabin's views.
 ATLAS = {
-    "left": (0.01, 0.01, 0.71, 0.29), "right": (0.01, 0.30, 0.71, 0.58), "top": (0.01, 0.59, 0.71, 0.95),
+    "left": (0.01, 0.01, 0.71, 0.29), "right": (0.01, 0.30, 0.71, 0.58), "top": (0.01, 0.59, 0.51, 0.845),
     "front": (0.72, 0.01, 0.99, 0.22), "rear": (0.72, 0.23, 0.99, 0.44), "wheel": (0.72, 0.45, 0.99, 0.72),
-    "cabin": (0.72, 0.73, 0.99, 0.86), "small": (0.72, 0.87, 0.85, 0.99), "interior": (0.86, 0.87, 0.99, 0.99),
-    "bottom": (0.01, 0.96, 0.35, 0.99),
+    "small": (0.72, 0.87, 0.85, 0.99), "interior": (0.86, 0.87, 0.99, 0.99), "bottom": (0.01, 0.96, 0.35, 0.99),
+    # The cabin: the dashboard as the driver sees it, the seats and the bench as seen from the front, the carpet
+    # from above.
+    "dash": (0.52, 0.59, 0.71, 0.71), "seats": (0.52, 0.72, 0.71, 0.855), "bench": (0.52, 0.865, 0.71, 0.97),
+    "carpet": (0.22, 0.86, 0.50, 0.95),
 }
 VIEW_MARGIN = (0.1, 0.3, 0.1)  # what a view shows beyond the car's length, width and height (m)
 
@@ -773,17 +778,26 @@ def _cabin(p: CarParams, parts, piece, xu):
     floor = p.sill + 0.08
     seat_z = 0.22 * p.width
 
-    def box(mat, center, size, pitch=0.0):
-        piece("cabin", mat, *_box(center, size, pitch=pitch), island="cabin")
+    wide = inner + 0.1
 
-    box("carpet", [(xc + xu(p.roof_end_u)) / 2, floor - 0.02, 0.0], (xc - xu(p.roof_end_u) - 0.2, 0.04, inner))
-    box("dash", [xc - 0.25, p.belt_front - 0.13, 0.0], (0.42, 0.34, inner))
+    def seen(v, island, facing, y0, y1):
+        """Texture coordinates of a cabin part as seen along the car: facing +1 looks forward, -1 looks back."""
+        return _island(island, (wide / 2 + facing * v[:, 2]) / wide, (y1 - v[:, 1]) / (y1 - y0))
+
+    def box(mat, center, size, pitch=0.0, island="seats", facing=-1, y=(floor, floor + 1.15)):
+        v, t = _box(center, size, pitch=pitch)
+        piece("cabin", mat, v, t, seen(v, island, facing, *y))
+
+    dash_y = (floor, p.belt_front + 0.30)
+    v, t = _box([(xc + xu(p.roof_end_u)) / 2, floor - 0.02, 0.0], (xc - xu(p.roof_end_u) - 0.2, 0.04, inner))
+    piece("cabin", "carpet", v, t, _island("carpet", (xc - v[:, 0]) / (xc - xu(p.roof_end_u)), (wide / 2 - v[:, 2]) / wide))
+    box("dash", [xc - 0.25, p.belt_front - 0.13, 0.0], (0.42, 0.34, inner), island="dash", facing=1, y=dash_y)
     for z in (-seat_z, seat_z):
         box("seat", [xb + 0.30, floor + 0.24, z], (0.50, 0.12, 0.50))
         box("seat", [xb + 0.02, floor + 0.58, z], (0.12, 0.62, 0.50), pitch=0.25)
         box("seat", [xb - 0.08, floor + 0.98, z], (0.10, 0.18, 0.28), pitch=0.25)
-    box("seat", [xb - 0.55, floor + 0.24, 0.0], (0.48, 0.12, inner - 0.08))
-    box("seat", [xb - 0.84, floor + 0.55, 0.0], (0.12, 0.58, inner - 0.08), pitch=0.25)
+    box("seat", [xb - 0.55, floor + 0.24, 0.0], (0.48, 0.12, inner - 0.08), island="bench", y=(floor, floor + 0.9))
+    box("seat", [xb - 0.84, floor + 0.55, 0.0], (0.12, 0.58, inner - 0.08), pitch=0.25, island="bench", y=(floor, floor + 0.9))
     # Steering wheel: a ring on the driver's side (left), facing the seat and leaning back, on a column.
     v, t = _revolve([(0.17 + 0.02 * np.cos(a), 0.02 * np.sin(a)) for a in np.linspace(0, 2 * np.pi, 8, endpoint=False)],
                     24, 1)
@@ -791,8 +805,9 @@ def _cabin(p: CarParams, parts, piece, xu):
     to_x = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])  # the ring's axis (Z) turned to point along -X
     tilt = np.array([[np.cos(lean), np.sin(lean), 0], [-np.sin(lean), np.cos(lean), 0], [0, 0, 1]])
     hub = np.array([xc - 0.52, p.belt_front + 0.02, -seat_z])
-    piece("cabin", "dash", v @ to_x.T @ tilt + hub, t, island="cabin")
-    box("dash", [xc - 0.42, p.belt_front - 0.02, -seat_z], (0.24, 0.05, 0.05), pitch=-lean)
+    v = v @ to_x.T @ tilt + hub
+    piece("cabin", "dash", v, t, seen(v, "dash", 1, *dash_y))
+    box("dash", [xc - 0.42, p.belt_front - 0.02, -seat_z], (0.24, 0.05, 0.05), pitch=-lean, island="dash", facing=1, y=dash_y)
 
 
 # The materials a car uses, as (sRGB colour, roughness, metallic); "lamp" is drawn unlit when the lights are on.
