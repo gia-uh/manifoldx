@@ -43,48 +43,54 @@ class CarParams:
     rim_ratio: float = 0.62  # rim radius over wheel radius
     arch_gap: float = 0.045  # between the tyre and the arch
     # Side profile.
-    nose_top: float = 0.74  # top of the nose at the very front
-    hood_front: float = 0.87  # the hood just behind the nose
-    cowl_u: float = 0.27  # where the hood meets the windscreen
-    cowl_height: float = 1.13
-    windscreen_u: float = 0.45  # where the windscreen meets the roof
-    roof_end_u: float = 0.88  # where the roof meets the hatch
-    roof_end_drop: float = 0.05
-    tail_top: float = 1.02  # top of the tail at the rear end
-    belt_front: float = 1.09  # belt (bottom of the side glass) at the cowl
-    belt_rear: float = 1.17  # and at the end of the roof
-    sill: float = 0.22  # underside between the wheels
-    bumper_bottom_front: float = 0.30
-    bumper_bottom_rear: float = 0.36
-    hood_crown: float = 0.10  # how far the hood's edge sits below its crown
+    nose_top: float = 0.75  # top of the nose at the very front
+    hood_front: float = 0.925  # the hood just behind the nose
+    cowl_u: float = 0.29  # where the hood meets the windscreen
+    cowl_height: float = 1.20
+    windscreen_u: float = 0.46  # where the windscreen meets the roof
+    roof_peak_u: float = 0.56  # where the roof is highest
+    roof_end_u: float = 0.78  # where the roof meets the rear glass
+    roof_end_drop: float = 0.08
+    hatch_u: float = 0.92  # where the rear glass ends
+    hatch_height: float = 1.165
+    tail_top: float = 0.91  # top of the tail at the rear end
+    belt_front: float = 1.03  # belt (bottom of the side glass) at the cowl
+    belt_rear: float = 1.11  # and at the end of the roof
+    sill: float = 0.20  # underside between the wheels
+    bumper_bottom_front: float = 0.33
+    bumper_bottom_rear: float = 0.35
+    hood_crown: float = 0.13  # how far the hood's edge sits below its crown
     # Plan and section.
-    nose_half: float = 0.80  # half-width at the front end, over the half-width
-    tail_half: float = 0.84
-    round_front: float = 0.17  # how far the front corners are pulled back (m)
-    round_rear: float = 0.18
-    round_power: float = 2.0
-    tumblehome: float = 0.30  # how much narrower the roof is than the body
+    nose_half: float = 0.76  # half-width at the front end, over the half-width
+    tail_half: float = 0.80
+    round_front: float = 0.18  # how far the front corners are pulled back (m)
+    round_rear: float = 0.19
+    round_power: float = 2.1
+    tumblehome: float = 0.31  # how much narrower the roof is than the body
     shoulder: float = 0.95  # belt half-width over the half-width
     # Greenhouse.
-    b_pillar_u: float = 0.56
-    b_pillar_width: float = 0.07
-    c_pillar_u: float = 0.75  # end of the rear door glass; behind it the quarter is black
+    a_pillar_foot: float = 0.40  # how far up the windscreen the side glass starts, 0 at the cowl to 1 at the roof
+    b_pillar_u: float = 0.565
+    b_pillar_width: float = 0.10
+    c_pillar_u: float = 0.69  # end of the rear door glass; behind it the quarter is black
     black_pillars: bool = True
     roof: str = "paint"  # or "black"
     # Parts.
     headlamp: str = "almond"  # "almond", "round" or "bar"
-    headlamp_center: tuple = (0.66, 0.80)  # (lateral, height)
-    headlamp_size: tuple = (0.30, 0.11)
+    headlamp_center: tuple = (0.676, 0.765)  # (lateral, height)
+    headlamp_size: tuple = (0.26, 0.15)
     drl_bar: bool = True
-    drl_height: float = 0.86
-    drl_half_length: float = 0.56
-    grille: tuple = (0.62, 0.30, 0.42)  # half-width, bottom, top
-    taillamp_center: tuple = (0.69, 1.00)
+    drl_height: float = 0.826
+    drl_half_length: float = 0.49
+    grille: tuple = (0.60, 0.27, 0.43)  # half-width, bottom, top
+    taillamp_center: tuple = (0.66, 1.00)
     taillamp_size: tuple = (0.30, 0.17)
     spoiler: bool = True
     mirrors: bool = True
     spokes: int = 5
-    cladding: bool = True  # black lower body
+    cladding: bool = False  # black lower body
+    door_strip: bool = True  # a black strip with a chrome line low on the doors
+    fog_rings: bool = True  # a lit ring at each end of the grille
     # Resolution.
     sections: int = 28
 
@@ -237,28 +243,39 @@ def _section(top, bottom, half, belt, roof):
     return [(0, bottom), (0.62 * half, bottom), (0.86 * half, bottom + 0.035 * body),
             (0.96 * half, bottom + 0.16 * body), (half, bottom + 0.48 * body), (0.985 * half, belt - 0.14 * body),
             (0.95 * half, belt - 0.01 * body), (0.55 * 0.95 * half + 0.45 * roof, belt + 0.45 * upper),
-            (roof, top - 0.10 * upper), (0.80 * roof, top - 0.025 * upper), (0.42 * roof, top - 0.004 * upper),
+            (roof, top - 0.20 * upper), (0.80 * roof, top - 0.06 * upper), (0.42 * roof, top - 0.012 * upper),
             (0, top)]
 
 
 def _stations(p: CarParams, axles):
-    """Section positions as fractions of the length: denser at the ends, plus a fan over each wheel arch."""
+    """Section positions as fractions of the length: denser at the ends, plus a fan over each wheel arch and one
+    at every edge between regions, so pillars and panel gaps fall on a section."""
     u = 0.5 - 0.5 * np.cos(np.pi * np.linspace(0, 1, p.sections))
+    bw = p.b_pillar_width / 2 / p.length
+    u = np.concatenate([u, [p.cowl_u - 0.01, p.cowl_u + 0.01, p.windscreen_u, p.b_pillar_u - bw, p.b_pillar_u,
+                            p.b_pillar_u + bw, p.c_pillar_u, p.roof_end_u - 0.01, p.hatch_u]])
     R = p.wheel_radius + p.arch_gap
     for xa in axles:
         ua = (p.length / 2 - xa) / p.length
         u = np.concatenate([u, ua + R * np.sin(np.linspace(-np.pi / 2, np.pi / 2, 9)) / p.length,
                             [ua - (R + 0.02) / p.length, ua + (R + 0.02) / p.length]])
     u = np.sort(u)
-    keep = np.concatenate([[True], np.diff(u) > 0.004])
+    edges = np.isin(u, [p.cowl_u - 0.01, p.cowl_u + 0.01, p.windscreen_u, p.b_pillar_u - bw, p.b_pillar_u,
+                        p.b_pillar_u + bw, p.c_pillar_u, p.roof_end_u - 0.01, p.hatch_u])
+    keep = np.ones(len(u), bool)
+    for k in range(1, len(u)):  # drop a section too close to the one kept before it, unless it is a region edge
+        last = np.nonzero(keep[:k])[0][-1]
+        if u[k] - u[last] < 0.004:
+            keep[k if not edges[k] or edges[last] else last] = False
+    keep[[0, -1]] = True
     return u[keep]
 
 
 def _profiles(p: CarParams, u):
     half = p.width / 2
-    top = _pchip([0, 0.04, p.cowl_u, p.windscreen_u, 0.62, p.roof_end_u, 1],
+    top = _pchip([0, 0.04, p.cowl_u, p.windscreen_u, p.roof_peak_u, p.roof_end_u, p.hatch_u, 1],
                  [p.nose_top, p.hood_front, p.cowl_height, p.height - 0.015, p.height,
-                  p.height - p.roof_end_drop, p.tail_top], u)
+                  p.height - p.roof_end_drop, p.hatch_height, p.tail_top], u)
     fo, ro = p.front_overhang / p.length, 1 - (p.front_overhang + p.wheelbase) / p.length
     bottom = _pchip([0, 0.6 * fo, 1 - 0.6 * ro, 1], [p.bumper_bottom_front, p.sill, p.sill, p.bumper_bottom_rear], u)
     halfw = _pchip([0, 0.05, 0.15, 0.85, 0.95, 1], [p.nose_half * half, 0.97 * half, half, half, 0.97 * half,
@@ -306,11 +323,15 @@ def _body_grid(p: CarParams, axles):
     return u, P, raised, halfw
 
 
+def _hj(k):
+    """Ring index to its place in the half section, 0 at the bottom centre to HALF - 1 at the roof centre."""
+    k %= RING
+    return k if k < HALF else RING - k
+
+
 def _band(j):
     """The band (0-10) of the face that starts at ring index j and goes to j + 1."""
-    def hj(k):
-        return k if k < HALF else RING - k
-    return min(hj(j), hj((j + 1) % RING))
+    return min(_hj(j), _hj(j + 1))
 
 
 def _body_faces(p: CarParams, u, P, raised):
@@ -325,9 +346,15 @@ def _body_faces(p: CarParams, u, P, raised):
         for j in range(RING):
             b = _band(j)
             side = "r" if P[i, j % RING, 2] + P[i, (j + 1) % RING, 2] > 0 else "l"
-            mat, part = _region(p, um, b), "body"
+            # A material per triangle, from its centroid, so a slanted edge like the A-pillar steps half as coarsely.
+            h0, h1 = _hj(j), _hj(j + 1)
+            # The quad's diagonal is mirrored on the other half of the ring, so both sides of the car match.
+            far = j >= HALF - 1
+            va, vb = ((2 * h0 + h1) / 3, (h0 + 2 * h1) / 3) if far else ((h0 + 2 * h1) / 3, (2 * h0 + h1) / 3)
+            pair = [_region(p, um, b, (2 * u[i] + u[i + 1]) / 3, va), _region(p, um, b, (u[i] + 2 * u[i + 1]) / 3, vb)]
+            part = "body"
             if raised[i, j] and raised[i, (j + 1) % RING] and raised[i + 1, j] and raised[i + 1, (j + 1) % RING]:
-                mat = "liner"
+                pair = ["liner", "liner"]
             if b in range(2, 8):
                 if p.cowl_u + 0.01 <= um < p.b_pillar_u:
                     part = f"door_f{side}"
@@ -335,11 +362,11 @@ def _body_faces(p: CarParams, u, P, raised):
                     part = f"door_r{side}"
             if 0.035 <= um < p.cowl_u - 0.005 and b >= 6:
                 part = "hood"
-            if um >= p.roof_end_u - 0.01 and b >= 4:
+            if um >= p.roof_end_u - 0.01 and b >= 8:
                 part = "hatch"
             a, c, d, e = vid(i, j), vid(i, j + 1), vid(i + 1, j + 1), vid(i + 1, j)
-            tris += [(a, c, d), (a, d, e)]
-            mats += [mat, mat]
+            tris += [(a, c, e), (c, d, e)] if far else [(a, c, d), (a, d, e)]
+            mats += pair
             parts += [part, part]
     # Close the ends with fans; the nose and tail are bumper paint.
     verts = list(verts)
@@ -360,8 +387,9 @@ def _body_faces(p: CarParams, u, P, raised):
     return verts, tris, np.array(mats), np.array(parts)
 
 
-def _region(p: CarParams, u, b):
-    """The material of a face at length fraction u in band b."""
+def _region(p: CarParams, u, b, ut, v):
+    """The material of a triangle whose quad sits at length fraction u in band b; ut and v are the triangle's own
+    centroid along the car and around the section (in bands), for the one edge that runs slanted."""
     if b <= 1:
         return "underbody"
     if b == 2 and p.cladding:
@@ -371,16 +399,18 @@ def _region(p: CarParams, u, b):
     roof = "black" if p.roof == "black" else "paint"
     pillar = "black" if p.black_pillars else "paint"
     if u < p.windscreen_u:
-        return "glass" if b >= 8 else pillar
+        # Beside the windscreen the side glass sits under the A-pillar, a line that climbs from the belt to the roof.
+        t = (ut - p.cowl_u) / (p.windscreen_u - p.cowl_u)
+        return "glass" if b >= 8 or v < 6 + 2 * (t - p.a_pillar_foot) / (1 - p.a_pillar_foot) - 0.25 else pillar
     if u < p.roof_end_u:
         if b >= 8:
             return roof
         if u >= p.c_pillar_u or abs(u - p.b_pillar_u) < p.b_pillar_width / 2 / p.length:
             return pillar
         return "glass"
-    if u < 0.985 and b >= 7:
-        return "glass"
-    return pillar if b >= 6 else "paint"
+    if u < p.hatch_u:
+        return "glass" if b >= 8 else pillar
+    return "paint"
 
 
 # --- decals --------------------------------------------------------------------------------------------------
@@ -413,7 +443,7 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     W, L = p.width, p.length
     out = []
 
-    def add(mat, view, outline):
+    def add(mat, view, outline, lift=0.006):
         # Triangulate flat, then split each triangle k x k times (about 4 cm apart), so the decal bends with the
         # skin it lands on instead of cutting through it.
         flat = np.asarray(outline, float)
@@ -445,7 +475,7 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         t, k = _raycast(o, d, verts, tris)
         if not np.isfinite(t).all():
             return
-        pts = o + (t - 0.006)[:, None] * d
+        pts = o + (t - lift)[:, None] * d
         owner = parts[k]
         names, counts = np.unique(owner, return_counts=True)
         # Texture coordinates: those of the skin under each point, by its barycentric weights.
@@ -464,9 +494,21 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
             uv = _island(view, (Wv / 2 - sign * pts[:, 2]) / Wv, (Hv - pts[:, 1]) / Hv)
         out.append((mat, str(names[counts.argmax()]), pts, tri, uv))
 
-    def both(mat, view, outline):
-        add(mat, view, outline)
-        add(mat, view, [(-a, b) for a, b in reversed(outline)])
+    def both(mat, view, outline, lift=0.006):
+        add(mat, view, outline, lift)
+        add(mat, view, [(-a, b) for a, b in reversed(outline)], lift)
+
+    def lens(mat, view, outline, rim=0.72, core=0.34):
+        """A lamp as a lit rim round a dark lens with a chrome core, each a smaller copy of the outline on top."""
+        c = np.mean(outline, axis=0)
+        both(mat, view, outline)
+        both("black", view, [tuple(c + rim * (np.array(q) - c)) for q in outline], 0.009)
+        if core:
+            both("chrome", view, [tuple(c + core * (np.array(q) - c)) for q in outline], 0.012)
+
+    def pill(cx, cy, a, b):
+        return [(cx + a * np.sign(np.cos(v)) * abs(np.cos(v)) ** 0.5, cy + b * np.sign(np.sin(v)) * abs(np.sin(v)) ** 0.5)
+                for v in np.linspace(0, 2 * np.pi, 20, endpoint=False)]
 
     cy, cz = p.headlamp_center
     a, bh = p.headlamp_size[0] / 2, p.headlamp_size[1] / 2
@@ -477,21 +519,27 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     else:  # almond: an ellipse drawn to a point on its inner side, toward the middle of the car
         s = np.linspace(0, 2 * np.pi, 20, endpoint=False)
         eye = [(cy + a * np.cos(v), cz + bh * np.sin(v) * (1 - 0.75 * max(0.0, -np.cos(v)))) for v in s]
-    both("lamp", "front", eye)
+    lens("lamp", "front", eye)
     if p.drl_bar:
         h, w = p.drl_height, p.drl_half_length
         add("lamp", "front", [(-w, h - 0.009), (w, h - 0.009), (w, h + 0.009), (-w, h + 0.009)])
     gw, g0, g1 = p.grille
-    add("trim", "front", [(-gw, g0), (gw, g0), (gw * 1.06, g1), (-gw * 1.06, g1)])
+    add("trim", "front", [(-gw, g0), (gw, g0), (gw * 1.06, g1), (-gw * 1.06, g1)], 0.003)
+    if p.fog_rings:
+        lens("lamp", "front", pill(0.74 * gw, (g0 + g1) / 2, 0.20 * gw, 0.36 * (g1 - g0)), rim=0.78, core=0.0)
     add("plate", "front", [(-0.26, 0.47), (0.26, 0.47), (0.26, 0.59), (-0.26, 0.59)])
     ty, tz = p.taillamp_center
     ta, tb = p.taillamp_size[0] / 2, p.taillamp_size[1] / 2
-    both("tail", "rear", [(ty - ta, tz - tb), (ty + ta, tz - tb), (ty + ta, tz + tb), (ty - ta, tz + tb)])
+    lens("tail", "rear", pill(ty, tz, ta, tb))
     add("plate", "rear", [(-0.26, 0.52), (0.26, 0.52), (0.26, 0.64), (-0.26, 0.64)])
     for view in ("left", "right"):
-        for u0, u1 in ((p.cowl_u, p.b_pillar_u), (p.b_pillar_u, p.c_pillar_u)):
+        for u0, u1, s0, s1 in ((p.cowl_u, p.b_pillar_u, 0.05, 0.0), (p.b_pillar_u, p.c_pillar_u, 0.0, 0.025)):
             x = L / 2 - (u0 + 0.62 * (u1 - u0)) * L
             add("chrome", view, [(x - 0.08, 0.93), (x + 0.08, 0.93), (x + 0.08, 0.955), (x - 0.08, 0.955)])
+            if p.door_strip:
+                x0, x1 = L / 2 - (u1 + s1) * L, L / 2 - (u0 + s0) * L
+                add("trim", view, [(x0, 0.40), (x1, 0.40), (x1, 0.47), (x0, 0.47)])
+                add("chrome", view, [(x0, 0.47), (x1, 0.47), (x1, 0.485), (x0, 0.485)])
     return out
 
 
@@ -521,15 +569,18 @@ def _wheel(p: CarParams, x, side):
 # --- texture atlas ------------------------------------------------------------------------------------------
 
 # Islands of the atlas as (s0, t0, s1, t1), with t growing down the image as in glTF. The exterior skin is one
-# strip unrolled like a paper model: the front at the left, the rear at the right; from the top, the underbody,
-# the right side upside down, its windows, the roof, the left windows and the left side the right way up.
-# Faces that look forward or back are projected as seen from the front and from behind instead, so lamps and
-# grille get the resolution they need.
+# strip unrolled like a paper model, in the car's own proportions but for a shrunk underbody: the front at the left, the rear at the right;
+# from the top, the underbody, the right side upside down, its windows, the roof, the left windows and the left
+# side the right way up. Faces that look forward or back are projected as seen from the front and from behind
+# instead, so lamps and grille get the resolution they need.
 ATLAS = {
-    "front": (0.01, 0.01, 0.25, 0.15), "rear": (0.26, 0.01, 0.50, 0.15), "wheel": (0.51, 0.01, 0.62, 0.15),
-    "cabin": (0.63, 0.01, 0.86, 0.15), "small": (0.87, 0.01, 0.99, 0.15),
-    "interior": (0.01, 0.16, 0.99, 0.30), "body": (0.01, 0.31, 0.99, 0.99),
+    "body": (0.01, 0.01, 0.74, 0.66), "front": (0.01, 0.67, 0.41, 0.99), "rear": (0.42, 0.67, 0.82, 0.99),
+    "wheel": (0.75, 0.01, 0.99, 0.25), "cabin": (0.75, 0.26, 0.99, 0.45), "interior": (0.75, 0.46, 0.99, 0.66),
+    "small": (0.83, 0.67, 0.99, 0.82),
 }
+
+
+UNDERBODY_SCALE = 0.25  # the underbody takes this much of its true height in the strip: nobody looks at it
 
 
 def _island(name, s, t):
@@ -549,6 +600,7 @@ def _body_uvs(p: CarParams, u, verts, tris):
     S = len(u)
     grid = verts[: S * RING].reshape(S, RING, 3)
     seg = np.linalg.norm(np.diff(np.concatenate([grid, grid[:, :1]], 1), axis=1), axis=2).mean(0)
+    seg *= np.where(np.array([_band(j) for j in range(RING)]) <= 1, UNDERBODY_SCALE, 1.0)
     V = np.concatenate([[0], np.cumsum(seg)]) / seg.sum()  # around the ring, by mean arc length; RING + 1 values
     U = np.concatenate([np.repeat(u, RING), [0.0, 1.0]])  # the two cap centres last
     J = np.concatenate([np.tile(np.arange(RING), S), [0, 0]])
@@ -632,11 +684,12 @@ def build_car(p: CarParams | None = None) -> Car:
         piece(owner, mat, v, t, uv)
 
     if p.mirrors:
-        uu = p.cowl_u + 0.035
+        uu = p.cowl_u + 0.05
+        ring = sections_at(uu)[:HALF]
         for side, s in (("l", -1), ("r", 1)):
-            zr = sections_at(uu)[:, 2].max() * s
-            v1, t1 = _box([xu(uu), p.belt_front + 0.07, zr + s * 0.10], (0.10, 0.11, 0.15))
-            v2, t2 = _box([xu(uu) + 0.02, p.belt_front + 0.04, zr + s * 0.04], (0.05, 0.03, 0.08))
+            zr = s * np.interp(p.belt_front + 0.05, ring[:, 1], ring[:, 2])  # the skin at the mirror's foot
+            v1, t1 = _box([xu(uu), p.belt_front + 0.10, zr + s * 0.13], (0.10, 0.12, 0.17))
+            v2, t2 = _box([xu(uu) + 0.01, p.belt_front + 0.06, zr + s * 0.03], (0.05, 0.03, 0.10))
             piece(f"door_f{side}", "paint", v1, t1)
             piece(f"door_f{side}", "black", v2, t2)
     if p.spoiler:
