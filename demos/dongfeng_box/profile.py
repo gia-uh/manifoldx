@@ -125,7 +125,7 @@ if __name__ == "__main__":
     simg, sp = side(f"{PHOTOS}/04-dongfeng-box-vista-lateral.webp")
     fimg, fp = front(f"{PHOTOS}/03-dongfeng-box-vista-frontal.webp")
     json.dump({"side": sp, "front": fp, "dims": [LENGTH, WIDTH, HEIGHT], "tyre_d": TYRE_D},
-              open("profile.json", "w"))
+              open("profile-box.json", "w"))
     im = Image.fromarray(simg)
     d = ImageDraw.Draw(im)
     s, g = sp["scale_mm_per_px"], sp["ground"]

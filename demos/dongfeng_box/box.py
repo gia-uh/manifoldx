@@ -1,6 +1,6 @@
 """Dongfeng BOX, modelled from its photos: a lofted body, glass, wheels, in a studio.
 
-Run: uv run python demos/dongfeng_box/box.py [photo|poster]   (renders stills; needs profile.json from profile.py)
+Run: CAR=box|friday uv run python demos/dongfeng_box/box.py [photo|poster]   (renders stills; needs profile.json from profile.py)
 """
 
 import json
@@ -16,7 +16,11 @@ from manifoldx.modeling.primitives import cylinder
 from manifoldx.resources import DirectionalLight, PointLight, StandardMaterial
 
 HERE = Path(__file__).parent
-P = json.load(open(HERE / "profile.json"))
+CAR = __import__("os").environ.get("CAR", "box")
+P = json.load(open(HERE / f"profile-{CAR}.json"))
+OUT = HERE / "out" / CAR
+SIDE_H = P["side"].get("photo_h", 933)  # the 1400 px wide photos' heights
+FRONT_H = P["front"].get("photo_h", 933)
 MM = 0.001
 L, W, H = (d * MM for d in P["dims"])
 TYRE_R = P["tyre_d"] / 2 * MM
@@ -96,9 +100,9 @@ def body_parts():
     ax = np.argmax(np.abs(fn), axis=1)
     s = sp["scale_mm_per_px"]
     side_uv = lambda p: np.column_stack([np.interp(p[:, 0] / MM, sp["anchors_mm"], sp["anchors_px"]) / 1400,
-                                         (sp["ground"] - p[:, 1] / MM / s) / 933])
-    front_uv = lambda p: np.column_stack([(700 + p[:, 2] / MM / fp["scale_x"]) / 1400,
-                                          (860 - p[:, 1] / MM / fp["scale_y"]) / 933])
+                                         (sp["ground"] - p[:, 1] / MM / s) / SIDE_H])
+    front_uv = lambda p: np.column_stack([(fp.get("centre", 700) + p[:, 2] / MM / fp["scale_x"]) / 1400,
+                                          (fp.get("ground", 860) - p[:, 1] / MM / fp["scale_y"]) / FRONT_H])
     rear_uv = lambda p: np.column_stack([0.5 + p[:, 2] / W, 1 - p[:, 1] / H])
     top_uv = lambda p: np.column_stack([(p[:, 0] + L / 2) / L, 0.5 + p[:, 2] / W])
     return {
@@ -135,7 +139,7 @@ def disc(radius, segments=64):
                     uvs=uvs.astype(np.float32))
 
 
-RIM_R = 17 * 25.4 / 2 * MM
+RIM_R = P.get("rim_in", 17) * 25.4 / 2 * MM
 
 
 def wheel_meshes():
@@ -154,7 +158,7 @@ def quat_x(deg):
 
 
 def build(engine, variant):
-    out = HERE / "out"
+    out = OUT
     tex = lambda name: mx.load_texture(engine, out / f"tex-{name}.png")
     maps = {"side": f"side-{variant}", "front": f"front-{variant}", "rear": "rear", "top": "top", "under": "top"}
     for part, mesh in body_parts().items():
@@ -187,7 +191,7 @@ VIEWS = {  # name: (camera position, target), roughly where each photo was shot 
 def main(out, variant):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    engine = mx.Engine("Dongfeng BOX", width=1400, height=933)
+    engine = mx.Engine(f"Dongfeng {CAR}", width=1400, height=933)
     engine.background_color = (0.62, 0.62, 0.63)
     engine.on("startup")(lambda _: build(engine, variant))
     engine.set_lights([PointLight(position=(-3.0, 4.0, 4.0), color="#ffffff", intensity=40),
@@ -200,7 +204,9 @@ def main(out, variant):
         engine.camera.fov = 30
         Image.fromarray(engine.render_frame(supersample=2)).save(out / f"render-{variant}-{name}.png")
         print("rendered", name)
+    report = engine.export_gltf(out / f"box-{variant}.glb")
+    print("glb", (out / f"box-{variant}.glb").stat().st_size // 1024, "KiB")
 
 
 if __name__ == "__main__":
-    main(HERE / "out", sys.argv[1] if len(sys.argv) > 1 else "photo")
+    main(OUT, sys.argv[1] if len(sys.argv) > 1 else "photo")
