@@ -694,8 +694,8 @@ def build_car(p: CarParams | None = None) -> Car:
             piece(f"door_f{side}", "black", v2, t2)
     if p.spoiler:
         ring = sections_at(p.roof_end_u)
-        v, t = _box([xu(p.roof_end_u) - 0.05, p.height - p.roof_end_drop + 0.005, 0.0],
-                    (0.12, 0.025, 2 * 0.9 * ring[:, 2].max() * (1 - p.tumblehome / 2)), pitch=np.radians(-6))
+        v, t = _box([xu(p.roof_end_u) - 0.07, p.height - p.roof_end_drop - 0.03, 0.0],
+                    (0.16, 0.03, 2 * 0.62 * ring[:, 2].max() * (1 - p.tumblehome)), pitch=np.radians(-12))
         piece("hatch", "paint", v, t)
 
     _cabin(p, parts, piece, xu)
