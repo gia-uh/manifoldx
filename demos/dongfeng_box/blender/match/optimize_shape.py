@@ -11,6 +11,7 @@ Constraints, all by construction or as penalties:
   - symmetric: only the right half of each section is a parameter, mirrored;
   - spec sheet: length fixed by the sections' x, roof crown 1570 mm and half-width 905 mm held within 5 mm;
   - each section's points stay in order (underside < belt < top, roof inside the side);
+  - the end sections stay wide (END_HALF), so the plan of the nose and tail comes from the end rounding;
   - smooth: the second difference of every profile along the car is penalised;
   - fair: the change of turning angle along the car and around every section of the interpolated surface
     (shape.fairness), against the hand-drawn shape's, so the inside of a panel cannot ripple while its outline
@@ -43,6 +44,7 @@ FACTOR_KEYS = ("floor", "tuck", "rocker", "belt_in", "glass_mid", "roof_side", "
 FACTOR_LO = np.array([0.3, 0.6, 0.8, 0.8, 0.1, 0.5, 0.1, 30, 0.5, 0, 0, 1.0])
 FACTOR_HI = np.array([0.9, 1.0, 1.0, 1.0, 0.9, 0.98, 0.8, 250, 0.98, 300, 300, 6.0])
 FACTOR_STEP = np.array([0.04, 0.02, 0.01, 0.01, 0.05, 0.03, 0.05, 15, 0.03, 20, 20, 0.3])
+END_ZONE, END_HALF = 150.0, 720.0  # mm: sections this close to an end keep at least this half-width
 FAIR_W = 0.01  # cost of bending as unevenly as the hand-drawn shape, per direction
 
 
@@ -161,6 +163,10 @@ class Problem:
         pen += max(0, abs(top.max() - 1570) - 5) / 20 + max(0, abs(half.max() - 905) - 5) / 20
         pen += np.clip(bottom + 80 - belt, 0, None).sum() / 50 + np.clip(belt + 15 - top, 0, None).sum() / 50
         pen += np.clip(roof - 0.97 * half, 0, None).sum() / 50 + np.clip(150 - bottom, 0, None).sum() / 50
+        # No silhouette sees the plan of the nose or the tail: left free, the search narrows the end sections into
+        # a snout. The ends stay wide (a car's front and back are broad faces) and the end rounding curves them.
+        ends = np.minimum(self.x - self.x[0], self.x[-1] - self.x) < END_ZONE
+        pen += np.clip(END_HALF - half[ends], 0, None).sum() / 50
         for col, ref in zip(rows.T, self.bend0):  # smoothness: slope change along the car, against the start's
             pen += 0.02 * float((self.bend(col) ** 2).sum()) / ref
         # No folds: neighbouring quads of the interpolated surface whose normals turn by more than 60 degrees mean

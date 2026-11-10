@@ -216,11 +216,13 @@ def slot(obj, mat):
     return names.index(mat.name)
 
 
-def paint_region(body, cutter, mat):
+def paint_region(body, cutter, mat, facing=None):
     """Repaint the part of body's skin inside cutter with mat, along the cutter's exact intersection curve.
 
     The body is split by two booleans (difference and intersect) on copies, the walls the cutter leaves are
-    dropped, and the two skins are joined back with their seam welded.
+    dropped, and the two skins are joined back with their seam welded. With facing (0, 1 or 2: X, Y or Z), only
+    the faces inside whose normal points within 60 degrees of that axis take mat, so a front cut does not wrap
+    round a rounded corner onto the side.
     """
     inside = body.copy()
     inside.data = body.data.copy()
@@ -234,8 +236,10 @@ def paint_region(body, cutter, mat):
         bm.from_mesh(obj.data)
         bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.material_index == cut], context="FACES")
         if obj is inside:
+            bm.normal_update()
             for f in bm.faces:
-                f.material_index = keep
+                if facing is None or abs(f.normal[facing]) >= 0.5:
+                    f.material_index = keep
         bm.to_mesh(obj.data)
         bm.free()
     bpy.ops.object.select_all(action="DESELECT")
@@ -304,8 +308,8 @@ def body():
         bpy.data.objects.remove(well)
 
     side = lambda poly, mat, half=1.2: paint_region(obj, prism("s", mm(poly), "Y", -half, half), mat)
-    front = lambda poly, mat, lo=-2.3, hi=-1.8: paint_region(obj, prism("f", mm(poly), "X", lo, hi), mat)
-    rear = lambda poly, mat, lo=1.85, hi=2.3: paint_region(obj, prism("r", mm(poly), "X", lo, hi), mat)
+    front = lambda poly, mat, lo=-2.3, hi=-1.8: paint_region(obj, prism("f", mm(poly), "X", lo, hi), mat, facing=0)
+    rear = lambda poly, mat, lo=1.85, hi=2.3: paint_region(obj, prism("r", mm(poly), "X", lo, hi), mat, facing=0)
     top = lambda poly, mat, lo, hi: paint_region(obj, prism("t", mm(poly), "Z", lo, hi), mat)
 
     # Greenhouse: gloss black from the belt up, the roof back in paint, then the glass. With BOX_GREENHOUSE the
@@ -321,11 +325,20 @@ def body():
     top([(-330, -560), (1590, -520), (1590, 520), (-330, 560)], MAT["paint"], 1.49, 1.8)
     # Windscreen: between the cowl (where the hood ends) and the roof, the faces that look forward or up rather than
     # sideways. The A-pillar is where the skin turns to face the side, so the cut follows any fitted shape.
-    glass = slot(obj, MAT["glass"])
-    for p in obj.data.polygons:
-        c, n = p.center, p.normal
-        if FACTORS["hood_end"] * MM <= c.x <= -0.30 and c.z > 0.95 and abs(n.y) < 0.45:
-            p.material_index = glass
+    # Those faces only locate the pillar: a straight edge |y| = a + b z is fitted to their outer boundary over the
+    # upper part of the screen, where no side face mixes in, and the screen is cut along it with an exact prism.
+    x0, x1 = FACTORS["hood_end"] * MM, -0.30
+    pts = np.array([(abs(p.center.y), p.center.z) for p in obj.data.polygons
+                    if x0 <= p.center.x <= x1 and p.center.z > 0.95 and abs(p.normal.y) < 0.45])
+    edges = np.linspace(pts[:, 1].min(), pts[:, 1].max(), 16)
+    rim = [(pts[(pts[:, 1] >= lo) & (pts[:, 1] < hi), 0].max(), (lo + hi) / 2)
+           for lo, hi in zip(edges[:-1], edges[1:]) if ((pts[:, 1] >= lo) & (pts[:, 1] < hi)).any()]
+    rim = np.array(rim[len(rim) * 3 // 10:])
+    b_, a_ = np.polyfit(rim[:, 1], rim[:, 0], 1)
+    zs = np.linspace(0.95, pts[:, 1].max() + 0.05, 12)
+    ys = np.clip(a_ + b_ * zs, 0.05, None)
+    screen = [(y * 1000, z * 1000) for y, z in zip(ys, zs)]
+    paint_region(obj, prism("w", mm(screen + [(-y, z) for y, z in reversed(screen)]), "X", x0, x1), MAT["glass"])
     if G:
         for pane in G["windows"]:
             side([tuple(q) for q in pane], MAT["glass"])
@@ -398,7 +411,12 @@ def cabin(body_obj):
     glass = slot(shell, MAT["glass"])
     bm = bmesh.new()
     bm.from_mesh(shell.data)
-    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.material_index == glass], context="FACES")
+    # Only where glass shows it: behind the cowl and above the sills. Pulled in along vertex normals, the copy of
+    # a tightly rounded nose or tail crosses the outer skin and shows through the paint.
+    x0, x1 = FACTORS["hood_end"] * MM, SECTIONS[-1][0] * MM - 0.25
+    drop = [f for f in bm.faces if f.material_index == glass or not (x0 < f.calc_center_median().x < x1)
+            or f.calc_center_median().z < 0.55]
+    bmesh.ops.delete(bm, geom=drop, context="FACES")
     bm.normal_update()
     for v in bm.verts:
         v.co -= v.normal * 0.025
