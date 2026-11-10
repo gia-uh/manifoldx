@@ -317,12 +317,15 @@ def body():
     else:
         side([(-1060, 1100), (-330, 1600), (1500, 1600), (1960, 1200), (2060, 1010), (2060, 960), (1900, 1180),
               (1300, 1168), (-1000, 1112)], MAT["black"])
-    rear([(-800, 1000), (800, 1000), (800, 1600), (-800, 1600)], MAT["black"], lo=1.6)
+    rear([(-620, 1000), (620, 1000), (620, 1600), (-620, 1600)], MAT["black"], lo=1.6)
     top([(-330, -560), (1590, -520), (1590, 520), (-330, 560)], MAT["paint"], 1.49, 1.8)
-    # Windscreen: from the cowl (where the hood ends) to the roof, everything above 0.95 m within 0.74 m of the
-    # centre line. Between those x the only skin there is the screen, so the cut follows any fitted shape.
-    cowl = FACTORS["hood_end"]
-    side([(cowl, 950), (-280, 950), (-280, 1700), (cowl, 1700)], MAT["glass"], half=0.74)
+    # Windscreen: between the cowl (where the hood ends) and the roof, the faces that look forward or up rather than
+    # sideways. The A-pillar is where the skin turns to face the side, so the cut follows any fitted shape.
+    glass = slot(obj, MAT["glass"])
+    for p in obj.data.polygons:
+        c, n = p.center, p.normal
+        if FACTORS["hood_end"] * MM <= c.x <= -0.30 and c.z > 0.95 and abs(n.y) < 0.45:
+            p.material_index = glass
     if G:
         for pane in G["windows"]:
             side([tuple(q) for q in pane], MAT["glass"])

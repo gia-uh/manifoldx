@@ -10,7 +10,9 @@ scale, turn), so a local difference of shape, such as a flatter nose, survives r
 Outputs per photo: IoU above the sills, contour distance (mean and 95th percentile, in px and mm), an overlay
 (green: photo only, magenta: model only), the model's material regions outlined on the photo, and the regions
 score (regions.py): IoU of paint and of non-paint where both silhouettes show car, with its overlay. The outline
-alone says nothing about where windows, pillars and lamps sit, and a fit on it alone moves them freely.
+alone says nothing about where windows, pillars and lamps sit, and a fit on it alone moves them freely. With
+--render-dir also the internal edges (edge_stats): panel lines, creases and lamp edges of the matched render
+against the photo's, as a mean distance both ways, with an overlay (green photo, magenta render, white both).
 With --render-dir, the matched Blender renders (render_matched.py) give the paint colour comparison in CIELAB.
 """
 
@@ -102,6 +104,29 @@ def contour_stats(photo, model, cut, params):
             "mean_mm": float(dist.mean() * mm_per_px), "p95_mm": float(np.percentile(dist, 95) * mm_per_px)}
 
 
+def edges(rgb, region, top=0.12):
+    """The strongest internal lines inside region: pixels whose grey-level gradient is in the top fraction there."""
+    g = ndimage.gaussian_filter(rgb.astype(float).mean(-1), 1.5)
+    mag = np.hypot(ndimage.sobel(g, 0), ndimage.sobel(g, 1))
+    return region & (mag >= np.quantile(mag[region], 1 - top))
+
+
+def edge_stats(photo_rgb, render_rgb, pmask, model, cut, params):
+    """Panel lines, creases, lamp and window edges: mean distance between the photo's and the render's internal
+    lines, both ways, in mm. Silhouette and region scores cannot see a fender crease or a lamp's volume; this can."""
+    region = ndimage.binary_erosion(pmask & model, iterations=6)
+    region[cut:] = False
+    ep, er = edges(photo_rgb, region), edges(render_rgb, region)
+    d_pr = ndimage.distance_transform_edt(~er)[ep].mean()
+    d_rp = ndimage.distance_transform_edt(~ep)[er].mean()
+    mm_per_px = np.linalg.norm(np.array(params[:3])) / (params[6] * SCALE) * 1000
+    ov = (photo_rgb * 0.35).astype(np.uint8)
+    ov[ep] = (40, 220, 60)
+    ov[er] = (230, 40, 200)
+    ov[ep & er] = (255, 255, 255)
+    return {"mean_px": round(float((d_pr + d_rp) / 2), 1), "mean_mm": round(float((d_pr + d_rp) / 2 * mm_per_px), 1)}, ov
+
+
 def lab(rgb):
     c = rgb / 255.0
     c = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
@@ -184,6 +209,8 @@ def main():
                 if r.exists():
                     rimg = np.asarray(Image.open(r).convert("RGB").resize((W, H)))
                     view["paint_render"] = colour_stats(rimg[sel])
+                    view["edges"], ov = edge_stats(img, rimg, pmask, model, cut, params)
+                    Image.fromarray(ov).save(out / f"edges-{photo[:2]}.png")
         report["views"][photo] = view
         print(photo[:2], json.dumps({k: v for k, v in view.items() if k != "params"}), flush=True)
     json.dump(report, open(out / "report.json", "w"), indent=1)
