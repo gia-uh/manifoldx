@@ -80,11 +80,11 @@ class CarParams:
     roof: str = "paint"  # or "black"
     # Parts.
     headlamp: str = "wedge"  # "wedge", "almond", "round" or "bar"
-    headlamp_center: tuple = (0.676, 0.765)  # (lateral, height)
-    headlamp_size: tuple = (0.26, 0.15)
+    headlamp_center: tuple = (0.655, 0.765)  # (lateral, height)
+    headlamp_size: tuple = (0.31, 0.16)
     drl_bar: bool = True
     drl_height: float = 0.826
-    drl_half_length: float = 0.79  # to the outer corner of the headlamps
+    drl_half_length: float = 0.505  # to the inner edge of the headlamps, whose own strip carries it on
     grille: tuple = (0.60, 0.27, 0.43)  # half-width, bottom, top
     taillamp_center: tuple = (0.66, 1.00)
     taillamp_size: tuple = (0.30, 0.17)
@@ -465,9 +465,13 @@ def _raycast(origins, direction, verts, tris, batch=128):
     return t[np.arange(len(origins)), k], k
 
 
-# The wedge headlamp's outline in units of its half-size, from its inner point round the bottom and the outer side.
-WEDGE = [(-1.0, -0.2), (-0.9, -0.41), (-0.48, -0.67), (0.21, -0.95), (0.43, -1.0), (0.69, -1.0), (0.84, -0.83),
-         (0.89, -0.63), (1.0, 0.48), (0.98, 0.71), (0.92, 1.0), (0.81, 1.0)]
+# The wedge headlamp, in units of its half-size (across, up). The unit: a light strip along the top that carries the
+# light bar on, hooks round the outer end and comes back along the bottom of a teardrop lens to its inner point.
+WEDGE = [(-1.0, 0.96), (0.55, 0.96), (0.85, 0.85), (1.0, 0.45), (1.0, -0.2), (0.9, -0.65), (0.7, -0.92), (0.4, -1.0),
+         (0.0, -0.88), (-0.4, -0.62), (-0.69, -0.19), (-1.0, 0.59)]
+# What the strip encloses and is not lit: the lens and, above it, a blade in the body's colour that a texture paints.
+WEDGE_DARK = [(-0.5, -0.3), (-0.33, -0.47), (0.02, -0.72), (0.38, -0.84), (0.62, -0.78), (0.78, -0.58), (0.86, -0.2),
+              (0.86, 0.38), (0.76, 0.56), (0.5, 0.59), (-1.02, 0.59), (-0.71, -0.2)]
 
 
 def _decals(p: CarParams, verts, tris, parts, corner_uv):
@@ -533,17 +537,17 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         add(mat, view, outline, lift, close and (*close, 1))
         add(mat, view, [(-a, b) for a, b in reversed(outline)], lift, close and (*close, -1))
 
-    def lens(mat, view, outline, rim=0.72, core=0.34, about=None, island=None):
+    def lens(mat, view, outline, rim=0.72, core=0.34, about=None, island=None, dark=None):
         """A lamp as a lit rim round a dark lens with a chrome core on top. The lens is the outline shrunk toward
         `about` (its middle by default): off-centre, the rim is wide on the far side and thin on the near one.
-        The core is the outline shrunk again, or an outline of its own. With an island, the lamp is drawn there
-        in close-up instead of in its view."""
+        The core is the outline shrunk again, or an outline of its own; so is the lens, with `dark`. With an
+        island, the lamp is drawn there in close-up instead of in its view."""
         c = np.mean(outline, axis=0) if about is None else np.asarray(about, float)
         lo, hi = np.min(outline, axis=0), np.max(outline, axis=0)
         pad = 0.06 * (hi - lo)
         close = island and (island, (*(lo - pad), *(hi + pad)))
         both(mat, view, outline, close=close)
-        both("black", view, [tuple(c + rim * (np.array(q) - c)) for q in outline], 0.009, close)
+        both("black", view, dark or [tuple(c + rim * (np.array(q) - c)) for q in outline], 0.009, close)
         if core:
             both("chrome", view, core if isinstance(core, list) else [tuple(c + core * (np.array(q) - c)) for q in outline],
                  0.012, close)
@@ -561,12 +565,11 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     elif p.headlamp == "almond":  # an ellipse drawn to a point on its inner side, toward the middle of the car
         s = np.linspace(0, 2 * np.pi, 20, endpoint=False)
         eye = [(cy + a * np.cos(v), cz + bh * np.sin(v) * (1 - 0.75 * max(0.0, -np.cos(v)))) for v in s]
-    else:  # wedge: a point toward the middle of the car, a tall rounded outer side, a straight upper edge
+    else:  # wedge
         eye = [(cy + a * u, cz + bh * v) for u, v in WEDGE]
     if p.headlamp == "wedge":
-        # Lit along the two edges that meet at the point, dark at the outer side, a projector lens inside.
-        lens("lamp", "front", eye, rim=0.84, about=(cy + 0.62 * a, cz + 0.05 * bh),
-             core=pill(cy + 0.24 * a, cz - 0.10 * bh, 0.38 * a, 0.48 * bh), island="headlamp")
+        lens("lamp", "front", eye, dark=[(cy + a * u, cz + bh * v) for u, v in WEDGE_DARK],
+             core=pill(cy + 0.2 * a, cz - 0.3 * bh, 0.26 * a, 0.3 * bh), island="headlamp")
     else:
         lens("lamp", "front", eye, island="headlamp")
     if p.drl_bar:
