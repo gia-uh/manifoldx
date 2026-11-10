@@ -7,9 +7,11 @@
 :root{--ink:#131f35;--paper:#eef0f3}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
 html,body{margin:0;height:100%;overflow:hidden;background:var(--paper);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;touch-action:none;overscroll-behavior:none}
-canvas{display:block;position:fixed;inset:0}
+body>canvas{display:block;position:fixed;inset:0}
 .hud{position:fixed;top:max(10px,env(safe-area-inset-top));left:max(14px,env(safe-area-inset-left));right:max(14px,env(safe-area-inset-right));display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;color:var(--ink)}
 .brand{font-weight:700;letter-spacing:.14em;font-size:13px}.brand small{display:block;font-weight:500;letter-spacing:.02em;opacity:.65;font-size:12px;margin-top:2px}
+#map{display:block;margin-top:8px;background:rgba(255,255,255,.55);border-radius:8px}
+#lap{font-variant-numeric:tabular-nums;font-weight:600!important;opacity:.85!important}
 .speed{text-align:right;font-variant-numeric:tabular-nums}.speed b{font-size:34px;line-height:1}.speed span{font-size:12px;opacity:.65;display:block}
 .top-btns{position:fixed;top:max(10px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);display:flex;gap:8px}
 .chip{pointer-events:auto;border:1px solid rgba(19,31,53,.25);background:rgba(255,255,255,.8);color:var(--ink);border-radius:18px;padding:7px 12px;font-size:13px;font-weight:600}
@@ -29,8 +31,8 @@ canvas{display:block;position:fixed;inset:0}
 @media (max-height:420px){.btn{width:70px;height:70px;font-size:26px}.btn.gas{height:100px;width:66px}.btn.brake{width:70px;height:70px}}
 </style></head><body>
 <div class="loading" id="loading">CARGANDO…</div>
-<div class="hud"><div class="brand">DONGFENG<small id="model">BOX · prueba de manejo</small></div><div class="speed"><b id="kmh">0</b><span>km/h</span><span id="fps"></span></div></div>
-<div class="top-btns"><button class="chip" id="swap">Cambiar carro</button><button class="chip" id="cam">Cámara</button><button class="chip" id="fs">Pantalla completa</button></div>
+<div class="hud"><div class="brand">DONGFENG<small id="model">BOX · prueba de manejo</small><small id="lap">en pits</small><canvas id="map" width="150" height="104"></canvas></div><div class="speed"><b id="kmh">0</b><span>km/h</span><span id="fps"></span></div></div>
+<div class="top-btns"><button class="chip" id="swap">Cambiar carro</button><button class="chip" id="cam">Cámara</button><button class="chip" id="reset">A pits</button><button class="chip" id="fs">Pantalla completa</button></div>
 <div class="pad left"><div class="btn" data-k="left">◀</div><div class="btn" data-k="right">▶</div></div>
 <div class="pad right"><div class="btn brake" data-k="brake">FRENO</div><div class="btn gas" data-k="gas">GAS</div></div>
 <div class="hint"><span class="keys">Teclado: flechas o WASD · C cambia la cámara</span></div>
@@ -83,51 +85,148 @@ sun.castShadow = true; sun.shadow.mapSize.set(1024, 1024);
 Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 1, far: 40 });
 scene.add(sun, sun.target);
 
-// The grounds: a pale concrete floor with a faint grid, a ring road, cones and a few plinths.
+// The grounds: a dealer's test circuit (main straight, sweepers, a chicane, a hairpin, esses), a pit lane out of
+// the showroom, cones to knock over, tyre walls to bounce off, and a low-poly city far away.
+const ASPHALT = "#4a4f57", NAVY = "#131f35";
 const floorTex = (() => {
-  const c = document.createElement("canvas"); c.width = c.height = 512; const g = c.getContext("2d");
-  g.fillStyle = "#dfe2e6"; g.fillRect(0, 0, 512, 512);
-  for (let i = 0; i < 2600; i++) { g.fillStyle = `rgba(0,0,0,${Math.random() * 0.035})`; g.fillRect(Math.random() * 512, Math.random() * 512, 2, 2); }
-  g.strokeStyle = "rgba(19,31,53,.10)"; g.lineWidth = 2; g.strokeRect(0, 0, 512, 512);
-  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(40, 40); t.colorSpace = THREE.SRGBColorSpace;
-  t.anisotropy = 8; return t;
+  const c = document.createElement("canvas"); c.width = c.height = 256; const g = c.getContext("2d");
+  g.fillStyle = "#d9ddd6"; g.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 1400; i++) { g.fillStyle = `rgba(40,60,40,${Math.random() * 0.05})`; g.fillRect(Math.random() * 256, Math.random() * 256, 2, 2); }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(120, 120); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
 })();
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshLambertMaterial({ map: floorTex }));
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(900, 900), new THREE.MeshLambertMaterial({ map: floorTex }));
 floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
-const R_IN = 14, R_OUT = 22;
-const road = new THREE.Mesh(new THREE.RingGeometry(R_IN, R_OUT, 128, 1), new THREE.MeshLambertMaterial({ color: "#4a4f57" }));
-road.rotation.x = -Math.PI / 2; road.position.y = 0.005; road.receiveShadow = true; scene.add(road);
-for (const r of [R_IN + 0.25, R_OUT - 0.25]) {
-  const line = new THREE.Mesh(new THREE.RingGeometry(r - 0.08, r + 0.08, 128, 1), new THREE.MeshBasicMaterial({ color: "#f3f4f6" }));
-  line.rotation.x = -Math.PI / 2; line.position.y = 0.01; scene.add(line);
-}
-{ // the centre line's dashes: one instanced draw
-  const dashes = new THREE.InstancedMesh(new THREE.PlaneGeometry(1.6, 0.14), new THREE.MeshBasicMaterial({ color: "#f3f4f6" }), 24);
-  const m = new THREE.Object3D();
-  for (let i = 0; i < 24; i++) {
-    const a = (i / 24) * Math.PI * 2, r = (R_IN + R_OUT) / 2;
-    m.rotation.set(-Math.PI / 2, 0, -a + Math.PI / 2); m.position.set(Math.cos(a) * r, 0.012, Math.sin(a) * r);
-    m.updateMatrix(); dashes.setMatrixAt(i, m.matrix);
+scene.fog = new THREE.Fog("#e9ebee", 90, 380);
+
+const V = (x, z) => new THREE.Vector3(x, 0, z);
+const TRACK = new THREE.CatmullRomCurve3([
+  V(-90, 0), V(-30, 0), V(30, 0), V(90, 0), V(125, 15), V(137, 50), V(122, 80), V(106, 94), V(116, 110),
+  V(102, 140), V(72, 152), V(54, 136), V(40, 110), V(10, 104), V(-20, 120), V(-52, 126), V(-92, 116),
+  V(-126, 90), V(-137, 50), V(-126, 15),
+], true, "centripetal");
+const N = 900, HALF = 5;  // samples round the lap; half the road's width in metres
+const pts = TRACK.getSpacedPoints(N).slice(0, N);
+const tan = pts.map((_, i) => pts[(i + 1) % N].clone().sub(pts[(i + N - 1) % N]).normalize());
+const nrm = tan.map((t) => new THREE.Vector3(-t.z, 0, t.x));  // to the left of travel
+
+// A flat strip along a polyline, as one mesh; colours per quad when given.
+function ribbon(points, normals, from, to, y, colorOf, closed) {
+  const pos = [], col = [], idx = [];
+  const n = points.length, last = closed ? n : n - 1;
+  for (let i = 0; i < last; i++) {
+    const a = points[i], b = points[(i + 1) % n], na = normals[i], nb = normals[(i + 1) % n], v = pos.length / 3;
+    for (const [p, q, off] of [[a, na, from], [a, na, to], [b, nb, from], [b, nb, to]]) pos.push(p.x + q.x * off, y, p.z + q.z * off);
+    if (colorOf) { const c = colorOf(i); for (let k = 0; k < 4; k++) col.push(c.r, c.g, c.b); }
+    idx.push(v, v + 1, v + 2, v + 1, v + 3, v + 2);  // counter-clockwise from above: faces up
   }
-  scene.add(dashes);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  if (colorOf) g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx); g.computeVertexNormals();
+  return g;
 }
-const solids = []; // circles the car bumps into: {x, z, r}
-const coneGeo = new THREE.ConeGeometry(0.22, 0.6, 18), coneMat = new THREE.MeshStandardMaterial({ color: "#e8682a", roughness: 0.6 });
-const stripe = new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.5 });
+const road = new THREE.Mesh(ribbon(pts, nrm, -HALF, HALF, 0.02, null, true), new THREE.MeshLambertMaterial({ color: ASPHALT }));
+road.receiveShadow = true; scene.add(road);
+const white = new THREE.Color("#f3f4f6"), navy = new THREE.Color(NAVY);
+const curbColour = (i) => (Math.floor(i / 3) % 2 ? white : navy);
+const curbMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+scene.add(new THREE.Mesh(ribbon(pts, nrm, HALF, HALF + 0.9, 0.03, curbColour, true), curbMat));
+scene.add(new THREE.Mesh(ribbon(pts, nrm, -HALF - 0.9, -HALF, 0.03, curbColour, true), curbMat));
+{ // the start line: a checkered strip across the road at sample 0's neighbourhood (x = 0 on the main straight)
+  const c = document.createElement("canvas"); c.width = 160; c.height = 16; const g = c.getContext("2d");
+  for (let i = 0; i < 20; i++) for (let j = 0; j < 2; j++) { g.fillStyle = (i + j) % 2 ? "#111" : "#fff"; g.fillRect(i * 8, j * 8, 8, 8); }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.magFilter = THREE.NearestFilter;
+  const line = new THREE.Mesh(new THREE.PlaneGeometry(2 * HALF, 1.2), new THREE.MeshBasicMaterial({ map: t }));
+  line.rotation.set(-Math.PI / 2, 0, Math.PI / 2); line.position.set(0, 0.04, 0); scene.add(line);
+}
+const startIdx = pts.reduce((best, p, i) => (Math.abs(p.x) + Math.abs(p.z) < Math.abs(pts[best].x) + Math.abs(pts[best].z) ? i : best), 0);
+
+// The pit lane: out of the showroom's door, alongside the main straight, into the track after the start line.
+const PIT = new THREE.CatmullRomCurve3([V(-62, -34), V(-56, -20), V(-35, -13), V(0, -12), V(30, -9), V(55, -4), V(75, -1)]);
+const pitPts = PIT.getSpacedPoints(160);
+const pitTan = pitPts.map((_, i) => pitPts[Math.min(i + 1, 160)].clone().sub(pitPts[Math.max(i - 1, 0)]).normalize());
+const pitNrm = pitTan.map((t) => new THREE.Vector3(-t.z, 0, t.x));
+const pit = new THREE.Mesh(ribbon(pitPts, pitNrm, -3.6, 3.6, 0.015, null, false), new THREE.MeshLambertMaterial({ color: "#5a6069" }));
+pit.receiveShadow = true; scene.add(pit);
+const apron = new THREE.Mesh(new THREE.PlaneGeometry(40, 18), new THREE.MeshLambertMaterial({ color: "#c7cbd1" }));
+apron.rotation.x = -Math.PI / 2; apron.position.set(-62, 0.012, -42); apron.receiveShadow = true; scene.add(apron);
+
+// The showroom: a glass box under a navy roof slab, with the brand across the fascia.
+const solids = []; // circles the car bounces off: {x, z, r}
+{
+  const g = new THREE.Group();
+  const glass = new THREE.Mesh(new THREE.BoxGeometry(34, 7, 16), new THREE.MeshStandardMaterial({ color: "#26354d", roughness: 0.08, metalness: 0.6 }));
+  glass.position.y = 3.5; g.add(glass);
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(38, 1.2, 20), new THREE.MeshLambertMaterial({ color: NAVY }));
+  roof.position.y = 7.6; roof.castShadow = true; g.add(roof);
+  for (const x of [-18, 18]) for (const z of [-9, 9]) {
+    const col = new THREE.Mesh(new THREE.BoxGeometry(0.6, 7, 0.6), new THREE.MeshLambertMaterial({ color: "#e6e8eb" }));
+    col.position.set(x, 3.5, z); g.add(col);
+  }
+  const c = document.createElement("canvas"); c.width = 512; c.height = 64; const x = c.getContext("2d");
+  x.fillStyle = NAVY; x.fillRect(0, 0, 512, 64); x.fillStyle = "#fff"; x.font = "700 40px system-ui,sans-serif";
+  x.textAlign = "center"; x.textBaseline = "middle"; x.letterSpacing = "10px"; x.fillText("DONGFENG", 256, 34);
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(16, 2), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c) }));
+  sign.material.map.colorSpace = THREE.SRGBColorSpace; sign.position.set(0, 7.6, 10.05); g.add(sign);
+  g.position.set(-62, 0, -60); scene.add(g);
+  for (let k = -16; k <= 16; k += 4) solids.push({ x: -62 + k, z: -52, r: 2.2 });  // its front wall, as bumpers
+}
+
+// Tyre walls on the outside of the fast corners, and cones: a slalom on the back straight and the chicane's apexes.
+const tyreGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.28, 12), tyreMat = new THREE.MeshLambertMaterial({ color: "#1d1f22" });
+const tyreTop = new THREE.MeshLambertMaterial({ color: "#f3f4f6" });
+const stacks = [];
+const along = (i, off) => pts[(i + N) % N].clone().addScaledVector(nrm[(i + N) % N], off);
+const outside = (i) => -Math.sign(nrm[i].clone().dot(tan[(i + 8) % N].clone().sub(tan[(i + N - 8) % N])) || 1);
+for (const at of [0.12, 0.16, 0.38, 0.45, 0.82, 0.88]) {
+  const i0 = Math.floor(at * N), side = outside(i0);
+  for (let k = -12; k <= 12; k += 3) {
+    const p = along(i0 + k, side * (HALF + 3.2));
+    stacks.push(p); solids.push({ x: p.x, z: p.z, r: 0.5 });
+  }
+}
+const tyres = new THREE.InstancedMesh(tyreGeo, tyreMat, stacks.length * 3);
+{ const m = new THREE.Object3D(); let n = 0;
+  for (const s of stacks) for (let h = 0; h < 3; h++) { m.position.set(s.x, 0.14 + h * 0.28, s.z); m.updateMatrix(); tyres.setMatrixAt(n++, m.matrix); } }
+tyres.castShadow = true; scene.add(tyres);
+
+const coneGeo = new THREE.ConeGeometry(0.22, 0.6, 14), coneMat = new THREE.MeshLambertMaterial({ color: "#e8682a" });
+const stripe = new THREE.MeshLambertMaterial({ color: "#ffffff" });
 const cones = [];
-for (let i = 0; i < 30; i++) {
-  const a = (i / 30) * Math.PI * 2, r = i % 2 ? R_IN - 1.2 : R_OUT + 1.2;
+const addCone = (p) => {
   const g = new THREE.Group();
   const c = new THREE.Mesh(coneGeo, coneMat); c.position.y = 0.3; g.add(c);
-  const s = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.14, 0.09, 18), stripe); s.position.y = 0.36; g.add(s);
-  g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r); scene.add(g);
-  cones.push({ g, vx: 0, vz: 0, spin: 0 });
-}
-const plinthMat = new THREE.MeshStandardMaterial({ color: "#131f35", roughness: 0.4, metalness: 0.2 });
-for (const [x, z] of [[0, 0], [-5, 4], [5, -4]]) {
-  const p = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.4, 0.25, 64), plinthMat);
-  p.position.set(x, 0.125, z); p.receiveShadow = true; scene.add(p);
-  solids.push({ x, z, r: 2.4 });
+  const s = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.14, 0.09, 14), stripe); s.position.y = 0.36; g.add(s);
+  g.position.copy(p); scene.add(g);
+  cones.push({ g, vx: 0, vz: 0, spin: 0, home: p.clone() });
+};
+{ const i0 = Math.floor(0.66 * N); for (let k = 0; k < 8; k++) addCone(along(i0 + k * 7, (k % 2 ? 1 : -1) * 1.8)); }
+for (const at of [0.30, 0.33]) addCone(along(Math.floor(at * N), -outside(Math.floor(at * N)) * (HALF - 0.6)));
+
+// Low-poly trees near the track and a city far off: instanced, flat-shaded, faded by the fog.
+{
+  const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.15, 0.2, 1.4, 6), new THREE.MeshLambertMaterial({ color: "#7a6a58" }), 90);
+  const crown = new THREE.InstancedMesh(new THREE.ConeGeometry(1.6, 4.2, 7), new THREE.MeshLambertMaterial({ color: "#6f8f74", flatShading: true }), 90);
+  const m = new THREE.Object3D(); let n = 0, tries = 0;
+  while (n < 90 && tries++ < 4000) {
+    const x = (Math.random() - 0.5) * 360, z = (Math.random() - 0.5) * 300;
+    let near = Infinity; for (let i = 0; i < N; i += 6) near = Math.min(near, Math.hypot(pts[i].x - x, pts[i].z - z));
+    if (near < HALF + 9 || Math.hypot(x + 62, z + 50) < 30 || (z < -2 && z > -24 && x > -70 && x < 80)) continue;
+    const s = 0.7 + Math.random() * 0.8;
+    m.scale.set(s, s, s); m.position.set(x, 0.7 * s, z); m.updateMatrix(); trunk.setMatrixAt(n, m.matrix);
+    m.position.set(x, (1.4 + 2.1) * s, z); m.updateMatrix(); crown.setMatrixAt(n, m.matrix); n++;
+  }
+  trunk.count = crown.count = n; crown.castShadow = true; scene.add(trunk, crown);
+  const city = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ flatShading: true }), 140);
+  const tones = ["#c9ced6", "#b7bec9", "#d8dce2", "#a9b3c2", "#8e9aad", "#cfd4db"].map((c) => new THREE.Color(c));
+  for (let i = 0; i < 140; i++) {
+    const a = (i / 140) * Math.PI * 2 + Math.random() * 0.03, r = 230 + Math.random() * 90;
+    const w = 10 + Math.random() * 18, d = 10 + Math.random() * 18, h = 12 + Math.random() ** 2 * 70;
+    m.scale.set(w, h, d); m.rotation.set(0, Math.random() * Math.PI, 0); m.position.set(Math.cos(a) * r, h / 2, Math.sin(a) * r);
+    m.updateMatrix(); city.setMatrixAt(i, m.matrix); city.setColorAt(i, tones[i % tones.length]);
+  }
+  scene.add(city);
 }
 
 // The car: a GLB from manifoldx. Its floor disc goes; wheels spin about their axle and the front ones steer.
@@ -154,7 +253,17 @@ const loadCar = (key) => new Promise((ok, fail) => {
 });
 
 const car = new THREE.Group(); scene.add(car);
-const state = { x: (R_IN + R_OUT) / 2, z: 0, heading: Math.PI / 2, v: 0, steer: 0, spin: 0 };
+const headingOf = (t) => Math.atan2(t.z, -t.x);  // forward is (-cos h, sin h)
+const START = { x: pitPts[0].x, z: pitPts[0].z, heading: headingOf(pitTan[0]) };
+const state = { ...START, v: 0, steer: 0, spin: 0 };
+// Where the car is on the lap: the nearest sample, searched near the last one.
+const lap = { idx: -1, n: 0, start: 0, best: Infinity, last: 0, marks: new Set(), running: false, offTrack: false };
+function nearest(x, z, from, span) {
+  let best = from, bd = Infinity;
+  for (let k = -span; k <= span; k++) { const i = (from + k + N) % N, d = (pts[i].x - x) ** 2 + (pts[i].z - z) ** 2; if (d < bd) { bd = d; best = i; } }
+  return [best, Math.sqrt(bd)];
+}
+const onPit = (x, z) => pitPts.some((p) => (p.x - x) ** 2 + (p.z - z) ** 2 < 4.2 ** 2);
 let current = "box", wheels = [];
 async function useCar(key) {
   const { model, wheels: w } = await loadCar(key);
@@ -175,10 +284,16 @@ for (const el of document.querySelectorAll(".btn")) {
 const keyMap = { ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right", ArrowUp: "gas", KeyW: "gas", ArrowDown: "brake", KeyS: "brake", Space: "brake" };
 addEventListener("keydown", (e) => { if (keyMap[e.code]) { keys[keyMap[e.code]] = true; e.preventDefault(); } if (e.code === "KeyC") nextCam(); });
 addEventListener("keyup", (e) => { if (keyMap[e.code]) keys[keyMap[e.code]] = false; });
-const auto = new URLSearchParams(location.search).get("auto");  // ?auto=1 drives itself, for a headless check
+const auto = new URLSearchParams(location.search).get("auto");
+const overview = new URLSearchParams(location.search).get("overview");  // a fixed view from above, for checks
+const simSteps = Number(new URLSearchParams(location.search).get("sim") || 1);  // steps per frame, for headless checks  // ?auto=1 drives itself, for a headless check
 const cams = [{ back: 7.5, up: 2.6, look: 1.0 }, { back: 4.2, up: 1.5, look: 0.9 }, { back: 13, up: 7.5, look: 0 }];
 let cam = 0; const nextCam = () => { cam = (cam + 1) % cams.length; };
 document.getElementById("cam").onclick = nextCam;
+document.getElementById("reset").onclick = () => {
+  Object.assign(state, START, { v: 0, steer: 0 }); Object.assign(lap, { idx: -1, running: false, marks: new Set() });
+  for (const c of cones) { c.g.position.copy(c.home); c.g.rotation.set(0, 0, 0); c.vx = c.vz = c.spin = 0; }
+};
 document.getElementById("swap").onclick = () => useCar(current === "box" ? "friday" : "box");
 document.getElementById("fs").onclick = async () => {
   try { await document.documentElement.requestFullscreen(); await screen.orientation?.lock?.("landscape"); } catch {}
@@ -188,17 +303,45 @@ const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 30
 addEventListener("resize", () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
 
 const qSteer = new THREE.Quaternion(), qSpin = new THREE.Quaternion(), Y = new THREE.Vector3(0, 1, 0), Z = new THREE.Vector3(0, 0, 1);
+const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+const lapEl = document.getElementById("lap");
+let simClock = 0;  // seconds of driving: laps are timed on it, so a slow frame never shortens a lap
+function updateLap() {
+  const now = simClock;
+  const [i, d] = lap.idx < 0 ? nearest(state.x, state.z, 0, N / 2) : nearest(state.x, state.z, lap.idx, 40);
+  lap.offTrack = d > HALF + 1.2 && !onPit(state.x, state.z);
+  if (d < HALF + 1.5) {
+    if (lap.idx < 0) { lap.running = true; lap.start = now; lap.marks.clear(); }  // out of the pits: the clock starts
+    for (const q of [1, 2, 3]) if (Math.abs(i - (startIdx + (q * N) / 4)) % N < 20) lap.marks.add(q);
+    const crossed = lap.idx >= 0 && ((lap.idx - startIdx + N) % N) > N * 0.9 && ((i - startIdx + N) % N) < N * 0.1;
+    if (crossed && lap.marks.size === 3) {
+      lap.last = now - lap.start; lap.best = Math.min(lap.best, lap.last); lap.n++; lap.start = now; lap.marks.clear();
+    }
+    lap.idx = i;
+  }
+  const cur = lap.running ? fmt(now - lap.start) : "en pits";
+  const txt = `Vuelta ${lap.n + 1} · ${cur}${lap.best < Infinity ? ` · mejor ${fmt(lap.best)}` : ""}`;
+  if (txt !== lapEl.textContent) lapEl.textContent = txt;
+}
 // Arcade driving: a bicycle model with speed-sensitive steering, rolling drag and a soft bump off solids.
 function step(dt) {
+  simClock += dt;
   const spec = CARS[current];
   const gas = keys.gas || auto, brake = keys.brake;
-  const steerIn = (keys.left ? 1 : 0) - (keys.right ? 1 : 0) + (auto ? 0.42 : 0);
+  let steerIn = (keys.left ? 1 : 0) - (keys.right ? 1 : 0);
+  if (auto) {  // follow the pit lane, then the racing line, by aiming at a point ahead
+    const aim = lap.idx < 0 ? pitPts[Math.min(160, pitPts.findIndex((p) => Math.hypot(p.x - state.x, p.z - state.z) < 6) + 10)] : pts[(lap.idx + 14) % N];
+    const want = Math.atan2(aim.z - state.z, -(aim.x - state.x));
+    let d = want - state.heading; d = Math.atan2(Math.sin(d), Math.cos(d));
+    steerIn = Math.max(-1, Math.min(1, d * 2.5));
+  }
   const maxSteer = 0.6 / (1 + Math.abs(state.v) / 9);
   state.steer += (steerIn * maxSteer - state.steer) * Math.min(1, dt * 7);
   if (gas) state.v += spec.accel * dt * (1 - Math.max(0, state.v) / spec.top);
   if (brake) state.v -= (state.v > 0.3 ? 9 : 2.5) * dt;
   state.v = Math.max(-5, state.v);
-  state.v -= state.v * 0.12 * dt + Math.sign(state.v) * Math.min(Math.abs(state.v), 0.35 * dt);
+  const grass = lap.offTrack ? 1.4 : 0;  // the verge slows you down hard
+  state.v -= state.v * (0.12 + grass) * dt + Math.sign(state.v) * Math.min(Math.abs(state.v), 0.35 * dt);
   state.heading += (state.v / spec.wheelbase) * Math.tan(state.steer) * dt;
   const fx = -Math.cos(state.heading), fz = Math.sin(state.heading);
   state.x += fx * state.v * dt; state.z += fz * state.v * dt;
@@ -206,7 +349,9 @@ function step(dt) {
     const dx = state.x - s.x, dz = state.z - s.z, d = Math.hypot(dx, dz), min = s.r + 1.0;
     if (d < min) { state.x = s.x + (dx / d) * min; state.z = s.z + (dz / d) * min; state.v *= -0.25; }
   }
-  const lim = 90; state.x = Math.max(-lim, Math.min(lim, state.x)); state.z = Math.max(-lim, Math.min(lim, state.z));
+  updateLap();
+  const lim = 300; state.x = Math.max(-lim, Math.min(lim, state.x)); state.z = Math.max(-lim, Math.min(lim, state.z));
+  drawMap();
   for (const c of cones) {
     const dx = c.g.position.x - state.x, dz = c.g.position.z - state.z, d = Math.hypot(dx, dz);
     if (d < 1.4 && Math.abs(state.v) > 0.5) { c.vx += (dx / d) * Math.abs(state.v) * 0.8; c.vz += (dz / d) * Math.abs(state.v) * 0.8; c.spin = 6; }
@@ -222,12 +367,29 @@ function step(dt) {
   }
   // A little body roll and pitch sell the motion.
   car.children[0] && (car.children[0].rotation.x = -state.steer * Math.min(1, Math.abs(state.v) / 15) * 0.05);
+  if (overview) { scene.fog = null; camera.far = 1500; camera.updateProjectionMatrix(); camera.position.set(0, 330, 75); camera.lookAt(0, 0, 70); } else {
   const c = cams[cam], back = c.back, tx = state.x - fx * back, tz = state.z - fz * back;
   camera.position.lerp(camGoal.set(tx, c.up, tz), Math.min(1, dt * 3.5));
   camera.lookAt(state.x + fx * 2, c.look, state.z + fz * 2);
+  }
   sun.position.set(state.x - 8, 18, state.z + 6); sun.target.position.set(state.x, 0, state.z);
   const kmh = Math.round(Math.abs(state.v) * 3.6);
   if (kmh !== shownKmh) { kmhEl.textContent = kmh; shownKmh = kmh; }
+}
+const map = document.getElementById("map"), mg = map.getContext("2d");
+const bounds = pts.concat(pitPts).reduce((b, p) => [Math.min(b[0], p.x), Math.max(b[1], p.x), Math.min(b[2], p.z), Math.max(b[3], p.z)], [1e9, -1e9, 1e9, -1e9]);
+const mapXY = (x, z) => { const s = Math.min((map.width - 16) / (bounds[1] - bounds[0]), (map.height - 16) / (bounds[3] - bounds[2]));
+  return [8 + (x - bounds[0]) * s, 8 + (z - bounds[2]) * s]; };
+const mapBase = (() => { const c = document.createElement("canvas"); c.width = map.width; c.height = map.height; const g = c.getContext("2d");
+  g.lineCap = g.lineJoin = "round";
+  for (const [line, w, col] of [[pts, 7, "rgba(19,31,53,.85)"], [pitPts, 4, "rgba(19,31,53,.45)"]]) {
+    g.strokeStyle = col; g.lineWidth = w; g.beginPath(); line.forEach((p, i) => (i ? g.lineTo : g.moveTo).call(g, ...mapXY(p.x, p.z)));
+    if (line === pts) g.closePath(); g.stroke();
+  }
+  return c; })();
+function drawMap() {
+  mg.clearRect(0, 0, map.width, map.height); mg.drawImage(mapBase, 0, 0);
+  const [x, y] = mapXY(state.x, state.z); mg.fillStyle = "#e8682a"; mg.beginPath(); mg.arc(x, y, 4, 0, 7); mg.fill();
 }
 const camGoal = new THREE.Vector3(), kmhEl = document.getElementById("kmh"); let shownKmh = -1;
 
@@ -247,9 +409,9 @@ function adapt(now) {
 window.__perf = () => ({ fps: perf.fps, scale, calls: renderer.info.render.calls, tris: renderer.info.render.triangles });
 
 await useCar("box");
-camera.position.set(state.x + 7, 3, state.z);
+camera.position.set(state.x + 4, 3, state.z - 8);
 document.getElementById("loading").remove();
 let last = performance.now();
-renderer.setAnimationLoop((now) => { const dt = Math.min(0.05, (now - last) / 1000); last = now; step(dt); renderer.render(scene, camera); adapt(now); });
+renderer.setAnimationLoop((now) => { const dt = Math.min(0.05, (now - last) / 1000); last = now; for (let k = 0; k < simSteps; k++) step(dt); renderer.render(scene, camera); adapt(now); });
 window.__ready = true;
 </script></body></html>
