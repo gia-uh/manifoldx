@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `manifoldx.modeling.assets`, procedural assets from named parameters. First asset: `build_car(CarParams(...))`, a low-poly car lofted from spec-sheet measurements and profile curves, with glass, pillars and doors as face tags, lamps and plates as projected outlines, and doors, hood, hatch and wheels as hinged parts (`Car.pose`, `spawn_car`, `place_car`). numpy only.
+
 ## [0.10.0] - 2026-11-08
 
 ### Added
