@@ -394,7 +394,16 @@ def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.
     sa = None if anchor is None else np.array([anchor[2], anchor[1]], float)
     fc, fh = _centreline(fpts, samples, fa)
     sc, sh = _centreline(spts, samples, sa)
-    path = np.column_stack([fc[:, 0], (fc[:, 1] + sc[:, 1]) / 2.0, sc[:, 0]])
+    # The anchor can sit halfway along the part in one view (a seated figure's body centre, level with the
+    # middle of an outstretched arm seen from the side), so the side's centreline may run hand to shoulder
+    # while the front's runs shoulder to hand. Both views share the height and see the same thickness at the
+    # same point of the part: run the side the way round where those two agree.
+    def disagreement(c, h):
+        return np.abs(fc[:, 1] - c[:, 1]).mean() + np.abs(fh - h).mean()
+
+    if disagreement(sc[::-1], sh[::-1]) < 0.8 * disagreement(sc, sh):
+        sc, sh = sc[::-1], sh[::-1]
+    path =np.column_stack([fc[:, 0], (fc[:, 1] + sc[:, 1]) / 2.0, sc[:, 0]])
     if isinstance(radius, str):
         if radius == "min":
             width = np.minimum(fh, sh)

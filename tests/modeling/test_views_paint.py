@@ -263,6 +263,22 @@ def test_swept_tube_follows_a_rod_that_reaches_across_and_forward():
     assert np.abs(p[:, 0] - p[:, 2]).max() < 0.15
 
 
+def test_swept_tube_matches_the_ends_by_thickness_when_the_anchor_sits_mid_part():
+    # A seated figure's arm: thick at the shoulder (x = 0.1, z = -0.4), thin at the hand (x = 0.8, z = 0.4).
+    # The anchor's z of 0.05 is nearer the hand in the side view, so the anchor alone would pair the shoulder
+    # in front with the hand at the side.
+    front = np.zeros((100, 100), bool)
+    side = np.zeros((100, 100), bool)
+    for k in range(40):                             # forty columns from the shoulder to the hand
+        half = 6 - k // 8
+        front[50 - half:50 + half, 55 + k] = True   # x from 0.1 to 0.88
+        side[50 - half:50 + half, 70 - k] = True    # z from -0.4 to 0.38 (the first column is z_max)
+    mesh = swept_tube(front, side, (0.0, 1.0), anchor=(0.0, 0.5, 0.05), samples=16, segments=8)
+    p = np.asarray(mesh.positions)
+    hand = p[p[:, 0] > 0.75]
+    assert hand[:, 2].mean() > 0.25                 # the hand reaches forward, not back to the shoulder
+
+
 def test_fill_rows_takes_the_nearest_row_narrowed_as_the_other_view_narrows():
     mask = np.zeros((40, 40), bool)
     mask[5:25, 10:30] = True                      # the drawn rows, twenty wide
