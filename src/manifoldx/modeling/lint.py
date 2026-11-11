@@ -2,13 +2,45 @@
 
 An agent that builds a model from drawings cannot see it; these checks tell it, in numbers, what came out wrong:
 a part that floats away from the rest, a mesh with holes or inside out. numpy only.
+
+The checks are pure functions returning :class:`Finding` values: a code, a level, where it is, the number behind
+it, a message and a hint naming what could change it. They read no file and hold no state.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from manifoldx.modeling.mesh import Mesh
+from manifoldx.modeling.trace import iou
+from manifoldx.modeling.views import Atlas, Island, template
+
+# Level order, worst first; a report sorts by it.
+LEVELS = ("error", "warn", "info")
+
+_HINTS = {
+    "A-OPEN": "a builder bug: report it",
+    "A-FLIP": "a builder bug: report it",
+    "A-FLOAT": ("attach to the nearest part; for a tube, anchor; check the part's text if the drawings "
+                "disagree on where it starts"),
+    "A-TRIS": "fewer rings or segments; --lod low",
+    "A-SEEN": "another builder; power; leave out a view that disagrees (views)",
+}
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One thing wrong with a model: what, how bad, where, the number behind it, and what could change it."""
+
+    code: str                       # A-FLOAT, A-OPEN, ...
+    level: str                      # "error", "warn" or "info"
+    part: str | None = None         # the part's name, when the finding is about one
+    view: str | None = None         # the view's name, when it is about one
+    value: float | int | None = None  # gap in metres, triangle count, IoU, ...
+    message: str = ""               # what came out wrong, in words
+    hint: str = ""                  # the options that could fix it
 
 
 def mesh_report(mesh: Mesh) -> dict:
@@ -95,3 +127,98 @@ def part_groups(parts: dict, tol: float) -> dict:
             g, o = min(others)
             nearest[n] = (o, g)
     return {"gaps": gaps, "groups": sorted(groups.values(), key=len, reverse=True), "nearest": nearest}
+
+
+# --- Findings: the checks an agent reads ----------------------------------------------------------------
+
+
+def check_meshes(parts: dict) -> list[Finding]:
+    """A-OPEN for a mesh with holes and A-FLIP for one whose faces look inward, both an error."""
+    findings = []
+    for name, mesh in parts.items():
+        report = mesh_report(mesh)
+        if report["open_edges"]:
+            findings.append(Finding(
+                "A-OPEN", "error", part=name, value=report["open_edges"],
+                message=f"mesh has {report['open_edges']} open edges (holes)", hint=_HINTS["A-OPEN"]))
+        if report["volume"] < 0:
+            findings.append(Finding(
+                "A-FLIP", "error", part=name, value=round(report["volume"], 6),
+                message="mesh is inside out (negative volume)", hint=_HINTS["A-FLIP"]))
+    return findings
+
+
+def check_contact(parts: dict, tol: float) -> list[Finding]:
+    """A-FLOAT, an error, for every part outside the largest group of touching parts.
+
+    ``tol`` is the gap in metres under which two parts count as touching. ``value`` is the part's distance to
+    its nearest neighbour and the message names that neighbour.
+    """
+    if len(parts) < 2:
+        return []
+    groups = part_groups(parts, tol=float(tol))
+    main = groups["groups"][0]
+    findings = []
+    for group in groups["groups"][1:]:
+        for name in group:
+            other, distance = groups["nearest"][name]
+            findings.append(Finding(
+                "A-FLOAT", "error", part=name, value=float(distance),
+                message=f"floats: not connected to {', '.join(main[:3])}; nearest part {other}",
+                hint=_HINTS["A-FLOAT"]))
+    return findings
+
+
+def check_triangles(parts: dict, max_tris: int) -> list[Finding]:
+    """A-TRIS, a warning, for every part with more triangles than ``max_tris``."""
+    findings = []
+    for name, mesh in parts.items():
+        count = int(len(mesh.faces))
+        if count > max_tris:
+            findings.append(Finding(
+                "A-TRIS", "warn", part=name, value=count,
+                message=f"{count} triangles, more than the {int(max_tris)} allowed", hint=_HINTS["A-TRIS"]))
+    return findings
+
+
+def check_seen(parts: dict, view: str, drawn_masks: dict, frame) -> list[Finding]:
+    """A-SEEN: what the camera sees of each part against the mask a drawing gives it, in one view.
+
+    ``parts`` maps a name to a mesh, ``drawn_masks`` a name to a bool mask (the drawing's silhouette of that
+    part) and ``frame`` is ``(u_min, u_max, v_min, v_max)``, the metres the mask covers. A part below 0.75 IoU
+    warns, below 0.5 it is an error; the message counts the pixels built but not drawn and drawn but not built,
+    and the rows they fall on. Parts with no drawn mask, or an empty one, are left alone.
+    """
+    drawn = {name: np.asarray(mask, bool) for name, mask in drawn_masks.items() if name in parts}
+    drawn = {name: mask for name, mask in drawn.items() if mask.any()}
+    if not drawn:
+        return []
+    shape = next(iter(drawn.values())).shape
+    if any(mask.shape != shape for mask in drawn.values()):
+        raise ValueError("all drawn masks of one view must have the same shape")
+    height, width = shape
+    island = Island(view=view, rect=(0, 0, width, height), frame=tuple(float(v) for v in frame))
+    colors = dict.fromkeys(parts, (255, 255, 255))  # the region index comes from the key order, not the colour
+    atlas = Atlas(size=(width, height), islands=[island], uvs={}, meshes={},
+                  island_of={name: np.zeros(len(mesh.faces), np.int32) for name, mesh in parts.items()},
+                  texel=1.0)
+    _, regions = template(parts, atlas, colors, 0, whole=True)
+    order = {name: index + 1 for index, name in enumerate(parts)}
+    findings = []
+    for name in parts:
+        if name not in drawn:
+            continue
+        seen, want = regions == order[name], drawn[name]
+        overlap = float(iou(seen, want))
+        if overlap >= 0.75:
+            continue
+        extra, missing = int((seen & ~want).sum()), int((want & ~seen).sum())
+        rows = np.flatnonzero((seen ^ want).any(axis=1))
+        where = (f"; rows {rows.min() / height:.0%}-{rows.max() / height:.0%} from the top"
+                 if rows.size else "")
+        findings.append(Finding(
+            "A-SEEN", "error" if overlap < 0.5 else "warn", part=name, view=view, value=round(overlap, 3),
+            message=(f"{view} view: visible part differs from the drawing ({extra} px built but not drawn, "
+                     f"{missing} px drawn but not built{where})"),
+            hint=_HINTS["A-SEEN"]))
+    return findings
