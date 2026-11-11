@@ -16,7 +16,8 @@ that records the prompt and key that produced it.
 reference (unless the file names photos), one view drawing and one blueprint
 per view, traces the blueprints, aligns the views and builds each part with a
 builder: `two_view` for a rounded or boxy part, `tube` for a limb or frame,
-`plate` for a flat part, `lathe` for a turned one. Anything a set of three
+`plate` for a flat part, `lathe` for a turned one, `skeleton` for a figure
+grown as one piece. Anything a set of three
 views cannot describe — a house from a plan, a scene made of sub-assets — is an
 open `Asset` whose `build` writes ordinary `manifoldx` code.
 
@@ -25,6 +26,33 @@ The worked examples are `examples/models/hydrant.py` and
 `Asset`). Their drawings are committed, so build and lint run offline; the
 chapter on models from drawings (`docs/chapters/15-models-from-drawings.md`)
 reads the three.
+
+## A figure: grow it from a skeleton
+
+A body with a head, a neck and limbs built part by part comes out as pieces
+that float or meet badly: a round tube for a robed arm looks like a cone stuck
+to the chest even when every silhouette matches. Build the whole figure as one
+`skeleton` instead: joints in metres (x right, y up from the ground, z toward
+the front) and the bones between them, on the part that holds most of it, with
+`covers` naming the parts the same solid makes:
+
+```python
+p.add("body", "orange", "her body in its robe", build=skeleton(
+    {"pelvis": (0, 1.02, -0.22), "chest": (0, 1.38, -0.22), "head": (0, 1.75, -0.22),
+     "hand1": (0.54, 1.50, 0.29), ...},
+    [("pelvis", "chest"), ("chest", "head"), ("chest", "hand1"), ...],
+    covers=("head", "arms"), views=("front", "left")))
+```
+
+Each joint's radius is read from the drawings across its bones, the bones melt
+into one closed solid, and that solid is cut to the outline the front and left
+drawings show. Nothing can float. To place the joints, run `inspect` once with
+the parts built any way and read the `extent` lines of `summary.txt`: where each
+drawn part spans, in metres, in each view. Then run `inspect` again: the
+overlays draw the bones in dark blue over the blueprints and the `mark` lines
+give each joint's position and fitted radius. Move a joint that sits off its
+drawing, add one where a limb bends, and fix a radius with `(x, y, z, r)` when
+the fit is wrong. A seated figure's lap is a joint at each knee and foot.
 
 ## The loop
 

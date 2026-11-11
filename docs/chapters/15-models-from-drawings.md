@@ -49,6 +49,7 @@ Each part names a `Builder`:
 | `tube` | limbs and frames that reach across and forward: arms, armrests on a post, arches | `anchor`, `radius`, `samples`, `section` (`"drape"` for a robed arm) |
 | `plate` | flat parts seen whole from one side: fins, signs, a tail | `thickness`, `lean` |
 | `lathe` | turned parts: vases, columns, a lamp | `segments`, `rings` |
+| `skeleton` | a figure grown as one piece from joints and bones: a statue, an animal, a plant | `joints`, `bones`, `covers`, `step`, `blend`, `round`, `smooth` |
 
 Every builder also takes `views` (which drawings say something about the part),
 `attach` (a part it must touch), `keep` (what to do with stray pieces), `grid`
@@ -57,6 +58,19 @@ Every builder also takes `views` (which drawings say something about the part),
 aligns the views to the same rows, and hands each part's masks and the shared
 `Frame` to its builder. A builder returns a `Built`: one mesh per instance, the
 rows it filled from the other view, and the area of every piece `keep` dropped.
+
+A figure is better grown than assembled. `skeleton` takes joints in metres and
+the bones between them and makes one closed solid that cannot float: its
+`covers` names the other parts the same solid makes (a head and arms grown with
+the body), and those get no mesh of their own. Underneath it is plain
+`manifoldx.modeling.skeleton`, usable without an asset: `fit_radii` reads each
+joint's radius from how wide the drawings are across its bones,
+`skeleton_sdf` joins the bones' `round_cone_sdf` fields with a smooth minimum,
+`hull_sdf` is the visual hull of the drawings (each view's `signed_distance`
+swept along its line of sight), `surface_nets` meshes the zero level of a
+sampled field, `taubin` smooths without shrinking, and `skin` puts them
+together. After a build, `inspect` draws the bones over the blueprints, which
+are the asset's `marks`.
 
 ## The hydrant at the kerb
 
