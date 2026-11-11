@@ -139,6 +139,7 @@ pre{font-family:var(--font-mono);font-size:12px;line-height:1.55;background:var(
 <tbody>
 <tr><td>Who fixes a model</td><td>The agent, guided by the lint; no automatic repair</td><td class="why"><span class="who">maintainer</span> Which builder fits a part, which view to trust and when to redraw are judgements; the tool gives the numbers and the options.</td></tr>
 <tr><td>The image model's two roles</td><td>Drawings to geometry first, views of the geometry to maps after</td><td class="why"><span class="who">maintainer</span> A part modelled by reading photos looked wrong; a traced blueprint looked right.</td></tr>
+<tr><td>Layering</td><td>Pure functions, then the Asset pipeline on them, then the command on that; each usable on its own</td><td class="why"><span class="who">maintainer</span> The same modelling techniques serve a script, an app and an agent; the command adds no logic.</td></tr>
 <tr><td>Dependencies</td><td>numpy and the standard library</td><td class="why"><span class="who">maintainer</span> As the rest of manifoldx.</td></tr>
 <tr><td>Normal and other maps</td><td>Computed from the albedo by default; from the image model on request</td><td class="why"><span class="who">maintainer</span> A computed map is registered by construction and free.</td></tr>
 <tr><td>The asset file</td><td>A class that inherits from <code>Asset</code> and overrides the stages draw, build, paint, check, with arbitrary Python and manifoldx code in each</td><td class="why"><span class="who">maintainer</span> A model is a pipeline, not a fixed structure: a house needs general views and details placed by the agent; a statue needs named parts. <code>Parts</code> is the ready subclass for the second.</td></tr>
@@ -149,6 +150,18 @@ pre{font-family:var(--font-mono);font-size:12px;line-height:1.55;background:var(
 
 <h2 id="file"><span class="n">04</span>The asset file</h2>
 <p>An asset is a class with four stages. The command runs them in order and passes each a context <code>c</code> with the tools: paid calls (cached), tracing, builders, placement, expectations for the lint.</p>
+<h3>Three layers</h3>
+<table class="tbl">
+<thead><tr><th>Layer</th><th>What it is</th><th>Used from</th></tr></thead>
+<tbody>
+<tr><td>1. Functions</td><td>Pure functions on numpy arrays and meshes: <code>trace</code>, <code>views</code> (<code>two_view_solid</code>, <code>swept_tube</code>, <code>view_atlas</code>, <code>template</code>), <code>paint</code>, <code>lint</code>, <code>image</code>. No files, no state, no network. <code>imagegen</code> is the one with side effects (a request, a cost log), kept apart.</td><td>Any script or app, procedurally, with no asset at all.</td></tr>
+<tr><td>2. Asset</td><td>The <code>Asset</code> base class, its context and <code>Parts</code>: stages that call layer 1, a cache for paid calls, a <code>Report</code> of findings. Usable from Python: <code>result = Statue().run(cache="statue.asset", stages=("build", "lint"))</code> returns the scene, the textures and the findings as objects.</td><td>Python: an app, a notebook, another asset, a client such as a catalogue generator.</td></tr>
+<tr><td>3. Command</td><td><code>manifoldx asset</code>: parses arguments, calls layer 2, prints findings and writes files. No logic of its own.</td><td>The shell and agents.</td></tr>
+</tbody>
+</table>
+<p>Each layer depends only on the ones below it. Whatever the command can do, a Python caller can do with the same names.</p>
+
+<h3>The stages</h3>
 <table class="tbl">
 <thead><tr><th>Stage</th><th>Returns</th><th>What the agent writes there</th></tr></thead>
 <tbody>
