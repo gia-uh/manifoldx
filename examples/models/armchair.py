@@ -1,8 +1,7 @@
 """A mid-century modern armchair, built from its three blueprints.
 
-The asset of the prototype's armchair (`.playground/assetgen/armchair.json`): a walnut frame with four tapered
-legs and flat armrests, a mustard-yellow seat cushion and a back cushion. Its drawings are committed beside it,
-so the build and the lint run with no network and no image model:
+A walnut frame with four tapered legs and flat armrests, a mustard-yellow seat cushion and a back cushion. Its
+drawings are committed beside it, so the build and the lint run with no network and no image model:
 
     uv run python examples/models/armchair.py
 """

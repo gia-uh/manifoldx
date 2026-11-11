@@ -1,8 +1,7 @@
 """A classic red cartoon fire hydrant, built from its three blueprints.
 
-The asset of the prototype's hydrant (`.playground/assetgen/hydrant.json`): a round barrel with a domed bonnet,
-a wide base flange, two side outlets and a front pumper. Its drawings are committed beside it, so the build and
-the lint run with no network and no image model:
+A round barrel with a domed bonnet, a wide base flange, two side outlets and a front pumper. Its drawings are
+committed beside it, so the build and the lint run with no network and no image model:
 
     uv run python examples/models/hydrant.py
 """
