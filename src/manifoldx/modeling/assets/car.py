@@ -43,31 +43,31 @@ class CarParams:
     the front (0) to the rear (1)."""
 
     # Package: the spec sheet.
-    length: float = 4.03
-    width: float = 1.81
-    height: float = 1.57
-    wheelbase: float = 2.66
-    front_overhang: float = 0.72
-    track: float = 1.55
-    wheel_radius: float = 0.318
+    length: float = 4.25
+    width: float = 1.78
+    height: float = 1.48
+    wheelbase: float = 2.62
+    front_overhang: float = 0.86
+    track: float = 1.53
+    wheel_radius: float = 0.315
     tyre_width: float = 0.205
     rim_ratio: float = 0.70  # rim radius over wheel radius
     arch_gap: float = 0.045  # between the tyre and the arch
     # Side profile.
-    nose_top: float = 0.75  # top of the nose at the very front
-    hood_front: float = 0.925  # the hood just behind the nose
+    nose_top: float = 0.70  # top of the nose at the very front
+    hood_front: float = 0.87  # the hood just behind the nose
     nose_blunt: float = 0.4  # how much of the rise from nose to hood the face makes in its first 4 cm: 0 is a wedge
     cowl_u: float = 0.29  # where the hood meets the windscreen
-    cowl_height: float = 1.20
+    cowl_height: float = 1.13
     windscreen_u: float = 0.46  # where the windscreen meets the roof
     roof_peak_u: float = 0.56  # where the roof is highest
     roof_end_u: float = 0.78  # where the roof meets the rear glass
     roof_end_drop: float = 0.08
     hatch_u: float = 0.92  # where the rear glass ends
-    hatch_height: float = 1.165
-    tail_top: float = 0.91  # top of the tail at the rear end
-    belt_front: float = 1.03  # belt (bottom of the side glass) at the cowl
-    belt_rear: float = 1.11  # and at the end of the roof
+    hatch_height: float = 1.10
+    tail_top: float = 0.86  # top of the tail at the rear end
+    belt_front: float = 0.97  # belt (bottom of the side glass) at the cowl
+    belt_rear: float = 1.05  # and at the end of the roof
     sill: float = 0.20  # underside between the wheels
     bumper_bottom_front: float = 0.36
     bumper_bottom_rear: float = 0.35
@@ -93,34 +93,34 @@ class CarParams:
     # A lamp is a shape from `lamps.LAMPS` by name (or a shape of your own), or one of the plain outlines. A shape
     # is placed by its anchor, sized in its own plane and turned `yaw` degrees from straight ahead toward its side
     # of the car, so a lamp on a corner is drawn as it is seen straight on.
-    headlamp: str | dict = "wedge"  # a shape, or "almond", "round" or "bar"
-    headlamp_center: tuple = (0.505, 0.826)  # (lateral, height) of the lamp's anchor: here, the end of the light bar
-    headlamp_size: tuple = (0.36, 0.185)
-    headlamp_yaw: float = 30.0
-    drl_bar: bool = True
-    drl_height: float = 0.826
+    headlamp: str | dict = "almond"  # a shape, or "almond", "round" or "bar"
+    headlamp_center: tuple = (0.56, 0.78)  # (lateral, height) of the lamp's anchor: here, the end of the light bar
+    headlamp_size: tuple = (0.30, 0.14)
+    headlamp_yaw: float = 20.0
+    drl_bar: bool = False
+    drl_height: float = 0.78
     drl_half_length: float = 0.505  # to the inner edge of the headlamps, whose own strip carries it on
-    grille: tuple = (0.83, 0.37, 0.50)  # half-width, bottom, top
-    grille_style: str | dict = "smile"  # a shape, or "bar"
-    taillamp: str | dict = "ring"  # a shape, or "pill"
-    taillamp_center: tuple = (0.68, 1.03)
-    taillamp_size: tuple = (0.33, 0.22)
-    taillamp_yaw: float = 35.0
-    spoiler: bool = True
+    grille: tuple = (0.60, 0.27, 0.43)  # half-width, bottom, top
+    grille_style: str | dict = "bar"  # a shape, or "bar"
+    taillamp: str | dict = "pill"  # a shape, or "pill"
+    taillamp_center: tuple = (0.66, 0.97)
+    taillamp_size: tuple = (0.26, 0.16)
+    taillamp_yaw: float = 25.0
+    spoiler: bool = False
     mirrors: bool = True
-    mirror: str | dict = "pod"  # a shape, or "box"
+    mirror: str | dict = "box"  # a shape, or "box"
     mirror_size: tuple = (0.20, 0.165)  # across and up, stalk included, as seen from ahead of the car
     mirror_yaw: float = 22.0  # degrees its outer end is swept back
-    wheel: str | dict = "swirl"  # a shape, or "spokes"
+    wheel: str | dict = "spokes"  # a shape, or "spokes"
     spokes: int = 5  # of the plain wheel
-    dash: str | dict = "deck"  # a shape, or "box"
-    steering: str | dict = "tri"  # a shape, or "ring"
-    door_card: str | dict | None = "quilt"  # a shape, or None for bare doors
-    console: str | dict | None = "tray"  # a shape, or None for no console
+    dash: str | dict = "box"  # a shape, or "box"
+    steering: str | dict = "ring"  # a shape, or "ring"
+    door_card: str | dict | None = None  # a shape, or None for bare doors
+    console: str | dict | None = None  # a shape, or None for no console
     cladding: bool = False  # black lower body
     handles: bool = True  # a chrome bar on each door; leave it out when a texture paints the handles
-    door_strip: bool = True  # a black strip with a chrome line low on the doors
-    fog_rings: bool = True  # a lit ring at each end of the grille
+    door_strip: bool = False  # a black strip with a chrome line low on the doors
+    fog_rings: bool = False  # a lit ring at each end of the grille
     # Resolution and shading.
     sections: int = 28
     crease: float = 40.0  # degrees: an edge that turns more than this is shaded sharp
