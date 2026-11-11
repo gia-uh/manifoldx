@@ -72,11 +72,6 @@ def _rooms(walls):
     return sorted(rooms, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]), reverse=True)
 
 
-def _slab(x0, x1, y0, y1, z0, z1):
-    """A box between two corners on each axis."""
-    return primitives.box(x1 - x0, y1 - y0, z1 - z0).translate([(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2])
-
-
 class House(Asset):
     height = 2.75            # walls plus roof, in metres
     wall_height = 2.6
@@ -125,31 +120,31 @@ class House(Asset):
         front = max(0.08, z1 - pz(max(room[3] for room in rooms)))
 
         # Four outer walls, then a wall in every gap between two rooms: the traced rooms lay out the plan.
-        walls = [_slab(x0, x1, 0.0, self.wall_height, z0, z0 + back),
-                 _slab(x0, x0 + left, 0.0, self.wall_height, z0 + back, z1 - front),
-                 _slab(x1 - right, x1, 0.0, self.wall_height, z0 + back, z1 - front)]
+        walls = [primitives.box_between((x0, 0.0, z0), (x1, self.wall_height, z0 + back)),
+                 primitives.box_between((x0, 0.0, z0 + back), (x0 + left, self.wall_height, z1 - front)),
+                 primitives.box_between((x1 - right, 0.0, z0 + back), (x1, self.wall_height, z1 - front))]
         for i, a in enumerate(rooms):
             for b in rooms[i + 1:]:
                 if a[2] <= b[0]:                                  # a left of b
                     lo, hi = a[2], b[0]
                     zlo, zhi = pz(max(a[1], b[1])), pz(min(a[3], b[3]))
                     if px(hi) - px(lo) > 0.02 and zhi - zlo > 0.02:
-                        walls.append(_slab(px(lo), px(hi), 0.0, self.wall_height, zlo, zhi))
+                        walls.append(primitives.box_between((px(lo), 0.0, zlo), (px(hi), self.wall_height, zhi)))
                 elif b[2] <= a[0]:                                # b left of a
                     lo, hi = b[2], a[0]
                     zlo, zhi = pz(max(a[1], b[1])), pz(min(a[3], b[3]))
                     if px(hi) - px(lo) > 0.02 and zhi - zlo > 0.02:
-                        walls.append(_slab(px(lo), px(hi), 0.0, self.wall_height, zlo, zhi))
+                        walls.append(primitives.box_between((px(lo), 0.0, zlo), (px(hi), self.wall_height, zhi)))
                 elif a[3] <= b[1]:                                # a behind b
                     lo, hi = pz(a[3]), pz(b[1])
                     xlo, xhi = px(max(a[0], b[0])), px(min(a[2], b[2]))
                     if hi - lo > 0.02 and xhi - xlo > 0.02:
-                        walls.append(_slab(xlo, xhi, 0.0, self.wall_height, lo, hi))
+                        walls.append(primitives.box_between((xlo, 0.0, lo), (xhi, self.wall_height, hi)))
                 elif b[3] <= a[1]:                                # b behind a
                     lo, hi = pz(b[3]), pz(a[1])
                     xlo, xhi = px(max(a[0], b[0])), px(min(a[2], b[2]))
                     if hi - lo > 0.02 and xhi - xlo > 0.02:
-                        walls.append(_slab(xlo, xhi, 0.0, self.wall_height, lo, hi))
+                        walls.append(primitives.box_between((xlo, 0.0, lo), (xhi, self.wall_height, hi)))
 
         # The front wall is split around the door the facade shows, with a lintel above it.
         red = _main(masks["red"])
@@ -157,18 +152,19 @@ class House(Asset):
         door_y0, door_y1 = (y_of(red[3]), y_of(red[1])) if red else (0.0, 2.0)
         door_x0, door_x1 = max(x0, door_x0), min(x1, door_x1)
         door_y0, door_y1 = max(0.0, door_y0), min(self.wall_height, door_y1)
-        front_z = (z1 - front, z1)
+        fz0, fz1 = z1 - front, z1
         if door_x0 > x0 + 0.02:
-            walls.append(_slab(x0, door_x0, 0.0, self.wall_height, *front_z))
+            walls.append(primitives.box_between((x0, 0.0, fz0), (door_x0, self.wall_height, fz1)))
         if door_x1 < x1 - 0.02:
-            walls.append(_slab(door_x1, x1, 0.0, self.wall_height, *front_z))
+            walls.append(primitives.box_between((door_x1, 0.0, fz0), (x1, self.wall_height, fz1)))
         if door_y1 < self.wall_height - 0.02:
-            walls.append(_slab(door_x0, door_x1, door_y1, self.wall_height, *front_z))
+            walls.append(primitives.box_between((door_x0, door_y1, fz0),
+                                                (door_x1, self.wall_height, fz1)))
 
         for index, mesh in enumerate(walls, start=1):
             scene.add(f"wall{index}", mesh)
-        scene.add("door", _slab(door_x0 + 0.01, door_x1 - 0.01, door_y0 + 0.01, door_y1 - 0.01,
-                                z1 - front - 0.01, z1 + 0.01))
+        scene.add("door", primitives.box_between((door_x0 + 0.01, door_y0 + 0.01, z1 - front - 0.01),
+                                                 (door_x1 - 0.01, door_y1 - 0.01, z1 + 0.01)))
 
         # Windows sit on the facade where the blue regions are, as shallow boxes in the front wall.
         labels, count = trace.components(masks["blue"])
@@ -182,16 +178,17 @@ class House(Asset):
             if width < 0.25 or tall < 0.25:
                 continue
             window += 1
-            scene.add(f"window{window}", _slab(x_of(box[0]), x_of(box[2]), y_of(box[3]), y_of(box[1]),
-                                               z1 - 0.05, z1 + 0.01))
+            scene.add(f"window{window}", primitives.box_between(
+                (x_of(box[0]), y_of(box[3]), z1 - 0.05), (x_of(box[2]), y_of(box[1]), z1 + 0.01)))
 
         # A flat roof over the whole footprint, its width and thickness read from the yellow band on the facade.
         roof = _main(masks["yellow"])
         roof_x0 = min(x_of(roof[0]), x0 - 0.1) if roof else x0 - 0.1
         roof_x1 = max(x_of(roof[2]), x1 + 0.1) if roof else x1 + 0.1
         roof_tall = max(0.12, (roof[3] - roof[1]) * scale) if roof else 0.15
-        scene.add("roof", _slab(roof_x0, roof_x1, self.wall_height - 0.02,
-                                self.wall_height - 0.02 + roof_tall, z0 - 0.15, z1 + 0.15))
+        scene.add("roof", primitives.box_between(
+            (roof_x0, self.wall_height - 0.02, z0 - 0.15),
+            (roof_x1, self.wall_height - 0.02 + roof_tall, z1 + 0.15)))
 
         shown = {"wall": masks["orange"], "roof": masks["yellow"], "door": masks["red"],
                  "window": masks["blue"]}

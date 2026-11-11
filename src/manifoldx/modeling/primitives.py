@@ -77,6 +77,14 @@ def box(width: float = 1.0, height: float = 1.0, depth: float = 1.0) -> Mesh:
     return Mesh(positions=corners, faces=np.array(faces, dtype=np.uint32))
 
 
+def box_between(a, b) -> Mesh:
+    """An axis-aligned box spanning two opposite corners, given as ``(x, y, z)`` points."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    low, high = np.minimum(a, b), np.maximum(a, b)
+    size = high - low
+    return box(float(size[0]), float(size[1]), float(size[2])).translate((low + high) / 2)
+
+
 def plane(width: float = 1.0, depth: float = 1.0, segments: int = 1) -> Mesh:
     n = segments + 1
     xs = np.linspace(-width / 2, width / 2, n)
