@@ -38,18 +38,27 @@ class Result:
         return self.report.exit_code
 
 
+def _instances(parts: dict, name: str) -> list:
+    """The scene's meshes for one declared part: its one mesh, or every ``name1``, ``name2``... instance."""
+    if name in parts:
+        return [parts[name]]
+    return [mesh for key, mesh in parts.items()
+            if key.startswith(name) and key[len(name):].isdigit() and key[len(name):]]
+
+
 def standard_findings(context: Context, scene: Scene, tol: float, max_tris: int) -> list[Finding]:
     """The checks every asset gets: closed meshes, contact, triangle count and what each drawing expects."""
     parts = scene.meshes
     findings = [*check_meshes(parts), *check_contact(parts, tol), *check_triangles(parts, max_tris)]
     for expectation in context.expectations:
-        missing = [name for name in expectation.names if name not in parts]
-        if missing:
-            raise ValueError(f"expect({expectation.view!r}) names parts the scene does not have: "
-                             f"{', '.join(missing)}")
-        named = {name: parts[name] for name in expectation.names}
+        named = {}
+        for name in expectation.names:
+            meshes = _instances(parts, name)
+            if not meshes:
+                raise ValueError(f"expect({expectation.view!r}) names parts the scene does not have: {name}")
+            named[name] = meshes if len(meshes) > 1 else meshes[0]
         frame = expectation.frame if expectation.frame is not None else _frame(parts, expectation.view)
-        findings.extend(check_seen(named, expectation.view, {name: expectation.mask for name in named}, frame))
+        findings.extend(check_seen(named, expectation.view, expectation.masks, frame))
     return findings
 
 

@@ -42,12 +42,19 @@ _DRAWING_PIXELS = 480.0
 
 @dataclass(frozen=True)
 class Expectation:
-    """What one drawing says the camera should see: a view, the mask of each part, and an optional frame."""
+    """What one drawing says the camera should see: a view, each part's mask, and an optional frame.
+
+    ``masks`` holds one bool mask per part name: a blueprint with a colour per part is checked part by part,
+    never as one mask for all. Every mask has the same shape, the drawing's pixels.
+    """
 
     view: str
-    mask: np.ndarray                                    # (H, W) bool
-    names: tuple[str, ...]                              # the parts the mask shows
+    masks: dict[str, np.ndarray]                        # part name -> (H, W) bool
     frame: tuple[float, float, float, float] | None = None  # u_min, u_max, v_min, v_max in metres
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(self.masks)
 
 
 def _rgb(image) -> np.ndarray:
@@ -160,10 +167,32 @@ class Context:
         """A new, empty scene to add named meshes to."""
         return Scene()
 
-    def expect(self, view: str, mask, names, frame=None) -> Expectation:
-        """Record what a drawing says the camera sees in ``view``, for the standard A-SEEN check."""
-        expectation = Expectation(view=view, mask=np.asarray(mask, bool), names=tuple(names),
-                                   frame=None if frame is None else tuple(float(v) for v in frame))
+    def expect(self, view: str, mask, names=None, frame=None) -> Expectation:
+        """Record what a drawing says the camera sees in ``view``, for the standard A-SEEN check.
+
+        ``mask`` is one bool mask shared by every name, or a mapping from each part name to its own mask, so a
+        blueprint with a colour per part is checked part by part. ``names`` lists the parts a single mask
+        shows; it is left out with a mapping.
+        """
+        if hasattr(mask, "items"):
+            masks = {str(name): np.asarray(m, bool) for name, m in mask.items()}
+            if names is not None:
+                missing = [name for name in names if name not in masks]
+                if missing:
+                    raise ValueError(f"expect({view!r}) names parts its masks do not have: {', '.join(missing)}")
+                masks = {str(name): masks[name] for name in names}
+        else:
+            if names is None:
+                raise ValueError("one mask for every part needs names=")
+            single = np.asarray(mask, bool)
+            masks = {str(name): single for name in names}
+        if not masks:
+            raise ValueError(f"expect({view!r}) has no masks")
+        shapes = {mask.shape for mask in masks.values()}
+        if len(shapes) > 1:
+            raise ValueError(f"expect({view!r}) needs every mask to have the same shape")
+        expectation = Expectation(view=view, masks=masks,
+                                  frame=None if frame is None else tuple(float(v) for v in frame))
         self.expectations.append(expectation)
         return expectation
 

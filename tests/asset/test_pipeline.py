@@ -8,7 +8,7 @@ import pytest
 
 from manifoldx.asset import Asset, Context, Report, Result, Scene
 from manifoldx.modeling.lint import Finding
-from manifoldx.modeling.views import extrude
+from manifoldx.modeling.views import extrude, silhouette
 
 SQUARE = np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
 
@@ -183,3 +183,31 @@ def test_an_asset_may_build_another_asset(tmp_path):
 def test_an_unknown_stage_is_refused(tmp_path):
     with pytest.raises(ValueError, match="render"):
         TwoBoxes().run(cache=tmp_path / "two-boxes.asset", stages=("build", "render"))
+
+
+def test_an_expectation_is_a_mask_per_part_and_counts_a_parts_instances_together(tmp_path):
+    class Legs(Asset):
+        height = 2.0
+
+        def build(self, c):
+            scene = c.scene()
+            scene.add("leg1", box(0.4), at=(-0.5, 0.0, 0.0))
+            scene.add("leg2", box(0.4), at=(0.5, 0.0, 0.0))
+            frame = (-1.0, 1.0, -0.2, 0.2)
+            drawn = silhouette(box(0.4).translate([-0.5, 0, 0]), "front", (64, 64), frame)
+            drawn |= silhouette(box(0.4).translate([0.5, 0, 0]), "front", (64, 64), frame)
+            c.expect("front", {"leg": drawn}, frame=frame)
+            return scene
+
+    result = Legs().run(cache=tmp_path / "legs.asset", stages=("build", "lint"))
+    assert [f for f in result.report.findings if f.code == "A-SEEN"] == []
+
+
+def test_an_expectation_with_a_mapping_needs_every_mask_the_same_shape(tmp_path):
+    class Bad(Asset):
+        def build(self, c):
+            c.expect("front", {"a": np.ones((8, 8), bool), "b": np.ones((4, 8), bool)}, frame=(-1, 1, -1, 1))
+            return c.scene()
+
+    with pytest.raises(ValueError, match="same shape"):
+        Bad().run(cache=tmp_path / "bad.asset", stages=("build",))
