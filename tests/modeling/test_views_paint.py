@@ -225,3 +225,11 @@ def test_two_view_solid_takes_masks_of_different_widths():
     mesh = two_view_solid(front, side, (0.0, 1.0), x_range=(-1.0, 1.0), z_range=(-2.0, 2.0))
     p = np.asarray(mesh.positions)
     assert abs(p[:, 0].max() - 0.5) < 0.05 and abs(p[:, 2].max() - 1.0) < 0.05
+
+
+def test_a_whole_template_draws_faces_of_other_islands():
+    box = extrude(np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]), 2.0)
+    atlas = view_atlas({"box": box}, ["front", "left"], (256, 256))
+    own, _ = template({"box": box}, atlas, {"box": (200, 0, 0)}, "left")
+    full, _ = template({"box": box}, atlas, {"box": (200, 0, 0)}, "left", whole=True)
+    assert (full[..., 1] == 0).sum() >= (own[..., 1] == 0).sum() > 0

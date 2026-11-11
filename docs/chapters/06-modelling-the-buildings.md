@@ -660,7 +660,8 @@ split mesh per part, with a vertex duplicated where its faces land in different
 islands, so every vertex has one UV. `template` draws one island flat: it
 rasterises the island's triangles with a depth buffer, nearest face winning,
 and returns the image and an integer map of the material index, white outside.
-That image is what an image model is asked to paint.
+That image is what an image model is asked to paint. With `whole=True` it draws every face the view sees, the template a
+rounded object needs: its own island alone is a ragged band.
 
 `paste_island` brings the answer back: it resizes the model's picture to the
 padded canvas, crops the island out at the offset `pad_to_aspect` returned and

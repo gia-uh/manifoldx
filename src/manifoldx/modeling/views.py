@@ -379,7 +379,7 @@ def view_atlas(parts, views, size, texel=None, margin=8):
                  island_of=island_of, texel=1.0 / scale)
 
 
-def template(parts, atlas, colors, island):
+def template(parts, atlas, colors, island, whole=False):
     """Draw one island's faces in flat colours, nearest face winning.
 
     ``colors`` maps a part (or material) name to RGB and its order gives the
@@ -387,6 +387,12 @@ def template(parts, atlas, colors, island):
     background. ``island`` is an island index, an :class:`Island`, or a view
     name. Returns ``(img, regions)``: an RGB image of the atlas (uint8) and an
     int map of the material index, both with the atlas's size.
+
+    With ``whole=True`` every face in front of the camera is drawn, not only
+    the island's own faces, so the template is a full picture of the object in
+    that view. A rounded object needs it: its island alone is a ragged band
+    that an image model cannot read as a picture, while every face still takes
+    its colour from the one view that sees it best.
     """
     if isinstance(island, str):
         names = [item.view for item in atlas.islands]
@@ -415,7 +421,7 @@ def template(parts, atlas, colors, island):
             raise KeyError(f"the atlas has no part {name!r}")
         if name not in colors:
             raise KeyError(f"colors has no entry for part {name!r}")
-        take = atlas.island_of[name] == index
+        take = np.ones(len(mesh.faces), bool) if whole else atlas.island_of[name] == index
         if not take.any():
             continue
         rgb = np.asarray(colors[name], dtype=np.uint8).reshape(3)
