@@ -64,6 +64,8 @@ Procedure docs in `know-how/` encode how to do things in this repo. Match the cu
 
 - [hot-reload](know-how/hot-reload.md) — running an app with `manifoldx run`, keeping state across reloads in `engine.state`, the gotchas of rerunning app code, and keeping reloads fast.
 
+- [making-an-asset](know-how/making-an-asset.md) — making a model with `manifoldx asset`: `Parts` and an open `Asset`, the draw, build, lint and inspect loop, how to read each lint code, the cache and the paid calls, and LOD.
+
 - [trace-web](know-how/trace-web.md) — the path tracer in a web page (`trace.js`): shipping it with `copy_to`, the 8-storage-buffer budget, why page and Python agree by statistics, and headless Chromium's WebGPU canvas.
 
 - [web-export](know-how/web-export.md) — `manifoldx export --web`: what reaches the browser, the transpiled subset and its errors, annotating, and replaying an export in Node against the Python app.

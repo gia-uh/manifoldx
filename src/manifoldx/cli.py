@@ -17,6 +17,7 @@ running under `manifoldx run` in this folder (see manifoldx.devchannel).
     manifoldx log [-n N] [--after SEQ] [--match REGEX] [--wait S]
     manifoldx metrics [-n N]
     manifoldx trace scene.glb -o out.png [--camera ...] [--size WxH] [--spp N] [--sun X,Y,Z]
+    manifoldx asset FILE COMMAND [options]
 """
 
 import argparse
@@ -65,11 +66,18 @@ def main(argv=None):
     from manifoldx.trace.command import add_parser as add_trace
 
     add_trace(sub)
+    from manifoldx.asset.command import add_parser as add_asset
+
+    add_asset(sub)
     args = parser.parse_args(argv)
     if args.command == "trace":
         from manifoldx.trace.command import run as trace
 
         return trace(args)
+    if args.command == "asset":
+        from manifoldx.asset.command import run as asset
+
+        return asset(args)
     if args.command in ("look", "state", "set", "emit", "events", "log", "metrics"):
         return dev_command(args)
     if args.command == "run":

@@ -179,3 +179,4 @@ pyrightconfig.json
 docs/site/
 docs/.scriptorium/
 docs/build/
+examples/models/*.asset/cost.csv

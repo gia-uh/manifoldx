@@ -563,3 +563,186 @@ Image.fromarray(engine.render_frame(supersample=1))
 Every number in `CarParams` is a dial: a longer wheelbase moves the rear axle and
 its arch, a lower `tail_top` rakes the hatch, `headlamp="round"` swaps the lamp
 outline. Detail comes later, from smoothing and subdivision on the same parts.
+
+## Assets from an image model
+
+Not every part wants a builder with twenty dials. A wheel face, a grille, a
+lamp or a dashboard is a drawing: flat regions of colour on white, which an
+image model can produce from a sentence. `manifoldx.image` and
+`manifoldx.modeling.trace` turn such a drawing into a `Shape`, a stack of named
+`Layer` values that the modelling tools can stretch, mirror and extrude.
+
+`read_png` decodes an 8-bit, non-interlaced PNG — RGB, RGBA, grey, grey+alpha
+or palette — into a numpy array, and `write_png` writes RGB or RGBA back, so a
+drawing and a render can travel without an imaging library. `resize` resamples
+an image bilinearly, or with `nearest=True` when the pixels are labels and
+interpolating them would invent colours. `pad_to_aspect` centres a drawing on a
+canvas of a named ratio from `ASPECTS` (by default the one `nearest_aspect` picks), returning the padded image and the
+offset of the original inside it; that is how a view reaches an image model at
+the ratio it expects, and how its answer is cropped back.
+
+Tracing starts from a `palette`, a mapping from material name to RGB, and
+`classify` labels every pixel with the index of its nearest palette colour.
+`dilate` and `erode` grow and shrink a mask with a square or disc element,
+`open_mask` and `close_mask` compose them to remove specks or fill pinholes, and
+`components` numbers the connected blobs of a mask (4- or 8-connected).
+`contours` returns the outer boundary of every component as a closed polygon in
+pixel coordinates, counter-clockwise with y up; with `holes=True` it also
+returns the holes, wound the other way. `simplify` applies Douglas-Peucker to a
+closed polygon, so a traced circle drops from hundreds of points to the few
+that carry its shape. `cut_by_rays` removes a thin strip along rays from a
+centre, which opens the round windows of a wheel face into the outside and
+leaves pieces without holes; without that, a region with a window cannot be
+extruded as a solid face.
+
+`trace_layers` is the whole pipeline: classify the image, take the materials in
+`order` (largest region first), contour and simplify each, turn a region's holes
+into layers of the material underneath, and map the drawing's frame — its
+bounding box, or one given — to `-1 .. 1` on its longer side, centred and y up.
+The result is a `Shape` in units of the part's half-size, with the outer side
+at `+u`. `redraw` rasterises a `Shape` back to an image, even-odd filling every
+polygon layer by layer, and `iou` compares two masks, so a trace is checked
+against its own drawing before it is used.
+
+A `Shape` is plain data. `to_json` and `from_json` round-trip it through text,
+and `save` and `load` do the same through a file, so traced artwork lives beside
+the code rather than inside it. `bounds` gives its `(u_min, v_min, u_max,
+v_max)` box. `mirror` flips it across `u = 0` and keeps every polygon
+counter-clockwise — the first thing to do to a drawing seen from behind.
+`mirror_half` keeps one side of a symmetric drawing and reflects it, which
+repairs an image model's small asymmetries; `stretch_middle` lengthens a shape
+by a ratio while holding the outer fraction at each end exactly as drawn, so
+slats and handles keep their proportions; `fit_box` scales and centres it to
+fill a box.
+
+```python
+import numpy as np
+
+from manifoldx.image import pad_to_aspect, read_png
+from manifoldx.modeling.shape import stretch_middle
+from manifoldx.modeling.trace import iou, redraw, trace_layers
+
+palette = {"white": (255, 255, 255), "steel": (70, 100, 140), "brass": (190, 150, 60)}
+drawing = read_png("wheel.png")
+canvas, (x0, y0) = pad_to_aspect(drawing, "1:1", fill=255)
+wheel = trace_layers(drawing, palette, ["steel", "brass"], background="white")
+wheel = stretch_middle(wheel, 1.1, ends=0.2)
+check = redraw(wheel, (drawing.shape[1], drawing.shape[0]), palette)
+print(iou(np.any(check != 255, axis=-1), np.any(drawing != 255, axis=-1)))
+wheel.save("wheel.json")
+```
+
+A traced shape becomes a solid, or a set of views becomes a whole part.
+`extrude` sweeps a closed outline in the XY plane along z into a prism, its
+two caps triangulated by ear clipping, which also handles a concave outline
+such as a grille. When there is a front drawing and a side drawing instead,
+`two_view_solid` lofts between them: both masks share their rows, each of `n`
+heights gives an x interval from the front mask and a z interval from the
+left-side mask, and the section is a superellipse inscribed in that rectangle,
+with `power=2` an ellipse and larger values squarer. `height_range`,
+`x_range` and `z_range` say which metres the masks cover — row 0 is the top,
+the front mask's first column is `x_min`, and the side mask's first column is
+`z_max` because the object faces the front-view camera, so its side image's
+columns run toward `-z`. A section spans the first to the last drawn pixel of
+a row, not its widest unbroken run: a part drawn on top of another leaves a
+hole inside the silhouette, and a hole must not pinch the solid. Heights where
+either mask is empty are skipped. `silhouette` projects a mesh back into a
+view's mask, so the solid can be compared with the drawing it came from.
+
+A limb that reaches across and forward at once, an outstretched arm or an
+armrest on its post, is not a stack of sections: `two_view_solid` fills the
+rectangle of its two spans and makes a slab. `swept_tube` takes the part's
+centreline in each view, matches the two by their position along the part
+(from the end nearest an `anchor` such as the body's centre) and sweeps a tube
+whose radius is the smaller of the two half-widths.
+
+An agent that builds from drawings cannot look at the result, so
+`manifoldx.modeling.lint` says in numbers what came out wrong. `mesh_report`
+counts open and non-manifold edges and degenerate faces and gives the volume,
+negative when the faces look inward. `winding` tells inside from outside, `gap`
+measures how far apart two parts are (zero when one reaches into the other),
+and `part_groups` joins the parts that touch: a model meant as one object should
+be one group, and any other group is a part that floats.
+
+A textured part needs somewhere to put the picture. `view_atlas` takes parts
+named in a mapping, sends every face to the view among `views` whose direction
+is closest to its normal, and projects its vertices orthographically in that
+view. The views become `Island` values in an `Atlas`: each island holds its
+rectangle in pixels, the view's frame in metres, and the atlas holds the
+metres per pixel it used. All islands share that scale unless `texel` asks for
+another, so texel density is even across the part. The `Atlas` also carries a
+split mesh per part, with a vertex duplicated where its faces land in different
+islands, so every vertex has one UV. `template` draws one island flat: it
+rasterises the island's triangles with a depth buffer, nearest face winning,
+and returns the image and an integer map of the material index, white outside.
+That image is what an image model is asked to paint. With `whole=True` it draws every face the view sees, the template a
+rounded object needs: its own island alone is a ragged band.
+
+`paste_island` brings the answer back: it resizes the model's picture to the
+padded canvas, crops the island out at the offset `pad_to_aspect` returned and
+writes it into the atlas rectangle. `kept_outline` compares the non-white
+pixels of the answer with the template as an IoU, so a model that moved or
+lost the outline is caught before it is used. `clean` repairs a painted
+island: a white hole left inside a region becomes that region's flat colour,
+and `tone` scales the whole island until the median of one region reaches the
+colour asked for. `bleed` grows each region's colours into its background by a
+few pixels, which keeps a seam filter from mixing in white. `normal_from_albedo`
+derives a tangent-space normal map from the picture itself: a thin line darker
+than its surroundings becomes a groove, and its smoothed relief differentiates
+into tilted normals, flat blue where the picture is flat. `flip_normal_x`
+inverts the red channel for an island mirrored across its seam.
+
+```python
+from manifoldx.modeling.paint import bleed, clean, kept_outline, normal_from_albedo, paste_island
+from manifoldx.modeling.views import extrude, silhouette, template, two_view_solid, view_atlas
+
+solid = two_view_solid(front, side, height_range=(0.0, 0.9),
+                       x_range=(-0.6, 0.6), z_range=(-0.4, 0.4))
+atlas = view_atlas({"body": solid}, ["front", "back", "left", "right", "top"],
+                   size=(1024, 1024))
+paint, regions = template({"body": solid}, atlas, {"body": (190, 190, 195)}, "front")
+print(kept_outline(paint, paint))
+```
+
+Some of the modelling is a drawing before it is a mesh: a blueprint of each
+orthographic view, then the albedo, normal, roughness and emission maps that
+texture it. `manifoldx.imagegen` asks an image model for those pictures and keeps
+the money in one place.
+
+`ImageModel` is the protocol every model answers: a `name`, a `cost` in dollars
+for the last call (or `None`), and `generate(prompt, images=(), aspect="1:1",
+size="1K")`, which returns an RGB `uint8` array. `OpenRouterImage` reaches any
+image model OpenRouter serves, with the key from `key`, from a `key_file`, or
+from `OPENROUTER_API_KEY`; the key is never written to the log or to an error.
+It posts the prompt and any reference pictures as PNG data URLs, asks for
+`modalities: ["image", "text"]` and an `image_config` holding the aspect ratio
+and size, and retries once without `image_config` for a model that refuses it.
+Every call appends `time, model, out_name, cost` to the CSV file given as `log`;
+with `budget`, a call whose log total has already reached that many dollars
+raises `BudgetExceeded` before anything is sent.
+
+```python
+from manifoldx.imagegen import OpenRouterImage, blueprint
+
+model = OpenRouterImage("google/gemini-3-pro-image-preview",
+                        key_file=".openrouter", log="assets/cost.csv", budget=5.0)
+wheel = model.generate(blueprint("wheel", "front",
+                                 {"rim": (200, 0, 0), "tyre": (20, 20, 20)}),
+                       aspect="1:1", size="2K", out_name="wheel_front.png")
+```
+
+`HttpImage` talks to the FLUX.2 klein service on the machine instead: it posts
+`{prompt, refs, width, height, seed}` to `/generate` and reads `{image:
+data-url}` back, with the bearer token, when one is needed, read from
+`token_file`. The aspect ratio and size become the local service's pixel width
+and height.
+
+The prompts are functions so a pipeline states each picture's rules once.
+`blueprint(part, view, palette, notes="")` gives one orthographic view drawn in
+the palette's flat colours with hard edges, a white background and no text.
+`albedo(view, palette_meaning, notes="")` asks for the flat colour texture and
+says what each colour means. `normal_map()` asks for a tangent-space normal map
+in OpenGL convention, flat at 128, 128, 255. `roughness_map(materials)` asks for
+a grayscale map, white rough and black smooth, with a value per material.
+`emission_map(lit)` makes the lit parts white on black. `edit(change, keep)`
+changes one thing and keeps the canvas and the other outlines pixel for pixel.
