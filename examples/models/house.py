@@ -1,8 +1,8 @@
-"""A small two-room house, built from a floor plan, four facades and a close-up of its door.
+"""A small two-room house, built from a floor plan and its front facade.
 
 The plan gives the footprint and the two rooms; the front facade gives the door, its windows and the roof. The
 rooms are white holes in the black walls, so the build stands a box around each room instead of cutting the plan
-with a boolean, which leaves open edges. Its drawings are committed beside it, so build and lint run offline:
+with a boolean, which leaves open edges. Its two drawings are committed beside it, so build and lint run offline:
 
     uv run python examples/models/house.py
 """
@@ -23,26 +23,12 @@ _PLAN = (
 )
 
 _FACADE = (
-    "The {side} facade of the small two-room house in the reference floor plan, as a flat 2D elevation seen "
+    "The front facade of the small two-room house in the reference floor plan, as a flat 2D elevation seen "
     "straight on, orthographic, no perspective. Flat colours only, no shading, gradients or texture: the walls "
     "are solid orange (255,140,0); a solid yellow (255,220,0) roof band runs across the top above the walls, a "
-    "little wider than them; {openings}; everything else is pure white. Sharp straight edges, no outlines, no "
-    "text, no furniture, no trees, no ground line, no sky."
-)
-
-_OPENINGS = {
-    "front": ("a solid red (220,40,40) front door stands on the ground in the middle of the wall, and two solid "
-              "blue (0,110,255) square windows sit one on each side of it"),
-    "back": "two solid blue (0,110,255) square windows sit on the wall, one on each side of the middle",
-    "left": ("one solid blue (0,110,255) square window sits in the middle of one plain orange wall: no door, "
-             "no interior wall, no black lines, and do not copy the plan's layout into this elevation"),
-    "right": "one solid blue (0,110,255) square window sits in the middle of the wall",
-}
-
-_DOOR = (
-    "A close-up of the front door of the house in the reference picture, straight on, orthographic: one tall "
-    "solid red (220,40,40) rectangle with a simple dark grey frame and a small dark grey handle, on a pure white "
-    "background. Flat colours, no shading, no text."
+    "little wider than them; a solid red (220,40,40) front door stands on the ground in the middle of the wall, "
+    "and two solid blue (0,110,255) square windows sit one on each side of it; everything else is pure white. "
+    "Sharp straight edges, no outlines, no text, no furniture, no trees, no ground line, no sky."
 )
 
 
@@ -72,6 +58,23 @@ def _rooms(walls):
     return sorted(rooms, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]), reverse=True)
 
 
+def _wall_between(a, b):
+    """The pixel box of the wall that fills the gap between two rooms, or None when they share no side.
+
+    Two rooms side by side leave a gap in x; one behind the other leave a gap in z. The wall spans the gap and
+    the part of the two rooms that face each other.
+    """
+    left, right = max(a[0], b[0]), min(a[2], b[2])
+    back, front = max(a[1], b[1]), min(a[3], b[3])
+    if left < right and back >= front:                      # one behind the other: span x, fill the z gap
+        lo, hi = (a[3], b[1]) if a[3] <= b[1] else (b[3], a[1])
+        return left, lo, right, hi
+    if back < front and left >= right:                      # side by side: span z, fill the x gap
+        lo, hi = (a[2], b[0]) if a[2] <= b[0] else (b[2], a[0])
+        return lo, back, hi, front
+    return None
+
+
 class House(Asset):
     height = 2.75            # walls plus roof, in metres
     wall_height = 2.6
@@ -79,9 +82,7 @@ class House(Asset):
 
     def draw(self, c):
         c.image("plan", _PLAN)
-        for side in ("front", "left", "back", "right"):
-            c.image(f"facade-{side}", _FACADE.format(side=side, openings=_OPENINGS[side]), refs=["plan"])
-        c.image("door", _DOOR, refs=["facade-front"])
+        c.image("facade-front", _FACADE, refs=["plan"])
 
     # --- build -----------------------------------------------------------------------------------------------
 
@@ -125,26 +126,12 @@ class House(Asset):
                  primitives.box_between((x1 - right, 0.0, z0 + back), (x1, self.wall_height, z1 - front))]
         for i, a in enumerate(rooms):
             for b in rooms[i + 1:]:
-                if a[2] <= b[0]:                                  # a left of b
-                    lo, hi = a[2], b[0]
-                    zlo, zhi = pz(max(a[1], b[1])), pz(min(a[3], b[3]))
-                    if px(hi) - px(lo) > 0.02 and zhi - zlo > 0.02:
-                        walls.append(primitives.box_between((px(lo), 0.0, zlo), (px(hi), self.wall_height, zhi)))
-                elif b[2] <= a[0]:                                # b left of a
-                    lo, hi = b[2], a[0]
-                    zlo, zhi = pz(max(a[1], b[1])), pz(min(a[3], b[3]))
-                    if px(hi) - px(lo) > 0.02 and zhi - zlo > 0.02:
-                        walls.append(primitives.box_between((px(lo), 0.0, zlo), (px(hi), self.wall_height, zhi)))
-                elif a[3] <= b[1]:                                # a behind b
-                    lo, hi = pz(a[3]), pz(b[1])
-                    xlo, xhi = px(max(a[0], b[0])), px(min(a[2], b[2]))
-                    if hi - lo > 0.02 and xhi - xlo > 0.02:
-                        walls.append(primitives.box_between((xlo, 0.0, lo), (xhi, self.wall_height, hi)))
-                elif b[3] <= a[1]:                                # b behind a
-                    lo, hi = pz(b[3]), pz(a[1])
-                    xlo, xhi = px(max(a[0], b[0])), px(min(a[2], b[2]))
-                    if hi - lo > 0.02 and xhi - xlo > 0.02:
-                        walls.append(primitives.box_between((xlo, 0.0, lo), (xhi, self.wall_height, hi)))
+                gap = _wall_between(a, b)
+                if gap is None:
+                    continue
+                gx0, gz0, gx1, gz1 = px(gap[0]), pz(gap[1]), px(gap[2]), pz(gap[3])
+                if gx1 - gx0 > 0.02 and gz1 - gz0 > 0.02:
+                    walls.append(primitives.box_between((gx0, 0.0, gz0), (gx1, self.wall_height, gz1)))
 
         # The front wall is split around the door the facade shows, with a lintel above it.
         red = _main(masks["red"])

@@ -1,9 +1,0 @@
-{
- "prompt": "The left facade of the small two-room house in the reference floor plan, as a flat 2D elevation seen straight on, orthographic, no perspective. Flat colours only, no shading, gradients or texture: the walls are solid orange (255,140,0); a solid yellow (255,220,0) roof band runs across the top above the walls, a little wider than them; one solid blue (0,110,255) square window sits in the middle of one plain orange wall: no door, no interior wall, no black lines, and do not copy the plan's layout into this elevation; everything else is pure white. Sharp straight edges, no outlines, no text, no furniture, no trees, no ground line, no sky.",
- "refs": [
-  "plan"
- ],
- "model": "google/gemini-2.5-flash-image",
- "aspect": "1:1",
- "key": "50fc8bd8a35888c59950124fcc5518ced04910eca3baf41640273c5fca702e80"
-}
