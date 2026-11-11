@@ -103,7 +103,8 @@ def test_a_wheel_shape_stands_inside_the_rim_and_both_sides_wear_one_picture():
     assert abs(face[:, 2] - left.pivot[2]).max() < p.tyre_width / 2  # behind the tyre's sidewall
     assert np.allclose(left.pieces["alloy"].uvs, right.pieces["alloy"].uvs, atol=1e-6)
     plain = build_car(CarParams(wheel="spokes", mirror="box", grille_style="bar", grille=(0.60, 0.27, 0.43), dash="box",
-                                steering="ring"))
+                                steering="ring", door_card=None, console=None))
+    assert "seat" not in plain.part("door_fl").pieces  # no leather on a bare door
     assert "spoke" in plain.part("wheel_fl").pieces and "alloy" not in plain.part("wheel_fl").pieces
     assert len(_low_lamps(plain)) > 0
     assert "dash" in plain.part("cabin").pieces and "chrome" not in plain.part("cabin").pieces
@@ -170,3 +171,20 @@ def test_a_dashboard_shape_spans_the_cabin_and_its_screens_stand_over_the_deck()
     wheel = _steering(STEERING["tri"], 0.19)
     rim = [(v, t) for m, v, t, _ in wheel if m == "dash"]
     assert _volume(rim) > 0 and max(np.hypot(v[:, 0], v[:, 1]).max() for v, _ in rim) < 0.19 * 1.1  # wider than tall
+
+
+def test_door_cards_line_the_doors_from_inside_and_a_console_stands_between_the_seats():
+    from manifoldx.modeling.assets.car import ATLAS
+
+    p = CarParams()
+    car = build_car(p)
+    left, right = car.part("door_fl"), car.part("door_fr")
+    leather, skin = right.pieces["seat"], right.pieces["paint"]
+    assert 0.5 < leather.positions[:, 2].max() < skin.positions[:, 2].max()  # on the door, on the cabin's side of its skin
+    assert leather.positions[:, 1].max() < p.belt_front and (leather.normals[:, 2] < 0).all()  # under the glass, facing in
+    assert np.allclose(left.pieces["seat"].uvs, leather.uvs, atol=1e-6)  # the left door wears the same picture, mirrored
+    assert np.allclose(left.pieces["seat"].positions * [1, 1, -1], leather.positions, atol=1e-5)
+    s0, t0, s1, t1 = ATLAS["console"]
+    rim = car.part("cabin").pieces["chrome"]
+    on_console = (rim.uvs[:, 0] >= s0) & (rim.uvs[:, 0] <= s1) & (rim.uvs[:, 1] >= t0) & (rim.uvs[:, 1] <= t1)
+    assert on_console.any() and abs(rim.positions[on_console][:, 2]).max() < 0.15  # its rim, between the seats

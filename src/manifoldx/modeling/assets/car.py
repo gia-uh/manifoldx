@@ -11,7 +11,7 @@ so they follow any shape: glass, pillars, doors, hood and hatch. Small parts tha
 plate, handles) are decals: flat outlines projected onto the body along a view direction, so a lamp style is
 just an outline. Lamps, the grille, wheels, door mirrors, the dashboard and the steering wheel take a shape: outlines traced from a flat drawing of the real
 part (`assets.lamps`, `assets.grilles`, `assets.wheels`, `assets.mirrors`, `assets.dashboards`,
-`assets.steering`), or a plain style built from boxes and ellipses.
+`assets.steering`, `assets.doors`, `assets.consoles`), or a plain style built from boxes and ellipses.
 
 Doors, hood and hatch are separate parts with a hinge; wheels spin and the front ones steer. `Car.pose` gives
 each part's transform for an opening, a wheel turn and a steering angle.
@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from manifoldx.modeling.assets.consoles import CONSOLES
 from manifoldx.modeling.assets.dashboards import DASHBOARDS
+from manifoldx.modeling.assets.doors import DOORS
 from manifoldx.modeling.assets.grilles import GRILLES
 from manifoldx.modeling.assets.lamps import LAMPS
 from manifoldx.modeling.assets.mirrors import MIRRORS
@@ -112,6 +114,8 @@ class CarParams:
     spokes: int = 5  # of the plain wheel
     dash: str | dict = "deck"  # a shape, or "box"
     steering: str | dict = "tri"  # a shape, or "ring"
+    door_card: str | dict | None = "quilt"  # a shape, or None for bare doors
+    console: str | dict | None = "tray"  # a shape, or None for no console
     cladding: bool = False  # black lower body
     handles: bool = True  # a chrome bar on each door; leave it out when a texture paints the handles
     door_strip: bool = True  # a black strip with a chrome line low on the doors
@@ -841,6 +845,9 @@ ATLAS = {
     # from above.
     "dash": (0.52, 0.59, 0.71, 0.71), "seats": (0.52, 0.72, 0.71, 0.855), "bench": (0.52, 0.865, 0.71, 0.97),
     "carpet": (0.22, 0.86, 0.50, 0.95),
+    # A door's inner panel as seen from the cabin (the right door's; the left one is its mirror image), shared by
+    # the four doors, and the console between the seats from above, the car's front up.
+    "door": (0.72, 0.715, 0.99, 0.86), "console": (0.90, 0.45, 0.99, 0.62),
 }
 VIEW_MARGIN = (0.1, 0.3, 0.1)  # what a view shows beyond the car's length, width and height (m)
 
@@ -975,6 +982,25 @@ def build_car(p: CarParams | None = None) -> Car:
                   inner_uv[sel].reshape(-1, 2), -smooth[sel].reshape(-1, 3))
     for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv):
         piece(owner, mat, v, t, uv)
+
+    card = DOORS.get(p.door_card) if isinstance(p.door_card, str) else p.door_card
+    if card:
+        # The card is fitted to each door, between the floor and the window sill, and dropped on the inside of the
+        # skin from the middle of the cabin. Front and rear doors, left and right, share one picture.
+        names = {"dark": "interior", "leather": "seat", "armrest": "dash"}
+        y0, y1 = p.sill + 0.10, p.belt_front - 0.02
+        for door, u0, u1 in (("f", p.cowl_u + 0.03, p.b_pillar_u - 0.02), ("r", p.b_pillar_u + 0.03, p.c_pillar_u - 0.01)):
+            a, bh = (u1 - u0) * L / 2, (y1 - y0) / 2
+            for side, s in (("l", -1), ("r", 1)):
+                out = np.array([0.0, 0.0, float(s)])
+                mid = verts[tris].mean(1)  # only the skin by this door is in a ray's way
+                near = tris[(s * mid[:, 2] > 0.3) & (abs(mid[:, 0] - xu((u0 + u1) / 2)) < a + 0.3) & (mid[:, 1] > y0 - 0.3) & (mid[:, 1] < y1 + 0.3)]
+                laid = [(m, _drape(slab, np.array([a, bh]), np.array([xu((u0 + u1) / 2), (y0 + y1) / 2, 0.0]), np.array([-a, 0.0, 0.0]),
+                                   np.array([0.0, bh, 0.0]), out, verts, near, 0.004 + 0.004 * k, step=0.12))
+                        for k, (m, outline) in enumerate(card["layers"]) for slab in _slabs(outline, 0.2 / a)]
+                for m, (flat, pts, tri) in ((m, d) for m, d in laid if d):
+                    piece(f"door_{door}{side}", names.get(m, m), pts, tri,
+                          _island("door", 0.03 + 0.47 * (flat[:, 0] + 1), 0.03 + 0.47 * (1 - flat[:, 1])), np.tile(-out, (len(pts), 1)))
 
     if p.mirrors:
         uu = p.cowl_u + 0.05
@@ -1135,6 +1161,36 @@ def _cabin(p: CarParams, parts, piece, xu):
         box("seat", [xb - 0.08, floor + 0.98, z], (0.10, 0.18, 0.28), pitch=0.25)
     box("seat", [xb - 0.55, floor + 0.24, 0.0], (0.48, 0.12, inner - 0.08), island="bench", y=(floor, floor + 0.9))
     box("seat", [xb - 0.84, floor + 0.55, 0.0], (0.12, 0.58, inner - 0.08), pitch=0.25, island="bench", y=(floor, floor + 0.9))
+    tray = CONSOLES.get(p.console) if isinstance(p.console, str) else p.console
+    if tray:
+        # The console stands between the front seats: its outline made solid, on a foot, with its layers on top.
+        # From above it is its picture; its sides and its foot are plain.
+        names = {"dark": "dash", "leather": "seat"}
+        half = 0.12
+        long = half / tray["aspect"]  # half its length
+        cx, top = xb + 0.26, floor + 0.40
+
+        def above(q):
+            return _island("console", 0.03 + 0.47 * (q[:, 0] / half + 1), 0.03 + 0.47 * (1 - q[:, 1] / long))
+
+        def aside(v):
+            return _island("console", 0.02 + 0.02 * (v[:, 2] / half + 1), 0.01 + 0.01 * (v[:, 0] - cx) / long + 0.01)
+
+        for k, (m, outline) in enumerate(tray["layers"]):
+            q = np.asarray(outline, float) * [half, long]
+            if k == 0:
+                v, f = _prism(q, -0.09, 0.0)  # (z, x, y) about the middle of its top
+                pts, f, n = np.column_stack([cx + v[:, 1], top + v[:, 2], v[:, 0]]), np.array(f), len(q) - 2
+                piece("cabin", names.get(m, m), pts, f[:n], above(v[:, :2]))
+                piece("cabin", names.get(m, m), pts, f[n:], aside(pts))
+                continue
+            if np.sum(q[:, 0] * np.roll(q[:, 1], -1) - np.roll(q[:, 0], -1) * q[:, 1]) < 0:
+                q = q[::-1]
+            pts = np.column_stack([cx + q[:, 1], np.full(len(q), top + 0.002 * k), q[:, 0]])
+            piece("cabin", names.get(m, m), pts, np.array(_triangulate(q)), above(q))
+        v, t = _box([cx, (floor + top - 0.09) / 2, 0.0], (1.3 * long, top - 0.09 - floor, 0.14))
+        piece("cabin", "dash", v, t, aside(v))
+
     # Steering wheel: on the driver's side (left), facing the seat with its top leaning away, on a column that
     # runs down and ahead from its hub.
     lean = np.radians(25)
