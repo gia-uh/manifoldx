@@ -32,10 +32,8 @@ import queue
 import re
 import select
 import socket
-import struct
 import threading
 import time
-import zlib
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -574,14 +572,9 @@ class Readback:
 
 def png(rgb):
     """PNG bytes of an (h, w, 3) uint8 image."""
-    h, w, _ = rgb.shape
-    raw = np.concatenate([np.zeros((h, 1), np.uint8), np.ascontiguousarray(rgb).reshape(h, w * 3)], axis=1)
+    from manifoldx.image import _encode_png
 
-    def chunk(kind, body):
-        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
-
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(raw.tobytes(), 6)) + chunk(b"IEND", b""))
+    return _encode_png(rgb)
 
 
 PAGE = """<!doctype html>
