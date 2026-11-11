@@ -218,7 +218,7 @@ def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.
     :func:`two_view_solid`. Each view's centreline is the mask's mean point in `samples` steps along its main
     axis; the two are matched by their position along that axis (from the end nearest `anchor`, an ``(x, y, z)``
     point such as the body's centre, or from the top end), so the tube's point i takes x from the front view, z
-    from the side view and y from both. Its radius is the mean of the two views' half-widths there.
+    from the side view and y from both. Its radius is the smaller of the two views' half-widths there.
     """
     front = np.asarray(front, dtype=bool)
     side = np.asarray(side, dtype=bool)
@@ -241,7 +241,7 @@ def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.
     fc, fh = _centreline(fpts, samples, fa)
     sc, sh = _centreline(spts, samples, sa)
     path = np.column_stack([fc[:, 0], (fc[:, 1] + sc[:, 1]) / 2.0, sc[:, 0]])
-    radius = (fh + sh) / 2.0
+    radius = np.minimum(fh, sh)                     # a hanging sleeve or a cloth widens one view or both
     kernel = np.ones(3) / 3.0                       # a light smoothing of the path and the radius
     for j in range(3):
         path[1:-1, j] = np.convolve(path[:, j], kernel, mode="valid")
