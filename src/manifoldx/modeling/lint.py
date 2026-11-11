@@ -27,6 +27,10 @@ _HINTS = {
                 "disagree on where it starts"),
     "A-TRIS": "fewer rings or segments; --lod low",
     "A-SEEN": "another builder; power; leave out a view that disagrees (views)",
+    "A-ROWS": "the blueprints disagree on what the part is: say it in the part's text, or fill=\"off\"",
+    "A-SHEET": "draw --again VIEW",
+    "A-KEEP": "draw --again, or a note for that view",
+    "A-STRAY": "none, or keep=\"all\"",
 }
 
 
@@ -93,6 +97,30 @@ def gap(a: Mesh, b: Mesh, sample=400) -> float:
         d = np.linalg.norm(pa[i:i + 1024, None, :] - pb[None, :, :], axis=2)
         best = min(best, float(d.min()))
     return best
+
+
+def closest_offset(a: Mesh, b: Mesh, sample=400) -> np.ndarray:
+    """The vector that moves ``a`` the shortest way to touch ``b``, in metres.
+
+    Zero when the two already touch or one has a vertex inside the other, as :func:`gap` counts it; otherwise
+    the step from the nearest vertex of ``a`` to the nearest vertex of ``b``. Measured between vertices, so it
+    is exact to the size of the meshes' edges.
+    """
+    pa, pb = np.asarray(a.positions, float), np.asarray(b.positions, float)
+    if len(pa) == 0 or len(pb) == 0:
+        return np.zeros(3)
+    for x, y in ((pa, b), (pb, a)):
+        pick = x[np.linspace(0, len(x) - 1, min(sample, len(x))).astype(int)]
+        if (np.abs(winding(pick, y)) > 0.5).any():
+            return np.zeros(3)
+    best, offset = np.inf, np.zeros(3)
+    for i in range(0, len(pa), 1024):
+        chunk = pa[i:i + 1024]
+        d = np.linalg.norm(chunk[:, None, :] - pb[None, :, :], axis=2)
+        row, col = np.unravel_index(int(np.argmin(d)), d.shape)
+        if d[row, col] < best:
+            best, offset = float(d[row, col]), pb[col] - chunk[row]
+    return offset
 
 
 def part_groups(parts: dict, tol: float) -> dict:
@@ -184,12 +212,16 @@ def check_triangles(parts: dict, max_tris: int) -> list[Finding]:
 def check_seen(parts: dict, view: str, drawn_masks: dict, frame) -> list[Finding]:
     """A-SEEN: what the camera sees of each part against the mask a drawing gives it, in one view.
 
-    ``parts`` maps a name to a mesh, ``drawn_masks`` a name to a bool mask (the drawing's silhouette of that
-    part) and ``frame`` is ``(u_min, u_max, v_min, v_max)``, the metres the mask covers. A part below 0.75 IoU
-    warns, below 0.5 it is an error; the message counts the pixels built but not drawn and drawn but not built,
-    and the rows they fall on. Parts with no drawn mask, or an empty one, are left alone.
+    ``parts`` maps a name to a mesh, or to a sequence of meshes when a part has several instances that the
+    drawing shows as one region (a chair's four legs, a pair of arms). ``drawn_masks`` maps a name to a bool
+    mask (the drawing's silhouette of that part) and ``frame`` is ``(u_min, u_max, v_min, v_max)``, the metres
+    the mask covers. A part below 0.75 IoU warns, below 0.5 it is an error; the message counts the pixels built
+    but not drawn and drawn but not built, and the rows they fall on. Parts with no drawn mask, or an empty
+    one, are left alone.
     """
-    drawn = {name: np.asarray(mask, bool) for name, mask in drawn_masks.items() if name in parts}
+    groups = {name: (list(value) if isinstance(value, (list, tuple)) else [value])
+              for name, value in parts.items()}
+    drawn = {name: np.asarray(mask, bool) for name, mask in drawn_masks.items() if name in groups}
     drawn = {name: mask for name, mask in drawn.items() if mask.any()}
     if not drawn:
         return []
@@ -198,17 +230,24 @@ def check_seen(parts: dict, view: str, drawn_masks: dict, frame) -> list[Finding
         raise ValueError("all drawn masks of one view must have the same shape")
     height, width = shape
     island = Island(view=view, rect=(0, 0, width, height), frame=tuple(float(v) for v in frame))
-    colors = dict.fromkeys(parts, (255, 255, 255))  # the region index comes from the key order, not the colour
+    flat, colours, group_of = {}, {}, {}
+    for index, (name, meshes) in enumerate(groups.items()):
+        for k, mesh in enumerate(meshes):
+            key = f"{name}#{k}"
+            flat[key] = mesh
+            colours[key] = (255, 255, 255)  # the region index comes from the key order, not the colour
+            group_of[key] = index + 1
     atlas = Atlas(size=(width, height), islands=[island], uvs={}, meshes={},
-                  island_of={name: np.zeros(len(mesh.faces), np.int32) for name, mesh in parts.items()},
+                  island_of={key: np.zeros(len(mesh.faces), np.int32) for key, mesh in flat.items()},
                   texel=1.0)
-    _, regions = template(parts, atlas, colors, 0, whole=True)
-    order = {name: index + 1 for index, name in enumerate(parts)}
+    _, regions = template(flat, atlas, colours, 0, whole=True)
+    region_numbers = {key: i + 1 for i, key in enumerate(flat)}  # what template painted this key
     findings = []
-    for name in parts:
+    for index, name in enumerate(groups):
         if name not in drawn:
             continue
-        seen, want = regions == order[name], drawn[name]
+        wanted = [region_numbers[key] for key in flat if group_of[key] == index + 1]
+        seen, want = np.isin(regions, wanted), drawn[name]
         overlap = float(iou(seen, want))
         if overlap >= 0.75:
             continue

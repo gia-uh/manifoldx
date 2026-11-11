@@ -1,8 +1,16 @@
 import numpy as np
+import pytest
 
-from manifoldx.modeling.lint import gap, mesh_report, part_groups, winding
+from manifoldx.modeling.lint import (
+    check_seen,
+    closest_offset,
+    gap,
+    mesh_report,
+    part_groups,
+    winding,
+)
 from manifoldx.modeling.mesh import Mesh
-from manifoldx.modeling.views import extrude
+from manifoldx.modeling.views import extrude, silhouette
 
 SQUARE = np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
 
@@ -43,3 +51,25 @@ def test_vertices_split_at_a_seam_are_not_holes():
     faces = f.copy()
     faces[len(f) // 2:] += len(p)
     assert mesh_report(Mesh(positions=split, faces=faces))["open_edges"] == 0
+
+
+def test_closest_offset_moves_a_floating_part_onto_its_neighbour():
+    a, b = box(0.0), box(2.2)
+    offset = closest_offset(b, a)
+    assert offset[0] == pytest.approx(-1.2) and abs(offset[1]) < 1e-9 and abs(offset[2]) < 1e-9
+    assert gap(b.translate(offset), a) < 1e-6
+    assert np.allclose(closest_offset(a, b), 0.0) or closest_offset(a, b)[0] > 0.0
+    assert np.allclose(closest_offset(box(0.9), box(0.0)), 0.0)  # already touching: no move
+
+
+def test_seen_counts_the_instances_of_one_part_together():
+    frame = (-2.2, 2.2, -1.1, 1.1)
+    parts = {"leg": [box(-0.6, 0.3), box(0.6, 0.3)]}
+    drawn = np.zeros((64, 64), bool)
+    for x in (-0.6, 0.6):
+        drawn |= silhouette(box(x, 0.3), "front", (64, 64), frame)
+    assert check_seen(parts, "front", {"leg": drawn}, frame) == []
+    half = drawn.copy()
+    half[:, 32:] = False
+    (finding,) = check_seen(parts, "front", {"leg": half}, frame)
+    assert finding.code == "A-SEEN" and finding.part == "leg"

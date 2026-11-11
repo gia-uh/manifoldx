@@ -13,10 +13,15 @@ from manifoldx.modeling.paint import (
     normal_from_albedo,
     paste_island,
 )
+from manifoldx.modeling.lint import mesh_report
 from manifoldx.modeling.views import (
     Atlas,
     Island,
     extrude,
+    fill_rows,
+    lathe_solid,
+    reflect_x,
+    row_centres,
     silhouette,
     template,
     swept_tube,
@@ -256,3 +261,83 @@ def test_swept_tube_follows_a_rod_that_reaches_across_and_forward():
     assert abs(p[:, 0].max() - 0.8) < 0.08 and abs(p[:, 2].max() - 0.8) < 0.08
     # A slab would fill the square: the rod stays near the diagonal x = z.
     assert np.abs(p[:, 0] - p[:, 2]).max() < 0.15
+
+
+def test_fill_rows_takes_the_nearest_row_narrowed_as_the_other_view_narrows():
+    mask = np.zeros((40, 40), bool)
+    mask[5:25, 10:30] = True                      # the drawn rows, twenty wide
+    other = np.zeros((40, 40), bool)
+    for row in range(5, 35):                      # ten rows lower, tapering from twenty to four
+        half = 10 - (row - 5) // 3
+        other[row, 20 - half:20 + half] = True
+    filled = fill_rows(mask, other, reach=20)
+    assert filled[25:35].any(axis=1).all()        # the rows only the other view draws are filled
+    assert filled[25].sum() >= filled[5].sum() - 2  # near the drawn row it keeps the drawn width
+    assert filled[34].sum() < filled[5].sum()     # narrower where the other view narrows
+    assert not filled[35:].any()                  # beyond the other view's rows nothing is invented
+    copied = fill_rows(mask, other, reach=20, mode="copy")
+    assert copied[34, 19:21].all() and copied[34].sum() == 2
+    assert not fill_rows(mask, other, reach=2)[27:].any()  # out of reach: left alone
+
+
+def test_row_centres_finds_each_rows_span_centre():
+    mask = np.zeros((3, 10), bool)
+    mask[0, 2:6] = True
+    mask[2, 0:10] = True
+    centres = row_centres(mask)
+    assert centres[0] == pytest.approx(4.0) and centres[2] == pytest.approx(5.0)
+    assert np.isnan(centres[1])
+
+
+def test_lathe_of_a_rectangle_is_a_closed_cylinder():
+    front = np.zeros((60, 60), bool)
+    front[10:50, 20:40] = True                    # 20 px wide, 40 tall
+    mesh = lathe_solid(front, (0.0, 0.6), (-0.6, 0.6), samples=20, segments=16)
+    p = np.asarray(mesh.positions, float)
+    radii = np.hypot(p[:, 0], p[:, 2])
+    assert radii.max() == pytest.approx(0.2, abs=1e-5)
+    # Row r's centre is at y = 0.6 - 0.6 * (r + 0.5) / 60: rows 10..49 span 0.105 to 0.495.
+    assert p[:, 1].min() == pytest.approx(0.105, abs=1e-5) and p[:, 1].max() == pytest.approx(0.495, abs=1e-5)
+    report = mesh_report(mesh)
+    assert report["open_edges"] == 0 and report["volume"] > 0
+    assert report["volume"] == pytest.approx(np.pi * 0.2 ** 2 * 0.39, rel=0.03)  # a 16-gon, not a circle
+
+
+def test_lathe_of_a_vase_narrows_where_the_profile_does():
+    front = np.zeros((80, 80), bool)
+    front[10:70, 30:50] = True
+    front[35:45, 30:36] = False                   # a waist: only the middle columns are drawn there
+    front[35:45, 44:50] = False
+    mesh = lathe_solid(front, (0.0, 0.8), (-0.8, 0.8), samples=30, segments=12)
+    p = np.asarray(mesh.positions, float)
+    radii = np.hypot(p[:, 0], p[:, 2])
+    waist = (p[:, 1] > 0.36) & (p[:, 1] < 0.44)
+    assert radii[waist].max() < radii.max() - 0.02
+    assert mesh_report(mesh)["open_edges"] == 0
+
+
+def test_reflect_x_mirrors_the_mesh_and_keeps_its_faces_outward():
+    mesh = extrude(np.array([[1.0, -1.0], [2.0, -1.0], [2.0, 1.0], [1.0, 1.0]]), depth=1.0)
+    mirrored = reflect_x(mesh)
+    assert np.asarray(mirrored.positions)[:, 0].max() == pytest.approx(-1.0)
+    assert np.asarray(mirrored.positions)[:, 0].min() == pytest.approx(-2.0)
+    assert mesh_report(mirrored)["volume"] == pytest.approx(_volume(mesh))
+
+
+def test_swept_tube_takes_a_mean_or_a_fixed_radius():
+    front = np.zeros((100, 100), bool)
+    front[48:53, 50:90] = True
+    side = np.zeros((100, 100), bool)
+    side[48:58, 10:50] = True                     # twice as thick in the side view
+    thin = swept_tube(front, side, (0.0, 1.0), samples=12, segments=8, radius="min")
+    thick = swept_tube(front, side, (0.0, 1.0), samples=12, segments=8, radius="mean")
+    fixed = swept_tube(front, side, (0.0, 1.0), samples=12, segments=8, radius=0.02)
+
+    def girth(mesh):
+        p = np.asarray(mesh.positions, float)
+        return float(np.linalg.norm(p - p.mean(axis=0), axis=1).max())
+
+    assert girth(thin) < girth(thick)
+    assert girth(fixed) < girth(thick)
+    with pytest.raises(ValueError):
+        swept_tube(front, side, (0.0, 1.0), radius="wide")

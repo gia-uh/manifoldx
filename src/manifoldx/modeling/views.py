@@ -175,6 +175,159 @@ def two_view_solid(front, side, height_range, n=48, power=2.0, segments=24,
     return Mesh(positions=positions, faces=np.asarray(faces, dtype=np.uint32)).recompute_normals()
 
 
+def row_centres(mask) -> np.ndarray:
+    """Each row's drawn span centre in pixel columns, NaN where the row is empty."""
+    work = np.asarray(mask, dtype=bool)
+    out = np.full(work.shape[0], np.nan)
+    for row, drawn in enumerate(work):
+        cols = np.flatnonzero(drawn)
+        if cols.size:
+            out[row] = (cols[0] + cols[-1] + 1) / 2.0
+    return out
+
+
+def fill_rows(mask, other, reach: int, mode: str = "narrow") -> np.ndarray:
+    """A mask with the rows only the other view draws filled in, near a drawn row.
+
+    A part seen from two views sometimes has a row drawn in one and not the other: a hidden end, or two
+    blueprints that disagree on what the part is. Each row of ``mask`` that is empty but drawn in ``other``
+    takes the span of ``mask``'s nearest drawn row, and ``mode`` says how:
+
+    - ``"narrow"``: narrowed in proportion as ``other`` narrows between the two rows, so a sleeve that hangs
+      lower in one view keeps its taper;
+    - ``"copy"``: ``other``'s own span at that row.
+
+    Rows further than ``reach`` (pixels) from a drawn row of ``mask`` are left alone.
+    """
+    if mode not in ("narrow", "copy"):
+        raise ValueError("mode must be 'narrow' or 'copy'")
+    work = np.asarray(mask, dtype=bool)
+    other = np.asarray(other, dtype=bool)
+    if work.shape[0] != other.shape[0]:
+        raise ValueError("the two masks must have the same rows")
+
+    def span(m, row):
+        cols = np.flatnonzero(m[row])
+        return (int(cols[0]), int(cols[-1]) + 1) if cols.size else None
+
+    have = np.flatnonzero(work.any(axis=1))
+    if have.size == 0:
+        return work.copy()
+    filled = work.copy()
+    for row in np.flatnonzero(other.any(axis=1) & ~work.any(axis=1)):
+        near = int(have[np.argmin(np.abs(have - row))])
+        if abs(near - row) > reach:
+            continue
+        here, there = span(work, near), span(other, row)
+        if there is None:
+            continue
+        if mode == "copy" or here is None:
+            filled[row, there[0]:there[1]] = True
+            continue
+        before = span(other, near) or there
+        ratio = (there[1] - there[0]) / max(1, before[1] - before[0])
+        centre = (here[0] + here[1]) / 2.0
+        half = (here[1] - here[0]) / 2.0 * min(1.0, ratio)
+        filled[row, int(round(centre - half)):int(round(centre + half)) + 1] = True
+    return filled
+
+
+def lathe_solid(front, height_range, x_range, centre=None, samples=30, segments=16):
+    """A solid of revolution from one view's profile, turned about a vertical axis.
+
+    ``front`` is a boolean mask with row 0 at the top, and ``height_range=(y_bottom, y_top)`` and
+    ``x_range=(x_min, x_max)`` say what metres the mask covers, as for :func:`two_view_solid`. The profile is
+    the mask's outer edge on either side of ``centre`` (an x in metres; the mask's own span centre by default),
+    so a rectangle becomes a closed cylinder and a vase comes out round. ``samples`` rings are spread over the
+    rows the mask draws; consecutive rings of the same radius are merged, and flat caps close the ends.
+    """
+    front = np.asarray(front, dtype=bool)
+    if front.ndim != 2 or not front.any():
+        raise ValueError("lathe_solid needs a drawn mask")
+    samples, segments = int(samples), int(segments)
+    if samples < 2 or segments < 3:
+        raise ValueError("lathe_solid needs samples >= 2 and segments >= 3")
+    height, width = front.shape
+    y_bottom, y_top = float(height_range[0]), float(height_range[1])
+    x_min, x_max = float(x_range[0]), float(x_range[1])
+    if y_top == y_bottom:
+        raise ValueError("height_range must have a non-zero height")
+    x_at = lambda pixel: x_min + (x_max - x_min) * pixel / width  # noqa: E731
+
+    drawn = np.flatnonzero(front.any(axis=1))
+    if drawn.size < 1:
+        raise ValueError("lathe_solid needs a drawn mask")
+    cols = np.flatnonzero(front.any(axis=0))
+    if centre is None:
+        centre = x_at((cols[0] + cols[-1] + 1) / 2.0)
+    centre = float(centre)
+    row_y = lambda r: y_top - (y_top - y_bottom) * (r + 0.5) / height  # noqa: E731
+
+    raw = []
+    for y in np.linspace(row_y(drawn[0]), row_y(drawn[-1]), samples):
+        row = int(np.clip(np.floor((y_top - y) / (y_top - y_bottom) * height), 0, height - 1))
+        spans = np.flatnonzero(front[row])
+        if spans.size == 0:
+            continue
+        lo, hi = sorted((x_at(spans[0]), x_at(spans[-1] + 1)))
+        radius = max(hi - centre, centre - lo)
+        if radius > 1e-12:
+            raw.append((y, radius))
+    # A run of equal radii keeps both ends, so a cylinder gets its bottom and its top rather than one ring.
+    rings = []
+    i = 0
+    while i < len(raw):
+        j = i
+        while j + 1 < len(raw) and abs(raw[j + 1][1] - raw[i][1]) <= 1e-12:
+            j += 1
+        rings.append(raw[i])
+        if j > i:
+            rings.append(raw[j])
+        i = j + 1
+    if len(rings) < 2:
+        raise ValueError("lathe_solid needs a profile with a height")
+
+    theta = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+    positions = []
+    for y, radius in rings:
+        positions.append(np.column_stack([centre + radius * np.cos(theta), np.full(segments, y),
+                                          radius * np.sin(theta)]))
+    positions = np.vstack(positions)
+    n_ring = len(positions)
+    bottom = np.array([[centre, rings[0][0], 0.0]])
+    top = np.array([[centre, rings[-1][0], 0.0]])
+    positions = np.vstack([positions, bottom, top]).astype(np.float32)
+    bottom_centre, top_centre = n_ring, n_ring + 1
+
+    faces = []
+    for s in range(len(rings) - 1):
+        base, nxt = s * segments, (s + 1) * segments
+        for i in range(segments):
+            j = (i + 1) % segments
+            faces += [(base + i, nxt + i, nxt + j), (base + i, nxt + j, base + j)]
+    last = (len(rings) - 1) * segments
+    for i in range(segments):
+        j = (i + 1) % segments
+        faces.append((bottom_centre, i, j))
+        faces.append((top_centre, last + j, last + i))
+    faces = np.asarray(faces, dtype=np.int64)
+    p = positions
+    volume = np.einsum("ij,ij->i", p[faces[:, 0]], np.cross(p[faces[:, 1]], p[faces[:, 2]])).sum()
+    if volume < 0:
+        faces = faces[:, ::-1]
+    return Mesh(positions=positions, faces=faces.astype(np.uint32)).recompute_normals()
+
+
+def reflect_x(mesh: Mesh) -> Mesh:
+    """A mesh mirrored across the plane x = 0, with its faces turned so they still face outwards."""
+    positions = np.asarray(mesh.positions, float).copy()
+    positions[:, 0] = -positions[:, 0]
+    uvs = None if mesh.uvs is None else np.column_stack([1.0 - np.asarray(mesh.uvs, float)[:, 0],
+                                                         np.asarray(mesh.uvs, float)[:, 1]])
+    return Mesh(positions=positions.astype(np.float32), faces=np.asarray(mesh.faces)[:, ::-1].copy(),
+                uvs=None if uvs is None else uvs.astype(np.float32)).recompute_normals()
+
+
 def _centreline(points, samples, anchor):
     """Centre and half-width of an elongated point set at `samples` steps along its main axis.
 
@@ -210,7 +363,7 @@ def _centreline(points, samples, anchor):
 
 
 def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.0), samples=32,
-               segments=16, anchor=None):
+               segments=16, anchor=None, radius="min"):
     """A tube swept along a part's centreline, matched between a front and a left-side mask.
 
     For a limb that reaches across and forward at once (an outstretched arm, an armrest on its post, an arch),
@@ -218,7 +371,8 @@ def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.
     :func:`two_view_solid`. Each view's centreline is the mask's mean point in `samples` steps along its main
     axis; the two are matched by their position along that axis (from the end nearest `anchor`, an ``(x, y, z)``
     point such as the body's centre, or from the top end), so the tube's point i takes x from the front view, z
-    from the side view and y from both. Its radius is the smaller of the two views' half-widths there.
+    from the side view and y from both. ``radius`` is the two views' smaller half-width there (``"min"``), their
+    mean (``"mean"``), or a fixed number of metres — a hanging sleeve or a cloth widens one view or both.
     """
     front = np.asarray(front, dtype=bool)
     side = np.asarray(side, dtype=bool)
@@ -241,11 +395,21 @@ def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.
     fc, fh = _centreline(fpts, samples, fa)
     sc, sh = _centreline(spts, samples, sa)
     path = np.column_stack([fc[:, 0], (fc[:, 1] + sc[:, 1]) / 2.0, sc[:, 0]])
-    radius = np.minimum(fh, sh)                     # a hanging sleeve or a cloth widens one view or both
-    kernel = np.ones(3) / 3.0                       # a light smoothing of the path and the radius
+    if isinstance(radius, str):
+        if radius == "min":
+            width = np.minimum(fh, sh)
+        elif radius == "mean":
+            width = (fh + sh) / 2.0
+        else:
+            raise ValueError("radius must be 'min', 'mean' or a positive number")
+    else:
+        width = np.full(samples, float(radius))
+        if width[0] <= 0.0:
+            raise ValueError("radius must be positive")
+    kernel = np.ones(3) / 3.0                       # a light smoothing of the path and the width
     for j in range(3):
         path[1:-1, j] = np.convolve(path[:, j], kernel, mode="valid")
-    radius[1:-1] = np.convolve(radius, kernel, mode="valid")
+    width[1:-1] = np.convolve(width, kernel, mode="valid")
 
     tangent = np.gradient(path, axis=0)
     tangent /= np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-12)
@@ -258,7 +422,7 @@ def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.
         normal = normal - tangent[i] * (normal @ tangent[i])
         normal /= max(np.linalg.norm(normal), 1e-12)
         binormal = np.cross(tangent[i], normal)
-        rings.append(path[i] + radius[i] * (np.outer(np.cos(theta), normal) + np.outer(np.sin(theta), binormal)))
+        rings.append(path[i] + width[i] * (np.outer(np.cos(theta), normal) + np.outer(np.sin(theta), binormal)))
     positions = np.vstack(rings + [path[:1], path[-1:]])
     first, last = samples * segments, samples * segments + 1
     faces = []
