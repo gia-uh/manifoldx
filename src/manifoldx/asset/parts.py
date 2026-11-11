@@ -20,14 +20,15 @@ are handled once, here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import ClassVar
 
 import numpy as np
 
 from manifoldx.asset.base import Asset
 from manifoldx.asset.context import CODE_COLOURS
-from manifoldx.image import read_png, resize
+from manifoldx.image import nearest_aspect, pad_to_aspect, read_png, resize
+from manifoldx.modeling import paint as painting
 from manifoldx.modeling.lint import Finding, closest_offset, gap
 from manifoldx.modeling.mesh import Mesh
 from manifoldx.modeling.trace import classify, components, contours, iou, open_mask, simplify
@@ -38,7 +39,9 @@ from manifoldx.modeling.views import (
     reflect_x,
     row_centres,
     swept_tube,
+    template,
     two_view_solid,
+    view_atlas,
 )
 
 # The rows an aligned view spans: the scale the prototype's drawings were made at.
@@ -68,6 +71,22 @@ _BP_PROMPT = ("Image 1 is a drawing of an object. Make a BLUEPRINT of exactly th
 
 # The style a Parts subclass uses when it names none: the hydrant's, the prototype's cartoon default.
 DEFAULT_STYLE = "Clean cel-shaded cartoon style with flat colours and thin dark outlines, even light."
+
+# How a paint call names the view it is painting, and the two finishes the prototype asked for.
+_VIEW_NAME = {"front": "front view", "back": "back view", "left": "left side view", "right": "right side view"}
+_FLAT = ("Flat colours: no shading, no highlights, no shadows, no outlines round the silhouette, no text.")
+_REAL = ("Real materials as in the photos, but under even, flat light: no cast shadows, no sky reflections, "
+         "no text.")
+_PAINT_PROMPT = (
+    "Image 1 is a flat-colour map of the {name} of a 3D model of the object in images 2 and 3 ({desc}): each "
+    "colour is one part. {codes}, white = background.\n\nRepaint image 1 as the colour TEXTURE of that object "
+    "seen from the {name}, as in images 2 and 3: {details}. Keep the canvas, the position, the size and the "
+    "outline of every coloured region of image 1 exactly, pixel for pixel, because the result is wrapped back "
+    "onto the 3D model; the parts' code colours do not appear in the result. {finish} Keep the background pure "
+    "white. Output one image with the same aspect ratio as image 1.")
+# An answer whose outline moved or shrank is asked again, at most this many times.
+_PAINT_TRIES = 3
+_PAINT_KEPT = 0.85
 
 # A tube's defaults, from the prototype: a third of two_view's rings, half its segments.
 _TUBE_SAMPLES = 10
@@ -575,6 +594,9 @@ class Parts(Asset):
     notes: dict[str, str] = {}
     details: dict[str, str] = {}
     base: tuple[int, int, int] = (170, 170, 170)
+    photoreal: bool = False
+    lod: str | None = None
+    atlas_size: int = 2048
 
     def parts(self, p: _Parts) -> None:
         """Declare the object's parts, one ``p.add`` per part."""
@@ -614,7 +636,8 @@ class Parts(Asset):
             if any(view not in masks or not masks[view].any() for view in item.build.requires):
                 continue                                     # the prototype skips a part its side view misses
             anchor = self._anchor(item.build, items, loaded, frame)
-            built = item.build.build(masks, frame, anchor=anchor)
+            builder = self._coarse(item.build)
+            built = builder.build(masks, frame, anchor=anchor)
             names = _instance_names(item, built.meshes)
             for name, mesh in zip(names, built.meshes):
                 scene.add(name, mesh)
@@ -630,6 +653,156 @@ class Parts(Asset):
                 c.expect(view, drawn, frame=loaded.frame_of(view, centre))
         self._built, self._frame = records, frame
         return scene
+
+    def _coarse(self, builder: Builder) -> Builder:
+        """The builder a ``--lod low`` run uses: fewer rings and segments, still textured from the same answers."""
+        if self.lod is None:
+            return builder
+        if self.lod != "low":
+            raise ValueError(f"lod must be 'low', not {self.lod!r}")
+        fields = {}
+        if hasattr(builder, "rings"):
+            fields["rings"] = 10
+        if hasattr(builder, "segments"):
+            fields["segments"] = 8
+        return replace(builder, **fields) if fields else builder
+
+    # --- paint -------------------------------------------------------------------------------------------
+
+    def paint(self, c, scene) -> dict:
+        """A template and one albedo call per view (right from the mirrored left), assembled into an atlas.
+
+        The call asks for the colour texture of the template's flat regions, with the view drawing and the
+        photos as references. An answer that keeps under 0.85 of the template's outline is asked again, up to
+        three times, and the best answer is kept; the code colours it left are replaced by ``base``. A normal
+        map is computed from the finished albedo. Returns the albedo and normal arrays, the atlas's UVs and its
+        meshes (split where a vertex carries two UVs).
+        """
+        items, _core = self._collect(c.palette)
+        colours = self._colours(c, scene, items)
+        size = int(self.atlas_size)
+        atlas = view_atlas(scene.meshes, ("front", "back", "left", "right"), (size, size))
+        views = {island.view: _island_template(scene.meshes, atlas, colours, island)
+                 for island in atlas.islands}
+        answers = {}
+        for view in ("front", "back", "left"):
+            flat, regions, aspect, offset = views[view]
+            refs = [flat]
+            if (c.images / f"view-{view}.png").exists():
+                refs.append(f"view-{view}")
+            refs.extend(self._paint_refs(c))
+            prompt = self._paint_prompt(items, view)
+            kept, picture = 0.0, np.full_like(flat, 255)
+            for attempt in range(_PAINT_TRIES):
+                name = f"albedo-{view}" if attempt == 0 else f"albedo-{view}-{attempt + 1}"
+                text = prompt if attempt == 0 else f"{prompt} (attempt {attempt + 1})"
+                answer = c.image(name, text, refs=refs, aspect=aspect)
+                candidate = resize(answer, (flat.shape[1], flat.shape[0]))
+                score = painting.kept_outline(flat, candidate)
+                if score > kept:
+                    kept, picture = score, candidate
+                if score >= _PAINT_KEPT:
+                    break
+            answers[view] = self._strip_codes(c, items, view, picture, regions, offset)
+            if kept < _PAINT_KEPT:
+                c.findings.append(Finding(
+                    "A-OUTLINE", "warn", view=view, value=round(kept, 3),
+                    message=f"the {view} albedo keeps only {kept:.0%} of its template's outline",
+                    hint="a note for that view; another model"))
+        answers["right"] = answers["left"][:, ::-1].copy()
+
+        albedo = np.full((size, size, 3), 255, np.uint8)
+        covered = np.zeros((size, size), bool)
+        bases = {name: self.base for name in scene.meshes}
+        for island in atlas.islands:
+            flat, regions, _aspect, offset = views[island.view]
+            picture = resize(answers[island.view], (flat.shape[1], flat.shape[0]))
+            x0, y0, x1, y1 = island.rect
+            ox, oy = offset
+            crop = picture[oy:oy + (y1 - y0), ox:ox + (x1 - x0)]
+            region = regions[:y1 - y0, :x1 - x0]
+            albedo[y0:y1, x0:x1] = painting.clean(crop, region, bases)
+            covered[y0:y1, x0:x1] = region > 0
+        albedo = painting.bleed(albedo, covered, steps=12)
+        return {"albedo": albedo, "normal": painting.normal_from_albedo(albedo),
+                "uvs": dict(atlas.uvs), "meshes": dict(atlas.meshes)}
+
+    def _colours(self, c, scene, items) -> dict:
+        """The code colour of every mesh the scene holds, by instance name."""
+        colours = {}
+        for record in getattr(self, "_built", []):
+            for name in record.names:
+                if name in scene.meshes:
+                    colours[name] = c.palette[record.item.colour]
+        for name in scene.meshes:
+            if name in colours:
+                continue
+            for item in items:
+                suffix = name[len(item.name):] if name.startswith(item.name) else None
+                if name == item.name or (suffix and suffix.isdigit()):
+                    colours[name] = c.palette[item.colour]
+                    break
+        missing = [name for name in scene.meshes if name not in colours]
+        if missing:
+            raise ValueError(f"paint does not know which part {missing[0]!r} is; build the scene with build()")
+        return colours
+
+    def _paint_refs(self, c) -> list:
+        """The reference pictures of the paid call: the asset's first two photos, else its reference drawing."""
+        refs = []
+        folder = self.cache_dir().parent
+        for photo in self.photos[:2]:
+            path = folder / photo
+            if path.exists():
+                refs.append(_rgb(read_png(path)))
+        if not refs and (c.images / "ref.png").exists():
+            refs.append("ref")
+        return refs
+
+    def _paint_prompt(self, items, view: str) -> str:
+        """The text of one view's albedo call, from the parts, the object and the view's details."""
+        codes = ", ".join(f"{item.colour} = {item.what.split(':')[0]}" for item in items)
+        return _PAINT_PROMPT.format(name=_VIEW_NAME[view], desc=self.desc, codes=codes,
+                                    details=self.details.get(view, ""), finish=_REAL if self.photoreal else _FLAT)
+
+    def _strip_codes(self, c, items, view, picture, regions, offset):
+        """Replace the code colours a model left in an answer with ``base``, and report what is still near one."""
+        code_rgb = np.array([c.palette[item.colour] for item in items], float)
+        out = np.array(picture, copy=True)
+        distance = np.linalg.norm(out[:, :, None, :].astype(float) - code_rgb, axis=3)
+        out[(distance < 60).any(axis=2)] = self.base
+        leftover = (distance < 120).any(axis=2)
+        height, width = regions.shape
+        ox, oy = offset
+        inside = regions > 0
+        fraction = (float(leftover[oy:oy + height, ox:ox + width][inside].mean())
+                    if inside.any() else 0.0)
+        if fraction > 0.005:
+            c.findings.append(Finding(
+                "A-CODE", "warn", view=view, value=round(fraction, 4),
+                message=f"{fraction:.1%} of the object is still near a part's code colour",
+                hint="paint --again VIEW"))
+        return out
+
+    def forget(self, c, name: str) -> list:
+        """A view forgets its drawing, blueprint and albedos; a part forgets the views its builder trusts."""
+        if name in VIEWS:
+            return self._forget_views(c, (name,))
+        try:
+            items, _core = self._collect(c.palette)
+        except ValueError:
+            items = []
+        for item in items:
+            if item.name == name:
+                return self._forget_views(c, item.build.views)
+        return super().forget(c, name)
+
+    def _forget_views(self, c, views) -> list:
+        removed = []
+        for view in views:
+            for stem in (f"view-{view}", f"bp-{view}", f"albedo-{view}"):
+                removed.extend(c.forget(stem))
+        return removed
 
     def _anchor(self, builder: Builder, items, loaded: _Views, frame: Frame):
         """The point that orients a tube: the middle of the part it names, or of the core by default."""
@@ -828,3 +1001,13 @@ def _rgb(image) -> np.ndarray:
     if array.ndim != 3 or array.shape[2] not in (3, 4):
         raise ValueError("a photo must be an (H, W, 3) or (H, W, 4) image")
     return np.ascontiguousarray(array[..., :3], dtype=np.uint8)
+
+
+def _island_template(parts, atlas, colours, island):
+    """One island's whole picture, its region map, the aspect it is padded to and the padding's offset."""
+    image, regions = template(parts, atlas, colours, island.view, whole=True)
+    x0, y0, x1, y1 = island.rect
+    crop, region = image[y0:y1, x0:x1], regions[y0:y1, x0:x1]
+    aspect = nearest_aspect(crop.shape[1], crop.shape[0])
+    padded, offset = pad_to_aspect(crop, aspect)
+    return padded, region, aspect, offset

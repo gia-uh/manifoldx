@@ -27,11 +27,12 @@ _FRAME_PAD = 0.02
 
 @dataclass
 class Result:
-    """What a run gives back: the scene, the textures, and the report of what is wrong with them."""
+    """What a run gives back: the scene, the textures, the report of what is wrong, and the context it used."""
 
     scene: Scene | None = None
     textures: dict = field(default_factory=dict)
     report: Report = field(default_factory=Report)
+    context: Context | None = None
 
     @property
     def exit_code(self) -> int:
@@ -111,18 +112,23 @@ class Asset:
         """The asset's own findings, on top of the standard lint. Empty by default."""
         return []
 
+    def forget(self, c: Context, name: str) -> list[Path]:
+        """Delete cached pictures before a run; a stage may widen ``name`` to mean more than one image."""
+        return c.forget(name)
+
     # --- the run ------------------------------------------------------------------------------------------
 
     def cache_dir(self) -> Path:
         """``NAME.asset`` next to the file that defines the class."""
         return Path(inspect.getfile(type(self))).resolve().parent / f"{self.name}.asset"
 
-    def run(self, cache=None, stages=STAGES, model=None, budget=None) -> Result:
+    def run(self, cache=None, stages=STAGES, model=None, budget=None, max_tris=None, again=()) -> Result:
         """Run the stages in order and return the scene, the textures and the report.
 
         ``cache`` is the asset's directory, ``NAME.asset`` next to this file by default; ``stages`` picks and
         orders them (``build`` runs when ``lint`` or ``paint`` needs a scene); ``model`` overrides the class's
-        image model, and ``budget`` caps the spend in dollars, or the calls when the model reports no cost.
+        image model, ``budget`` caps the spend in dollars, or the calls when the model reports no cost, and
+        ``max_tris`` the A-TRIS threshold. ``again`` names cached images to forget first, as ``--again`` does.
         """
         stages = tuple(stages)
         unknown = [stage for stage in stages if stage not in STAGES]
@@ -130,6 +136,8 @@ class Asset:
             raise ValueError(f"unknown stage {unknown[0]!r}; choose from {', '.join(STAGES)}")
         c = Context(self.cache_dir() if cache is None else cache, model=self.model if model is None else model,
                     budget=budget, height=self.height)
+        for name in again:
+            self.forget(c, name)
         if "draw" in stages:
             self.draw(c)
         scene = None
@@ -140,7 +148,10 @@ class Asset:
         report = Report()
         if "lint" in stages:
             tol = max(0.01 * float(self.height), 1e-6)
-            report.extend(standard_findings(c, scene, tol=tol, max_tris=self.max_tris))
+            limit = self.max_tris if max_tris is None else int(max_tris)
+            report.extend(standard_findings(c, scene, tol=tol, max_tris=limit))
             report.extend(self.check(c, scene))
         textures = dict(self.paint(c, scene) or {}) if "paint" in stages else {}
-        return Result(scene=scene, textures=textures, report=report)
+        if "paint" in stages:
+            report.extend(c.findings)
+        return Result(scene=scene, textures=textures, report=report, context=c)

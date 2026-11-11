@@ -18,6 +18,7 @@ import numpy as np
 from manifoldx.asset.scene import Scene
 from manifoldx.image import read_png, write_png
 from manifoldx.imagegen import BudgetExceeded
+from manifoldx.modeling.lint import Finding
 from manifoldx.modeling.trace import classify
 
 # The flat colours a drawing may code its regions in, white being the paper. A stage may pass its own palette.
@@ -101,6 +102,7 @@ class Context:
         self.spent = 0.0        # dollars when the model reports a cost, else calls
         self.calls = 0          # requests actually sent
         self.expectations: list[Expectation] = []
+        self.findings: list[Finding] = []   # what a stage such as paint found; the run adds them to the report
         self._instance = None   # the model once built from an id
 
     # --- the paid step ------------------------------------------------------------------------------------
@@ -145,6 +147,23 @@ class Context:
             raise FileNotFoundError(
                 f"no cached image {name!r} at {path}; run the draw stage first, or the asset that draws it")
         return read_png(path)
+
+    def forget(self, name: str) -> list[Path]:
+        """Delete the cached pictures called ``name`` and their sidecars; returns the paths removed.
+
+        A name is a prefix: forgetting ``albedo-front`` also forgets ``albedo-front-2``, and every sidecar that
+        goes with a deleted picture. A stage may widen a name first (see :meth:`manifoldx.asset.Parts.forget`).
+        """
+        if not name or name in (".", "..") or "/" in name or "\\" in name:
+            raise ValueError(f"forget needs an image name, not {name!r}")
+        removed = []
+        for path in sorted(self.images.glob(f"{name}*.png")):
+            sidecar = path.with_suffix(".json")
+            path.unlink()
+            if sidecar.exists():
+                sidecar.unlink()
+            removed.append(path)
+        return removed
 
     def mask(self, name: str, colour, palette=None) -> np.ndarray:
         """The pixels of a cached picture in one code colour, as a bool mask.

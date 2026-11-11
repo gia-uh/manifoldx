@@ -9,9 +9,11 @@ and :mod:`manifoldx.imagegen`; this package imports those and nothing imports it
 
 from manifoldx.asset.base import Asset, Result, standard_findings
 from manifoldx.asset.context import CODE_COLOURS, Context, Expectation
+from manifoldx.asset.inspect import inspect
 from manifoldx.asset.parts import Parts, lathe, plate, tube, two_view
 from manifoldx.asset.report import Report
 from manifoldx.asset.scene import Scene
+from manifoldx.asset.write import save
 
 __all__ = ["Asset", "CODE_COLOURS", "Context", "Expectation", "Parts", "Report", "Result", "Scene",
-           "lathe", "plate", "standard_findings", "tube", "two_view"]
+           "inspect", "lathe", "plate", "save", "standard_findings", "tube", "two_view"]

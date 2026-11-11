@@ -31,6 +31,8 @@ _HINTS = {
     "A-SHEET": "draw --again VIEW",
     "A-KEEP": "draw --again, or a note for that view",
     "A-STRAY": "none, or keep=\"all\"",
+    "A-CODE": "paint --again VIEW",
+    "A-OUTLINE": "a note for that view; another model",
 }
 
 
