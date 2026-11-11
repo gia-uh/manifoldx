@@ -175,6 +175,108 @@ def two_view_solid(front, side, height_range, n=48, power=2.0, segments=24,
     return Mesh(positions=positions, faces=np.asarray(faces, dtype=np.uint32)).recompute_normals()
 
 
+def _centreline(points, samples, anchor):
+    """Centre and half-width of an elongated point set at `samples` steps along its main axis.
+
+    The axis runs from the end nearest `anchor` (when given) or from the top end.
+    """
+    mean = points.mean(axis=0)
+    _, _, vt = np.linalg.svd(points - mean, full_matrices=False)
+    d = vt[0]
+    t = (points - mean) @ d
+    ends = mean + np.outer([t.min(), t.max()], d)
+    if anchor is not None:
+        flip = np.linalg.norm(ends[1] - anchor) < np.linalg.norm(ends[0] - anchor)
+    else:
+        flip = ends[1][1] > ends[0][1]
+    if flip:
+        d, t = -d, -t
+    perp = (points - mean) @ np.array([-d[1], d[0]])
+    edges = np.linspace(t.min(), t.max(), samples + 1)
+    idx = np.clip(np.searchsorted(edges, t, side="right") - 1, 0, samples - 1)
+    centre = np.full((samples, 2), np.nan)
+    half = np.full(samples, np.nan)
+    for k in range(samples):
+        sel = idx == k
+        if sel.any():
+            centre[k] = points[sel].mean(axis=0)
+            half[k] = (perp[sel].max() - perp[sel].min()) / 2.0
+    good = ~np.isnan(half)
+    ks = np.arange(samples)
+    for j in range(2):
+        centre[:, j] = np.interp(ks, ks[good], centre[good, j])
+    half = np.interp(ks, ks[good], half[good])
+    return centre, half
+
+
+def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.0), samples=32,
+               segments=16, anchor=None):
+    """A tube swept along a part's centreline, matched between a front and a left-side mask.
+
+    For a limb that reaches across and forward at once (an outstretched arm, an armrest on its post, an arch),
+    where :func:`two_view_solid` fills the whole rectangle of the two spans. The masks and ranges follow
+    :func:`two_view_solid`. Each view's centreline is the mask's mean point in `samples` steps along its main
+    axis; the two are matched by their position along that axis (from the end nearest `anchor`, an ``(x, y, z)``
+    point such as the body's centre, or from the top end), so the tube's point i takes x from the front view, z
+    from the side view and y from both. Its radius is the mean of the two views' half-widths there.
+    """
+    front = np.asarray(front, dtype=bool)
+    side = np.asarray(side, dtype=bool)
+    if front.shape[0] != side.shape[0]:
+        raise ValueError("front and side masks must have the same rows")
+    if not front.any() or not side.any():
+        raise ValueError("swept_tube needs the part drawn in both views")
+    height = front.shape[0]
+    y_bottom, y_top = float(height_range[0]), float(height_range[1])
+    x_min, x_max = float(x_range[0]), float(x_range[1])
+    z_min, z_max = float(z_range[0]), float(z_range[1])
+    rows, cols = np.nonzero(front)
+    ys = y_top - (y_top - y_bottom) * (rows + 0.5) / height
+    fpts = np.column_stack([x_min + (x_max - x_min) * (cols + 0.5) / front.shape[1], ys])
+    rows, cols = np.nonzero(side)
+    ys = y_top - (y_top - y_bottom) * (rows + 0.5) / height
+    spts = np.column_stack([z_max + (z_min - z_max) * (cols + 0.5) / side.shape[1], ys])
+    fa = None if anchor is None else np.array([anchor[0], anchor[1]], float)
+    sa = None if anchor is None else np.array([anchor[2], anchor[1]], float)
+    fc, fh = _centreline(fpts, samples, fa)
+    sc, sh = _centreline(spts, samples, sa)
+    path = np.column_stack([fc[:, 0], (fc[:, 1] + sc[:, 1]) / 2.0, sc[:, 0]])
+    radius = (fh + sh) / 2.0
+    kernel = np.ones(3) / 3.0                       # a light smoothing of the path and the radius
+    for j in range(3):
+        path[1:-1, j] = np.convolve(path[:, j], kernel, mode="valid")
+    radius[1:-1] = np.convolve(radius, kernel, mode="valid")
+
+    tangent = np.gradient(path, axis=0)
+    tangent /= np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-12)
+    ref = np.array([0.0, 1.0, 0.0]) if abs(tangent[0][1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    normal = np.cross(tangent[0], ref)
+    normal /= np.linalg.norm(normal)
+    theta = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+    rings = []
+    for i in range(samples):                        # parallel transport keeps the rings from twisting
+        normal = normal - tangent[i] * (normal @ tangent[i])
+        normal /= max(np.linalg.norm(normal), 1e-12)
+        binormal = np.cross(tangent[i], normal)
+        rings.append(path[i] + radius[i] * (np.outer(np.cos(theta), normal) + np.outer(np.sin(theta), binormal)))
+    positions = np.vstack(rings + [path[:1], path[-1:]])
+    first, last = samples * segments, samples * segments + 1
+    faces = []
+    for i in range(samples - 1):
+        for k in range(segments):
+            a, b = i * segments + k, i * segments + (k + 1) % segments
+            faces += [(a, b, b + segments), (a, b + segments, a + segments)]
+    for k in range(segments):
+        faces.append((first, (k + 1) % segments, k))
+        faces.append((last, (samples - 1) * segments + k, (samples - 1) * segments + (k + 1) % segments))
+    faces = np.asarray(faces, dtype=np.int64)
+    p = positions
+    volume = np.einsum("ij,ij->i", p[faces[:, 0]], np.cross(p[faces[:, 1]], p[faces[:, 2]])).sum()
+    if volume < 0:                                  # faces outward, whatever way the path runs
+        faces = faces[:, ::-1]
+    return Mesh(positions=positions.astype(np.float32), faces=faces.astype(np.uint32)).recompute_normals()
+
+
 def _coverage(px, py, clip):
     """Pixel centres inside one projected triangle, with barycentric weights.
 

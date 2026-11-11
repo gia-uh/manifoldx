@@ -19,6 +19,7 @@ from manifoldx.modeling.views import (
     extrude,
     silhouette,
     template,
+    swept_tube,
     two_view_solid,
     view_atlas,
 )
@@ -242,3 +243,16 @@ def test_two_view_solid_puts_its_rings_on_the_part_not_the_whole_height():
     mesh = two_view_solid(front, side, (0.0, 1.0), n=4, segments=8)
     ys = np.unique(np.round(np.asarray(mesh.positions)[:, 1], 4))
     assert len(ys) == 4 and ys.min() >= 0.1 and ys.max() <= 0.2
+
+
+def test_swept_tube_follows_a_rod_that_reaches_across_and_forward():
+    # A rod from (0, 0.5, 0) to (0.8, 0.5, 0.8): across in the front view, forward in the side view.
+    front = np.zeros((100, 100), bool)
+    front[48:53, 50:90] = True                      # x from 0 to 0.8 on a (-1, 1) range
+    side = np.zeros((100, 100), bool)
+    side[48:53, 10:50] = True                       # z from 0.8 down to 0 (the first column is z_max)
+    mesh = swept_tube(front, side, (0.0, 1.0), anchor=(0.0, 0.5, 0.0), samples=16, segments=8)
+    p = np.asarray(mesh.positions)
+    assert abs(p[:, 0].max() - 0.8) < 0.08 and abs(p[:, 2].max() - 0.8) < 0.08
+    # A slab would fill the square: the rod stays near the diagonal x = z.
+    assert np.abs(p[:, 0] - p[:, 2]).max() < 0.15

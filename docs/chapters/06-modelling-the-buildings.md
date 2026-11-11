@@ -649,6 +649,13 @@ hole inside the silhouette, and a hole must not pinch the solid. Heights where
 either mask is empty are skipped. `silhouette` projects a mesh back into a
 view's mask, so the solid can be compared with the drawing it came from.
 
+A limb that reaches across and forward at once, an outstretched arm or an
+armrest on its post, is not a stack of sections: `two_view_solid` fills the
+rectangle of its two spans and makes a slab. `swept_tube` takes the part's
+centreline in each view, matches the two by their position along the part
+(from the end nearest an `anchor` such as the body's centre) and sweeps a tube
+whose radius is the mean of the two widths.
+
 A textured part needs somewhere to put the picture. `view_atlas` takes parts
 named in a mapping, sends every face to the view among `views` whose direction
 is closest to its normal, and projects its vertices orthographically in that
