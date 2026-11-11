@@ -563,3 +563,48 @@ Image.fromarray(engine.render_frame(supersample=1))
 Every number in `CarParams` is a dial: a longer wheelbase moves the rear axle and
 its arch, a lower `tail_top` rakes the hatch, `headlamp="round"` swaps the lamp
 outline. Detail comes later, from smoothing and subdivision on the same parts.
+
+## Assets from an image model
+
+Some of the modelling is a drawing before it is a mesh: a blueprint of each
+orthographic view, then the albedo, normal, roughness and emission maps that
+texture it. `manifoldx.imagegen` asks an image model for those pictures and keeps
+the money in one place.
+
+`ImageModel` is the protocol every model answers: a `name`, a `cost` in dollars
+for the last call (or `None`), and `generate(prompt, images=(), aspect="1:1",
+size="1K")`, which returns an RGB `uint8` array. `OpenRouterImage` reaches any
+image model OpenRouter serves, with the key from `key`, from a `key_file`, or
+from `OPENROUTER_API_KEY`; the key is never written to the log or to an error.
+It posts the prompt and any reference pictures as PNG data URLs, asks for
+`modalities: ["image", "text"]` and an `image_config` holding the aspect ratio
+and size, and retries once without `image_config` for a model that refuses it.
+Every call appends `time, model, out_name, cost` to the CSV file given as `log`;
+with `budget`, a call whose log total has already reached that many dollars
+raises `BudgetExceeded` before anything is sent.
+
+```python
+from manifoldx.imagegen import OpenRouterImage, blueprint
+
+model = OpenRouterImage("google/gemini-3-pro-image-preview",
+                        key_file=".openrouter", log="assets/cost.csv", budget=5.0)
+wheel = model.generate(blueprint("wheel", "front",
+                                 {"rim": (200, 0, 0), "tyre": (20, 20, 20)}),
+                       aspect="1:1", size="2K", out_name="wheel_front.png")
+```
+
+`HttpImage` talks to the FLUX.2 klein service on the machine instead: it posts
+`{prompt, refs, width, height, seed}` to `/generate` and reads `{image:
+data-url}` back, with the bearer token, when one is needed, read from
+`token_file`. The aspect ratio and size become the local service's pixel width
+and height.
+
+The prompts are functions so a pipeline states each picture's rules once.
+`blueprint(part, view, palette, notes="")` gives one orthographic view drawn in
+the palette's flat colours with hard edges, a white background and no text.
+`albedo(view, palette_meaning, notes="")` asks for the flat colour texture and
+says what each colour means. `normal_map()` asks for a tangent-space normal map
+in OpenGL convention, flat at 128, 128, 255. `roughness_map(materials)` asks for
+a grayscale map, white rough and black smooth, with a value per material.
+`emission_map(lit)` makes the lit parts white on black. `edit(change, keep)`
+changes one thing and keeps the canvas and the other outlines pixel for pixel.
