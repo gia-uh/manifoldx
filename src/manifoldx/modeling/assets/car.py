@@ -113,6 +113,10 @@ class CarParams:
     handles: bool = True  # a chrome bar on each door; leave it out when a texture paints the handles
     door_strip: bool = False  # a black strip with a chrome line low on the doors
     fog_rings: bool = False  # a lit ring at each end of the grille
+    # A pickup: behind the cab the body is an open bed. Its sides rise to rails a little above the belt; give the
+    # profile its rail height from `hatch_u` on (`hatch_height`, `tail_top`). The rear end is the tailgate.
+    bed_u: float | None = None  # where the bed starts, behind the cab; None for a closed body
+    bed_floor: float = 0.9  # height of the bed's floor, above the rear wheel arches
     # Resolution and shading.
     sections: int = 28
     crease: float = 40.0  # degrees: an edge that turns more than this is shaded sharp
@@ -342,6 +346,8 @@ def _body_faces(p: CarParams, u, P, raised):
         um = (u[i] + u[i + 1]) / 2
         for j in range(RING):
             b = _band(j)
+            if p.bed_u is not None and um >= p.bed_u and b >= 7:
+                continue  # the bed is open: only its sides and the rails on them
             side = "r" if P[i, j % RING, 2] + P[i, (j + 1) % RING, 2] > 0 else "l"
             # A material per triangle, from its centroid, so a slanted edge like the A-pillar steps half as coarsely.
             h0, h1 = _hj(j), _hj(j + 1)
@@ -359,7 +365,7 @@ def _body_faces(p: CarParams, u, P, raised):
                     part = f"door_r{side}"
             if 0.035 <= um < p.cowl_u - 0.005 and b >= 6:
                 part = "hood"
-            if um >= p.roof_end_u - 0.01 and b >= 8:
+            if um >= p.roof_end_u - 0.01 and b >= 8 and p.bed_u is None:  # a pickup's cab keeps its rear window
                 part = "hatch"
             a, c, d, e = vid(i, j), vid(i, j + 1), vid(i + 1, j + 1), vid(i + 1, j)
             tris += [(a, c, e), (c, d, e)] if far else [(a, c, d), (a, d, e)]
@@ -392,7 +398,8 @@ def _body_faces(p: CarParams, u, P, raised):
                 for t in quad if k else quad[1:] if sign > 0 else quad[:1]:
                     tris.append(t)
                     mats.append("paint")
-                    parts.append("body")
+                    tailgate = p.bed_u is not None and sign < 0 and min(verts[v][1] for v in t) > p.bed_floor - 0.06
+                    parts.append("hatch" if tailgate else "body")
                     bands.append(-1)
             outer = inner
     verts = np.array(verts)
@@ -891,6 +898,42 @@ def _body_uvs(p: CarParams, u, verts, tris, bands, loft_of):
 # --- the car -------------------------------------------------------------------------------------------------
 
 
+def _bed(p: CarParams, u, P, piece):
+    """The open bed's tub in liner: a floor, the inner walls under the rails, a front wall against the cab and the
+    tailgate's inner face. The rails' inner edge is ring point 7 of each section, on either side."""
+    i0 = int(np.argmax(u >= p.bed_u))
+    rail_r, rail_l, f = P[i0:, 7], P[i0:, RING - 7], p.bed_floor
+    def strip(top, bottom, facing):
+        """Triangles between two matching polylines, turned to face `facing`."""
+        n = len(top)
+        v = np.concatenate([top, bottom])
+        k = np.arange(n - 1)
+        t = np.concatenate([np.stack([k, k + 1, k + n], 1), np.stack([k + 1, k + n + 1, k + n], 1)])
+        return v, _facing(v, t, facing)
+    def down(q):  # straight down to the floor
+        return q * [1, 0, 1] + [0, f, 0]
+    piece("body", "liner", *strip(rail_r, down(rail_r), [0, 0, -1]))
+    piece("body", "liner", *strip(rail_l, down(rail_l), [0, 0, 1]))
+    piece("body", "liner", *strip(down(rail_r), down(rail_l), [0, 1, 0]))
+    # Against the cab: the section's upper part over the rails, down to the floor.
+    ring = P[i0]
+    wall = [ring[j] for j in range(7, RING - 6)] + [down(ring[RING - 7]), down(ring[7])]
+    v = np.array(wall)
+    piece("body", "liner", v, _facing(v, np.array(_triangulate(v[:, [2, 1]])), [-1, 0, 0]))
+    # The tailgate's inner face, a little inside the rear end.
+    right, left = P[-1, 7] + [0.02, 0, 0], P[-1, RING - 7] + [0.02, 0, 0]
+    v = np.array([right, left, down(left), down(right)])
+    piece("hatch", "liner", v, _facing(v, np.array([(0, 1, 2), (0, 2, 3)]), [1, 0, 0]))
+
+
+def _facing(v, t, facing):
+    """Flip the triangles whose normal points away from `facing`."""
+    t = np.asarray(t)
+    n = np.cross(v[t[:, 1]] - v[t[:, 0]], v[t[:, 2]] - v[t[:, 0]])
+    t[n @ np.asarray(facing, float) < 0] = t[n @ np.asarray(facing, float) < 0][:, ::-1]
+    return t
+
+
 def build_car(p: CarParams | None = None) -> Car:
     p = p or CarParams()
     x_front_axle = p.length / 2 - p.front_overhang
@@ -930,6 +973,9 @@ def build_car(p: CarParams | None = None) -> Car:
                          axis=np.array([0.0, 0.0, 1.0]), open_angle=50.0)
     parts["hatch"] = Part("hatch", "hatch", pivot=np.array([xu(p.roof_end_u - 0.01), p.height - p.roof_end_drop, 0.0]),
                           axis=np.array([0.0, 0.0, 1.0]), open_angle=-75.0)
+    if p.bed_u is not None:  # the tailgate: hinged at the bed's floor, it folds down behind the car
+        parts["hatch"] = Part("hatch", "hatch", pivot=np.array([P[-1, :, 0].min(), p.bed_floor - 0.06, 0.0]),
+                              axis=np.array([0.0, 0.0, 1.0]), open_angle=90.0)
 
     # Body faces, split by part and material, one vertex per triangle corner so each face can take its own
     # place in the texture atlas; normals stay smooth across soft bends, taken from the welded skin.
@@ -947,6 +993,8 @@ def build_car(p: CarParams | None = None) -> Car:
                   inner_uv[sel].reshape(-1, 2), -smooth[sel].reshape(-1, 3))
     for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv):
         piece(owner, mat, v, t, uv)
+    if p.bed_u is not None:
+        _bed(p, u, P, piece)
 
     card = p.door_card if isinstance(p.door_card, dict) else None
     if card:

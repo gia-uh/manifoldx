@@ -202,3 +202,19 @@ def test_a_grille_shape_can_carry_chrome():
         pieces = build_car(CarParams(grille_style=bars)).part("body").pieces
         return len(pieces["chrome"].positions) if "chrome" in pieces else 0
     assert chrome("chrome") > chrome("black")  # the bar is drawn in chrome, not dark trim
+
+
+def test_a_bed_is_open_above_its_floor_and_its_tailgate_folds_down_behind():
+    p = CarParams(bed_u=0.7, bed_floor=0.85, roof_end_u=0.66, hatch_u=0.68, hatch_height=1.1, tail_top=1.1)
+    car = build_car(p)
+    x0 = p.length / 2 - p.bed_u * p.length  # where the bed starts
+    skin = car.part("body").pieces["paint"].positions
+    over = skin[(skin[:, 0] < x0 - 0.1) & (abs(skin[:, 2]) < 0.5)]
+    assert (over[:, 1] < 1.0).all()  # nothing spans the bed between the rails
+    floor = car.part("body").pieces["liner"].positions
+    at = floor[(floor[:, 0] < x0 - 0.1) & np.isclose(floor[:, 1], p.bed_floor)]
+    assert np.ptp(at[:, 2]) > 0.8 * p.width  # the bed's floor, in liner, from rail to rail
+    gate = car.part("hatch")
+    shut, open_ = _posed(gate, car.pose()), _posed(gate, car.pose(hatch=1.0))
+    assert open_[:, 0].min() < shut[:, 0].min() - 0.2 and open_[:, 1].max() < shut[:, 1].max() - 0.1
+    assert "glass" not in gate.pieces  # the cab's rear window stays on the body
