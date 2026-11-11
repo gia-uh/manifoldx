@@ -363,7 +363,7 @@ def _centreline(points, samples, anchor):
 
 
 def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.0), samples=32,
-               segments=16, anchor=None, radius="min"):
+               segments=16, anchor=None, radius="min", section="round"):
     """A tube swept along a part's centreline, matched between a front and a left-side mask.
 
     For a limb that reaches across and forward at once (an outstretched arm, an armrest on its post, an arch),
@@ -373,6 +373,11 @@ def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.
     point such as the body's centre, or from the top end), so the tube's point i takes x from the front view, z
     from the side view and y from both. ``radius`` is the two views' smaller half-width there (``"min"``), their
     mean (``"mean"``), or a fixed number of metres — a hanging sleeve or a cloth widens one view or both.
+
+    ``section="drape"`` is for a limb with cloth hanging from it, a robed arm: each ring spans, top to bottom,
+    the heights both views draw at that point of the path (the front's column at its x, the side's at its z),
+    and across only the limb's own thickness (``radius`` as a number, else the thinnest tenth of the part's
+    half-widths), so a sleeve hangs as a curtain under the arm instead of swelling it into a cone.
     """
     front = np.asarray(front, dtype=bool)
     side = np.asarray(side, dtype=bool)
@@ -415,6 +420,12 @@ def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.
         width = np.full(samples, float(radius))
         if width[0] <= 0.0:
             raise ValueError("radius must be positive")
+    if section == "drape":
+        return _draped_tube(front, side, path, np.minimum(fh, sh) if isinstance(radius, str) else width,
+                            None if isinstance(radius, str) else float(radius), (y_bottom, y_top),
+                            (x_min, x_max), (z_min, z_max), segments)
+    if section != "round":
+        raise ValueError("section must be 'round' or 'drape'")
     kernel = np.ones(3) / 3.0                       # a light smoothing of the path and the width
     for j in range(3):
         path[1:-1, j] = np.convolve(path[:, j], kernel, mode="valid")
@@ -446,6 +457,65 @@ def swept_tube(front, side, height_range, x_range=(-1.0, 1.0), z_range=(-1.0, 1.
     p = positions
     volume = np.einsum("ij,ij->i", p[faces[:, 0]], np.cross(p[faces[:, 1]], p[faces[:, 2]])).sum()
     if volume < 0:                                  # faces outward, whatever way the path runs
+        faces = faces[:, ::-1]
+    return Mesh(positions=positions.astype(np.float32), faces=faces.astype(np.uint32)).recompute_normals()
+
+
+def _span(mask, col):
+    """The first and last drawn row of a mask's column, or None when the column is empty or off the mask."""
+    if not 0 <= col < mask.shape[1]:
+        return None
+    rows = np.flatnonzero(mask[:, col])
+    return (rows[0], rows[-1] + 1) if rows.size else None
+
+
+def _draped_tube(front, side, path, halves, thickness, height_range, x_range, z_range, segments):
+    """The rings of a draped limb along ``path``: as tall as both views draw it there, ``thickness`` across."""
+    y_bottom, y_top = height_range
+    rows = front.shape[0]
+    to_y = (y_top - y_bottom) / rows
+    if thickness is None:
+        thickness = float(np.percentile(halves, 10))
+    samples = len(path)
+    centre, tall = np.empty(samples), np.empty(samples)
+    for i, (x, _, z) in enumerate(path):
+        fcol = int((x - x_range[0]) / (x_range[1] - x_range[0]) * front.shape[1])
+        scol = int((z_range[1] - z) / (z_range[1] - z_range[0]) * side.shape[1])
+        spans = [s for s in (_span(front, fcol), _span(side, scol)) if s is not None]
+        if not spans:
+            centre[i], tall[i] = path[i, 1], thickness
+            continue
+        top, bottom = max(s[0] for s in spans), min(s[1] for s in spans)
+        if bottom <= top:                           # the views disagree here: trust the narrower one
+            top, bottom = min(spans, key=lambda s: s[1] - s[0])
+        centre[i] = y_top - (top + bottom) / 2.0 * to_y
+        tall[i] = max((bottom - top) / 2.0 * to_y, thickness)
+    path = np.column_stack([path[:, 0], centre, path[:, 2]])
+    kernel = np.ones(3) / 3.0
+    for values in (path[:, 1], tall):
+        values[1:-1] = np.convolve(values, kernel, mode="valid")
+    along = np.gradient(path[:, [0, 2]], axis=0)
+    along /= np.maximum(np.linalg.norm(along, axis=1, keepdims=True), 1e-12)
+    across = np.column_stack([-along[:, 1], np.zeros(samples), along[:, 0]])  # horizontal, square to the path
+    up = np.array([0.0, 1.0, 0.0])
+    theta = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+    c, s = np.cos(theta), np.sin(theta)
+    c, s = np.sign(c) * np.abs(c) ** 0.8, np.sign(s) * np.abs(s) ** 0.8   # a little squarer than an ellipse
+    rings = [path[i] + thickness * np.outer(c, across[i]) + tall[i] * np.outer(s, up) for i in range(samples)]
+    positions = np.vstack(rings + [path[:1], path[-1:]])
+    first, last = samples * segments, samples * segments + 1
+    faces = []
+    for i in range(samples - 1):
+        for k in range(segments):
+            a, b = i * segments + k, i * segments + (k + 1) % segments
+            faces += [(a, b, b + segments), (a, b + segments, a + segments)]
+    for k in range(segments):
+        faces.append((first, (k + 1) % segments, k))
+        faces.append((last, (samples - 1) * segments + k, (samples - 1) * segments + (k + 1) % segments))
+    faces = np.asarray(faces, dtype=np.int64)
+    volume = np.einsum("ij,ij->i", positions[faces[:, 0]],
+                       np.cross(positions[faces[:, 1]], positions[faces[:, 2]])).sum()
+    if volume < 0:
         faces = faces[:, ::-1]
     return Mesh(positions=positions.astype(np.float32), faces=faces.astype(np.uint32)).recompute_normals()
 

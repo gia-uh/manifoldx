@@ -46,7 +46,7 @@ Each part names a `Builder`:
 | builder | for | options |
 | --- | --- | --- |
 | `two_view` | rounded or boxy parts seen whole from the front and the side: heads, seats, a barrel | `power`, `rings`, `segments`, `fill` |
-| `tube` | limbs and frames that reach across and forward: arms, armrests on a post, arches | `anchor`, `radius`, `samples` |
+| `tube` | limbs and frames that reach across and forward: arms, armrests on a post, arches | `anchor`, `radius`, `samples`, `section` (`"drape"` for a robed arm) |
 | `plate` | flat parts seen whole from one side: fins, signs, a tail | `thickness`, `lean` |
 | `lathe` | turned parts: vases, columns, a lamp | `segments`, `rings` |
 

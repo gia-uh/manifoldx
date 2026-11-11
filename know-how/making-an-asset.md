@@ -142,6 +142,13 @@ a model the command exits 1 on.
   nearest part. Answer it with `attach="nearest part"`; for a limb or an arm,
   give the tube an `anchor`. Check the part's text if the drawings disagree on
   where it starts.
+- **A clean lint is not a right shape.** The lint compares silhouettes in the
+  views that were drawn, and a part can match all of them and still be wrong
+  in depth: a robed arm built as a round tube matches its front and side
+  outlines and still looks like a cone sticking out of the chest. Render the
+  scene from a three-quarter angle and look before calling it done. For a limb
+  with cloth hanging from it, `tube(section="drape")` hangs the sleeve under a
+  thin arm instead of swelling it.
 - **`A-ATTACH`** — info: the build moved a part the distance it names to reach
   the part it attaches to. A move of a centimetre or two is normal; a large one
   says the drawing and the part's text disagree.

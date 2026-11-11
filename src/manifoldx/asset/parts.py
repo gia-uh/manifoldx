@@ -265,13 +265,15 @@ class tube(Builder):
 
     ``anchor`` names the part whose centre orients the path (the core by default); ``radius`` is the two views'
     smaller half-width (``"min"``), their mean (``"mean"``) or a number of metres; ``samples`` is how many rings
-    the path gets.
+    the path gets; ``section="drape"`` hangs cloth under the limb, as tall as both views draw it and only the
+    limb's thickness across (a robed arm), where the default ``"round"`` would swell it into a cone.
     """
 
     requires: ClassVar[tuple[str, ...]] = ("front", "left")
     anchor: str | None = None
     radius: str | float = "min"
     samples: int | None = None
+    section: str = "round"
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -283,13 +285,15 @@ class tube(Builder):
             raise ValueError("radius must be positive")
         if self.samples is not None and int(self.samples) < 2:
             raise ValueError("samples must be at least 2")
+        if self.section not in ("round", "drape"):
+            raise ValueError("section must be 'round' or 'drape'")
 
     def build(self, masks, frame, anchor=None) -> Built:
         pairs, filled, dropped = self._pairs(masks, frame)
         samples = _TUBE_SAMPLES if self.samples is None else int(self.samples)
         origin = np.zeros(3) if anchor is None else np.asarray(anchor, float)
         meshes = [swept_tube(a, b, (0.0, frame.top), samples=samples, segments=_TUBE_SEGMENTS,
-                             anchor=tuple(origin), radius=self.radius,
+                             anchor=tuple(origin), radius=self.radius, section=self.section,
                              x_range=frame.x_range(a.shape[1]), z_range=frame.z_range(b.shape[1]))
                   for a, b in pairs]
         return self._finish(meshes, filled, dropped)

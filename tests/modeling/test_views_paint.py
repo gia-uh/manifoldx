@@ -279,6 +279,28 @@ def test_swept_tube_matches_the_ends_by_thickness_when_the_anchor_sits_mid_part(
     assert hand[:, 2].mean() > 0.25                 # the hand reaches forward, not back to the shoulder
 
 
+def test_swept_tube_drape_hangs_a_sleeve_under_a_thin_arm():
+    # A robed arm reaching across and forward: a thin forearm on top, a sleeve hanging under its first half.
+    front = np.zeros((100, 100), bool)
+    side = np.zeros((100, 100), bool)
+    front[40:43, 50:90] = True                      # the arm, three rows thick
+    side[40:43, 10:50] = True
+    front[43:60, 50:70] = True                      # the sleeve, drawn in both views under the shoulder half
+    side[43:60, 30:50] = True
+    mesh = swept_tube(front, side, (0.0, 1.0), anchor=(0.0, 0.5, 0.0), samples=16, segments=8,
+                      section="drape")
+    p = np.asarray(mesh.positions)[:-2].reshape(16, 8, 3)
+    tall = p[:, :, 1].max(axis=1) - p[:, :, 1].min(axis=1)
+    across = np.linalg.norm(p[:, :, [0, 2]].max(axis=1) - p[:, :, [0, 2]].min(axis=1), axis=1)
+    assert tall[:4].mean() > 0.12                   # the sleeve hangs under the shoulder end
+    assert tall[-4:].mean() < 0.06                  # the hand is only the arm
+    assert across.max() < 0.1                       # and nothing swells it sideways into a cone
+    round_tube = np.asarray(swept_tube(front, side, (0.0, 1.0), anchor=(0.0, 0.5, 0.0), samples=16,
+                                       segments=8).positions)[:-2].reshape(16, 8, 3)
+    assert np.linalg.norm(round_tube[:4, :, [0, 2]].max(axis=1) - round_tube[:4, :, [0, 2]].min(axis=1),
+                          axis=1).mean() > across[:4].mean()
+
+
 def test_fill_rows_takes_the_nearest_row_narrowed_as_the_other_view_narrows():
     mask = np.zeros((40, 40), bool)
     mask[5:25, 10:30] = True                      # the drawn rows, twenty wide
