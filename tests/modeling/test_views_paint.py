@@ -233,3 +233,12 @@ def test_a_whole_template_draws_faces_of_other_islands():
     own, _ = template({"box": box}, atlas, {"box": (200, 0, 0)}, "left")
     full, _ = template({"box": box}, atlas, {"box": (200, 0, 0)}, "left", whole=True)
     assert (full[..., 1] == 0).sum() >= (own[..., 1] == 0).sum() > 0
+
+
+def test_two_view_solid_puts_its_rings_on_the_part_not_the_whole_height():
+    front = np.zeros((100, 20), bool)
+    front[80:90, 5:15] = True
+    side = front.copy()
+    mesh = two_view_solid(front, side, (0.0, 1.0), n=4, segments=8)
+    ys = np.unique(np.round(np.asarray(mesh.positions)[:, 1], 4))
+    assert len(ys) == 4 and ys.min() >= 0.1 and ys.max() <= 0.2

@@ -119,8 +119,14 @@ def two_view_solid(front, side, height_range, n=48, power=2.0, segments=24,
     def z_at(pixel):
         return z_max + (z_min - z_max) * pixel / side_width
 
+    # The rings go where the part is: over the rows drawn in both views, so a short part of a tall object
+    # (a seat, a foot) gets all n of them, ending exactly at its first and last row.
+    both = np.flatnonzero(front.any(axis=1) & side.any(axis=1))
+    if both.size == 0:
+        raise ValueError("front and side have no height where both are drawn")
+    row_y = lambda r: y_top - (y_top - y_bottom) * (r + 0.5) / height  # noqa: E731
     rings, ys = [], []
-    for y in np.linspace(y_top, y_bottom, n):
+    for y in np.linspace(row_y(both[0]), row_y(both[-1]), n):
         row = int(np.clip(np.floor((y_top - y) / (y_top - y_bottom) * height), 0, height - 1))
         cols = np.flatnonzero(front[row])
         zcols = np.flatnonzero(side[row])
