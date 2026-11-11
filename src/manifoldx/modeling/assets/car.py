@@ -656,7 +656,7 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
             u, v = np.asarray(outline, float).T
             across = np.where(abs(u) < ends, u * (gw - (1 - ends) * scale) / ends, np.sign(u) * (gw - (1 - abs(u)) * scale))
             for slab in _slabs(np.column_stack([across, (g0 + g1) / 2 + v * (g1 - g0) / 2]), 0.12):
-                add("lamp" if m == "lit" else "trim", "front", slab, 0.006 + 0.003 * k, least=1)
+                add({"lit": "lamp", "chrome": "chrome"}.get(m, "trim"), "front", slab, 0.006 + 0.003 * k, least=1)
     else:
         add("trim", "front", [(-gw, g0), (gw, g0), (gw * 1.06, g1), (-gw * 1.06, g1)], 0.003)
         if p.fog_rings:

@@ -191,3 +191,14 @@ def test_door_cards_line_the_doors_from_inside_and_a_console_stands_between_the_
     rim = car.part("cabin").pieces["chrome"]
     on_console = (rim.uvs[:, 0] >= s0) & (rim.uvs[:, 0] <= s1) & (rim.uvs[:, 1] >= t0) & (rim.uvs[:, 1] <= t1)
     assert on_console.any() and abs(rim.positions[on_console][:, 2]).max() < 0.15  # its rim, between the seats
+
+
+def test_a_grille_shape_can_carry_chrome():
+    def chrome(mat):
+        bars = {"aspect": 4.0, "ends": 0.6, "layers": [
+            ("black", [(-1, -1), (1, -1), (1, 1), (-1, 1)]),
+            (mat, [(-0.9, -0.1), (0.9, -0.1), (0.9, 0.1), (-0.9, 0.1)]),
+        ]}
+        pieces = build_car(CarParams(grille_style=bars)).part("body").pieces
+        return len(pieces["chrome"].positions) if "chrome" in pieces else 0
+    assert chrome("chrome") > chrome("black")  # the bar is drawn in chrome, not dark trim
