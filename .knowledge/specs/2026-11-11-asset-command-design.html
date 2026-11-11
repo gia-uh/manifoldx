@@ -112,7 +112,7 @@ pre{font-family:var(--font-mono);font-size:12px;line-height:1.55;background:var(
 <main>
 <h1>manifoldx asset: a model from image-model drawings, built and corrected by an agent</h1>
 <div class="meta"><span>.knowledge/specs/2026-11-11-asset-command-design.html</span><span>·</span><span>follows the tools of #227</span></div>
-<p class="lede">An asset is one Python file that names the object, its parts and how each part is built. <code>manifoldx asset</code> draws the blueprints with an image model, builds the meshes, lints them against the drawings and paints them. The lint does not fix anything: it says what is wrong, where, and which options of the file could change it. The agent reads it, chooses one change and runs again, as it does with a score in Euterpe.</p>
+<p class="lede">An asset is one Python file with a class that inherits from <code>Asset</code> and overrides the stages of a pipeline: what to ask the image model for, how to build the scene from the answers, how to paint it. Inside each stage the agent writes any Python and manifoldx code it needs: loops, sub-assets, a house put together from general views and close-ups. A ready subclass, <code>Parts</code>, covers the common case of one object made of named parts. <code>manifoldx asset</code> runs the stages, caches every paid call and lints what comes out. The lint does not fix anything: it says what is wrong, where, and which options of the file could change it. The agent reads it, chooses one change and runs again, as it does with a score in Euterpe.</p>
 
 <h2 id="delivers"><span class="n">01</span>What this delivers</h2>
 <div class="trio">
@@ -141,29 +141,56 @@ pre{font-family:var(--font-mono);font-size:12px;line-height:1.55;background:var(
 <tr><td>The image model's two roles</td><td>Drawings to geometry first, views of the geometry to maps after</td><td class="why"><span class="who">maintainer</span> A part modelled by reading photos looked wrong; a traced blueprint looked right.</td></tr>
 <tr><td>Dependencies</td><td>numpy and the standard library</td><td class="why"><span class="who">maintainer</span> As the rest of manifoldx.</td></tr>
 <tr><td>Normal and other maps</td><td>Computed from the albedo by default; from the image model on request</td><td class="why"><span class="who">maintainer</span> A computed map is registered by construction and free.</td></tr>
-<tr><td>The asset file</td><td>Python, a function <code>asset()</code> returning an <code>Asset</code></td><td class="why"><span class="who q">proposed</span> The same shape as a Euterpe piece; an agent can compute parts in a loop and comment its choices.</td></tr>
+<tr><td>The asset file</td><td>A class that inherits from <code>Asset</code> and overrides the stages draw, build, paint, check, with arbitrary Python and manifoldx code in each</td><td class="why"><span class="who">maintainer</span> A model is a pipeline, not a fixed structure: a house needs general views and details placed by the agent; a statue needs named parts. <code>Parts</code> is the ready subclass for the second.</td></tr>
 <tr><td>Where the object's data lives</td><td>Next to the file: <code>NAME.asset/</code> holds drawings, cache, meshes and reports</td><td class="why"><span class="who q">proposed</span> manifoldx holds no concrete assets; the client keeps its own.</td></tr>
 <tr><td>Rendering stills</td><td>The engine's own render for inspect; Blender only when it is installed</td><td class="why"><span class="who q">proposed</span> inspect must run anywhere; a toon or photo still is a nicety.</td></tr>
 </tbody>
 </table>
 
 <h2 id="file"><span class="n">04</span>The asset file</h2>
-<pre>from manifoldx.asset import Asset, two_view, tube, plate
+<p>An asset is a class with four stages. The command runs them in order and passes each a context <code>c</code> with the tools: paid calls (cached), tracing, builders, placement, expectations for the lint.</p>
+<table class="tbl">
+<thead><tr><th>Stage</th><th>Returns</th><th>What the agent writes there</th></tr></thead>
+<tbody>
+<tr><td>draw(c)</td><td>nothing; the answers stay in the cache</td><td>Which pictures to ask for: reference, views, blueprints, close-ups of details, a plan of a room. <code>c.image(name, prompt, refs, aspect)</code> asks once and returns the picture on every later run.</td></tr>
+<tr><td>build(c)</td><td>a <code>Scene</code>: named meshes with their transforms and materials</td><td>Any manifoldx code: trace a blueprint, build parts with the builders, loft, boolean, sculpt, place furniture read from a plan in a loop, add a sub-asset. <code>c.expect(view, mask, names)</code> tells the lint what a drawing says the camera should see.</td></tr>
+<tr><td>paint(c, scene)</td><td>textures per mesh</td><td>Templates and albedo calls for the views it chooses, maps computed or asked for.</td></tr>
+<tr><td>check(c, scene)</td><td>extra findings</td><td>Checks of its own on top of the standard lint: a door that must open, a roof that must cover the walls.</td></tr>
+</tbody>
+</table>
+<pre>from manifoldx.asset import Asset, Parts, two_view, tube
+from manifoldx.modeling import trace, views
 
-def asset():
-    a = Asset("statue", desc="a bronze seated woman with her arms stretched out, on a granite pedestal",
-              photos=["photos/front.png", "photos/three-quarter.png"], height=1.0,
-              model="google/gemini-2.5-flash-image", align=["head", "body", "arms", "throne"])
-    a.part("head", "yellow", "the woman's head with her hair")
-    a.part("body", "orange", "her body in its long robe, seated", build=two_view(power=2.5))
-    a.part("arms", "green", "each outstretched arm with its sleeve",
-           build=tube(anchor="body", attach="body", radius="min"))
-    a.part("throne", "blue", "the throne she sits on", build=two_view(power=5))
-    a.part("pedestal", "magenta", "the granite pedestal", build=two_view(power=8, views=("front", "left")))
-    a.notes(left="her front faces the LEFT edge; one arm points at the viewer")
-    a.paint(front="dark bronze with a green patina; ALMA MATER carved on the pedestal", back="...", left="...")
-    return a</pre>
-<p>A part is a name, a code colour (from a fixed palette of eight), the sentence the blueprint prompt uses for it, and a builder. Notes per view go into the drawing prompts; paint details into the albedo prompts. Nothing else is needed: defaults cover the rest.</p>
+
+class Statue(Parts):                         # the declarative case: one object, named parts
+    desc = "a bronze seated woman with her arms stretched out, on a granite pedestal"
+    photos = ["photos/front.png", "photos/three-quarter.png"]
+    model, height, align = "google/gemini-2.5-flash-image", 1.0, ["head", "body", "arms", "throne"]
+
+    def parts(self, p):
+        p.add("head", "yellow", "the woman's head with her hair")
+        p.add("body", "orange", "her body in its long robe, seated", build=two_view(power=2.5))
+        p.add("arms", "green", "each outstretched arm", build=tube(anchor="body", attach="body"))
+        p.add("pedestal", "magenta", "the granite pedestal", build=two_view(power=8, views=("front", "left")))
+
+
+class House(Asset):                          # the open case: a pipeline the agent writes
+    def draw(self, c):
+        c.image("plan", "a floor plan of a small two-room house, walls in black, doors in red", aspect="1:1")
+        for side in ("front", "left", "back", "right"):
+            c.image(f"facade-{side}", f"the {side} facade of that house, orthographic", refs=["plan"])
+        c.image("door", "a close-up of the front door, straight on", refs=["facade-front"])
+
+    def build(self, c):
+        walls = trace.contours(c.mask("plan", "black"))
+        scene = c.scene()
+        for i, outline in enumerate(walls):
+            scene.add(f"wall{i}", views.extrude(c.metres(outline), depth=2.6))
+        scene.add("door", c.part_from("door", builder=two_view(power=8)),
+                  at=c.locate("facade-front", "red"))
+        c.expect("front", c.mask("facade-front"), names=["wall0", "door"])
+        return scene</pre>
+<p>A stage may call another asset (<code>c.asset(Statue)</code>) and place what it returns, so a scene is made of assets. Nothing maps one to one: a drawing may feed several meshes, a mesh may come from several drawings, and textures follow the views the agent paints.</p>
 
 <h2 id="builders"><span class="n">05</span>Builders and options</h2>
 <table class="tbl">
@@ -224,14 +251,14 @@ def asset():
 
 <h2 id="delivery"><span class="n">09</span>Delivery</h2>
 <ol>
-<li><code>manifoldx.asset</code>: <code>Asset</code>, the part palette and the builders as data, from the prototype runner.</li>
+<li><code>manifoldx.asset</code>: the <code>Asset</code> base class and its stages, the context <code>c</code> (cached <code>image</code>, <code>mask</code>, <code>metres</code>, <code>scene</code>, <code>expect</code>, <code>asset</code>), and the <code>Parts</code> subclass with the builders, from the prototype runner.</li>
 <li>The common options: <code>views</code>, <code>attach</code>, <code>keep</code>, <code>grid</code>, <code>mirror</code>; the lathe builder.</li>
 <li>Lint with codes, levels, numbers and hints; <code>--json</code>; exit codes.</li>
 <li>inspect: overlays, groups image, <code>summary.txt</code>.</li>
 <li>draw and paint with the cache under <code>NAME.asset/</code> and the budget.</li>
 <li>The <code>manifoldx asset</code> command and its book section.</li>
 <li><code>know-how/making-an-asset.md</code>: the loop, how to read each code, and the lessons of the prototype (one view per call, view drawing before blueprint, notes per view, the back view drawn mirrored, thin attachments out of blueprints, which models to use).</li>
-<li>Two examples drawn from text alone, so no photo or character rights are involved: a hydrant and an armchair.</li>
+<li>Three examples drawn from text alone, so no photo or character rights are involved: a hydrant and an armchair as <code>Parts</code>, and a small house as an open <code>Asset</code> built from a plan, facades and a close-up.</li>
 </ol>
 
 <h2 id="testing"><span class="n">10</span>Testing</h2>
