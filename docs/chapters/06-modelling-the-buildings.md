@@ -631,3 +631,59 @@ check = redraw(wheel, (drawing.shape[1], drawing.shape[0]), palette)
 print(iou(np.any(check != 255, axis=-1), np.any(drawing != 255, axis=-1)))
 wheel.save("wheel.json")
 ```
+
+A traced shape becomes a solid, or a set of views becomes a whole part.
+`extrude` sweeps a closed outline in the XY plane along z into a prism, its
+two caps triangulated by ear clipping, which also handles a concave outline
+such as a grille. When there is a front drawing and a side drawing instead,
+`two_view_solid` lofts between them: both masks share their rows, each of `n`
+heights gives an x interval from the front mask and a z interval from the
+left-side mask, and the section is a superellipse inscribed in that rectangle,
+with `power=2` an ellipse and larger values squarer. `height_range`,
+`x_range` and `z_range` say which metres the masks cover — row 0 is the top,
+the front mask's first column is `x_min`, and the side mask's first column is
+`z_max` because the object faces the front-view camera, so its side image's
+columns run toward `-z`. A section spans the first to the last drawn pixel of
+a row, not its widest unbroken run: a part drawn on top of another leaves a
+hole inside the silhouette, and a hole must not pinch the solid. Heights where
+either mask is empty are skipped. `silhouette` projects a mesh back into a
+view's mask, so the solid can be compared with the drawing it came from.
+
+A textured part needs somewhere to put the picture. `view_atlas` takes parts
+named in a mapping, sends every face to the view among `views` whose direction
+is closest to its normal, and projects its vertices orthographically in that
+view. The views become `Island` values in an `Atlas`: each island holds its
+rectangle in pixels, the view's frame in metres, and the atlas holds the
+metres per pixel it used. All islands share that scale unless `texel` asks for
+another, so texel density is even across the part. The `Atlas` also carries a
+split mesh per part, with a vertex duplicated where its faces land in different
+islands, so every vertex has one UV. `template` draws one island flat: it
+rasterises the island's triangles with a depth buffer, nearest face winning,
+and returns the image and an integer map of the material index, white outside.
+That image is what an image model is asked to paint.
+
+`paste_island` brings the answer back: it resizes the model's picture to the
+padded canvas, crops the island out at the offset `pad_to_aspect` returned and
+writes it into the atlas rectangle. `kept_outline` compares the non-white
+pixels of the answer with the template as an IoU, so a model that moved or
+lost the outline is caught before it is used. `clean` repairs a painted
+island: a white hole left inside a region becomes that region's flat colour,
+and `tone` scales the whole island until the median of one region reaches the
+colour asked for. `bleed` grows each region's colours into its background by a
+few pixels, which keeps a seam filter from mixing in white. `normal_from_albedo`
+derives a tangent-space normal map from the picture itself: a thin line darker
+than its surroundings becomes a groove, and its smoothed relief differentiates
+into tilted normals, flat blue where the picture is flat. `flip_normal_x`
+inverts the red channel for an island mirrored across its seam.
+
+```python
+from manifoldx.modeling.paint import bleed, clean, kept_outline, normal_from_albedo, paste_island
+from manifoldx.modeling.views import extrude, silhouette, template, two_view_solid, view_atlas
+
+solid = two_view_solid(front, side, height_range=(0.0, 0.9),
+                       x_range=(-0.6, 0.6), z_range=(-0.4, 0.4))
+atlas = view_atlas({"body": solid}, ["front", "back", "left", "right", "top"],
+                   size=(1024, 1024))
+paint, regions = template({"body": solid}, atlas, {"body": (190, 190, 195)}, "front")
+print(kept_outline(paint, paint))
+```

@@ -33,6 +33,7 @@ from manifoldx.modeling.assets.lamps import LAMPS
 from manifoldx.modeling.assets.mirrors import MIRRORS
 from manifoldx.modeling.assets.steering import STEERING
 from manifoldx.modeling.assets.wheels import WHEELS
+from manifoldx.modeling._poly import _triangulate
 from manifoldx.modeling.mesh import Mesh
 
 
@@ -229,34 +230,6 @@ def _revolve(profile, segments, side):
             j0, j1 = ((s + 1) % segments) * n + k, ((s + 1) % segments) * n + (k + 1) % n
             tris += [(i0, j0, j1), (i0, j1, i1)] if side > 0 else [(i0, j1, j0), (i0, i1, j1)]
     return v, tris
-
-
-def _triangulate(poly):
-    """Ear clipping of a simple 2-D polygon; returns index triples."""
-    poly = np.asarray(poly, float)
-    idx = list(range(len(poly)))
-    area = np.sum(poly[:, 0] * np.roll(poly[:, 1], -1) - np.roll(poly[:, 0], -1) * poly[:, 1])
-    if area < 0:
-        idx.reverse()
-    def cross(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-    tris = []
-    while len(idx) > 3:
-        for k in range(len(idx)):
-            i0, i1, i2 = idx[k - 1], idx[k], idx[(k + 1) % len(idx)]
-            a, b, c = poly[i0], poly[i1], poly[i2]
-            if cross(a, b, c) <= 1e-12:
-                continue
-            if any(cross(a, b, poly[j]) >= 0 and cross(b, c, poly[j]) >= 0 and cross(c, a, poly[j]) >= 0
-                   for j in idx if j not in (i0, i1, i2)):
-                continue
-            tris.append((i0, i1, i2))
-            idx.pop(k)
-            break
-        else:
-            break
-    tris += [(idx[0], idx[k], idx[k + 1]) for k in range(1, len(idx) - 1)]
-    return tris
 
 
 # --- the body ------------------------------------------------------------------------------------------------
