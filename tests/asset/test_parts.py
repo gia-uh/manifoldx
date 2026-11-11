@@ -391,3 +391,36 @@ def test_a_plate_keeps_its_own_name_while_instances_are_numbered():
 
     assert _instance_names(_Added("tail", "cyan", "a tail", plate()), (None,)) == ["tail"]
     assert _instance_names(_Added("arms", "blue", "an arm", two_view()), (None, None)) == ["arms1", "arms2"]
+
+
+def test_draw_asks_for_a_reference_then_each_view_and_its_blueprint(tmp_path):
+    class FakeImage:
+        name = "fake/parts"
+        cost = 0.0
+
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, prompt, images=(), aspect="1:1", size="1K"):
+            self.calls.append({"prompt": prompt, "images": list(images), "aspect": aspect})
+            return np.full((16, 16, 3), 255, np.uint8)
+
+    class Bucket(Parts):
+        desc, height, core = "a red bucket", 1.0, "body"
+        notes = {"front": "the handle points at the viewer"}
+
+        def parts(self, p):
+            p.add("body", "orange", "the round body")
+            p.add("rim", "yellow", "the rim on top")
+
+    model = FakeImage()
+    Bucket().run(cache=tmp_path / "bucket.asset", stages=("draw",), model=model)
+    assert model.calls[0]["prompt"].startswith("Reference for a 3D model: a red bucket, the whole object")
+    assert len(model.calls) == 7                       # reference, then a view and a blueprint for three views
+    assert len(model.calls[0]["images"]) == 0
+    assert len(model.calls[1]["images"]) == 1 and len(model.calls[2]["images"]) == 1
+    blueprint = model.calls[2]["prompt"]
+    assert "- orange (255, 140, 0) = the round body;" in blueprint
+    assert "- yellow (255, 220, 0) = the rim on top;" in blueprint
+    assert "the handle points at the viewer" in blueprint
+    assert "BLUEPRINT" in blueprint and "pure white" in blueprint
