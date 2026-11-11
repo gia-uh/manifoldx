@@ -50,6 +50,7 @@ Each part names a `Builder`:
 | `plate` | flat parts seen whole from one side: fins, signs, a tail | `thickness`, `lean` |
 | `lathe` | turned parts: vases, columns, a lamp | `segments`, `rings` |
 | `skeleton` | a figure grown as one piece from joints and bones: a statue, an animal, a plant | `joints`, `bones`, `covers`, `step`, `blend`, `round`, `smooth` |
+| `hull` | a part the drawings give whole, cut along every line of sight: a throne, a block, a crate | `behind` (parts drawn in front of it, per view), `minus` (skeleton parts it is hollowed by), `step`, `smooth` |
 
 Every builder also takes `views` (which drawings say something about the part),
 `attach` (a part it must touch), `keep` (what to do with stray pieces), `grid`
@@ -68,8 +69,9 @@ joint's radius from how wide the drawings are across its bones,
 `skeleton_sdf` joins the bones' `round_cone_sdf` fields with a smooth minimum,
 `hull_sdf` is the visual hull of the drawings (each view's `signed_distance`
 swept along its line of sight), `surface_nets` meshes the zero level of a
-sampled field, `taubin` smooths without shrinking, and `skin` puts them
-together. After a build, `inspect` draws the bones over the blueprints, which
+sampled field, `taubin` smooths without shrinking, `skin` puts them
+together (`skin_field` gives its field for another solid to subtract), and
+`carve` meshes a visual hull alone, which is what `hull` builds. After a build, `inspect` draws the bones over the blueprints, which
 are the asset's `marks`.
 
 ## The hydrant at the kerb

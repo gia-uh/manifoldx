@@ -52,7 +52,17 @@ drawn part spans, in metres, in each view. Then run `inspect` again: the
 overlays draw the bones in dark blue over the blueprints and the `mark` lines
 give each joint's position and fitted radius. Move a joint that sits off its
 drawing, add one where a limb bends, and fix a radius with `(x, y, z, r)` when
-the fit is wrong. A seated figure's lap is a joint at each knee and foot.
+the fit is wrong. A seated figure's lap is a joint at each knee and foot, and a
+joint over the lap when the side view shows grey there: the robe falls from the
+chest to the knees and needs a bone to hang on.
+
+What a figure sits in or stands against is a `hull`: every point all its views
+draw. Two things the silhouettes cannot say are yours to give: which parts are
+drawn in front of it in a view (`behind={"front": ("body", "arms")}`), whose
+pixels it may then take, and which skeleton parts sit inside it
+(`minus=("body",)`), which it is hollowed by. A throne built with `two_view`
+fills straight through the figure, because a section spans the first to the
+last drawn pixel of a row.
 
 ## The loop
 
