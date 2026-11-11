@@ -14,6 +14,14 @@ rules:
       in: "docs/chapters/*.md"
       as: word
 
+  - name: "every class in manifoldx.asset is named in the docs"
+    extract:
+      file: "src/manifoldx/asset/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
   - name: "every class in manifoldx.assets is named in the docs"
     extract:
       file: "src/manifoldx/assets/**/*.py"

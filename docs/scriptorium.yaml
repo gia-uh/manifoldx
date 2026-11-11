@@ -26,6 +26,7 @@ files:
   - chapters/12-a-still-worth-printing.md
   - chapters/13-working-with-an-agent.md
   - chapters/14-the-plaza-end-to-end.md
+  - chapters/15-models-from-drawings.md
 
 outputs:
   site:
