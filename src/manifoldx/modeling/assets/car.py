@@ -9,9 +9,9 @@ booleans.
 Regions are tags on the loft's faces, in its own coordinates (position along the car, band around the section),
 so they follow any shape: glass, pillars, doors, hood and hatch. Small parts that sit on the skin (lamps, grille,
 plate, handles) are decals: flat outlines projected onto the body along a view direction, so a lamp style is
-just an outline. Lamps, the grille, wheels, door mirrors, the dashboard and the steering wheel take a shape: outlines traced from a flat drawing of the real
-part (`assets.lamps`, `assets.grilles`, `assets.wheels`, `assets.mirrors`, `assets.dashboards`,
-`assets.steering`, `assets.doors`, `assets.consoles`), or a plain style built from boxes and ellipses.
+just an outline. Lamps, the grille, wheels, door mirrors, the dashboard, the steering wheel, the door cards and the
+console take a shape: a dict of outlines traced from a flat drawing of the real part, or a plain style built from
+boxes and ellipses. `examples/models/dongfeng_box.py` traces one of each and says how each kind is drawn.
 
 Doors, hood and hatch are separate parts with a hinge; wheels spin and the front ones steer. `Car.pose` gives
 each part's transform for an opening, a wheel turn and a steering angle.
@@ -25,14 +25,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from manifoldx.modeling.assets.consoles import CONSOLES
-from manifoldx.modeling.assets.dashboards import DASHBOARDS
-from manifoldx.modeling.assets.doors import DOORS
-from manifoldx.modeling.assets.grilles import GRILLES
-from manifoldx.modeling.assets.lamps import LAMPS
-from manifoldx.modeling.assets.mirrors import MIRRORS
-from manifoldx.modeling.assets.steering import STEERING
-from manifoldx.modeling.assets.wheels import WHEELS
 from manifoldx.modeling._poly import _triangulate
 from manifoldx.modeling.mesh import Mesh
 
@@ -43,31 +35,31 @@ class CarParams:
     the front (0) to the rear (1)."""
 
     # Package: the spec sheet.
-    length: float = 4.03
-    width: float = 1.81
-    height: float = 1.57
-    wheelbase: float = 2.66
-    front_overhang: float = 0.72
-    track: float = 1.55
-    wheel_radius: float = 0.318
+    length: float = 4.25
+    width: float = 1.78
+    height: float = 1.48
+    wheelbase: float = 2.62
+    front_overhang: float = 0.86
+    track: float = 1.53
+    wheel_radius: float = 0.315
     tyre_width: float = 0.205
     rim_ratio: float = 0.70  # rim radius over wheel radius
     arch_gap: float = 0.045  # between the tyre and the arch
     # Side profile.
-    nose_top: float = 0.75  # top of the nose at the very front
-    hood_front: float = 0.925  # the hood just behind the nose
+    nose_top: float = 0.70  # top of the nose at the very front
+    hood_front: float = 0.87  # the hood just behind the nose
     nose_blunt: float = 0.4  # how much of the rise from nose to hood the face makes in its first 4 cm: 0 is a wedge
     cowl_u: float = 0.29  # where the hood meets the windscreen
-    cowl_height: float = 1.20
+    cowl_height: float = 1.13
     windscreen_u: float = 0.46  # where the windscreen meets the roof
     roof_peak_u: float = 0.56  # where the roof is highest
     roof_end_u: float = 0.78  # where the roof meets the rear glass
     roof_end_drop: float = 0.08
     hatch_u: float = 0.92  # where the rear glass ends
-    hatch_height: float = 1.165
-    tail_top: float = 0.91  # top of the tail at the rear end
-    belt_front: float = 1.03  # belt (bottom of the side glass) at the cowl
-    belt_rear: float = 1.11  # and at the end of the roof
+    hatch_height: float = 1.10
+    tail_top: float = 0.86  # top of the tail at the rear end
+    belt_front: float = 0.97  # belt (bottom of the side glass) at the cowl
+    belt_rear: float = 1.05  # and at the end of the roof
     sill: float = 0.20  # underside between the wheels
     bumper_bottom_front: float = 0.36
     bumper_bottom_rear: float = 0.35
@@ -90,37 +82,37 @@ class CarParams:
     black_pillars: bool = True
     roof: str = "paint"  # or "black"
     # Parts.
-    # A lamp is a shape from `lamps.LAMPS` by name (or a shape of your own), or one of the plain outlines. A shape
+    # A lamp is a shape (a dict, see the module's docstring) or one of the plain outlines. A shape
     # is placed by its anchor, sized in its own plane and turned `yaw` degrees from straight ahead toward its side
     # of the car, so a lamp on a corner is drawn as it is seen straight on.
-    headlamp: str | dict = "wedge"  # a shape, or "almond", "round" or "bar"
-    headlamp_center: tuple = (0.505, 0.826)  # (lateral, height) of the lamp's anchor: here, the end of the light bar
-    headlamp_size: tuple = (0.36, 0.185)
-    headlamp_yaw: float = 30.0
-    drl_bar: bool = True
-    drl_height: float = 0.826
+    headlamp: str | dict = "almond"  # a shape, or "almond", "round" or "bar"
+    headlamp_center: tuple = (0.56, 0.78)  # (lateral, height) of the lamp's anchor: here, the end of the light bar
+    headlamp_size: tuple = (0.30, 0.14)
+    headlamp_yaw: float = 20.0
+    drl_bar: bool = False
+    drl_height: float = 0.78
     drl_half_length: float = 0.505  # to the inner edge of the headlamps, whose own strip carries it on
-    grille: tuple = (0.83, 0.37, 0.50)  # half-width, bottom, top
-    grille_style: str | dict = "smile"  # a shape, or "bar"
-    taillamp: str | dict = "ring"  # a shape, or "pill"
-    taillamp_center: tuple = (0.68, 1.03)
-    taillamp_size: tuple = (0.33, 0.22)
-    taillamp_yaw: float = 35.0
-    spoiler: bool = True
+    grille: tuple = (0.60, 0.27, 0.43)  # half-width, bottom, top
+    grille_style: str | dict = "bar"  # a shape, or "bar"
+    taillamp: str | dict = "pill"  # a shape, or "pill"
+    taillamp_center: tuple = (0.66, 0.97)
+    taillamp_size: tuple = (0.26, 0.16)
+    taillamp_yaw: float = 25.0
+    spoiler: bool = False
     mirrors: bool = True
-    mirror: str | dict = "pod"  # a shape, or "box"
+    mirror: str | dict = "box"  # a shape, or "box"
     mirror_size: tuple = (0.20, 0.165)  # across and up, stalk included, as seen from ahead of the car
     mirror_yaw: float = 22.0  # degrees its outer end is swept back
-    wheel: str | dict = "swirl"  # a shape, or "spokes"
+    wheel: str | dict = "spokes"  # a shape, or "spokes"
     spokes: int = 5  # of the plain wheel
-    dash: str | dict = "deck"  # a shape, or "box"
-    steering: str | dict = "tri"  # a shape, or "ring"
-    door_card: str | dict | None = "quilt"  # a shape, or None for bare doors
-    console: str | dict | None = "tray"  # a shape, or None for no console
+    dash: str | dict = "box"  # a shape, or "box"
+    steering: str | dict = "ring"  # a shape, or "ring"
+    door_card: dict | None = None  # a shape, or None for bare doors
+    console: dict | None = None  # a shape, or None for no console
     cladding: bool = False  # black lower body
     handles: bool = True  # a chrome bar on each door; leave it out when a texture paints the handles
-    door_strip: bool = True  # a black strip with a chrome line low on the doors
-    fog_rings: bool = True  # a lit ring at each end of the grille
+    door_strip: bool = False  # a black strip with a chrome line low on the doors
+    fog_rings: bool = False  # a lit ring at each end of the grille
     # Resolution and shading.
     sections: int = 28
     crease: float = 40.0  # degrees: an edge that turns more than this is shaded sharp
@@ -636,7 +628,7 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         return [(cx + a * np.sign(np.cos(v)) * abs(np.cos(v)) ** 0.5, cy + b * np.sign(np.sin(v)) * abs(np.sin(v)) ** 0.5)
                 for v in np.linspace(0, 2 * np.pi, 20, endpoint=False)]
 
-    head = LAMPS.get(p.headlamp) if isinstance(p.headlamp, str) else p.headlamp
+    head = p.headlamp if isinstance(p.headlamp, dict) else None
     if head:
         unit(head, 1, p.headlamp_center, p.headlamp_size, p.headlamp_yaw, "headlamp", "lamp")
     else:
@@ -654,7 +646,7 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         h, w = p.drl_height, p.drl_half_length
         add("lamp", "front", [(-w, h - 0.009), (w, h - 0.009), (w, h + 0.009), (-w, h + 0.009)], 0.010)
     gw, g0, g1 = p.grille
-    grille = GRILLES.get(p.grille_style) if isinstance(p.grille_style, str) else p.grille_style
+    grille = p.grille_style if isinstance(p.grille_style, dict) else None
     if grille:
         # The shape is as tall as the grille. Its ends keep their proportions and its middle takes up the length.
         scale, ends = (g1 - g0) / 2 * grille["aspect"], grille["ends"]
@@ -670,7 +662,7 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         if p.fog_rings:
             lens("lamp", "front", pill(0.74 * gw, (g0 + g1) / 2, 0.20 * gw, 0.36 * (g1 - g0)), rim=0.78, core=0.0)
     add("plate", "front", [(-0.26, 0.47), (0.26, 0.47), (0.26, 0.59), (-0.26, 0.59)])
-    tail = LAMPS.get(p.taillamp) if isinstance(p.taillamp, str) else p.taillamp
+    tail = p.taillamp if isinstance(p.taillamp, dict) else None
     if tail:
         unit(tail, -1, p.taillamp_center, p.taillamp_size, p.taillamp_yaw, "taillamp", "tail")
     else:
@@ -701,7 +693,7 @@ def _wheel(p: CarParams, x, side):
                      (r - 0.035, w / 2), (rr, w / 2)], 32, side)
     rim = _revolve([(0.0, w / 2 - 0.05), (rr, w / 2 - 0.05), (rr, -w / 2 + 0.03), (0.0, -w / 2 + 0.03)], 32, side)
     out = {"tyre": [tyre], "rim": [rim]}
-    shape = WHEELS.get(p.wheel) if isinstance(p.wheel, str) else p.wheel
+    shape = p.wheel if isinstance(p.wheel, dict) else None
     if shape:
         names = {"dark": "alloy", "metal": "spoke"}
         top, dish = w / 2 - 0.012, w / 2 - 0.05
@@ -956,7 +948,7 @@ def build_car(p: CarParams | None = None) -> Car:
     for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv):
         piece(owner, mat, v, t, uv)
 
-    card = DOORS.get(p.door_card) if isinstance(p.door_card, str) else p.door_card
+    card = p.door_card if isinstance(p.door_card, dict) else None
     if card:
         # The card is fitted to each door, between the floor and the window sill, and dropped on the inside of the
         # skin from the middle of the cabin. Front and rear doors, left and right, share one picture.
@@ -978,7 +970,7 @@ def build_car(p: CarParams | None = None) -> Car:
     if p.mirrors:
         uu = p.cowl_u + 0.05
         ring = sections_at(uu)[:HALF]
-        shape = MIRRORS.get(p.mirror) if isinstance(p.mirror, str) else p.mirror
+        shape = p.mirror if isinstance(p.mirror, dict) else None
         for side, s in (("l", -1), ("r", 1)):
             if shape:
                 zr = np.interp(p.belt_front + 0.01, ring[:, 1], ring[:, 2])  # the skin at the stalk's foot
@@ -1122,7 +1114,7 @@ def _cabin(p: CarParams, parts, piece, xu):
 
     v, t = _box([(xc + xu(p.roof_end_u)) / 2, floor - 0.02, 0.0], (xc - xu(p.roof_end_u) - 0.2, 0.04, inner))
     piece("cabin", "carpet", v, t, _island("carpet", (xc - v[:, 0]) / (xc - xu(p.roof_end_u)), (wide / 2 - v[:, 2]) / wide))
-    dash = DASHBOARDS.get(p.dash) if isinstance(p.dash, str) else p.dash
+    dash = p.dash if isinstance(p.dash, dict) else None
     if dash:
         for mat, v, t, n, shown in _dash(dash, inner, p.belt_front + 0.03, xc - 0.46, xc - 0.02, p.crease):
             piece("cabin", mat, v, t, seen(v, "dash", 1, *dash_y) if shown else plain(v), n)
@@ -1134,7 +1126,7 @@ def _cabin(p: CarParams, parts, piece, xu):
         box("seat", [xb - 0.08, floor + 0.98, z], (0.10, 0.18, 0.28), pitch=0.25)
     box("seat", [xb - 0.55, floor + 0.24, 0.0], (0.48, 0.12, inner - 0.08), island="bench", y=(floor, floor + 0.9))
     box("seat", [xb - 0.84, floor + 0.55, 0.0], (0.12, 0.58, inner - 0.08), pitch=0.25, island="bench", y=(floor, floor + 0.9))
-    tray = CONSOLES.get(p.console) if isinstance(p.console, str) else p.console
+    tray = p.console if isinstance(p.console, dict) else None
     if tray:
         # The console stands between the front seats: its outline made solid, on a foot, with its layers on top.
         # From above it is its picture; its sides and its foot are plain.
@@ -1170,7 +1162,7 @@ def _cabin(p: CarParams, parts, piece, xu):
     to_x = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])  # the wheel's axis (Z) turned to point along -X
     tilt = np.array([[np.cos(lean), -np.sin(lean), 0], [np.sin(lean), np.cos(lean), 0], [0, 0, 1]])
     hub = np.array([xc - 0.62, p.belt_front - 0.05, -seat_z])
-    wheel = STEERING.get(p.steering) if isinstance(p.steering, str) else p.steering
+    wheel = p.steering if isinstance(p.steering, dict) else None
     if wheel:
         # The wheel stands in front of the dashboard, so it is not drawn into that view: it has a picture of its
         # own, straight on, in the free part of the island under the dashboard.

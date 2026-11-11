@@ -1,6 +1,13 @@
+import importlib.util
+from pathlib import Path
+
 import numpy as np
 
 from manifoldx.modeling.assets.car import CarParams, build_car
+
+_spec = importlib.util.spec_from_file_location("dongfeng_box", Path(__file__).parents[2] / "examples/models/dongfeng_box.py")
+box = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(box)  # the traced shapes live in this recipe
 
 
 def _verts(part):
@@ -95,15 +102,14 @@ def test_every_face_sits_in_one_island_of_the_atlas():
 
 
 def test_a_wheel_shape_stands_inside_the_rim_and_both_sides_wear_one_picture():
-    p = CarParams()
+    p = CarParams(wheel=box.SWIRL)
     car = build_car(p)
     left, right = car.part("wheel_fl"), car.part("wheel_fr")
     face = left.pieces["alloy"].positions
     assert np.hypot(*(face[:, :2] - left.pivot[:2]).T).max() <= p.wheel_radius * p.rim_ratio * 1.01
     assert abs(face[:, 2] - left.pivot[2]).max() < p.tyre_width / 2  # behind the tyre's sidewall
     assert np.allclose(left.pieces["alloy"].uvs, right.pieces["alloy"].uvs, atol=1e-6)
-    plain = build_car(CarParams(wheel="spokes", mirror="box", grille_style="bar", grille=(0.60, 0.27, 0.43), dash="box",
-                                steering="ring", door_card=None, console=None))
+    plain = build_car(CarParams(fog_rings=True))  # the defaults are the plain parts
     assert "seat" not in plain.part("door_fl").pieces  # no leather on a bare door
     assert "spoke" in plain.part("wheel_fl").pieces and "alloy" not in plain.part("wheel_fl").pieces
     assert len(_low_lamps(plain)) > 0
@@ -112,11 +118,10 @@ def test_a_wheel_shape_stands_inside_the_rim_and_both_sides_wear_one_picture():
 
 def test_a_mirror_shape_faces_outward_and_fills_its_size():
     from manifoldx.modeling.assets.car import _mirror
-    from manifoldx.modeling.assets.mirrors import MIRRORS
 
     size = (0.20, 0.165)
     for side in (1, -1):
-        pieces = _mirror(MIRRORS["pod"], size, side)
+        pieces = _mirror(box.POD, size, side)
         shell = [(v, t) for m, v, t, _, _ in pieces if m in ("paint", "black")]
         volume = sum(np.einsum("ij,ij->i", v[t[:, 0]], np.cross(v[t[:, 1]], v[t[:, 2]])).sum() / 6 for v, t in shell)
         assert volume > 0  # the faces look out of the shell, not into it
@@ -135,16 +140,16 @@ def _low_lamps(car):
 def test_a_grille_shape_fills_its_box_and_keeps_its_ends():
     from manifoldx.modeling.assets.car import _slabs
 
-    p = CarParams()
+    p = CarParams(grille_style=box.SMILE, grille=(0.83, 0.37, 0.50), fog_rings=True)
     half, bottom, top = p.grille
     rings = _low_lamps(build_car(p))
     assert abs(abs(rings[:, 2]).max() - half) < 0.01
     assert bottom - 0.01 < rings[:, 1].min() and rings[:, 1].max() < top + 0.01
     # A shorter grille moves its rings together; it does not squeeze them.
-    shorter = _low_lamps(build_car(CarParams(grille=(half - 0.1, bottom, top))))
+    shorter = _low_lamps(build_car(CarParams(grille_style=box.SMILE, grille=(half - 0.1, bottom, top), fog_rings=True)))
     assert abs(abs(shorter[:, 2]).max() - (half - 0.1)) < 0.01
     assert abs(np.ptp(abs(shorter[:, 2])) - np.ptp(abs(rings[:, 2]))) < 0.005
-    assert len(_low_lamps(build_car(CarParams(fog_rings=False)))) == 0
+    assert len(_low_lamps(build_car(CarParams(grille_style=box.SMILE, grille=p.grille)))) == 0  # no fog rings by default
     bar = np.array([(0, 0), (1, 0), (1, 0.1), (0.5, 0.2), (0, 0.1)])
     cut = _slabs(bar, 0.3)
     assert np.isclose(sum(abs(np.sum(q[:, 0] * np.roll(q[:, 1], -1) - np.roll(q[:, 0], -1) * q[:, 1])) / 2 for q in cut), 0.15)
@@ -156,11 +161,9 @@ def _volume(pieces):
 
 def test_a_dashboard_shape_spans_the_cabin_and_its_screens_stand_over_the_deck():
     from manifoldx.modeling.assets.car import _dash, _steering
-    from manifoldx.modeling.assets.dashboards import DASHBOARDS
-    from manifoldx.modeling.assets.steering import STEERING
 
     width, deck, rear, front = 1.5, 1.06, 0.40, 0.84
-    pieces = _dash(DASHBOARDS["deck"], width, deck, rear, front, 40.0)
+    pieces = _dash(box.DECK, width, deck, rear, front, 40.0)
     solid = np.concatenate([v for m, v, _, _, _ in pieces if m == "dash"])
     assert np.allclose([solid[:, 2].min(), solid[:, 2].max()], [-width / 2, width / 2], atol=0.01)
     assert solid[:, 1].max() <= deck + 1e-6 and abs(solid[:, 0].min() - rear) < 0.01 and solid[:, 0].max() <= front + 1e-6
@@ -168,7 +171,7 @@ def test_a_dashboard_shape_spans_the_cabin_and_its_screens_stand_over_the_deck()
     screens = np.concatenate([v for m, v, _, _, shown in pieces if m == "black" and shown])
     assert screens[:, 1].max() > deck + 0.05 and screens[:, 0].max() < rear  # over the deck, on the cabin's side
     assert {"seat", "chrome"} <= {m for m, *_ in pieces}  # the leather panel and the vent's frame are laid on it
-    wheel = _steering(STEERING["tri"], 0.19)
+    wheel = _steering(box.TRI, 0.19)
     rim = [(v, t) for m, v, t, _ in wheel if m == "dash"]
     assert _volume(rim) > 0 and max(np.hypot(v[:, 0], v[:, 1]).max() for v, _ in rim) < 0.19 * 1.1  # wider than tall
 
@@ -176,7 +179,7 @@ def test_a_dashboard_shape_spans_the_cabin_and_its_screens_stand_over_the_deck()
 def test_door_cards_line_the_doors_from_inside_and_a_console_stands_between_the_seats():
     from manifoldx.modeling.assets.car import ATLAS
 
-    p = CarParams()
+    p = CarParams(door_card=box.QUILT, console=box.TRAY)
     car = build_car(p)
     left, right = car.part("door_fl"), car.part("door_fr")
     leather, skin = right.pieces["seat"], right.pieces["paint"]
