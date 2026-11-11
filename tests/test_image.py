@@ -211,3 +211,10 @@ def test_pad_to_aspect_presets_and_errors():
     assert {"1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16", "21:9"} <= set(ASPECTS)
     with pytest.raises(ValueError):
         pad_to_aspect(np.zeros((4, 4, 3), np.uint8), "5:0")
+
+
+def test_pad_to_aspect_takes_the_nearest_aspect_by_default():
+    from manifoldx.image import nearest_aspect, pad_to_aspect
+    assert nearest_aspect(1920, 1080) == "16:9" and nearest_aspect(300, 410) == "3:4"
+    padded, _ = pad_to_aspect(np.zeros((410, 300, 3), np.uint8))
+    assert padded.shape[:2] == (410, round(410 * 3 / 4))

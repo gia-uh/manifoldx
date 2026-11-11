@@ -215,3 +215,13 @@ def test_flip_normal_x_inverts_red():
     normal = np.array([[[0, 128, 255], [64, 10, 20]]], dtype=np.uint8)
     out = flip_normal_x(normal)
     assert out.tolist() == [[[255, 128, 255], [191, 10, 20]]]
+
+
+def test_two_view_solid_takes_masks_of_different_widths():
+    front = np.zeros((40, 40), bool)
+    front[5:35, 10:30] = True
+    side = np.zeros((40, 80), bool)
+    side[5:35, 20:60] = True
+    mesh = two_view_solid(front, side, (0.0, 1.0), x_range=(-1.0, 1.0), z_range=(-2.0, 2.0))
+    p = np.asarray(mesh.positions)
+    assert abs(p[:, 0].max() - 0.5) < 0.05 and abs(p[:, 2].max() - 1.0) < 0.05

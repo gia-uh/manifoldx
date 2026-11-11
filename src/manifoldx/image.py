@@ -235,18 +235,24 @@ def _aspect_ratio(aspect) -> float:
     return w / h
 
 
-def pad_to_aspect(img, aspect, fill=255):
+def nearest_aspect(width, height):
+    """The name in ``ASPECTS`` whose ratio is closest to ``width / height``."""
+    r = np.log(width / height)
+    return min(ASPECTS, key=lambda n: abs(np.log(ASPECTS[n][0] / ASPECTS[n][1]) - r))
+
+
+def pad_to_aspect(img, aspect=None, fill=255):
     """Pad an image (centred) to ``aspect`` and return it with the offset.
 
     ``aspect`` is a name in ``ASPECTS`` such as ``"16:9"`` or a ``(w, h)``
-    pair. The result is ``(padded, (x0, y0))``, where ``(x0, y0)`` is the
+    pair; ``None`` takes the nearest one (:func:`nearest_aspect`). The result is ``(padded, (x0, y0))``, where ``(x0, y0)`` is the
     position of the original image inside the padded one.
     """
     arr = np.asarray(img)
     if arr.ndim not in (2, 3):
         raise ValueError("images must be (H, W) or (H, W, C)")
-    ratio = _aspect_ratio(aspect)
     height, width = arr.shape[:2]
+    ratio = _aspect_ratio(nearest_aspect(width, height) if aspect is None else aspect)
     if width / height > ratio:
         new_height, new_width = max(height, round(width / ratio)), width
     else:

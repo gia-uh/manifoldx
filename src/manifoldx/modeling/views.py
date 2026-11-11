@@ -83,7 +83,7 @@ def two_view_solid(front, side, height_range, n=48, power=2.0, segments=24,
                    x_range=(-1.0, 1.0), z_range=(-1.0, 1.0)):
     """A solid lofted from a front mask and a left-side mask.
 
-    Both masks are boolean arrays with the same rows; row 0 is the top. For each
+    Both masks are boolean arrays with the same rows (their widths may differ); row 0 is the top. For each
     of ``n`` heights the front mask gives the x interval and the side mask the z
     interval, and the section is a superellipse of exponent ``power`` (2 is an
     ellipse) inscribed in that rectangle. ``height_range=(y_bottom, y_top)``,
@@ -101,10 +101,11 @@ def two_view_solid(front, side, height_range, n=48, power=2.0, segments=24,
         raise ValueError("power must be positive")
     front = np.asarray(front, dtype=bool)
     side = np.asarray(side, dtype=bool)
-    if front.shape != side.shape:
-        raise ValueError("front and side masks must have the same shape")
+    if front.shape[0] != side.shape[0]:
+        raise ValueError("front and side masks must have the same rows")
     height, width = front.shape
-    if height == 0 or width == 0:
+    side_width = side.shape[1]
+    if height == 0 or width == 0 or side_width == 0:
         raise ValueError("the masks are empty")
     y_bottom, y_top = float(height_range[0]), float(height_range[1])
     x_min, x_max = float(x_range[0]), float(x_range[1])
@@ -116,7 +117,7 @@ def two_view_solid(front, side, height_range, n=48, power=2.0, segments=24,
         return x_min + (x_max - x_min) * pixel / width
 
     def z_at(pixel):
-        return z_max + (z_min - z_max) * pixel / width
+        return z_max + (z_min - z_max) * pixel / side_width
 
     rings, ys = [], []
     for y in np.linspace(y_top, y_bottom, n):

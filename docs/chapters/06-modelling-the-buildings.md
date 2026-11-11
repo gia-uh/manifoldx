@@ -577,7 +577,7 @@ or palette — into a numpy array, and `write_png` writes RGB or RGBA back, so a
 drawing and a render can travel without an imaging library. `resize` resamples
 an image bilinearly, or with `nearest=True` when the pixels are labels and
 interpolating them would invent colours. `pad_to_aspect` centres a drawing on a
-canvas of a named ratio from `ASPECTS`, returning the padded image and the
+canvas of a named ratio from `ASPECTS` (by default the one `nearest_aspect` picks), returning the padded image and the
 offset of the original inside it; that is how a view reaches an image model at
 the ratio it expects, and how its answer is cropped back.
 
