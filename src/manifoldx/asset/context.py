@@ -21,17 +21,19 @@ from manifoldx.imagegen import BudgetExceeded
 from manifoldx.modeling.trace import classify
 
 # The flat colours a drawing may code its regions in, white being the paper. A stage may pass its own palette.
+# The prototype's drawings, and the committed blueprints, were made with these values; a pixel is matched to the
+# nearest entry, so they must be the ones the image model was asked for.
 CODE_COLOURS = {
     "white": (255, 255, 255),
     "black": (0, 0, 0),
     "grey": (130, 130, 130),
     "red": (220, 40, 40),
-    "orange": (240, 140, 40),
-    "yellow": (240, 210, 40),
-    "green": (40, 160, 60),
-    "cyan": (40, 190, 200),
-    "blue": (40, 80, 200),
-    "magenta": (220, 50, 200),
+    "orange": (255, 140, 0),
+    "yellow": (255, 220, 0),
+    "green": (0, 200, 0),
+    "cyan": (0, 200, 255),
+    "blue": (0, 110, 255),
+    "magenta": (255, 0, 200),
 }
 
 # Pixels per metre a drawing is taken to have when a stage gives no scale and the asset no height.

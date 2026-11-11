@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 
-from manifoldx.asset import Asset, Context
+from manifoldx.asset import CODE_COLOURS, Asset, Context
 from manifoldx.imagegen import BudgetExceeded
 
 RED = (220, 40, 40)
@@ -117,6 +117,18 @@ def test_the_budget_caps_calls_when_the_model_reports_no_cost(tmp_path):
     with pytest.raises(BudgetExceeded):
         c.image("c", "three")
     assert c.calls == 2
+
+
+def test_the_code_colours_are_the_ones_the_prototype_draws_with():
+    """The committed blueprints are painted in these exact values; a pixel is matched to the nearest entry."""
+    assert CODE_COLOURS["orange"] == (255, 140, 0)
+    assert CODE_COLOURS["yellow"] == (255, 220, 0)
+    assert CODE_COLOURS["green"] == (0, 200, 0)
+    assert CODE_COLOURS["blue"] == (0, 110, 255)
+    assert CODE_COLOURS["magenta"] == (255, 0, 200)
+    assert CODE_COLOURS["cyan"] == (0, 200, 255)
+    assert CODE_COLOURS["white"] == (255, 255, 255) and CODE_COLOURS["black"] == (0, 0, 0)
+    assert CODE_COLOURS["grey"] == (130, 130, 130) and CODE_COLOURS["red"] == (220, 40, 40)
 
 
 def test_a_named_code_colour_is_one_mask(tmp_path):
