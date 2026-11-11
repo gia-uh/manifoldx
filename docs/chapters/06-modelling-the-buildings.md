@@ -563,3 +563,71 @@ Image.fromarray(engine.render_frame(supersample=1))
 Every number in `CarParams` is a dial: a longer wheelbase moves the rear axle and
 its arch, a lower `tail_top` rakes the hatch, `headlamp="round"` swaps the lamp
 outline. Detail comes later, from smoothing and subdivision on the same parts.
+
+## Assets from an image model
+
+Not every part wants a builder with twenty dials. A wheel face, a grille, a
+lamp or a dashboard is a drawing: flat regions of colour on white, which an
+image model can produce from a sentence. `manifoldx.image` and
+`manifoldx.modeling.trace` turn such a drawing into a `Shape`, a stack of named
+`Layer` values that the modelling tools can stretch, mirror and extrude.
+
+`read_png` decodes an 8-bit, non-interlaced PNG — RGB, RGBA, grey, grey+alpha
+or palette — into a numpy array, and `write_png` writes RGB or RGBA back, so a
+drawing and a render can travel without an imaging library. `resize` resamples
+an image bilinearly, or with `nearest=True` when the pixels are labels and
+interpolating them would invent colours. `pad_to_aspect` centres a drawing on a
+canvas of a named ratio from `ASPECTS`, returning the padded image and the
+offset of the original inside it; that is how a view reaches an image model at
+the ratio it expects, and how its answer is cropped back.
+
+Tracing starts from a `palette`, a mapping from material name to RGB, and
+`classify` labels every pixel with the index of its nearest palette colour.
+`dilate` and `erode` grow and shrink a mask with a square or disc element,
+`open_mask` and `close_mask` compose them to remove specks or fill pinholes, and
+`components` numbers the connected blobs of a mask (4- or 8-connected).
+`contours` returns the outer boundary of every component as a closed polygon in
+pixel coordinates, counter-clockwise with y up; with `holes=True` it also
+returns the holes, wound the other way. `simplify` applies Douglas-Peucker to a
+closed polygon, so a traced circle drops from hundreds of points to the few
+that carry its shape. `cut_by_rays` removes a thin strip along rays from a
+centre, which opens the round windows of a wheel face into the outside and
+leaves pieces without holes; without that, a region with a window cannot be
+extruded as a solid face.
+
+`trace_layers` is the whole pipeline: classify the image, take the materials in
+`order` (largest region first), contour and simplify each, turn a region's holes
+into layers of the material underneath, and map the drawing's frame — its
+bounding box, or one given — to `-1 .. 1` on its longer side, centred and y up.
+The result is a `Shape` in units of the part's half-size, with the outer side
+at `+u`. `redraw` rasterises a `Shape` back to an image, even-odd filling every
+polygon layer by layer, and `iou` compares two masks, so a trace is checked
+against its own drawing before it is used.
+
+A `Shape` is plain data. `to_json` and `from_json` round-trip it through text,
+and `save` and `load` do the same through a file, so traced artwork lives beside
+the code rather than inside it. `bounds` gives its `(u_min, v_min, u_max,
+v_max)` box. `mirror` flips it across `u = 0` and keeps every polygon
+counter-clockwise — the first thing to do to a drawing seen from behind.
+`mirror_half` keeps one side of a symmetric drawing and reflects it, which
+repairs an image model's small asymmetries; `stretch_middle` lengthens a shape
+by a ratio while holding the outer fraction at each end exactly as drawn, so
+slats and handles keep their proportions; `fit_box` scales and centres it to
+fill a box.
+
+```python
+import numpy as np
+
+from manifoldx.image import pad_to_aspect, read_png
+from manifoldx.modeling.shape import stretch_middle
+from manifoldx.modeling.trace import iou, redraw, trace_layers
+
+palette = {"white": (255, 255, 255), "steel": (70, 100, 140), "brass": (190, 150, 60)}
+drawing = read_png("wheel.png")
+canvas, (x0, y0) = pad_to_aspect(drawing, "1:1", fill=255)
+wheel = trace_layers(drawing, palette, ["steel", "brass"], background="white")
+wheel = stretch_middle(wheel, 1.1, ends=0.2)
+check = redraw(wheel, (drawing.shape[1], drawing.shape[0]), palette)
+print(iou(np.any(check != 255, axis=-1), np.any(drawing != 255, axis=-1)))
+wheel.save("wheel.json")
+```
