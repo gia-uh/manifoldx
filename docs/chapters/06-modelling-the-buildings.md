@@ -656,6 +656,14 @@ centreline in each view, matches the two by their position along the part
 (from the end nearest an `anchor` such as the body's centre) and sweeps a tube
 whose radius is the smaller of the two half-widths.
 
+An agent that builds from drawings cannot look at the result, so
+`manifoldx.modeling.lint` says in numbers what came out wrong. `mesh_report`
+counts open and non-manifold edges and degenerate faces and gives the volume,
+negative when the faces look inward. `winding` tells inside from outside, `gap`
+measures how far apart two parts are (zero when one reaches into the other),
+and `part_groups` joins the parts that touch: a model meant as one object should
+be one group, and any other group is a part that floats.
+
 A textured part needs somewhere to put the picture. `view_atlas` takes parts
 named in a mapping, sends every face to the view among `views` whose direction
 is closest to its normal, and projects its vertices orthographically in that
