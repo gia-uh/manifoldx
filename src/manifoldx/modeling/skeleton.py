@@ -216,6 +216,19 @@ def fit_radii(joints, bones, views, default=0.03) -> np.ndarray:
     return np.array(radii)
 
 
+def skin_field(joints, radii, bones, blend=0.04, hull=(), round=0.0):
+    """The field :func:`skin` meshes, as a function of points: negative inside the skin."""
+    joints, radii = np.asarray(joints, float), np.asarray(radii, float)
+    hull = [(right, up, signed_distance(mask) if np.asarray(mask).dtype == bool else mask, frame)
+            for right, up, mask, frame in hull]
+
+    def field(points):
+        value = skeleton_sdf(points, joints, radii, bones, blend)
+        return -_smin(-value, -hull_sdf(points, hull), round) if hull else value
+
+    return field
+
+
 def skin(joints, radii, bones, step=0.01, blend=0.04, hull=(), round=0.0, smooth=0) -> Mesh:
     """The mesh around a skeleton, optionally cut to the visual hull of ``hull`` views and smoothed.
 
@@ -229,12 +242,35 @@ def skin(joints, radii, bones, step=0.01, blend=0.04, hull=(), round=0.0, smooth
     shape = np.ceil((hi - lo) / step).astype(int) + 1
     axes = [lo[i] + step * np.arange(shape[i]) for i in range(3)]
     grid = np.stack(np.meshgrid(*axes, indexing="ij"), -1).reshape(-1, 3)
-    hull = [(right, up, signed_distance(mask), frame) for right, up, mask, frame in hull]
+    field = skin_field(joints, radii, bones, blend, hull, round)
+    chunks = [field(points) for points in np.array_split(grid, max(1, len(grid) // 200000))]
+    mesh = surface_nets(np.concatenate(chunks).reshape(tuple(shape)), lo, step)
+    return taubin(mesh, smooth) if smooth else mesh
+
+
+def carve(views, step=0.01, smooth=0, minus=None) -> Mesh:
+    """The visual hull of ``views`` alone, meshed: every point each view draws, cut along each line of sight.
+
+    For a part whose shape the drawings give whole (a throne, a block of stone), where no skeleton is needed.
+    ``minus`` is another solid's field (a function of points, negative inside) taken out of it: what the
+    silhouettes cannot hollow, such as the room a seated figure takes inside its throne.
+    """
+    lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
+    for right, up, _, (u0, u1, v0, v1) in views:
+        right, up = np.asarray(right, float), np.asarray(up, float)
+        for axis, (a, b) in ((right, (u0, u1)), (up, (v0, v1))):
+            k = int(np.argmax(np.abs(axis)))
+            ends = sorted((a * axis[k], b * axis[k]))
+            lo[k], hi[k] = min(lo[k], ends[0]), max(hi[k], ends[1])
+    lo, hi = lo - 2 * step, hi + 2 * step
+    shape = np.ceil((hi - lo) / step).astype(int) + 1
+    grid = np.stack(np.meshgrid(*[lo[i] + step * np.arange(shape[i]) for i in range(3)], indexing="ij"),
+                    -1).reshape(-1, 3)
+    views = [(right, up, signed_distance(mask), frame) for right, up, mask, frame in views]
     chunks = []
     for points in np.array_split(grid, max(1, len(grid) // 200000)):
-        field = skeleton_sdf(points, joints, radii, bones, blend)
-        if hull:
-            field = -_smin(-field, -hull_sdf(points, hull), round)
-        chunks.append(field)
-    mesh = surface_nets(np.concatenate(chunks).reshape(tuple(shape)), lo, step)
+        field = hull_sdf(points, views)
+        chunks.append(field if minus is None else np.maximum(field, -minus(points)))
+    field = np.concatenate(chunks)
+    mesh = surface_nets(field.reshape(tuple(shape)), lo, step)
     return taubin(mesh, smooth) if smooth else mesh

@@ -31,7 +31,7 @@ from manifoldx.image import nearest_aspect, pad_to_aspect, read_png, resize
 from manifoldx.modeling import paint as painting
 from manifoldx.modeling.lint import Finding, closest_offset, gap
 from manifoldx.modeling.mesh import Mesh
-from manifoldx.modeling.skeleton import fit_radii, skin
+from manifoldx.modeling.skeleton import carve, fit_radii, skin, skin_field
 from manifoldx.modeling.trace import classify, components, contours, iou, open_mask, simplify
 from manifoldx.modeling.views import (
     extrude,
@@ -339,7 +339,8 @@ class skeleton(Builder):
         object.__setattr__(self, "bones", tuple(tuple(bone) for bone in self.bones))
         object.__setattr__(self, "covers", tuple(self.covers))
 
-    def views_of(self, masks, frame: Frame):
+    @staticmethod
+    def views_of(masks, frame: Frame):
         """The front and left masks as (right, up, mask, frame) views in the asset's metres."""
         front, side = masks["front"], masks["left"]
         x0, x1 = frame.x_range(front.shape[1])
@@ -358,12 +359,51 @@ class skeleton(Builder):
                 radii[i] = float(self.joints[name][3])
         return names, joints, bones, radii
 
+    def field(self, masks, frame: Frame):
+        """The skeleton's solid as a field of points (negative inside), for a hull that sits around it."""
+        _, joints, bones, radii = self.solve(masks, frame)
+        return skin_field(joints, radii, bones, blend=self.blend, hull=self.views_of(masks, frame), round=self.round)
+
     def build(self, masks, frame, anchor=None) -> Built:
         solved = self.solve(masks, frame)
         _, joints, bones, radii = solved
         mesh = skin(joints, radii, bones, step=self.step, blend=self.blend, hull=self.views_of(masks, frame),
                     round=self.round, smooth=self.smooth)
         return replace(self._finish([mesh]), skeleton=solved)
+
+
+@dataclass(frozen=True)
+class hull(Builder):
+    """A part the drawings give whole, cut along every line of sight: a throne, a block, a crate.
+
+    The solid is every point each trusted view draws. ``behind`` maps a view to the parts drawn in front of
+    this one there (a figure seated on the throne, seen from the front): their pixels count as this part's
+    too, since the drawing cannot say what they hide, and the other views cut the solid back to its depth.
+    ``minus`` names skeleton parts taken out of the solid: silhouettes cannot hollow a seat, but the figure
+    sitting in it can. ``step`` is the grid's spacing in metres and ``smooth`` the Taubin iterations.
+    """
+
+    behind: dict = field(default_factory=dict)
+    minus: tuple[str, ...] = ()
+    step: float = 0.015
+    smooth: int = 6
+
+    requires: ClassVar[tuple[str, ...]] = ("front", "left")
+    bare_name: ClassVar[bool] = True
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        unknown = [view for view in self.behind if view not in VIEWS]
+        if unknown:
+            raise ValueError(f"behind names an unknown view {unknown[0]!r}")
+
+    def build(self, masks, frame, anchor=None, fields=()) -> Built:
+        views = skeleton.views_of(masks, frame)
+        minus = None
+        if fields:
+            def minus(points):
+                return np.minimum.reduce([f(points) for f in fields])
+        return self._finish([carve(views, step=self.step, smooth=self.smooth, minus=minus)])
 
 
 @dataclass(frozen=True)
@@ -704,15 +744,26 @@ class Parts(Asset):
         scene = c.scene()
         records: list[_Record] = []
         covered = _covered(items)
-        for item in items:
+        later = [item for item in items if getattr(item.build, "minus", ())]
+        fields = {}                                          # skeleton parts' solids, for a hull to subtract
+        for item in [item for item in items if item not in later] + later:
             if item.name in covered:
                 continue                                     # a skeleton part grows it with its own solid
-            masks = {view: _union(loaded.masks[view], item) for view in item.build.views if view in loaded.masks}
+            masks = {view: _union(loaded.masks[view], item, view) for view in item.build.views
+                     if view in loaded.masks}
             if any(view not in masks or not masks[view].any() for view in item.build.requires):
                 continue                                     # the prototype skips a part its side view misses
             anchor = self._anchor(item.build, items, loaded, frame)
             builder = self._coarse(item.build)
-            built = builder.build(masks, frame, anchor=anchor)
+            if isinstance(builder, skeleton):
+                fields[item.name] = builder.field(masks, frame)
+            if isinstance(builder, hull) and builder.minus:
+                missing = [name for name in builder.minus if name not in fields]
+                if missing:
+                    raise ValueError(f"{item.name}'s hull subtracts {missing[0]!r}, which is not a skeleton part")
+                built = builder.build(masks, frame, anchor=anchor, fields=[fields[n] for n in builder.minus])
+            else:
+                built = builder.build(masks, frame, anchor=anchor)
             names = _instance_names(item, built.meshes)
             for name, mesh in zip(names, built.meshes):
                 scene.add(name, mesh)
@@ -1109,11 +1160,14 @@ def _covered(items) -> set[str]:
     return {name for item in items for name in getattr(item.build, "covers", ())}
 
 
-def _union(masks: dict, item) -> np.ndarray:
-    """A part's mask in one view, joined with those of the parts its skeleton covers."""
+def _union(masks: dict, item, view: str | None = None) -> np.ndarray:
+    """A part's mask in one view, joined with the parts its skeleton covers and, to build, those it is behind."""
     out = masks[item.name]
-    for name in getattr(item.build, "covers", ()):
+    extra = tuple(getattr(item.build, "covers", ()))
+    if view is not None:
+        extra += tuple(getattr(item.build, "behind", {}).get(view, ()))
+    for name in extra:
         if name not in masks:
-            raise ValueError(f"{item.name}'s skeleton covers {name!r}, which is not a part")
+            raise ValueError(f"{item.name}'s builder names {name!r}, which is not a part")
         out = out | masks[name]
     return out

@@ -7,7 +7,7 @@ here, so a test needs no image model and no committed drawing.
 import numpy as np
 import pytest
 
-from manifoldx.asset import CODE_COLOURS, Parts, lathe, plate, skeleton, two_view, tube
+from manifoldx.asset import CODE_COLOURS, Parts, hull, lathe, plate, skeleton, two_view, tube
 from manifoldx.asset.parts import Built, Frame
 from manifoldx.image import write_png
 from manifoldx.modeling.lint import mesh_report
@@ -459,3 +459,51 @@ def test_a_skeleton_grows_head_body_and_arms_as_one_piece(tmp_path):
 def test_a_skeleton_refuses_a_bone_to_a_joint_it_does_not_have():
     with pytest.raises(ValueError, match="does not have"):
         skeleton({"a": (0, 0, 0), "b": (0, 1, 0)}, [("a", "c")])
+
+
+def test_a_hull_behind_a_figure_is_hollowed_where_the_figure_sits(tmp_path):
+    size = (200, 200)
+    torso = rect(size, (60, 180), (85, 115))
+    seat_front = rect(size, (100, 180), (60, 140))   # the throne, wider than the figure, partly hidden by it
+    seat_side = rect(size, (100, 180), (70, 130))    # as deep as the figure's torso: it sits in it
+    cache = tmp_path / "seated.asset"
+    write_blueprints(cache, front=paint(size, blue=seat_front & ~torso, orange=torso),
+                     left=paint(size, blue=seat_side, orange=rect(size, (60, 180), (85, 115))))
+    joints = {"low": (0, 0.05, 0), "high": (0, 0.85, 0)}
+
+    class Seated(Parts):
+        desc, height, core = "a figure on a block", 1.0, "body"
+
+        def parts(self, p):
+            p.add("body", "orange", "the figure",
+                  build=skeleton(joints, [("low", "high")], views=("front", "left"), step=0.02))
+            p.add("throne", "blue", "the block",
+                  build=hull(behind={"front": ("body",)}, minus=("body",), views=("front", "left"), step=0.02))
+
+    result = Seated().run(cache=cache, stages=("build",))
+    assert set(result.scene.meshes) == {"body", "throne"}
+    throne = np.asarray(result.scene.meshes["throne"].positions)
+    body = np.asarray(result.scene.meshes["body"].positions)
+    # the block spans the drawing's width behind the figure, and does not run through the figure's middle
+    assert throne[:, 0].max() > 0.3 and throne[:, 0].min() < -0.3
+    inside = (np.abs(throne[:, 0]) < 0.6 * body[:, 0].max()) & (np.abs(throne[:, 2]) < 0.6 * body[:, 2].max()) \
+        & (throne[:, 1] > 0.2) & (throne[:, 1] < 0.5)
+    assert not inside.any()
+
+
+def test_a_hull_cannot_subtract_a_part_that_is_not_a_skeleton(tmp_path):
+    size = (100, 100)
+    block = rect(size, (20, 90), (30, 70))
+    cache = tmp_path / "bad.asset"
+    write_blueprints(cache, front=paint(size, blue=block, orange=rect(size, (10, 20), (40, 60))),
+                     left=paint(size, blue=block, orange=rect(size, (10, 20), (40, 60))))
+
+    class Bad(Parts):
+        desc, height, core = "a block", 1.0, "throne"
+
+        def parts(self, p):
+            p.add("throne", "blue", "the block", build=hull(minus=("lid",), views=("front", "left")))
+            p.add("lid", "orange", "the lid", build=two_view(views=("front", "left")))
+
+    with pytest.raises(ValueError, match="not a skeleton part"):
+        Bad().run(cache=cache, stages=("build",))
