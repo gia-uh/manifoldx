@@ -1,0 +1,9 @@
+{
+ "prompt": "A close-up of the front door of the house in the reference picture, straight on, orthographic: one tall solid red (220,40,40) rectangle with a simple dark grey frame and a small dark grey handle, on a pure white background. Flat colours, no shading, no text.",
+ "refs": [
+  "facade-front"
+ ],
+ "model": "google/gemini-2.5-flash-image",
+ "aspect": "1:1",
+ "key": "b820c9e79d780cf6c85a24bf116b5363684ea8f6840158dda160a135b976bc65"
+}

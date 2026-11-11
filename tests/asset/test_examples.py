@@ -40,6 +40,15 @@ def test_the_hydrants_report_is_deterministic():
         assert np.array_equal(np.asarray(mesh.positions), np.asarray(second.scene.meshes[name].positions))
 
 
+def test_the_house_builds_and_lints_its_committed_drawings():
+    result = _load("house")().run(stages=("build", "lint"))
+    assert sorted(result.scene.meshes) == ["door", "roof", "wall1", "wall2", "wall3", "wall4", "wall5",
+                                           "wall6", "wall7", "window1", "window2"]
+    assert "A-OPEN" not in _codes(result) and "A-FLIP" not in _codes(result)
+    assert "A-FLOAT" not in _codes(result)
+    assert result.report.exit_code == 0
+
+
 def test_the_armchair_builds_and_lints_its_committed_blueprints():
     result = _load("armchair")().run(stages=("build", "lint"))
     assert sorted(result.scene.meshes) == ["arms1", "arms2", "back1", "legs1", "legs2", "legs3", "legs4",

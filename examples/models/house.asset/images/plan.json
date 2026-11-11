@@ -1,0 +1,7 @@
+{
+ "prompt": "A flat 2D floor plan of a small two-room house, seen straight from above, orthographic, no perspective. On a pure white page, draw thick solid black (0,0,0) walls: one rectangular outer wall and one straight black wall across the middle that divides the inside into two rooms. In the middle of the front (bottom) outer wall, mark the front door with a solid red (220,40,40) gap through the wall. Everything else is pure white. No floor texture, furniture, labels, text, dimensions, arrows, shadows or outlines; only flat white, black and red.",
+ "refs": [],
+ "model": "google/gemini-2.5-flash-image",
+ "aspect": "1:1",
+ "key": "37dc023eacd6f5e94328e17c7ea064812e0171d5c91aa434e4f60403860aab13"
+}
