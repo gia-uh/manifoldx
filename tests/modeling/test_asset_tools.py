@@ -3,7 +3,15 @@
 import numpy as np
 import pytest
 
-from manifoldx.modeling.shape import Shape
+from manifoldx.modeling.shape import (
+    Layer,
+    Shape,
+    bounds,
+    fit_box,
+    mirror,
+    mirror_half,
+    stretch_middle,
+)
 from manifoldx.modeling.trace import (
     classify,
     close_mask,
@@ -191,3 +199,87 @@ def test_trace_layers_maps_the_frame_to_the_unit_square():
     poly = shape.layers[0].polygons[0]
     assert np.allclose(poly.min(axis=0), (-1, -1), atol=0.02)
     assert np.allclose(poly.max(axis=0), (1, 1), atol=0.02)
+
+
+# --- Shape: JSON, mirroring, stretching and fitting ------------------------
+
+
+def _square(size=1.0):
+    return np.array([[0.0, 0.0], [size, 0.0], [size, size], [0.0, size]])
+
+
+def _hexagon():
+    return np.array([[-1.0, 0.0], [-1.0, 1.0], [0.0, 1.0],
+                     [1.0, 1.0], [1.0, 0.0], [0.0, -1.0]])
+
+
+def _example_shape():
+    return Shape(layers=[Layer("steel", [_square()]), Layer("brass", [_hexagon()])],
+                 anchor=(0.25, -0.5), meta={"note": "test"})
+
+
+def test_shape_json_round_trip():
+    shape = _example_shape()
+    text = shape.to_json()
+    back = Shape.from_json(text)
+    assert [layer.material for layer in back.layers] == ["steel", "brass"]
+    for original, copy in zip(shape.layers, back.layers):
+        assert len(original.polygons) == len(copy.polygons)
+        for a, b in zip(original.polygons, copy.polygons):
+            assert np.allclose(a, b)
+    assert tuple(back.anchor) == shape.anchor
+    assert back.meta == shape.meta
+
+
+def test_shape_save_and_load(tmp_path):
+    shape = _example_shape()
+    path = tmp_path / "shape.json"
+    shape.save(path)
+    back = Shape.load(path)
+    assert bounds(back) == pytest.approx(bounds(shape))
+    assert [layer.material for layer in back.layers] == ["steel", "brass"]
+
+
+def test_mirror_flips_u_and_keeps_ccw():
+    shape = Shape(layers=[Layer("steel", [_square()])])
+    mirrored = mirror(shape)
+    poly = mirrored.layers[0].polygons[0]
+    assert poly[:, 0].min() == pytest.approx(-1) and poly[:, 0].max() == pytest.approx(0)
+    assert _signed_area(poly) > 0
+    assert _signed_area(shape.layers[0].polygons[0]) > 0
+
+
+def test_mirror_half_rebuilds_the_other_half():
+    shape = Shape(layers=[Layer("steel", [_square()])])  # the right half only
+    rebuilt = mirror_half(shape, keep="right")
+    assert bounds(rebuilt) == pytest.approx((-1, 0, 1, 1))
+    assert len(rebuilt.layers[0].polygons) == 2
+    for poly in rebuilt.layers[0].polygons:
+        assert _signed_area(poly) > 0
+
+    left = Shape(layers=[Layer("steel", [_square()])])
+    left.layers[0].polygons[0][:, 0] *= -1  # the left half, still CCW after reversal
+    left.layers[0].polygons[0] = left.layers[0].polygons[0][::-1]
+    assert bounds(mirror_half(left, keep="left")) == pytest.approx((-1, 0, 1, 1))
+
+
+def test_stretch_middle_keeps_the_ends_and_scales_the_middle():
+    shape = Shape(layers=[Layer("steel", [_hexagon()])])
+    stretched = stretch_middle(shape, 2.0, ends=0.25)
+    assert bounds(stretched) == pytest.approx((-1.5, -1, 1.5, 1))
+    middle = stretched.layers[0].polygons[0]
+    original = shape.layers[0].polygons[0]
+    # The vertex at u=0 is in the stretched middle and stays put; the end
+    # vertices move outward by exactly half the extra length.
+    assert np.allclose(middle[np.isclose(middle[:, 0], 0)], original[np.isclose(original[:, 0], 0)])
+    assert np.allclose(sorted(middle[:, 0]), [-1.5, -1.5, 0, 0, 1.5, 1.5])
+
+
+def test_fit_box_scales_and_centres():
+    shape = Shape(layers=[Layer("steel", [_square(2.0)])])
+    fitted = fit_box(shape, half_w=2.0, half_h=0.5)
+    assert bounds(fitted) == pytest.approx((-2, -0.5, 2, 0.5))
+
+
+def test_bounds_of_an_empty_shape():
+    assert bounds(Shape(layers=[])) == (0.0, 0.0, 0.0, 0.0)
