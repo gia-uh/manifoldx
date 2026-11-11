@@ -137,6 +137,25 @@ def test_palette_with_trns_gives_alpha(tmp_path):
     assert (back[0, 0, :3] == [255, 0, 0]).all()
 
 
+def test_a_four_bit_palette_packs_two_indices_per_byte(tmp_path):
+    palette = np.array([[255, 140, 0], [0, 200, 0], [255, 255, 255]], dtype=np.uint8)
+    # Row 0: indices 0, 1, 0, 2, 1; row 1: 2, 0, 1, 1, 0 -- five pixels a row.
+    rows = [bytes([0x01, 0x02, 0x10]), bytes([0x20, 0x11, 0x00])]
+    path = tmp_path / "fourbit.png"
+    path.write_bytes(_png_bytes(5, 2, 3, [b"\x00" + row for row in rows], plte=palette.reshape(-1), depth=4))
+    back = read_png(path)
+    assert back.shape == (2, 5, 3)
+    assert (back == palette[np.array([[0, 1, 0, 2, 1], [2, 0, 1, 1, 0]])]).all()
+
+
+def test_a_one_bit_grey_png_reads_black_and_white(tmp_path):
+    path = tmp_path / "onebit.png"
+    path.write_bytes(_png_bytes(3, 1, 0, [b"\x00\xa0"], depth=1))
+    back = read_png(path)
+    assert back.shape == (1, 3, 3)
+    assert (back[0, :, 0] == [255, 0, 255]).all()
+
+
 def test_all_five_filters_decode(tmp_path):
     rng = np.random.default_rng(5)
     img = rng.integers(0, 256, size=(10, 11, 2), dtype=np.uint8)

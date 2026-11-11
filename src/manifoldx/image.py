@@ -41,9 +41,14 @@ def _paeth(a: int, b: int, c: int) -> int:
     return c
 
 
-def _unfilter(data: bytes, width: int, height: int, bpp: int) -> np.ndarray:
-    """Undo the five PNG row filters; return (height, width * bpp) uint8."""
-    stride = width * bpp
+def _unfilter(data: bytes, width: int, height: int, bpp: int, depth: int = 8) -> np.ndarray:
+    """Undo the five PNG row filters; return (height, stride) uint8.
+
+    ``bpp`` is the samples per pixel and ``depth`` their bit depth, so a 4-bit
+    palette image has a stride of ``ceil(width / 2)`` bytes. The filters work
+    on whole bytes, so ``bpp`` stays 1 for the sub-byte depths.
+    """
+    stride = (width * bpp * depth + 7) // 8
     if len(data) < height * (stride + 1):
         raise ValueError("PNG image data is truncated")
     rows = []
@@ -76,12 +81,21 @@ def _unfilter(data: bytes, width: int, height: int, bpp: int) -> np.ndarray:
     return np.frombuffer(b"".join(rows), dtype=np.uint8).reshape(height, stride)
 
 
+def _unpack_bits(raw: np.ndarray, width: int, depth: int) -> np.ndarray:
+    """Unpack a sub-byte PNG scanline into one integer per pixel, most significant bit first."""
+    height = raw.shape[0]
+    bits = np.unpackbits(raw, axis=1)[:, :width * depth]
+    weights = (1 << np.arange(depth - 1, -1, -1)).astype(np.uint16)
+    return (bits.reshape(height, width, depth) * weights).sum(axis=2).astype(np.uint8)
+
+
 def read_png(path) -> np.ndarray:
-    """Decode an 8-bit, non-interlaced PNG. Missing alpha becomes opaque.
+    """Decode an 8-bit or sub-byte, non-interlaced PNG. Missing alpha becomes opaque.
 
     RGB and RGBA stay as they are; grey becomes RGB and grey+alpha becomes
     RGBA; a palette image becomes RGB, or RGBA when it carries a tRNS chunk.
-    Any other PNG raises ``ValueError``.
+    Grey and palette images may be 1, 2, 4 or 8 bits per pixel (a palette
+    drawing is often stored at 4). Any other PNG raises ``ValueError``.
     """
     data = Path(path).read_bytes()
     if not data.startswith(_SIGNATURE):
@@ -111,8 +125,10 @@ def read_png(path) -> np.ndarray:
     if header is None:
         raise ValueError("PNG without an IHDR chunk")
     width, height, depth, color_type, compression, filter_method, interlace = header
-    if depth != 8:
-        raise ValueError(f"only 8-bit PNGs are supported, got {depth}-bit")
+    if depth not in (1, 2, 4, 8):
+        raise ValueError(f"only 1, 2, 4 and 8-bit PNGs are supported, got {depth}-bit")
+    if depth != 8 and color_type not in (0, 3):
+        raise ValueError(f"a {depth}-bit PNG must be grey or paletted, not colour type {color_type}")
     if compression != 0 or filter_method != 0:
         raise ValueError("unsupported PNG compression or filter method")
     if interlace != 0:
@@ -123,8 +139,15 @@ def read_png(path) -> np.ndarray:
         raise ValueError("PNG without image data")
 
     channels = _CHANNELS[color_type]
-    raw = _unfilter(zlib.decompress(b"".join(idat)), width, height, channels)
-    pixels = raw.reshape(height, width, channels)
+    raw = _unfilter(zlib.decompress(b"".join(idat)), width, height, channels, depth)
+    if depth < 8:
+        values = _unpack_bits(raw, width, depth)
+        if color_type == 0:
+            return np.ascontiguousarray(np.repeat(
+                (values.astype(np.uint16) * 255 // ((1 << depth) - 1)).astype(np.uint8)[..., None], 3, axis=2))
+        pixels = values[..., None]
+    else:
+        pixels = raw.reshape(height, width, channels)
 
     if color_type == 0:
         return np.ascontiguousarray(np.repeat(pixels, 3, axis=2))
