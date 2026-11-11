@@ -7,7 +7,7 @@ here, so a test needs no image model and no committed drawing.
 import numpy as np
 import pytest
 
-from manifoldx.asset import CODE_COLOURS, Parts, lathe, plate, two_view, tube
+from manifoldx.asset import CODE_COLOURS, Parts, lathe, plate, skeleton, two_view, tube
 from manifoldx.asset.parts import Built, Frame
 from manifoldx.image import write_png
 from manifoldx.modeling.lint import mesh_report
@@ -424,3 +424,38 @@ def test_draw_asks_for_a_reference_then_each_view_and_its_blueprint(tmp_path):
     assert "- yellow (255, 220, 0) = the rim on top;" in blueprint
     assert "the handle points at the viewer" in blueprint
     assert "BLUEPRINT" in blueprint and "pure white" in blueprint
+
+
+def test_a_skeleton_grows_head_body_and_arms_as_one_piece(tmp_path):
+    size = (200, 200)
+    torso, head = rect(size, (80, 180), (80, 120)), disc(size, (100, 60), 18)
+    arms = rect(size, (90, 100), (30, 170))
+    side_torso, side_arms = rect(size, (80, 180), (85, 115)), rect(size, (90, 100), (95, 105))
+    cache = tmp_path / "figure.asset"
+    write_blueprints(cache, front=paint(size, orange=torso, yellow=head, green=arms),
+                     left=paint(size, orange=side_torso, yellow=head, green=side_arms))
+    joints = {"pelvis": (0, 0.05, 0), "chest": (0, 0.62, 0), "neck": (0, 0.72, 0), "head": (0, 0.87, 0),
+              "hand_r": (0.48, 0.62, 0), "hand_l": (-0.48, 0.62, 0)}
+    bones = [("pelvis", "chest"), ("chest", "neck"), ("neck", "head"), ("chest", "hand_r"), ("chest", "hand_l")]
+
+    class Figure(Parts):
+        desc, height, core = "a figure with its arms out", 1.0, "body"
+
+        def parts(self, p):
+            p.add("body", "orange", "the body",
+                  build=skeleton(joints, bones, covers=("head", "arms"), views=("front", "left"), step=0.02))
+            p.add("head", "yellow", "the head")
+            p.add("arms", "green", "the arms")
+
+    result = Figure().run(cache=cache, stages=("build", "lint"))
+    assert list(result.scene.meshes) == ["body"]
+    codes = {f.code for f in result.report.findings}
+    assert not codes & {"A-FLOAT", "A-OPEN", "A-FLIP"}
+    assert not result.report.errors
+    p = np.asarray(result.scene.meshes["body"].positions)
+    assert p[:, 0].max() > 0.4 and p[:, 0].min() < -0.4 and p[:, 1].max() > 0.9
+
+
+def test_a_skeleton_refuses_a_bone_to_a_joint_it_does_not_have():
+    with pytest.raises(ValueError, match="does not have"):
+        skeleton({"a": (0, 0, 0), "b": (0, 1, 0)}, [("a", "c")])

@@ -112,6 +112,14 @@ class Asset:
         """The asset's own findings, on top of the standard lint. Empty by default."""
         return []
 
+    def marks(self) -> list[tuple[str, tuple, tuple]]:
+        """Lines the last build wants drawn over its drawings, ``(label, start, end)`` in metres; none by default.
+
+        ``inspect`` draws them on every overlay and lists them in the summary, so an agent can see where a
+        skeleton's joints and bones sit against the blueprints.
+        """
+        return []
+
     def forget(self, c: Context, name: str) -> list[Path]:
         """Delete cached pictures before a run; a stage may widen ``name`` to mean more than one image."""
         return c.forget(name)

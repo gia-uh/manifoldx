@@ -5,7 +5,10 @@
 - ``overlay-<view>.png``: the scene's silhouette over the blueprint, green where both agree, grey where the
   drawing shows something the build did not make, red where the build made something the drawing does not show;
 - ``groups.png``: the front, left and top silhouettes, each group of touching parts in its own colour;
-- ``summary.txt``: one fact per line — parts and triangles, the groups, each part's IoU per view, every finding.
+- ``summary.txt``: one fact per line — parts and triangles, the groups, each part's IoU per view, where each
+  drawn part spans in metres (to place a skeleton's joints), the asset's marks, every finding.
+
+An asset's :meth:`~manifoldx.asset.Asset.marks` (a skeleton's bones) are drawn on every overlay in dark blue.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from manifoldx.modeling.views import Atlas, Island, _VIEWS, silhouette, template
 _DRAWN, _BUILT, _BOTH = (180, 180, 180), (220, 60, 60), (60, 140, 60)
 _TILE = 400
 _GAP = 10
+_MARK = (20, 30, 120)
 _HUES = [(60, 150, 60), (220, 50, 50), (40, 90, 220), (230, 150, 0), (150, 50, 200)]
 
 
@@ -37,7 +41,7 @@ def inspect(asset, c, scene, out_dir, report=None) -> list[Path]:
     out.mkdir(parents=True, exist_ok=True)
     files = []
     for expectation in c.expectations:
-        files.append(_overlay(scene, expectation, out / f"overlay-{expectation.view}.png"))
+        files.append(_overlay(scene, expectation, out / f"overlay-{expectation.view}.png", asset.marks()))
     tol = max(0.01 * float(asset.height), 1e-6)
     groups = part_groups(scene.meshes, tol=tol)["groups"]
     files.append(_groups(scene, groups, out / "groups.png"))
@@ -49,13 +53,14 @@ def inspect(asset, c, scene, out_dir, report=None) -> list[Path]:
     else:
         finding_lines = report.lines()
     summary = out / "summary.txt"
-    summary.write_text("\n".join(_summary(c, scene, groups, finding_lines)) + "\n", encoding="utf-8")
+    lines = _summary(c, scene, groups, finding_lines, asset.marks())
+    summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
     files.append(summary)
     return files
 
 
-def _overlay(scene, expectation, path: Path) -> Path:
-    """One view's silhouette over its blueprint: green both, grey only drawn, red only built."""
+def _overlay(scene, expectation, path: Path, marks=()) -> Path:
+    """One view's silhouette over its blueprint: green both, grey only drawn, red only built, marks in blue."""
     shape = next(iter(expectation.masks.values())).shape
     frame = expectation.frame if expectation.frame is not None else _frame(scene.meshes, expectation.view)
     drawn = np.zeros(shape, bool)
@@ -70,8 +75,31 @@ def _overlay(scene, expectation, path: Path) -> Path:
     image[drawn & ~built] = _DRAWN
     image[drawn & built] = _BOTH
     image[~drawn & built] = _BUILT
+    for _, start, end in marks:
+        _line_on(image, _pixel(expectation.view, frame, shape, start), _pixel(expectation.view, frame, shape, end))
     write_png(path, image)
     return path
+
+
+def _pixel(view, frame, shape, point):
+    """Where a point in metres falls on a view's drawing, as (column, row)."""
+    _, right, up = _VIEWS[view]
+    u, v = np.asarray(point, float) @ np.asarray(right), np.asarray(point, float) @ np.asarray(up)
+    u0, u1, v0, v1 = frame
+    column = (u - u0) / (u1 - u0) * shape[1]
+    if view == "back":                              # the overlay shows the back drawing as drawn
+        column = shape[1] - column
+    return column, (v1 - v) / (v1 - v0) * shape[0]
+
+
+def _line_on(image, a, b):
+    """A three-pixel dark blue line from ``a`` to ``b`` with a dot at each end."""
+    steps = int(max(abs(b[0] - a[0]), abs(b[1] - a[1]), 1))
+    for t in np.linspace(0.0, 1.0, steps + 1):
+        x, y = a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])
+        image[max(0, int(y) - 1):int(y) + 2, max(0, int(x) - 1):int(x) + 2] = _MARK
+    for x, y in (a, b):
+        image[max(0, int(y) - 4):int(y) + 5, max(0, int(x) - 4):int(x) + 5] = _MARK
 
 
 def _groups(scene, groups, path: Path) -> Path:
@@ -95,13 +123,17 @@ def _groups(scene, groups, path: Path) -> Path:
     return path
 
 
-def _summary(c, scene, groups, finding_lines) -> list[str]:
-    """One fact per line: parts and triangles, the groups, each part's IoU per view, every finding."""
+def _summary(c, scene, groups, finding_lines, marks=()) -> list[str]:
+    """One fact per line: parts and triangles, the groups, IoUs, extents, marks, every finding."""
     triangles = sum(int(len(mesh.faces)) for mesh in scene.meshes.values())
     lines = [f"{len(scene)} parts, {triangles} triangles",
              f"{len(groups)} group(s) of touching parts: " + " | ".join(", ".join(group) for group in groups)]
     for expectation in c.expectations:
         lines.extend(_ious(scene, expectation))
+    for expectation in c.expectations:
+        lines.extend(_extents(scene, expectation))
+    lines.extend(f"mark {label}: ({', '.join(f'{v:.2f}' for v in start)}) to ({', '.join(f'{v:.2f}' for v in end)})"
+                 for label, start, end in marks)
     lines.extend(finding_lines)
     return lines
 
@@ -128,6 +160,29 @@ def _ious(scene, expectation) -> list[str]:
             continue
         seen = np.isin(regions, wanted)
         lines.append(f"IoU {part} {expectation.view}: {iou(seen, drawn):.3f}")
+    return lines
+
+
+def _extents(scene, expectation) -> list[str]:
+    """Where each drawn part spans in one view, in metres along that view's axes."""
+    frame = expectation.frame if expectation.frame is not None else _frame(scene.meshes, expectation.view)
+    u0, u1, v0, v1 = frame
+    axis = {"front": ("x", 1), "back": ("x", -1), "left": ("z", -1)}.get(expectation.view)
+    if axis is None:
+        return []
+    name, sign = axis
+    lines = []
+    for part, mask in expectation.masks.items():
+        rows, cols = np.nonzero(np.asarray(mask, bool))
+        if not rows.size:
+            continue
+        height, width = np.asarray(mask).shape
+        u = u0 + (u1 - u0) * (np.array([cols.min(), cols.max() + 1])) / width
+        if expectation.view == "back":
+            u = u0 + (u1 - u0) * (width - np.array([cols.max() + 1, cols.min()])) / width
+        v = v1 - (v1 - v0) * np.array([rows.max() + 1, rows.min()]) / height
+        lo, hi = sorted(sign * u)
+        lines.append(f"extent {part} {expectation.view}: {name} {lo:.2f}..{hi:.2f}, y {v[0]:.2f}..{v[1]:.2f}")
     return lines
 
 

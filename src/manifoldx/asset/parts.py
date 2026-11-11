@@ -31,6 +31,7 @@ from manifoldx.image import nearest_aspect, pad_to_aspect, read_png, resize
 from manifoldx.modeling import paint as painting
 from manifoldx.modeling.lint import Finding, closest_offset, gap
 from manifoldx.modeling.mesh import Mesh
+from manifoldx.modeling.skeleton import fit_radii, skin
 from manifoldx.modeling.trace import classify, components, contours, iou, open_mask, simplify
 from manifoldx.modeling.views import (
     extrude,
@@ -109,6 +110,7 @@ class Built:
     meshes: tuple[Mesh, ...] = ()
     filled: int = 0
     dropped: tuple[float, ...] = ()
+    skeleton: tuple | None = None                 # a skeleton's (names, joints, bones, radii), for inspect
 
 
 @dataclass(frozen=True)
@@ -297,6 +299,71 @@ class tube(Builder):
                              x_range=frame.x_range(a.shape[1]), z_range=frame.z_range(b.shape[1]))
                   for a, b in pairs]
         return self._finish(meshes, filled, dropped)
+
+
+@dataclass(frozen=True)
+class skeleton(Builder):
+    """One connected solid grown from a tree of joints and cut to the drawings: a figure, an animal, a plant.
+
+    ``joints`` maps a name to ``(x, y, z)`` in the asset's metres (x right, y up from the ground, z toward the
+    front), or ``(x, y, z, radius)`` to fix a radius; ``bones`` pairs joint names. Each joint's radius is read
+    from how wide the drawings are across its bones, the bones melt into each other over ``blend`` metres, the
+    solid is cut to the outline the front and left drawings show (edges rounded over ``round``), meshed every
+    ``step`` metres and smoothed ``smooth`` times. ``covers`` names other parts of the drawing the same solid
+    makes (a head and arms grown with the body): their colours join this part's outline and they get no mesh
+    of their own. Head, neck and limbs come out as one piece, so nothing floats.
+    """
+
+    joints: dict = field(default_factory=dict)
+    bones: tuple = ()
+    covers: tuple[str, ...] = ()
+    step: float = 0.015
+    blend: float = 0.05
+    round: float = 0.05
+    smooth: int = 10
+
+    requires: ClassVar[tuple[str, ...]] = ("front", "left")
+    bare_name: ClassVar[bool] = True
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if len(self.joints) < 2 or not self.bones:
+            raise ValueError("a skeleton needs at least two joints and one bone")
+        for a, b in self.bones:
+            for name in (a, b):
+                if name not in self.joints:
+                    raise ValueError(f"bone ({a!r}, {b!r}) names a joint the skeleton does not have: {name!r}")
+        for name, joint in self.joints.items():
+            if len(joint) not in (3, 4):
+                raise ValueError(f"joint {name!r} must be (x, y, z) or (x, y, z, radius)")
+        object.__setattr__(self, "bones", tuple(tuple(bone) for bone in self.bones))
+        object.__setattr__(self, "covers", tuple(self.covers))
+
+    def views_of(self, masks, frame: Frame):
+        """The front and left masks as (right, up, mask, frame) views in the asset's metres."""
+        front, side = masks["front"], masks["left"]
+        x0, x1 = frame.x_range(front.shape[1])
+        z0, z1 = frame.z_range(side.shape[1])
+        return [((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), front, (x0, x1, 0.0, frame.top)),
+                ((0.0, 0.0, -1.0), (0.0, 1.0, 0.0), side, (-z1, -z0, 0.0, frame.top))]
+
+    def solve(self, masks, frame: Frame):
+        """The joints as an array, the bones as index pairs and every joint's radius, fitted where not given."""
+        names = list(self.joints)
+        joints = np.array([self.joints[name][:3] for name in names], float)
+        bones = [(names.index(a), names.index(b)) for a, b in self.bones]
+        radii = fit_radii(joints, bones, self.views_of(masks, frame))
+        for i, name in enumerate(names):
+            if len(self.joints[name]) == 4:
+                radii[i] = float(self.joints[name][3])
+        return names, joints, bones, radii
+
+    def build(self, masks, frame, anchor=None) -> Built:
+        solved = self.solve(masks, frame)
+        _, joints, bones, radii = solved
+        mesh = skin(joints, radii, bones, step=self.step, blend=self.blend, hull=self.views_of(masks, frame),
+                    round=self.round, smooth=self.smooth)
+        return replace(self._finish([mesh]), skeleton=solved)
 
 
 @dataclass(frozen=True)
@@ -525,7 +592,8 @@ class _Views:
     """The blueprints, aligned: cropped to the figure, scaled so the align parts span N rows, padded to R."""
 
     def __init__(self, c, items, palette, align, height, core) -> None:
-        trusted = {view for item in items for view in item.build.views}
+        covered = _covered(items)
+        trusted = {view for item in items if item.name not in covered for view in item.build.views}
         indexes = {name: index for index, name in enumerate(palette)}
         self.masks: dict[str, dict[str, np.ndarray]] = {}   # view -> part -> aligned bool mask
         self.drawn: dict[str, dict[str, np.ndarray]] = {}   # the blueprint as drawn (the back not mirrored)
@@ -635,8 +703,11 @@ class Parts(Asset):
         frame = loaded.frame(core)
         scene = c.scene()
         records: list[_Record] = []
+        covered = _covered(items)
         for item in items:
-            masks = {view: loaded.masks[view][item.name] for view in item.build.views if view in loaded.masks}
+            if item.name in covered:
+                continue                                     # a skeleton part grows it with its own solid
+            masks = {view: _union(loaded.masks[view], item) for view in item.build.views if view in loaded.masks}
             if any(view not in masks or not masks[view].any() for view in item.build.requires):
                 continue                                     # the prototype skips a part its side view misses
             anchor = self._anchor(item.build, items, loaded, frame)
@@ -658,6 +729,19 @@ class Parts(Asset):
         self._built, self._frame = records, frame
         return scene
 
+    def marks(self) -> list[tuple[str, tuple, tuple]]:
+        """Every skeleton's bones from the last build, ``(label, start, end)``, labelled with the joints' radii."""
+        out = []
+        for record in getattr(self, "_built", []):
+            solved = getattr(record.built, "skeleton", None)
+            if solved is None:
+                continue
+            names, joints, bones, radii = solved
+            for i, j in bones:
+                label = f"{names[i]} r={radii[i]:.3f} - {names[j]} r={radii[j]:.3f}"
+                out.append((label, tuple(float(v) for v in joints[i]), tuple(float(v) for v in joints[j])))
+        return out
+
     def _coarse(self, builder: Builder) -> Builder:
         """The builder a ``--lod low`` run uses: fewer rings and segments, still textured from the same answers."""
         if self.lod is None:
@@ -669,6 +753,8 @@ class Parts(Asset):
             fields["rings"] = 10
         if hasattr(builder, "segments"):
             fields["segments"] = 8
+        if isinstance(builder, skeleton):
+            fields["step"] = 2 * builder.step
         return replace(builder, **fields) if fields else builder
 
     # --- paint -------------------------------------------------------------------------------------------
@@ -857,8 +943,9 @@ class Parts(Asset):
     def _drawn(self, loaded: _Views, items, view: str) -> dict[str, np.ndarray]:
         """The blueprint's masks for the parts that trust ``view``; the back view's as drawn, not mirrored."""
         masks = loaded.drawn[view]
-        return {item.name: _pad(masks[item.name], loaded.rows) for item in items
-                if view in item.build.views and masks[item.name].any()}
+        covered = _covered(items)
+        return {item.name: _pad(_union(masks, item), loaded.rows) for item in items
+                if item.name not in covered and view in item.build.views and _union(masks, item).any()}
 
     def _collect(self, palette):
         p = _Parts(palette)
@@ -1015,3 +1102,18 @@ def _island_template(parts, atlas, colours, island):
     aspect = nearest_aspect(crop.shape[1], crop.shape[0])
     padded, offset = pad_to_aspect(crop, aspect)
     return padded, region, aspect, offset
+
+
+def _covered(items) -> set[str]:
+    """The parts another part's skeleton grows, so they get no mesh of their own."""
+    return {name for item in items for name in getattr(item.build, "covers", ())}
+
+
+def _union(masks: dict, item) -> np.ndarray:
+    """A part's mask in one view, joined with those of the parts its skeleton covers."""
+    out = masks[item.name]
+    for name in getattr(item.build, "covers", ()):
+        if name not in masks:
+            raise ValueError(f"{item.name}'s skeleton covers {name!r}, which is not a part")
+        out = out | masks[name]
+    return out
