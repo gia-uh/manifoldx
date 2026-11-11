@@ -7,8 +7,6 @@ maps material names to RGB. Everything here works on numpy arrays; a mask is a
 
 from __future__ import annotations
 
-from collections import defaultdict
-
 import numpy as np
 
 from manifoldx.modeling.shape import Layer, Shape
@@ -35,14 +33,10 @@ def classify(img, palette) -> np.ndarray:
     if not len(colours):
         raise ValueError("palette is empty")
     work = pixels[..., :3].astype(np.float32)
-    best = np.zeros(work.shape[:2], dtype=np.int32)
-    best_distance = np.full(work.shape[:2], np.inf, dtype=np.float32)
-    for index, colour in enumerate(colours):
-        distance = np.sum((work - colour) ** 2, axis=2)
-        take = distance < best_distance
-        best[take] = index
-        best_distance[take] = distance[take]
-    return best
+    # One distance plane per colour; argmin keeps the first palette entry on a
+    # tie, exactly as comparing each colour in order against the best so far.
+    distances = np.stack([np.sum((work - colour) ** 2, axis=2) for colour in colours])
+    return distances.argmin(axis=0).astype(np.int32)
 
 
 # --- Morphology ------------------------------------------------------------
@@ -152,57 +146,124 @@ _CASES = {
 }
 
 
-def _key(point) -> tuple[int, int]:
-    return (int(round(point[0] * 2)), int(round(point[1] * 2)))
+# Edge midpoints in doubled pixel coordinates, as offsets from a cell's
+# (2 * column, 2 * row) origin. Doubling makes the half-pixel midpoints exact
+# integers, so the segment endpoints can be matched by integer key.
+_EDGES = {
+    "E0": (-1, -2),
+    "E1": (0, -1),
+    "E2": (-1, 0),
+    "E3": (-2, -1),
+}
+
+
+def _edge_tables():
+    """Per slot (0, 1) and corner code: start and end edge offsets."""
+    starts = np.zeros((2, 16, 2), dtype=np.int64)
+    ends = np.zeros((2, 16, 2), dtype=np.int64)
+    present = np.zeros((2, 16), dtype=bool)
+    for code, segments in _CASES.items():
+        for slot, (start, end) in enumerate(segments):
+            starts[slot, code] = _EDGES[start]
+            ends[slot, code] = _EDGES[end]
+            present[slot, code] = True
+    return starts, ends, present
+
+
+_STARTS, _ENDS, _PRESENT = _edge_tables()
 
 
 def _loops(mask: np.ndarray) -> list[np.ndarray]:
-    """Closed loops of the mask boundary, in pixel coordinates (y up)."""
+    """Closed loops of the mask boundary, in pixel coordinates (y up).
+
+    The marching-squares cells are evaluated for the whole grid at once; the
+    resulting segments are then chained, each edge midpoint having exactly one
+    outgoing segment (a saddle where two do meet is resolved in index order,
+    as before).
+    """
     work = np.asarray(mask, dtype=bool)
     height, width = work.shape
     padded = np.zeros((height + 2, width + 2), dtype=bool)
     padded[1:-1, 1:-1] = work
 
-    def edge(j, i, name):
-        if name == "E0":
-            return (i + 0.5 - 1.0, j - 1.0)
-        if name == "E1":
-            return (i + 1.0 - 1.0, j + 0.5 - 1.0)
-        if name == "E2":
-            return (i + 0.5 - 1.0, j + 1.0 - 1.0)
-        return (i - 1.0, j + 0.5 - 1.0)
+    corners = padded.astype(np.uint8)
+    code = ((corners[:-1, :-1] << 3) | (corners[:-1, 1:] << 2)
+            | (corners[1:, 1:] << 1) | corners[1:, :-1])
 
-    segments = []
-    for j in range(height + 1):
-        for i in range(width + 1):
-            code = (int(padded[j, i]) << 3 | int(padded[j, i + 1]) << 2
-                    | int(padded[j + 1, i + 1]) << 1 | int(padded[j + 1, i]))
-            for start, end in _CASES.get(code, ()):
-                segments.append((edge(j, i, start), edge(j, i, end)))
+    # Every (cell, slot) pair that produces a segment, in the same order the
+    # per-cell loop used to append them: cell row-major, then slot.
+    cells, slots = [], []
+    for slot in range(2):
+        rows, cols = np.nonzero(_PRESENT[slot][code])
+        cells.append(rows * (width + 1) + cols)
+        slots.append(np.full(len(rows), slot, dtype=np.int64))
+    cell = np.concatenate(cells)
+    slot = np.concatenate(slots)
+    if len(cell) == 0:
+        return []
+    order = np.argsort(cell * 2 + slot, kind="stable")
+    cell, slot = cell[order], slot[order]
 
-    outgoing = defaultdict(list)
-    for index, (start, _end) in enumerate(segments):
-        outgoing[_key(start)].append(index)
-    used = np.zeros(len(segments), dtype=bool)
+    cell_cols = cell % (width + 1)
+    cell_rows = cell // (width + 1)
+    cell_code = code.reshape(-1)[cell]
+    start_x = 2 * cell_cols + _STARTS[slot, cell_code, 0]
+    start_y = 2 * cell_rows + _STARTS[slot, cell_code, 1]
+    end_x = 2 * cell_cols + _ENDS[slot, cell_code, 0]
+    end_y = 2 * cell_rows + _ENDS[slot, cell_code, 1]
+
+    # Integer keys for the midpoint keys; +2 keeps them non-negative and the
+    # span is wider than the doubled width, so the pair maps injectively.
+    span = 2 * width + 4
+    start_key = (start_y + 2) * span + (start_x + 2)
+    end_key = (end_y + 2) * span + (end_x + 2)
+
+    count = len(start_key)
+    by_start = np.argsort(start_key, kind="stable")
+    sorted_keys = start_key[by_start]
+    left = np.searchsorted(sorted_keys, end_key, side="left")
+    right = np.searchsorted(sorted_keys, end_key, side="right")
+    found = left < count
+    safe = np.clip(left, 0, count - 1)
+    found &= sorted_keys[safe] == end_key
+    first_next = np.where(found, by_start[np.where(found, safe, 0)], -1)
+
+    # A midpoint with several outgoing segments (a corner-touching saddle) is
+    # resolved by taking the lowest-numbered unused one.
+    multi = {}
+    for group_left, group_right in zip(left, right):
+        if group_right - group_left > 1:
+            key = int(sorted_keys[group_left])
+            multi[key] = [int(k) for k in by_start[group_left:group_right]]
+
+    used = np.zeros(count, dtype=bool)
+    xs, ys = start_x.tolist(), start_y.tolist()
     loops = []
-    for first in range(len(segments)):
+    for first in range(count):
         if used[first]:
             continue
-        points = []
         index = first
-        start_key = _key(segments[first][0])
+        start_key_first = start_key[first]
+        points = []
         while True:
             used[index] = True
-            start, end = segments[index]
-            points.append(start)
-            if _key(end) == start_key:
+            points.append(index)
+            key = end_key[index]
+            if key == start_key_first:
                 break
-            candidates = [k for k in outgoing[_key(end)] if not used[k]]
-            if not candidates:
-                break
-            index = candidates[0]
+            candidates = multi.get(int(key))
+            if candidates is None:
+                index = int(first_next[index])
+                if index < 0:
+                    break
+            else:
+                index = next((k for k in candidates if not used[k]), -1)
+                if index < 0:
+                    break
         if len(points) >= 3:
-            loops.append(np.array(points, dtype=float))
+            loops.append(np.stack([np.array([xs[p] for p in points], dtype=float),
+                                   np.array([ys[p] for p in points], dtype=float)],
+                                  axis=1) * 0.5)
     return loops
 
 

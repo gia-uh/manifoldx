@@ -283,3 +283,38 @@ def test_fit_box_scales_and_centres():
 
 def test_bounds_of_an_empty_shape():
     assert bounds(Shape(layers=[])) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_trace_layers_traces_a_512_square_six_colour_drawing_in_under_two_seconds():
+    """A 512x512 six-colour blueprint traces in well under two seconds (issue #226)."""
+    import time
+
+    size = 512
+    yy, xx = np.indices((size, size))
+    palette = {
+        "white": (255, 255, 255),
+        "yellow": (255, 220, 0),
+        "orange": (255, 140, 0),
+        "blue": (0, 110, 255),
+        "green": (0, 200, 0),
+        "cyan": (0, 200, 255),
+    }
+    drawing = np.empty((size, size, 3), dtype=np.uint8)
+    drawing[...] = palette["white"]
+    drawing[(xx - 150) ** 2 + (yy - 150) ** 2 <= 120 ** 2] = palette["orange"]
+    drawing[(xx - 380) ** 2 + (yy - 170) ** 2 <= 130 ** 2] = palette["blue"]
+    drawing[(yy > 300) & (xx > 60) & (xx < 460)] = palette["green"]
+    drawing[(xx > 250) & (yy > 330) & (xx < 430) & (yy < 470)] = palette["yellow"]
+    drawing[((xx - 120) ** 2 + (yy - 400) ** 2 <= 70 ** 2) & (yy > 380)] = palette["cyan"]
+
+    start = time.perf_counter()
+    shape = trace_layers(drawing, palette, ["orange", "blue", "green", "yellow", "cyan"],
+                         background="white", tol=1.0, min_area=20)
+    elapsed = time.perf_counter() - start
+
+    assert {"orange", "blue", "green", "yellow", "cyan"} <= {layer.material for layer in shape.layers}
+    redrawn = redraw(shape, (size, size), palette)
+    assert iou(_nonwhite(redrawn), _nonwhite(drawing)) > 0.98
+    # The per-cell Python marcher took several seconds here; the vectorised one
+    # is a small fraction of a second.
+    assert elapsed < 2.0
