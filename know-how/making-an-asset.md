@@ -242,7 +242,8 @@ reference is the view drawing and the first photos, when there are any.
 drifting from the template, or when the texture already exists as orthographic
 drawings or photos, bake the atlas instead: `manifoldx.modeling.bake.bake_projection`
 projects the drawings onto the built mesh, so a drawing that is shifted or
-scaled still lands on the right piece.
+scaled still lands on the right piece, and a drawing whose parts sit in the
+wrong place can be registered by keypoints.
 
 Use a bake instead of painting islands when:
 
@@ -279,7 +280,8 @@ atlas = bake_projection(car, {"left": left}, size=1024)
 defaults to paint, black, trim, chrome, plate and underbody; `fallback` is the
 colour for baked texels no view faces, and defaults to the median of that
 material's baked texels, then its palette colour. `size` is the square atlas
-side, 2048 by default.
+side, 2048 by default. `keypoints` registers a view by named parts instead of
+by its box; it is covered below.
 
 ### How to draw the views
 
@@ -292,7 +294,8 @@ side, 2048 by default.
   out if you can.
 - **Keep the object's proportions.** Each view may sit anywhere and be any
   size in its image; the bake fits the asset's silhouette box to the drawing's
-  foreground box. It does not correct a stretched or rotated drawing.
+  foreground box. It does not correct a stretched or rotated drawing. Give
+  keypoints when it does more than that.
 - **Follow the documented orientation.** `left` has the front at the image's
   left. `right` is the left view mirrored. `front` has the object's left side
   at the image's right, `rear` its right side at the image's right. `top` and
@@ -300,6 +303,54 @@ side, 2048 by default.
   is up, seen from below its left side is up, as a camera sees them.
 - **Draw the object in its rest pose.** Wheels straight, doors and hood shut.
   A view of a different pose projects onto the wrong texels.
+
+### Register a drawing by its parts
+
+A box fit cannot fix a drawing whose parts are individually off: a nose drawn
+higher, wheels a little further apart, a slightly oblique plan view. For that,
+name the parts: `keypoints={view: {landmark: (px, py)}}`, where `px` is from the
+image's left and `py` from its top, and each landmark is one the built asset
+knows, in car coordinates. `Car.landmarks` holds them:
+
+| landmark | where it is |
+| --- | --- |
+| `wheel_front_left`, `wheel_front_right`, `wheel_rear_left`, `wheel_rear_right` | the wheel centres (the part's hub) |
+| `nose`, `tail` | the middle of the front and of the rear end, at bumper height |
+| `windscreen_foot`, `windscreen_top` | the middle of the windscreen's lower and upper edges |
+| `rear_window_top`, `rear_window_foot` | the middle of the rear window's upper and lower edges |
+| `roof` | the highest point of the body |
+| `mirror_left`, `mirror_right` | where each door mirror meets the door (absent when the car has no mirrors) |
+
+Give the landmarks that view shows, at the pixel each one sits at in that
+drawing, and leave out the ones it hides. In a side view the near and far
+wheels land on the same pixels, so give one wheel of each axle. Three
+keypoints are the minimum:
+
+- **3 to 5 keypoints** fit an affine transform by least squares. That corrects
+  translation, scale, a stretch or shear, and a small rotation, but the whole
+  drawing still moves as one piece.
+- **6 or more** fit a regularised thin-plate spline: each landmark pulls the
+  drawing around it onto the part of the asset it names, and the rest of the
+  drawing barely moves. This is the fit that rescues a drawing whose parts
+  drift apart.
+
+```python
+# A left view 512 pixels square, and where its parts are in that image.
+marks = {
+    "nose": (52, 214), "tail": (470, 226), "roof": (260, 18),
+    "windscreen_foot": (150, 160), "windscreen_top": (240, 26),
+    "rear_window_top": (388, 32), "rear_window_foot": (440, 110),
+    "mirror_left": (168, 122), "wheel_front_left": (112, 258),
+    "wheel_rear_left": (388, 258),
+}
+atlas = bake_projection(car, {"left": left}, size=1024, keypoints={"left": marks})
+```
+
+The points are read off the drawing, not calculated: open it, find the exact
+place each named part sits, and give its pixel. A view with no keypoints keeps
+the box registration, so mix them freely: keypoints where the drawing is
+unreliable, a box everywhere else. A wrong keypoint pulls its own
+neighbourhood the wrong way; check the bake, move that point and bake again.
 
 ### What registration by silhouette box can and cannot fix
 
@@ -312,7 +363,9 @@ it corrects:
 
 It cannot correct:
 
-- rotation, perspective or a non-orthographic view;
+- rotation, perspective or a non-orthographic view; a rotation or a stretch is
+  what keypoints' affine fit is for, and a part out of place what six or more
+  keypoints' spline is for;
 - a different pose or a different object;
 - a shadow, reflection or label counted as part of the object;
 - occlusion: a part hidden in a drawing gets the colour of whatever is in front
