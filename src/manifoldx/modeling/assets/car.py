@@ -143,6 +143,20 @@ class Car:
     def part(self, name: str) -> Part:
         return next(p for p in self.parts if p.name == name)
 
+    @property
+    def landmarks(self) -> dict:
+        """Named three-dimensional points on the car, for registering a drawing by keypoints.
+
+        The names are ``wheel_front_left``, ``wheel_front_right``, ``wheel_rear_left``,
+        ``wheel_rear_right`` (the wheel centres), ``nose`` and ``tail`` (the middle of each
+        end), ``windscreen_foot`` and ``windscreen_top``, ``rear_window_top`` and
+        ``rear_window_foot`` (the middle of each edge of the glass), ``roof`` (the highest
+        point) and ``mirror_left`` and ``mirror_right`` (where each door mirror meets the
+        door; absent when the car has no mirrors). All are in car coordinates: metres, Y up,
+        the front at +X, the right side at +Z.
+        """
+        return _landmarks(self.params, self.parts)
+
     def pose(self, doors=0.0, hood=0.0, hatch=0.0, wheel_turn=0.0, steer=0.0) -> dict:
         """Each part's (position, quaternion xyzw) so that car-space vertices land in their posed place.
 
@@ -163,6 +177,61 @@ class Car:
                 q = np.array([0.0, 0.0, 0.0, 1.0])
             out[p.name] = (p.pivot - _rotate(q, p.pivot), q)
         return out
+
+
+# --- markers on the car --------------------------------------------------------------------------------------
+
+
+def _landmarks(p: CarParams, parts) -> dict:
+    """The car's named landmarks, in car coordinates (see :attr:`Car.landmarks`).
+
+    Wheels, glass edges and mirrors come from the measurements, so they move with the car; the nose, the
+    tail and the roof are read off the built mesh, so a pickup's tailgate or a different profile still
+    lands on the surface.
+    """
+    axles = (p.length / 2 - p.front_overhang, p.length / 2 - p.front_overhang - p.wheelbase)
+    out = {}
+    for x, end in zip(axles, ("front", "rear")):
+        for side, sign in (("left", -1.0), ("right", 1.0)):
+            out[f"wheel_{end}_{side}"] = np.array([x, p.wheel_radius, sign * p.track / 2])
+    out.update(_landmarks_on_the_centreline(p))
+
+    vertices = [np.asarray(mesh.positions, float) for part in parts for mesh in part.pieces.values()]
+    if not vertices:
+        return out
+    v = np.concatenate(vertices, axis=0)
+    middle = v[np.abs(v[:, 2]) <= 0.08]  # the centre plane, where the nose, the tail and the roof are
+    if len(middle):
+        # The middle of a rounded end: the mean of the vertices on its frontmost (or rearmost) line.
+        front, back = middle[:, 0].max(), middle[:, 0].min()
+        out["nose"] = middle[middle[:, 0] >= front - 0.02].mean(axis=0)
+        out["tail"] = middle[middle[:, 0] <= back + 0.02].mean(axis=0)
+    out["roof"] = v[v[:, 1].argmax()]
+    return out
+
+
+def _landmarks_on_the_centreline(p: CarParams) -> dict:
+    """Where the windscreen and the rear window meet the roof and the body, on the centre plane."""
+    def at(u):
+        top = _profiles(p, np.array([u]))[0][0]
+        x = (p.length / 2 - u * p.length) * (1 - (p.nose_bulge + p.tail_bulge) / p.length)
+        x += (p.tail_bulge - p.nose_bulge) / 2  # the loft's own shift, so the point sits on the skin
+        return np.array([x, float(top), 0.0])
+
+    out = {
+        "windscreen_foot": at(p.cowl_u),
+        "windscreen_top": at(p.windscreen_u),
+        "rear_window_top": at(p.roof_end_u),
+        "rear_window_foot": at(p.hatch_u),
+    }
+    if p.mirrors:  # the foot of each mirror, where its stalk meets the door
+        u = min(p.cowl_u + 0.05, 1.0)
+        top, bottom, halfw, belt, roof = (float(q[0]) for q in _profiles(p, np.array([u])))
+        section = _section(top, bottom, halfw, belt, roof)
+        z = float(np.interp(p.belt_front + 0.01, [y for _, y in section], [s for s, _ in section]))
+        for side, sign in (("left", -1.0), ("right", 1.0)):
+            out[f"mirror_{side}"] = np.array([at(u)[0], p.belt_front + 0.01, sign * (z - 0.01)])
+    return out
 
 
 # --- curves and small geometry helpers ---------------------------------------------------------------------
