@@ -564,6 +564,14 @@ Every number in `CarParams` is a dial: a longer wheelbase moves the rear axle an
 its arch, a lower `tail_top` rakes the hatch, `headlamp="round"` swaps the lamp
 outline. Detail comes later, from smoothing and subdivision on the same parts.
 
+A car's texture can be a flat base paint with crisp details on top. Bake the base
+with `bake_projection(car, {}, size=..., materials={"paint"}, fallback=...)`, then
+place each detail as a `Decal`: an RGBA image, a view, and a centre that is a 3D
+point or one of `Car.landmarks`, with a size in metres. `apply_decals(atlas, car,
+decals)` projects each one onto the texels of its allowed materials that face the
+view, so a badge or a stripe stays sharp where a whole-view bake would smear it.
+`know-how/making-an-asset.md` has the drawing workflow.
+
 ## Assets from an image model
 
 Not every part wants a builder with twenty dials. A wheel face, a grille, a

@@ -352,6 +352,78 @@ the box registration, so mix them freely: keypoints where the drawing is
 unreliable, a box everywhere else. A wrong keypoint pulls its own
 neighbourhood the wrong way; check the bake, move that point and bake again.
 
+### A base paint and decals
+
+A whole-drawing bake blends every view across the whole surface. When the
+drawing and the asset disagree on a small detail — a badge, a lamp graphic, a
+stripe — the detail lands half on the wrong panel. Bake a flat base paint
+instead and lay each detail on it as a decal, placed on the asset on its own.
+
+Use base plus decals when:
+
+- the panels are mostly one colour and only a few crisp details differ;
+- the details are small enough that a whole-view bake would smear them;
+- a detail has to sit at a measured point, or follow a landmark when the car's
+  measurements change.
+
+Keep a whole-view bake when the drawing already lines up and every panel is
+painted, or when the surface should follow the drawing's shading rather than a
+flat colour.
+
+The base is a bake with no views. `fallback` gives each material's flat colour:
+
+```python
+base = bake_projection(
+    car, {}, size=1024, materials={"paint"},
+    fallback={"paint": (140, 150, 160)},
+)
+```
+
+Give `fallback` as one RGB triple for every baked material, or as a
+`{material: RGB}` mapping. Other materials keep their palette colours, and the
+gutters are filled as usual.
+
+A decal is an RGBA image plus a view, a place and a size:
+
+```python
+from manifoldx.modeling.bake import Decal, apply_decals
+
+mark = np.zeros((64, 64, 4), np.uint8)
+mark[..., :3] = (220, 180, 40)   # the paint
+mark[8:56, 8:56, 3] = 255        # where it paints; the border stays clear
+
+atlas = apply_decals(base, car, [
+    Decal(mark, "left", centre="mirror_left", offset=(0, -0.12, 0), size=(0.20, 0.20)),
+])
+```
+
+- **Place it by a point or a landmark.** `centre` is either a 3D point in the
+  car's coordinates or a name from `Car.landmarks`; `offset` shifts it. The
+  landmark is looked up on every call, so a decal follows the car when its
+  measurements change.
+- **Give the size in metres.** `size=(width, height)` is in the view's image
+  plane: width runs across the image, height down it. A single number is a
+  square.
+- **Follow the view conventions.** A decal uses the same `left`, `right`,
+  `front`, `rear`, `top` and `bottom` orientations as a bake. For example a
+  left-view decal's image top is the car's roof, and its image left is the
+  front.
+- **Name the materials it may paint.** The default is paint alone, so a decal
+  never colours glass, lamps or the interior unless `materials` says so.
+  `facing` (default 0.3) is the least `normal . view direction` that receives
+  it, so it does not wrap round an edge.
+- **Use straight alpha.** Alpha 0 leaves the atlas untouched; a partly
+  transparent texel blends the decal's colour over what is there. Sampling is
+  bilinear, as in a bake.
+
+To cut a decal from a drawing, crop a tight rectangle around the detail in that
+view, keep the background transparent, and give the crop's physical width and
+height in metres. The image is placed by its middle, so a tight crop with equal
+margins on each side centres on `centre`. Check the result by rendering the car
+or by comparing the atlas before and after; move `offset` or resize the crop
+until the detail sits where it should. Decals paint in order, so a later one
+covers an earlier one.
+
 ### What registration by silhouette box can and cannot fix
 
 It fits one axis-aligned box per view to the object's non-background pixels, so

@@ -13,6 +13,11 @@ are baked; the rest keep their palette colours, and texels no view faces keep a
 fallback colour.  Last, the atlas gutters are filled from the nearest covered
 texel so that mip-mapping does not bleed one island into another.
 
+A bake of whole drawings can smear a small detail where the drawing and the
+asset disagree.  Instead, bake a flat base paint with no views and lay crisp
+details on it as :class:`Decal` images with :func:`apply_decals`; each decal is
+placed on the asset by a 3D point or a landmark and projected along a view.
+
 The module uses numpy only; it never imports Pillow.  A view may be a Pillow
 image, an array read by another library, or a plain ``H x W x 3`` numpy array,
 because every view goes through :func:`numpy.asarray`.
@@ -34,6 +39,9 @@ which is the convention of :class:`manifoldx.modeling.assets.car.Car`.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 import numpy as np
 
 #: The car materials a bake touches by default.  Glass, lamps, tyres, wheels and
@@ -50,6 +58,17 @@ _VIEW_DIRECTIONS = {
     "bottom": np.array([0.0, -1.0, 0.0]),
 }
 _VIEW_NAMES = tuple(_VIEW_DIRECTIONS)
+
+# The world directions of each view's image axes: across to the image's right,
+# down toward the image's bottom.  They follow ``_view_uv`` exactly.
+_VIEW_AXES = {
+    "left": (np.array([-1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0])),
+    "right": (np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0])),
+    "front": (np.array([0.0, 0.0, -1.0]), np.array([0.0, -1.0, 0.0])),
+    "rear": (np.array([0.0, 0.0, 1.0]), np.array([0.0, -1.0, 0.0])),
+    "top": (np.array([-1.0, 0.0, 0.0]), np.array([0.0, 0.0, -1.0])),
+    "bottom": (np.array([-1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0])),
+}
 
 _WEIGHT_POWER = 3.0
 # A texel counts as baked when the views that face it add up to this much.
@@ -75,7 +94,10 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None, keypoi
         ``top`` and ``bottom``.  A missing ``right`` mirrors ``left`` and a
         missing ``left`` mirrors ``right``.  An image is anything
         :func:`numpy.asarray` can read as ``H x W``, ``H x W x 3`` or
-        ``H x W x 4``; an alpha channel is used as the foreground mask.
+        ``H x W x 4``; an alpha channel is used as the foreground mask.  Pass an
+        empty mapping to bake no drawing at all: the result is then the flat
+        base paint, one colour per material from ``fallback``, ready for
+        :func:`apply_decals`.
     size:
         Side of the square atlas, in texels.
     materials:
@@ -104,8 +126,8 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None, keypoi
     size = int(size)
     if size < 1:
         raise ValueError("size must be a positive integer")
-    if not isinstance(views, dict) or not views:
-        raise ValueError("views must be a non-empty mapping of view name to image")
+    if not isinstance(views, dict):
+        raise ValueError("views must be a mapping of view name to image, or {} for a base paint")
 
     images = {
         name: _prepare_image(image) for name, image in views.items() if name in _VIEW_DIRECTIONS
@@ -118,8 +140,6 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None, keypoi
         images["right"] = _mirror(images["left"])
     if "left" not in images and "right" in images:
         images["left"] = _mirror(images["right"])
-    if not images:
-        raise ValueError("no usable views")
     landmarks = None
     if keypoints:
         landmarks = getattr(car, "landmarks", None)
@@ -188,6 +208,151 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None, keypoi
     return np.clip(atlas, 0.0, 255.0).astype(np.uint8)
 
 
+@dataclass(frozen=True)
+class Decal:
+    """A crisp RGBA detail projected onto an asset, over a flat base paint.
+
+    A decal is placed on the asset, not on an atlas island: ``centre`` is either
+    a 3D point in the asset's own coordinates or the name of one of its
+    :attr:`~manifoldx.modeling.assets.car.Car.landmarks`, and ``offset`` shifts
+    it from there.  It is projected along ``view`` with the same orthographic
+    projection as :func:`bake_projection`, so the view conventions are shared:
+    ``left`` has the front at the image's left, ``top`` has the right side up.
+
+    Parameters
+    ----------
+    image:
+        The decal as ``H x W x 4`` RGBA, or ``H x W x 3`` for an opaque image.
+        Anything :func:`numpy.asarray` reads works, including a Pillow image.
+        Alpha is straight, not premultiplied: 0 leaves the atlas untouched.
+    view:
+        One of ``left``, ``right``, ``front``, ``rear``, ``top`` and ``bottom``.
+    centre:
+        A 3D point, or a landmark name, where the image's middle lands.
+    size:
+        ``(width, height)`` in metres in the view's image plane; one number
+        makes a square.
+    offset:
+        A 3D offset added to ``centre``, in metres.
+    materials:
+        The material names the decal may paint.  Defaults to paint alone, so a
+        decal never colours glass, lamps or the interior unless asked to.
+    facing:
+        The least ``normal . view_direction`` a texel needs to receive the
+        decal, so it does not wrap round an edge.  Defaults to 0.3.
+    """
+
+    image: object
+    view: str
+    centre: str | Sequence[float]
+    size: float | Sequence[float]
+    offset: Sequence[float] = (0.0, 0.0, 0.0)
+    materials: Sequence[str] | str | None = None
+    facing: float = 0.3
+
+
+def apply_decals(atlas, car, decals):
+    """Composite decals over a base-painted atlas, in order.
+
+    Parameters
+    ----------
+    atlas:
+        ``(size, size, 3)`` RGB, as :func:`bake_projection` returns.  A float
+        atlas is accepted and returned at the same scale.
+    car:
+        The built asset the atlas belongs to: anything with ``parts`` whose
+        pieces carry UVs, and ``landmarks`` when a decal is placed by name.
+    decals:
+        A :class:`Decal`, or an iterable of them.  Later decals paint over
+        earlier ones.
+
+    Returns
+    -------
+    A new atlas, the input's shape and dtype, with each decal's alpha blended
+    over the texels of its allowed materials that face its view.
+    """
+    source = np.asarray(atlas)
+    if source.ndim != 3 or source.shape[2] != 3:
+        raise ValueError(f"an atlas must be H x W x 3 RGB, not {source.shape}")
+    if source.shape[0] != source.shape[1]:
+        raise ValueError(f"an atlas must be square, not {source.shape[:2]}")
+    if isinstance(decals, Decal):
+        decals = (decals,)
+    else:
+        decals = tuple(decals)
+    if not decals:
+        return source.copy()
+
+    size = source.shape[0]
+    names = _material_names(car)
+    if not names:
+        raise ValueError("the asset has no UV-mapped pieces to paint")
+    id_of = {name: i for i, name in enumerate(names)}
+    pos, nrm, mat = _rasterise(car, size, names)
+
+    integer = np.issubdtype(source.dtype, np.integer)
+    high = float(np.iinfo(source.dtype).max) if integer else 255.0
+    work = source.astype(np.float32)
+    restore = 1.0
+    if np.issubdtype(source.dtype, np.floating) and source.size and float(source.max()) <= 1.0:
+        work *= 255.0
+        restore = 1.0 / 255.0
+
+    for decal in decals:
+        if not isinstance(decal, Decal):
+            raise TypeError(f"decals must be Decal instances, not {type(decal).__name__}")
+        if decal.view not in _VIEW_DIRECTIONS:
+            raise ValueError(f"unknown decal view {decal.view!r}; expected {sorted(_VIEW_NAMES)}")
+        rgb, alpha = _prepare_decal(decal.image)
+        centre = _decal_centre(decal, car)
+        width, height = _decal_size(decal.size)
+        facing = _decal_facing(decal.facing)
+
+        if decal.materials is None:
+            materials = ("paint",)
+        elif isinstance(decal.materials, str):
+            materials = (decal.materials,)
+        else:
+            materials = tuple(decal.materials)
+        unknown = [name for name in materials if name not in id_of]
+        if unknown:
+            raise ValueError(f"the asset has no material(s) {unknown}; it has {sorted(names)}")
+        if not materials:
+            continue
+
+        allowed = np.isin(mat, [id_of[name] for name in materials])
+        allowed &= (nrm @ _VIEW_DIRECTIONS[decal.view]) >= facing
+        if not allowed.any():
+            continue
+
+        ys, xs = np.nonzero(allowed)
+        across, down = _VIEW_AXES[decal.view]
+        relative = pos[ys, xs] - centre
+        u = relative @ across
+        v = relative @ down
+        inside = (np.abs(u) <= width / 2) & (np.abs(v) <= height / 2)
+        if not inside.any():
+            continue
+
+        ys, xs = ys[inside], xs[inside]
+        px = (u[inside] / width + 0.5) * rgb.shape[1]
+        py = (v[inside] / height + 0.5) * rgb.shape[0]
+        coverage = _bilinear(alpha, px, py)
+        painted = coverage > 0.0
+        if not painted.any():
+            continue
+
+        ys, xs = ys[painted], xs[painted]
+        weight = coverage[painted][..., None]
+        colour = _bilinear(rgb, px[painted], py[painted])
+        work[ys, xs] = weight * colour + (1.0 - weight) * work[ys, xs]
+
+    result = np.clip(work * restore, 0.0, high)
+    if integer:
+        result = np.rint(result)
+    return result.astype(source.dtype)
+
+
 # --- images and registration ---------------------------------------------------------------------------------
 
 
@@ -220,6 +385,77 @@ def _prepare_image(image):
     if not mask.any():
         raise ValueError("a view has no foreground pixels; give it a plain background")
     return rgb, mask
+
+
+def _prepare_decal(image):
+    """A decal's RGB floats and straight alpha, from a Pillow image or an array."""
+    a = np.asarray(image)
+    if a.ndim != 3 or a.shape[2] not in (3, 4):
+        raise ValueError(f"a decal must be H x W x 4 RGBA or H x W x 3, not {a.shape}")
+
+    rgb = a[..., :3].astype(np.float32)
+    if np.issubdtype(a.dtype, np.floating) and rgb.size and float(np.nanmax(rgb)) <= 1.0:
+        rgb = rgb * 255.0
+
+    if a.shape[2] == 3:
+        alpha = np.ones(a.shape[:2], np.float32)
+    else:
+        alpha = a[..., 3].astype(np.float32)
+        if np.issubdtype(a.dtype, np.integer):
+            peak = float(np.iinfo(a.dtype).max)
+            if peak > 1.0:
+                alpha = alpha / peak
+        elif alpha.size and float(np.nanmax(alpha)) > 1.0:
+            alpha = alpha / 255.0
+
+    if not np.isfinite(rgb).all() or not np.isfinite(alpha).all():
+        raise ValueError("a decal must hold finite colours and alpha")
+    return rgb, np.clip(alpha, 0.0, 1.0)
+
+
+def _decal_centre(decal, car):
+    """The decal's centre in world space, resolved from a point or a landmark."""
+    if isinstance(decal.centre, str):
+        landmarks = getattr(car, "landmarks", None)
+        if landmarks is None:
+            raise ValueError("a decal placed by landmark needs an asset with landmarks")
+        if decal.centre not in landmarks:
+            raise ValueError(
+                f"unknown landmark {decal.centre!r}; the asset has {sorted(landmarks)}"
+            )
+        centre = np.asarray(landmarks[decal.centre], float)
+    else:
+        centre = _point(decal.centre, "centre")
+    return centre + _point(decal.offset, "offset")
+
+
+def _point(value, what):
+    """One 3D point as a float array."""
+    point = np.asarray(value, float).reshape(-1)
+    if point.size != 3 or not np.isfinite(point).all():
+        raise ValueError(f"a decal {what} must be a 3D point of finite numbers, not {value!r}")
+    return point
+
+
+def _decal_size(value):
+    """A decal's width and height in metres, from one number or a pair."""
+    size = np.asarray(value, float).reshape(-1)
+    if size.size == 1:
+        size = np.repeat(size, 2)
+    if size.size != 2 or not np.isfinite(size).all() or (size <= 0.0).any():
+        raise ValueError("a decal size must be a width and height in positive metres")
+    return float(size[0]), float(size[1])
+
+
+def _decal_facing(value):
+    """A decal's facing threshold as a finite float."""
+    try:
+        facing = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"a decal facing must be a number, not {value!r}") from error
+    if not np.isfinite(facing):
+        raise ValueError(f"a decal facing must be finite, not {value!r}")
+    return facing
 
 
 def _background_mask(rgb, light):
