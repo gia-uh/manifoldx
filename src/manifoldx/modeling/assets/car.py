@@ -11,7 +11,7 @@ so they follow any shape: glass, pillars, doors, hood and hatch. Small parts tha
 plate, handles) are decals: flat outlines projected onto the body along a view direction, so a lamp style is
 just an outline. Lamps, the grille, wheels, door mirrors, the dashboard, the steering wheel, the door cards and the
 console take a shape: a dict of outlines traced from a flat drawing of the real part, or a plain style built from
-boxes and ellipses. `examples/models/dongfeng_box.py` traces one of each and says how each kind is drawn.
+boxes and ellipses. `examples/models/car_shapes.py` traces one of each and says how each kind is drawn.
 
 Doors, hood and hatch are separate parts with a hinge; wheels spin and the front ones steer. `Car.pose` gives
 each part's transform for an opening, a wheel turn and a steering angle.
