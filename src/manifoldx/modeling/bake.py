@@ -22,8 +22,8 @@ and must be orthographic, with a plain background:
   ``right`` is missing, and vice versa);
 * ``front`` has the asset's left side at the image's right;
 * ``rear`` has the asset's right side at the image's right;
-* ``top`` has the front at the left and the asset's left side up;
-* ``bottom`` has the front at the left and the asset's left side up.
+* ``top`` has the front at the left and the asset's right side up, as seen from above;
+* ``bottom`` has the front at the left and the asset's left side up, as seen from below.
 
 The asset is assumed to use metres, Y up, its front at +X and its right at +Z,
 which is the convention of :class:`manifoldx.modeling.assets.car.Car`.
@@ -316,9 +316,9 @@ def _project(name, pos, box, xmin, xmax, ymin, ymax, zmin, zmax):
     elif name in ("front", "rear"):
         u = (zmax - z) / wide if name == "front" else (z - zmin) / wide
         v = (ymax - y) / tall
-    else:  # plan views: the front is at the left in both, the asset's left side up
+    else:  # plan views: the front is at the left; from above the right side is up, from below the left side
         u = (xmax - x) / across
-        v = (z - zmin) / wide
+        v = (zmax - z) / wide if name == "top" else (z - zmin) / wide
     bx0, bx1, by0, by1 = box
     return bx0 + u * (bx1 - bx0), by0 + v * (by1 - by0)
 

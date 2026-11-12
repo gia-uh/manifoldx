@@ -132,7 +132,7 @@ def test_gutters_reach_the_far_corner_of_the_atlas():
     assert np.allclose(out, ORANGE)
 
 
-def test_the_top_view_has_the_assets_left_side_up():
+def test_the_top_view_has_the_assets_right_side_up():
     car, pos, nrm, mat, paint_id = _default_car()
     image = np.full((SIZE, SIZE, 3), 255, np.uint8)
     image[24 : SIZE // 2, 20 : SIZE - 20] = RED
@@ -144,5 +144,5 @@ def test_the_top_view_has_the_assets_left_side_up():
     right_side = facing_up & (pos[..., 2] > 0.3)
     assert left_side.sum() > 100
     assert right_side.sum() > 100
-    assert np.allclose(_mean(atlas, left_side), RED, atol=12)
-    assert np.allclose(_mean(atlas, right_side), BLUE, atol=12)
+    assert np.allclose(_mean(atlas, right_side), RED, atol=12)
+    assert np.allclose(_mean(atlas, left_side), BLUE, atol=12)

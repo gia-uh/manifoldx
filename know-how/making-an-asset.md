@@ -296,7 +296,8 @@ side, 2048 by default.
 - **Follow the documented orientation.** `left` has the front at the image's
   left. `right` is the left view mirrored. `front` has the object's left side
   at the image's right, `rear` its right side at the image's right. `top` and
-  `bottom` both have the front at the left and the object's left side up.
+  `bottom` have the front at the left; seen from above the object's right side
+  is up, seen from below its left side is up, as a camera sees them.
 - **Draw the object in its rest pose.** Wheels straight, doors and hood shut.
   A view of a different pose projects onto the wrong texels.
 
