@@ -1,6 +1,6 @@
 ---
 when: making an asset with manifoldx asset, alone or as an agent: turning an image model's drawings into a mesh, reading a lint and changing one option at a time, drawing and painting without paying twice, or choosing between Parts and an open Asset
-triggers: ["manifoldx asset", "asset", "Parts", "two_view", "swept_tube", "A-SEEN", "A-FLOAT", "A-KEEP", "A-SHEET", "A-CODE", "A-OUTLINE", "A-TRIS", "blueprint", "blueprints", "image model", "albedo", "kept_outline", "LOD", "lint findings"]
+triggers: ["manifoldx asset", "asset", "Parts", "two_view", "swept_tube", "A-SEEN", "A-FLOAT", "A-KEEP", "A-SHEET", "A-CODE", "A-OUTLINE", "A-TRIS", "blueprint", "blueprints", "image model", "albedo", "kept_outline", "LOD", "lint findings", "bake", "bake_projection", "projection"]
 ---
 
 # Making an asset
@@ -235,6 +235,94 @@ reference is the view drawing and the first photos, when there are any.
   its sculpted relief is worth a call.
 - **Ask for one view per call here too.** Two views on one answer share a
   canvas, and a view painted at another view's scale does not fit its island.
+
+## Baking by projection
+
+`paint` asks an image model to paint each atlas island. When the model keeps
+drifting from the template, or when the texture already exists as orthographic
+drawings or photos, bake the atlas instead: `manifoldx.modeling.bake.bake_projection`
+projects the drawings onto the built mesh, so a drawing that is shifted or
+scaled still lands on the right piece.
+
+Use a bake instead of painting islands when:
+
+- the drawings come from outside (photos, a hand-drawn elevation, a reference
+  sheet) and line up with the object, not with the atlas template;
+- the image model draws the object well but cannot follow the island layout;
+- the same picture must cover several pieces, or both sides of a symmetric
+  part;
+- you want the texture to follow the surface rather than the island's flat
+  projection.
+
+Keep painting islands for what no outside view sees: interiors, the underside,
+glass, lamps, and small details hidden behind other parts. A bake only recolours
+the materials you name; everything else keeps its palette colour.
+
+```python
+import numpy as np
+from manifoldx.modeling.assets.car import CarParams, build_car
+from manifoldx.modeling.bake import bake_projection
+
+# Stand-ins for the drawings: a left view with a front and a rear flat colour.
+left = np.full((512, 512, 3), 255, np.uint8)
+left[40:472, 40:256] = (200, 60, 50)   # the front half
+left[40:472, 256:472] = (50, 70, 190)  # the rear half
+
+car = build_car(CarParams())           # the neutral defaults
+atlas = bake_projection(car, {"left": left}, size=1024)
+# atlas is (1024, 1024, 3) uint8, laid out like ATLAS; write it to a PNG.
+# spawn_car(engine, car, texture="baked.png")
+```
+
+`views` is keyed `left`, `right`, `front`, `rear`, `top` and `bottom`. A missing
+`right` mirrors `left` (and a missing `left` mirrors `right`). `materials`
+defaults to paint, black, trim, chrome, plate and underbody; `fallback` is the
+colour for baked texels no view faces, and defaults to the median of that
+material's baked texels, then its palette colour. `size` is the square atlas
+side, 2048 by default.
+
+### How to draw the views
+
+- **One strict orthographic view per image.** A three-quarter view, a wide-angle
+  photo or a sheet of views cannot be registered by a box.
+- **Use a plain background.** The background is what the registration calls
+  "not the object": white or a flat colour, with no shadow, reflection or
+  gradient. A white or very light body on a white background disappears; give
+  it a coloured background.
+- **Keep the object's proportions.** Each view may sit anywhere and be any
+  size in its image; the bake fits the asset's silhouette box to the drawing's
+  foreground box. It does not correct a stretched or rotated drawing.
+- **Follow the documented orientation.** `left` has the front at the image's
+  left. `right` is the left view mirrored. `front` has the object's left side
+  at the image's right, `rear` its right side at the image's right. `top` has
+  the front at the left and the object's right side up; `bottom` has the front
+  at the left and its right side down.
+- **Draw the object in its rest pose.** Wheels straight, doors and hood shut.
+  A view of a different pose projects onto the wrong texels.
+
+### What registration by silhouette box can and cannot fix
+
+It fits one axis-aligned box per view to the object's non-background pixels, so
+it corrects:
+
+- translation: the drawing can sit anywhere in its image;
+- scale: the drawing can be larger or smaller, and the two image axes are
+  fitted separately, so a slightly stretched drawing still lands.
+
+It cannot correct:
+
+- rotation, perspective or a non-orthographic view;
+- a different pose or a different object;
+- a shadow, reflection or label counted as part of the object;
+- occlusion: a part hidden in a drawing gets the colour of whatever is in front
+  of it;
+- asymmetry between the two sides. The right view is the left one mirrored, so
+  a badge, a fuel cap or a mirror that differs side to side needs its own
+  `right` drawing. The same applies to `bottom`: supply it only when the
+  underside is drawn.
+
+A bake produces an albedo atlas. A normal map can still be computed from that
+albedo, as `paint` does.
 
 ## Which model
 
