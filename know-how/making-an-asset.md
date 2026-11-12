@@ -285,18 +285,18 @@ side, 2048 by default.
 
 - **One strict orthographic view per image.** A three-quarter view, a wide-angle
   photo or a sheet of views cannot be registered by a box.
-- **Use a plain background.** The background is what the registration calls
-  "not the object": white or a flat colour, with no shadow, reflection or
-  gradient. A white or very light body on a white background disappears; give
-  it a coloured background.
+- **Use a plain background.** The background is the colour registration
+  subtracts: white or a flat colour, with no reflection or gradient. A light
+  body on a white field still bakes (only pixels near the field's colour are
+  dropped); a soft ground shadow is read as part of the drawing, so keep it
+  out if you can.
 - **Keep the object's proportions.** Each view may sit anywhere and be any
   size in its image; the bake fits the asset's silhouette box to the drawing's
   foreground box. It does not correct a stretched or rotated drawing.
 - **Follow the documented orientation.** `left` has the front at the image's
   left. `right` is the left view mirrored. `front` has the object's left side
-  at the image's right, `rear` its right side at the image's right. `top` has
-  the front at the left and the object's right side up; `bottom` has the front
-  at the left and its right side down.
+  at the image's right, `rear` its right side at the image's right. `top` and
+  `bottom` both have the front at the left and the object's left side up.
 - **Draw the object in its rest pose.** Wheels straight, doors and hood shut.
   A view of a different pose projects onto the wrong texels.
 

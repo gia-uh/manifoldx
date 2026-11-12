@@ -22,8 +22,8 @@ and must be orthographic, with a plain background:
   ``right`` is missing, and vice versa);
 * ``front`` has the asset's left side at the image's right;
 * ``rear`` has the asset's right side at the image's right;
-* ``top`` has the front at the left and the asset's right side up;
-* ``bottom`` has the front at the left and the asset's right side down.
+* ``top`` has the front at the left and the asset's left side up;
+* ``bottom`` has the front at the left and the asset's left side up.
 
 The asset is assumed to use metres, Y up, its front at +X and its right at +Z,
 which is the convention of :class:`manifoldx.modeling.assets.car.Car`.
@@ -51,9 +51,6 @@ _VIEW_NAMES = tuple(_VIEW_DIRECTIONS)
 _WEIGHT_POWER = 3.0
 # A texel counts as baked when the views that face it add up to this much.
 _COVERAGE = 0.05
-# How far the nearest-covered-texel fill reaches into the empty atlas.  This is
-# enough for the mip levels a 2K atlas uses without colouring the whole sheet.
-_GUTTER = 16
 _BACKGROUND_TOLERANCE = 24.0
 
 
@@ -94,7 +91,9 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None):
     if not isinstance(views, dict) or not views:
         raise ValueError("views must be a non-empty mapping of view name to image")
 
-    images = {name: _prepare_image(image) for name, image in views.items() if name in _VIEW_DIRECTIONS}
+    images = {
+        name: _prepare_image(image) for name, image in views.items() if name in _VIEW_DIRECTIONS
+    }
     unknown = set(views) - set(_VIEW_DIRECTIONS)
     if unknown:
         raise ValueError(f"unknown view(s) {sorted(unknown)}; expected {sorted(_VIEW_NAMES)}")
@@ -157,7 +156,7 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None):
         if sel.any():
             atlas[sel] = acc[sel] / wsum[sel][:, None]
 
-    atlas = _fill_gutters(atlas, mat >= 0, _GUTTER)
+    atlas = _fill_gutters(atlas, mat >= 0)
     return np.clip(atlas, 0.0, 255.0).astype(np.uint8)
 
 
@@ -202,8 +201,6 @@ def _background_mask(rgb, light):
     values, counts = np.unique(quantised, axis=0, return_counts=True)
     background = values[np.argmax(counts)].astype(np.float32) * 8.0
     mask = np.linalg.norm(rgb - background, axis=2) > _BACKGROUND_TOLERANCE
-    if background.min() > 150.0 and background.max() - background.min() < 20.0:
-        mask &= ~light
     if not mask.any():  # a drawing with no margin: fall back to the luminance rule
         mask = (rgb.min(axis=2) < 200.0) & ~light
     return mask
@@ -218,7 +215,9 @@ def _mirror(prepared):
 
 
 def _material_names(car):
-    names = {name for part in car.parts for name, mesh in part.pieces.items() if mesh.uvs is not None}
+    names = {
+        name for part in car.parts for name, mesh in part.pieces.items() if mesh.uvs is not None
+    }
     return sorted(names)
 
 
@@ -273,8 +272,10 @@ def _rasterise(car, size, names):
                 if normals is not None:
                     nrm[yy, xx] = bary @ normals[face]
                 else:
-                    face_normal = np.cross(positions[face[1]] - positions[face[0]],
-                                           positions[face[2]] - positions[face[0]])
+                    face_normal = np.cross(
+                        positions[face[1]] - positions[face[0]],
+                        positions[face[2]] - positions[face[0]],
+                    )
                     nrm[yy, xx] = face_normal / (np.linalg.norm(face_normal) + 1e-9)
                 mat[yy, xx] = material_id
 
@@ -285,13 +286,22 @@ def _rasterise(car, size, names):
 
 def _bounds(car):
     """The asset's full box in metres: X front-back, Y ground-roof, Z left-right."""
-    vertices = [np.asarray(mesh.positions, np.float32)
-                for part in car.parts for mesh in part.pieces.values()]
+    vertices = [
+        np.asarray(mesh.positions, np.float32)
+        for part in car.parts
+        for mesh in part.pieces.values()
+    ]
     if not vertices:
         raise ValueError("the asset has no pieces")
     v = np.concatenate(vertices, axis=0)
-    return (float(v[:, 0].min()), float(v[:, 0].max()), float(v[:, 1].min()), float(v[:, 1].max()),
-            float(v[:, 2].min()), float(v[:, 2].max()))
+    return (
+        float(v[:, 0].min()),
+        float(v[:, 0].max()),
+        float(v[:, 1].min()),
+        float(v[:, 1].max()),
+        float(v[:, 2].min()),
+        float(v[:, 2].max()),
+    )
 
 
 def _project(name, pos, box, xmin, xmax, ymin, ymax, zmin, zmax):
@@ -306,18 +316,44 @@ def _project(name, pos, box, xmin, xmax, ymin, ymax, zmin, zmax):
     elif name in ("front", "rear"):
         u = (zmax - z) / wide if name == "front" else (z - zmin) / wide
         v = (ymax - y) / tall
-    else:  # plan views: the front is at the left in both, the right side up for top and down for bottom
+    else:  # plan views: the front is at the left in both, the asset's left side up
         u = (xmax - x) / across
-        v = (zmax - z) / wide if name == "top" else (z - zmin) / wide
+        v = (z - zmin) / wide
     bx0, bx1, by0, by1 = box
     return bx0 + u * (bx1 - bx0), by0 + v * (by1 - by0)
 
 
 def _view_box(prepared):
-    """The image's non-background bounding box as (x0, x1, y0, y1), inclusive."""
-    _, mask = prepared
-    ys, xs = np.nonzero(mask)
-    return int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+    """The image's non-background bounding box as (x0, x1, y0, y1), inclusive.
+
+    Registration uses the drawing's structure rather than every foreground
+    pixel: a soft ground shadow or a bright halo spreads past the subject and
+    would register the asset too small.  Rows and columns holding only a speck
+    are ignored, so one stray anti-aliased pixel cannot widen the box.  When
+    the mask carries almost no structure (an alpha cut-out of a light object),
+    every foreground pixel counts instead.
+    """
+    rgb, mask = prepared
+    structure = mask & (rgb.min(axis=2) <= 200.0)
+    structure &= ~((rgb.max(axis=2) - rgb.min(axis=2) < 12.0) & (rgb.mean(axis=2) > 150.0))
+    if int(structure.sum()) < 0.1 * max(int(mask.sum()), 1):
+        structure = mask
+    x0, x1 = _span(structure.sum(axis=0))
+    y0, y1 = _span(structure.sum(axis=1))
+    return x0, x1, y0, y1
+
+
+def _span(counts):
+    """First and last row or column holding real content.
+
+    A row or column must hold at least one percent of the busiest one to count,
+    which drops stray specks while keeping a thin tip of the subject.
+    """
+    peak = int(counts.max()) if counts.size else 0
+    strong = np.nonzero(counts >= max(2, int(round(0.01 * peak))))[0]
+    if not strong.size:
+        return 0, counts.size - 1
+    return int(strong[0]), int(strong[-1])
 
 
 def _bilinear(image, xf, yf):
@@ -331,8 +367,12 @@ def _bilinear(image, xf, yf):
     if image.ndim == 3:
         dx = dx[..., None]
         dy = dy[..., None]
-    return (image[y0, x0] * (1.0 - dx) * (1.0 - dy) + image[y0, x0 + 1] * dx * (1.0 - dy)
-            + image[y0 + 1, x0] * (1.0 - dx) * dy + image[y0 + 1, x0 + 1] * dx * dy)
+    return (
+        image[y0, x0] * (1.0 - dx) * (1.0 - dy)
+        + image[y0, x0 + 1] * dx * (1.0 - dy)
+        + image[y0 + 1, x0] * (1.0 - dx) * dy
+        + image[y0 + 1, x0 + 1] * dx * dy
+    )
 
 
 # --- colours and gutters --------------------------------------------------------------------------------------
@@ -346,7 +386,7 @@ def _palette():
     out = {}
     for name, entry in PALETTE.items():
         value = entry[0]
-        out[name] = np.array([int(value[i:i + 2], 16) for i in (1, 3, 5)], np.float32)
+        out[name] = np.array([int(value[i : i + 2], 16) for i in (1, 3, 5)], np.float32)
     return out
 
 
@@ -375,22 +415,43 @@ def _colour(value):
     return colour
 
 
-def _fill_gutters(colour, cover, radius):
-    """Dilate covered texels outward, copying the colour of a covered neighbour each step."""
-    out = colour.copy()
-    filled = cover.copy()
-    for _ in range(radius):
-        if filled.all():
-            break
-        newly = np.zeros_like(filled)
-        for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)):
-            source = _shift(filled, dy, dx, False)
-            take = ~filled & ~newly & source
-            if take.any():
-                out[take] = _shift(out, dy, dx, False)[take]
-                newly |= take
-        filled |= newly
-    return out
+def _fill_gutters(colour, cover):
+    """Fill every uncovered texel with the colour of its nearest covered texel.
+
+    Jump flooding propagates the nearest covered coordinate in ``log2(size)``
+    passes, which is cheap enough to colour the whole atlas: mip levels sample
+    far outside the islands and would otherwise bleed the background in.
+    """
+    if not cover.any():
+        return colour
+    height, width = cover.shape
+    rows, cols = np.mgrid[0:height, 0:width]
+    source_y = np.where(cover, rows, -1).astype(np.int32)
+    source_x = np.where(cover, cols, -1).astype(np.int32)
+    far = np.int32(1 << 30)
+    step = 1 << max(height, width).bit_length() - 1
+    while step >= 1:
+        for dy in (-step, 0, step):
+            for dx in (-step, 0, step):
+                if dy == 0 and dx == 0:
+                    continue
+                candidate_y = _shift(source_y, dy, dx, -1)
+                candidate_x = _shift(source_x, dy, dx, -1)
+                known = candidate_y >= 0
+                if not known.any():
+                    continue
+                current = np.where(
+                    source_y >= 0, (source_y - rows) ** 2 + (source_x - cols) ** 2, far
+                )
+                distance = (candidate_y - rows) ** 2 + (candidate_x - cols) ** 2
+                take = known & (distance < current)
+                source_y[take] = candidate_y[take]
+                source_x[take] = candidate_x[take]
+        step //= 2
+    missing = source_y < 0
+    if missing.any():  # unreachable only if the grid were empty, which cover rules out
+        return colour
+    return colour[source_y, source_x]
 
 
 def _shift(array, dy, dx, fill):
