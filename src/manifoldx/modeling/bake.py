@@ -3,7 +3,10 @@
 Every UV-mapped piece of the asset is rasterised into the atlas: each texel gets
 the three-dimensional point, the normal and the material it belongs to.  Each
 view is registered by fitting the asset's projected silhouette box to the
-bounding box of the image's non-background pixels.  Every texel is then
+bounding box of the image's non-background pixels, or, when the caller gives
+keypoints, by fitting the asset's named landmarks to the places the caller marks
+in the drawing: an affine least-squares fit with three to five keypoints, a
+regularised thin-plate spline with six or more.  Every texel is then
 projected orthographically into every view, sampled bilinearly, and blended by
 how squarely its normal faces that view.  Only the materials the caller names
 are baked; the rest keep their palette colours, and texels no view faces keep a
@@ -52,9 +55,12 @@ _WEIGHT_POWER = 3.0
 # A texel counts as baked when the views that face it add up to this much.
 _COVERAGE = 0.05
 _BACKGROUND_TOLERANCE = 24.0
+# How much a thin-plate spline smooths, relative to the drawing's own scale: small enough that a moved
+# keypoint pulls its own part of the drawing and little else, large enough that noise cannot fold the image.
+_TPS_SMOOTHING = 1e-3
 
 
-def bake_projection(car, views, size=2048, materials=None, fallback=None):
+def bake_projection(car, views, size=2048, materials=None, fallback=None, keypoints=None):
     """Texture a built asset's atlas from orthographic drawings.
 
     Parameters
@@ -80,6 +86,16 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None):
         ``{material: RGB}`` mapping.  When omitted, a material with baked
         texels keeps the median of what was baked and one with none keeps its
         palette colour.
+    keypoints:
+        ``{view: {landmark: (px, py)}}``, to register a drawing by named parts
+        instead of by its silhouette box.  A landmark is one of the asset's
+        :attr:`~manifoldx.modeling.assets.car.Car.landmarks`; ``px`` and ``py``
+        are the pixel where the caller sees it in that drawing, ``px`` from the
+        image's left and ``py`` from its top.  A view needs at least three
+        keypoints: three to five give an affine least-squares fit, six or more a
+        regularised thin-plate spline that pulls each part of the drawing onto
+        the part of the asset it shows.  Landmarks a view does not show are left
+        out; a view without keypoints keeps the box registration.
 
     Returns
     -------
@@ -97,12 +113,19 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None):
     unknown = set(views) - set(_VIEW_DIRECTIONS)
     if unknown:
         raise ValueError(f"unknown view(s) {sorted(unknown)}; expected {sorted(_VIEW_NAMES)}")
+    supplied = set(images)
     if "right" not in images and "left" in images:
         images["right"] = _mirror(images["left"])
     if "left" not in images and "right" in images:
         images["left"] = _mirror(images["right"])
     if not images:
         raise ValueError("no usable views")
+    landmarks = None
+    if keypoints:
+        landmarks = getattr(car, "landmarks", None)
+        if landmarks is None:
+            raise ValueError("keypoint registration needs an asset with landmarks")
+    keypoints = _prepare_keypoints(keypoints, supplied, landmarks)
 
     names = _material_names(car)
     if not names:
@@ -116,7 +139,9 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None):
     pos, nrm, mat = _rasterise(car, size, names)
     baked = np.isin(mat, baked_ids)
 
-    xmin, xmax, ymin, ymax, zmin, zmax = _bounds(car)
+    bounds = _bounds(car)
+    landmarks = landmarks or {}
+    warps = {name: _keypoint_warp(name, marks, landmarks, bounds) for name, marks in keypoints.items()}
     acc = np.zeros((size, size, 3), np.float32)
     wsum = np.zeros((size, size), np.float32)
 
@@ -125,7 +150,10 @@ def bake_projection(car, views, size=2048, materials=None, fallback=None):
         weight *= baked
         if not weight.any():
             continue
-        xf, yf = _project(name, pos, _view_box(images[name]), xmin, xmax, ymin, ymax, zmin, zmax)
+        if name in warps:
+            xf, yf = warps[name](*_view_uv(name, pos, bounds))
+        else:
+            xf, yf = _project(name, pos, _view_box(images[name]), bounds)
         covered = _bilinear(mask.astype(np.float32), xf, yf)
         weight *= covered
         if not weight.any():
@@ -209,6 +237,108 @@ def _background_mask(rgb, light):
 def _mirror(prepared):
     rgb, mask = prepared
     return np.ascontiguousarray(rgb[:, ::-1]), np.ascontiguousarray(mask[:, ::-1])
+
+
+def _prepare_keypoints(keypoints, supplied, landmarks):
+    """Validate the caller's keypoints, view by view."""
+    if keypoints is None:
+        return {}
+    if not isinstance(keypoints, dict):
+        raise ValueError("keypoints must be a {view: {landmark: (px, py)}} mapping")
+    unknown = set(keypoints) - set(_VIEW_DIRECTIONS)
+    if unknown:
+        raise ValueError(f"unknown view(s) {sorted(unknown)} in keypoints; expected {sorted(_VIEW_NAMES)}")
+    out = {}
+    for name, marks in keypoints.items():
+        if name not in supplied:
+            raise ValueError(f"keypoints given for the {name!r} view, which has no image")
+        if not isinstance(marks, dict) or not marks:
+            raise ValueError(f"the {name!r} view needs a non-empty {{landmark: (px, py)}} mapping")
+        out[name] = {}
+        for landmark, pixel in marks.items():
+            if landmark not in landmarks:
+                raise ValueError(f"unknown landmark {landmark!r} in the {name!r} view; the asset has {sorted(landmarks)}")
+            out[name][landmark] = _pixel(pixel)
+    return out
+
+
+def _pixel(value):
+    """One keypoint as a pair of floats."""
+    pixel = np.asarray(value, float).reshape(-1)
+    if pixel.size != 2 or not np.isfinite(pixel).all():
+        raise ValueError(f"a keypoint must be a (px, py) pair of finite numbers, not {value!r}")
+    return float(pixel[0]), float(pixel[1])
+
+
+def _keypoint_warp(view, marks, landmarks, bounds):
+    """A function from normalised view coordinates to the drawing's pixels, fitted to the keypoints.
+
+    Three to five keypoints fit an affine transform by least squares; six or more fit a regularised
+    thin-plate spline, so moving one landmark pulls the drawing near it and leaves the rest where it was.
+    """
+    source = np.array([_view_uv(view, np.asarray(landmarks[name], float), bounds) for name in marks], float)
+    target = np.array(list(marks.values()), float)
+    if len(source) < 3:
+        raise ValueError(f"the {view!r} view needs at least 3 keypoints, not {len(source)}")
+    design = np.column_stack([source, np.ones(len(source))])
+    if np.linalg.matrix_rank(design) < 3:
+        raise ValueError(f"the {view!r} view's keypoints are degenerate; spread them over the drawing")
+    if len(source) <= 5:
+        return _affine_warp(design, target)
+    return _thin_plate_warp(source, target)
+
+
+def _affine_warp(design, target):
+    """The least-squares affine map whose design matrix and target are given."""
+    coefficients = np.linalg.lstsq(design, target, rcond=None)[0]
+
+    def warp(u, v):
+        u, v = np.broadcast_arrays(np.asarray(u, np.float32), np.asarray(v, np.float32))
+        out = np.stack([u.ravel(), v.ravel(), np.ones(u.size, np.float32)], axis=1) @ coefficients
+        return out[:, 0].reshape(u.shape), out[:, 1].reshape(u.shape)
+
+    return warp
+
+
+def _thin_plate_warp(source, target):
+    """A regularised thin-plate spline through the keypoints, as a function of normalised coordinates."""
+    count = len(source)
+    distance = np.linalg.norm(source[:, None] - source[None], axis=2)
+    kernel = _radial(distance * distance)
+    design = np.column_stack([np.ones(count), source])
+    system = np.zeros((count + 3, count + 3))
+    system[:count, :count] = kernel + _TPS_SMOOTHING * np.eye(count)
+    system[:count, count:] = design
+    system[count:, :count] = design.T
+    try:
+        solution = np.linalg.solve(system, np.vstack([target, np.zeros((3, 2))]))
+    except np.linalg.LinAlgError as error:  # unreachable with the smoothing, unless the points are degenerate
+        raise ValueError("the keypoints do not admit a thin-plate spline") from error
+    weights, affine = solution[:count], solution[count:]
+    control = np.asarray(source, np.float32)
+    weights = np.asarray(weights, np.float32)
+    affine = np.asarray(affine, np.float32)
+
+    def warp(u, v):
+        u, v = np.broadcast_arrays(np.asarray(u, np.float32), np.asarray(v, np.float32))
+        # Accumulate one control point at a time: a whole (h, w, count) grid would be far too large.
+        x = affine[0, 0] + affine[1, 0] * u + affine[2, 0] * v
+        y = affine[0, 1] + affine[1, 1] * u + affine[2, 1] * v
+        for k in range(count):
+            du, dv = u - control[k, 0], v - control[k, 1]
+            basis = _radial(du * du + dv * dv)
+            x = x + weights[k, 0] * basis
+            y = y + weights[k, 1] * basis
+        return x, y
+
+    return warp
+
+
+def _radial(squared_distance):
+    """The thin-plate kernel ``r^2 log r``, written with ``r^2`` so it needs no square root."""
+    squared = np.asarray(squared_distance)
+    out = 0.5 * squared * np.log(np.maximum(squared, 1e-30))
+    return out.astype(squared.dtype, copy=False)
 
 
 # --- the atlas raster ----------------------------------------------------------------------------------------
@@ -304,8 +434,9 @@ def _bounds(car):
     )
 
 
-def _project(name, pos, box, xmin, xmax, ymin, ymax, zmin, zmax):
-    """Project every texel's 3D point into a view, fitted to that image's foreground box."""
+def _view_uv(name, pos, bounds):
+    """A 3D point, or a grid of them, as normalised coordinates in one view's own frame."""
+    xmin, xmax, ymin, ymax, zmin, zmax = bounds
     x, y, z = pos[..., 0], pos[..., 1], pos[..., 2]
     across = max(xmax - xmin, 1e-9)
     tall = max(ymax - ymin, 1e-9)
@@ -319,6 +450,12 @@ def _project(name, pos, box, xmin, xmax, ymin, ymax, zmin, zmax):
     else:  # plan views: the front is at the left; from above the right side is up, from below the left side
         u = (xmax - x) / across
         v = (zmax - z) / wide if name == "top" else (z - zmin) / wide
+    return u, v
+
+
+def _project(name, pos, box, bounds):
+    """Project every texel's 3D point into a view, fitted to that image's foreground box."""
+    u, v = _view_uv(name, pos, bounds)
     bx0, bx1, by0, by1 = box
     return bx0 + u * (bx1 - bx0), by0 + v * (by1 - by0)
 
