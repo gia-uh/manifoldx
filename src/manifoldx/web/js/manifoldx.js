@@ -849,8 +849,8 @@ export function cameraMatrix(camera, aspect) {
   const proj = new Float32Array(16);
   proj[0] = f / aspect;
   proj[5] = f;
-  proj[10] = -far / (far - near);
-  proj[11] = -(far * near) / (far - near);
+  proj[10] = near / (far - near);
+  proj[11] = (far * near) / (far - near);
   proj[14] = -1.0;
   const m4 = (a) => new NdArray(a, [4, 4], "f32");
   const [P, V] = [m4(proj), m4(view)];
