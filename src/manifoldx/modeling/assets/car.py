@@ -1338,9 +1338,15 @@ def spawn_car(engine, car: Car, at=(0.0, 0.0, 0.0), yaw=0.0, palette=None, light
     return handles
 
 
-def place_car(handles: dict, car: Car, at=(0.0, 0.0, 0.0), yaw=0.0, **pose) -> None:
-    """Move a spawned car to `at`, turned by `yaw` radians about Y, posed as in Car.pose."""
-    qy = _axis_angle(np.array([0.0, 1.0, 0.0]), yaw)
+def place_car(handles: dict, car: Car, at=(0.0, 0.0, 0.0), yaw=0.0, pitch=0.0, roll=0.0, **pose) -> None:
+    """Move a spawned car to `at`, turned by `yaw` radians about Y, posed as in Car.pose.
+
+    `pitch` then tilts it about its own Z axis (positive raises the nose, the +x end) and `roll` about its own
+    X axis (positive lowers the +z side), so a car can sit on a slope.
+    """
+    qy = _quat_mul(_axis_angle(np.array([0.0, 1.0, 0.0]), yaw),
+                   _quat_mul(_axis_angle(np.array([0.0, 0.0, 1.0]), pitch),
+                             _axis_angle(np.array([1.0, 0.0, 0.0]), roll)))
     for name, (pos, q) in car.pose(**pose).items():
         world_pos = np.asarray(at, float) + _rotate(qy, pos)
         world_rot = _quat_mul(qy, q)

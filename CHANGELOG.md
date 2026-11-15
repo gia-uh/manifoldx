@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `place_car(..., pitch=, roll=)`: tilt a placed car about its own axes after the yaw, so it can sit on a slope.
 - `manifoldx asset FILE COMMAND`: run one asset file's stages from the shell (`draw`, `build`, `lint`, `inspect`,
   `paint`, `render`), with `--json`, `--budget`, `--model`, `--again`, `--max-tris`, `--lod low` and `--out`; exit
   0 on success, 1 on a finding and 2 on a usage error. `Parts.paint` asks the image model for one albedo per view
