@@ -218,3 +218,31 @@ def test_a_bed_is_open_above_its_floor_and_its_tailgate_folds_down_behind():
     shut, open_ = _posed(gate, car.pose()), _posed(gate, car.pose(hatch=1.0))
     assert open_[:, 0].min() < shut[:, 0].min() - 0.2 and open_[:, 1].max() < shut[:, 1].max() - 0.1
     assert "glass" not in gate.pieces  # the cab's rear window stays on the body
+
+
+
+def _hubs(**kw):
+    """World positions of the four wheel hubs after place_car, read through each wheel part's transform."""
+    from types import SimpleNamespace
+
+    from manifoldx.modeling.assets.car import _rotate, place_car
+
+    car = build_car(CarParams())
+    handles = {name: [SimpleNamespace(transform=SimpleNamespace(pos=None, rot=None))] for name in car.pose()}
+    place_car(handles, car, at=(5.0, 1.0, -2.0), **kw)
+    out = {}
+    for part, (end, side) in {"wheel_fl": ("front", "left"), "wheel_fr": ("front", "right"),
+                              "wheel_rl": ("rear", "left"), "wheel_rr": ("rear", "right")}.items():
+        t = handles[part][0].transform
+        out[part] = np.array(t.pos) + _rotate(np.array(t.rot), car.landmarks[f"wheel_{end}_{side}"])
+    return out
+
+
+def test_pitch_raises_the_nose_and_roll_lowers_the_right_side():
+    p = CarParams()
+    up = _hubs(yaw=0.7, pitch=0.1)
+    assert np.isclose(up["wheel_fl"][1] - up["wheel_rl"][1], p.wheelbase * np.sin(0.1), atol=1e-4)
+    rolled = _hubs(yaw=0.7, roll=0.1)
+    assert np.isclose(rolled["wheel_fl"][1] - rolled["wheel_fr"][1], p.track * np.sin(0.1), atol=1e-4)
+    flat = _hubs(yaw=0.7)
+    assert np.isclose(flat["wheel_fl"][1], flat["wheel_rr"][1])
