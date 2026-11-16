@@ -1,10 +1,13 @@
 import asyncio
 import argparse
 import gc
+import os
+import threading
 import wgpu
 import sys
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -405,8 +408,17 @@ class Engine:
 
         # === ECS Infrastructure ===
         self.store = EntityStore(max_entities)
-        self.commands = CommandBuffer()
+        # One command buffer per running system: the current thread's while a
+        # system runs (see _bind_commands), otherwise the frame's.
+        self._frame_commands = CommandBuffer()
+        self._command_tls = threading.local()
         self.systems = SystemRegistry()
+        # Timing of the systems phase: seconds per system name, reset by run_all,
+        # and the wall seconds of each parallel group, in run order.
+        self.system_split: dict[str, float] = {}
+        self.group_split: list[float] = []
+        # The frame pool for parallel groups, created on the first group.
+        self._frame_pool: ThreadPoolExecutor | None = None
 
         # Resource registries
         self._geometry_registry = GeometryRegistry(self._device)
@@ -574,11 +586,51 @@ class Engine:
         if exc is not None:
             self._task_errors.append(exc)
 
-    def system(self, func):
-        """Decorator to register a system function.
+    @property
+    def commands(self) -> CommandBuffer:
+        """The command buffer of the running system, or the frame's buffer outside one."""
+        bound = getattr(self._command_tls, "buffer", None)
+        return self._frame_commands if bound is None else bound
 
+    @contextmanager
+    def _bind_commands(self, buf: CommandBuffer | None):
+        """Bind `buf` as this thread's command buffer until the block ends.
+
+        A parallel system's commands go to its own buffer, which the group
+        appends to the frame's in registration order once every system finished.
+        """
+        previous = getattr(self._command_tls, "buffer", None)
+        self._command_tls.buffer = buf
+        try:
+            yield
+        finally:
+            self._command_tls.buffer = previous
+
+    @contextmanager
+    def _in_parallel(self, name: str):
+        """Mark the current thread as running parallel system `name`, until the block ends."""
+        previous = getattr(self._command_tls, "parallel_system", None)
+        self._command_tls.parallel_system = name
+        try:
+            yield
+        finally:
+            self._command_tls.parallel_system = previous
+
+    def _get_frame_pool(self) -> ThreadPoolExecutor:
+        """The pool a group runs on: one thread per core, created on first use."""
+        if self._frame_pool is None:
+            self._frame_pool = ThreadPoolExecutor(os.cpu_count() or 1, thread_name_prefix="manifoldx-frame")
+        return self._frame_pool
+
+    def system(self, func=None, *, parallel: bool = False):
+        """Decorator to register a system function, bare or with `parallel=True`.
+
+        Consecutive `parallel=True` systems form a group and run at the same
+        time, each on its own command buffer; a system without it is a barrier.
         Parses Query type hints to determine which components to query.
         """
+        if func is None:  # @engine.system(parallel=...)
+            return lambda f: self.system(f, parallel=parallel)
         import inspect
         from manifoldx.systems import Query
 
@@ -597,15 +649,17 @@ class Engine:
                     elif hasattr(c, "__name__"):
                         component_names.append(c.__name__)
 
-        self.systems.register(func, component_names)
+        self.systems.register(func, component_names, parallel=parallel)
         return func
 
     def remove_system(self, func) -> None:
         """Unregister a system added with `@engine.system`.
 
         Safe to call from inside any system, the one being removed included; a
-        removed system does not run again, the current frame included. Raises
-        ValueError if `func` is not a registered system.
+        removed system does not run again, the current frame included. A
+        parallel system removed before its group starts is skipped; one removed
+        while its group is running finishes this frame. Raises ValueError if
+        `func` is not a registered system.
         """
         self.systems.remove(func)
 
@@ -1065,6 +1119,12 @@ class Engine:
     # === Spawn & Destroy ===
     def spawn(self, *args, n: int = 1, **kwargs):
         """Spawn n entities now, with these components, and return a handle to the first (None for n=0)."""
+        parallel = getattr(self._command_tls, "parallel_system", None)
+        if parallel is not None:
+            raise RuntimeError(
+                "engine.spawn writes the store at once: call it from a serial system, "
+                f"not from parallel system {parallel}"
+            )
         # Handle Mesh, Material, and Transform component objects
         processed_kwargs = {}
         mesh_geo_id = None
@@ -1695,6 +1755,9 @@ class Engine:
         for executor in (self._executor, self._process_executor):
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
+        if self._frame_pool is not None:
+            self._frame_pool.shutdown(wait=False, cancel_futures=True)
+            self._frame_pool = None
 
     def close(self) -> None:
         """Stop the engine and free the GPU device it requested; safe to call twice.
