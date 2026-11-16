@@ -30,26 +30,22 @@ def sprites(n: int):
 
 
 def sprites_mixed(n: int):
-    """n point sprites of one material, of which max(1, n // 100) move every frame (a starfield with rain)."""
-    import manifoldx as mx
-    from manifoldx.components import Component, Material, Transform
-    from manifoldx.types import Float
+    """n point sprites of one material, of which the last max(1, n // 100) move every frame (a starfield
+    with rain)."""
+    from manifoldx.components import Material, Transform
     from manifoldx.viz import ColormapMaterial, PointCloud, Radius, ScalarValue
-
-    Mover = type("Mover", (Component,), {"__annotations__": {"k": Float}})  # this module's annotations are strings
 
     engine = headless_engine(n)
     engine.camera.fit(60)
-    mat = ColormapMaterial(cmap="viridis", vmin=0, vmax=1)
-    still, moving = n - max(1, n // 100), max(1, n // 100)
-    for count, extra in ((still, {}), (moving, {"Mover": Mover(k=np.zeros(moving))})):
-        engine.spawn(PointCloud(), Material(mat), Transform(pos=_positions(count)),
-                     ScalarValue(value=np.random.default_rng(1).uniform(0, 1, count).astype(np.float32)),
-                     Radius(radius=np.full(count, 0.1, np.float32)), n=count, **extra)
+    engine.spawn(PointCloud(), Material(ColormapMaterial(cmap="viridis", vmin=0, vmax=1)),
+                 Transform(pos=_positions(n)),
+                 ScalarValue(value=np.random.default_rng(1).uniform(0, 1, n).astype(np.float32)),
+                 Radius(radius=np.full(n, 0.1, np.float32)), n=n)
+    moving = slice(n - max(1, n // 100), n)
 
     @engine.system
-    def fall(q: mx.Query[Transform, Mover], dt: float):
-        q[Transform].position -= np.float32(0.01)
+    def fall(q, dt: float):  # writes the store's rows: a Query would match every sprite
+        engine.store._components["Transform"][moving, 1] -= np.float32(0.01)
 
     return engine
 
