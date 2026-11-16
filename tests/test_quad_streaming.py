@@ -21,10 +21,37 @@ def full(levels):
     return lambda L, a, b: 0 <= a < (1 << (levels - L)) and 0 <= b < (1 << (levels - L))
 
 
-def streamer(levels, build=tri, origin=(0, 0)):
+def streamer(levels, build=tri, origin=(0, 0), refine_ms=None):
     engine = mx.Engine("quad", width=64, height=600)
     engine.camera.far = 15000.0
-    return QuadStreamer(engine, CELL, origin, levels, full(levels), build, lambda L: CELL * 2**L / 16)
+    return QuadStreamer(engine, CELL, origin, levels, full(levels), build, lambda L: CELL * 2**L / 16,
+                        refine_ms=refine_ms)
+
+
+def focal(s):
+    return s.engine.h / (2 * np.tan(np.radians(s.engine.camera.fov) / 2))
+
+
+def tiles(s, levels):
+    """The cut covers every cell exactly once."""
+    covered = np.zeros((1 << levels, 1 << levels), int)
+    for L, a, b in s._cut:
+        covered[a << L:(a + 1) << L, b << L:(b + 1) << L] += 1
+    return (covered == 1).all()
+
+
+def settled(s, x, z, h):
+    """Every node of the cut is one the rules keep at this camera: none splits, no four siblings merge."""
+    f = focal(s)
+    for L, a, b in s._cut:
+        d = s._distance((L, a, b), x, z, h)
+        if L > 0 and s.error(L) * f / d > s.tau:
+            return False
+        if L < s.levels:
+            p = (L + 1, a >> 1, b >> 1)
+            if all(k in s._cut for k in s._children(p)) and s.error(L + 1) * f / s._distance(p, x, z, h) <= s.tau / s.merge:
+                return False
+    return True
 
 
 def test_selection_tiles_the_content():
@@ -44,15 +71,47 @@ def test_selection_tiles_the_content():
 def test_merge_uses_hysteresis():
     s = streamer(6)
     node = (3, 2, 2)
-    focal = s.engine.h / (2 * np.tan(np.radians(s.engine.camera.fov) / 2))
     x0, z0, side = s._box(node)
+    cx, cz = x0 + side / 2, z0 + side / 2
     # A height where the node's error is 5 px: under tau (6), over tau / 1.5 (4).
-    h = s.error(3) * focal / 5.0
-    s._selected = set()
-    assert node not in s._select(x0 + side / 2, z0 + side / 2, h)  # refined: not merged until under 4 px
-    s._selected = {node}
-    assert node in s._select(x0 + side / 2, z0 + side / 2, h)  # once picked, it stays until over 6 px
+    h = s.error(3) * focal(s) / 5.0
+    s._select(cx, cz, 1.0)  # low: refined below the node
+    assert node not in s._select(cx, cz, h)  # its children stay until it is under 4 px
+    s._select(cx, cz, 1e6)  # high: coarser than the node
+    assert node in s._select(cx, cz, h)  # split down to it, and it stays while under 6 px
     s.close()
+
+
+def test_refined_cut_tiles_and_settles():
+    s = streamer(7)
+    s.engine.camera.far = 1e6
+    rng = np.random.default_rng(1)
+    for _ in range(20):
+        x, z = rng.uniform(-2000, 27600, 2)
+        h = float(rng.choice([1.0, 50.0, 400.0, 3000.0]))
+        s._select(x, z, h)
+        assert tiles(s, 7) and settled(s, x, z, h)
+    s.close()
+
+
+def test_budget_spreads_the_refinement():
+    s = streamer(7, refine_ms=0.0)  # 16 checks a frame, the floor
+    s.engine.camera.far = 1e6
+    frames = 0
+    while True:
+        before = set(s._cut or ())
+        s._select(100.0, 100.0, 1.0)
+        frames += 1
+        assert tiles(s, 7)  # every frame draws a whole tiling, refined or not
+        if s._cut == before and not s._queue:
+            break
+    assert frames > 5 and settled(s, 100.0, 100.0, 1.0)
+    whole = streamer(7)
+    whole.engine.camera.far = 1e6
+    whole._select(100.0, 100.0, 1.0)
+    assert s._cut == whole._cut  # the same cut, reached over several frames
+    s.close()
+    whole.close()
 
 
 def test_high_camera_is_bounded():

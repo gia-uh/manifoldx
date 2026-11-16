@@ -308,10 +308,12 @@ class QuadStreamer(_Uploads):
     anything; a node's children are the existing (L-1, 2a+da, 2b+db). `build(L, a, b)` returns its
     MeshData relative to the node's corner, in a worker, and `error(L)` its geometric error in metres.
 
-    Each focus() picks the nodes to draw by a walk from the root: a node is refined into its children
-    while its error seen from the camera, error * focal / distance, is above `tau` pixels; one that was
-    refined merges back only once that falls under tau / merge, so a camera that hovers does not make
-    nodes blink. Nodes wholly beyond the camera's far plane are left out. The nodes picked are built
+    The nodes to draw are a cut of the tree that each focus() refines: a node splits into its children
+    while its error seen from the camera, error * focal / distance, is above `tau` pixels; children merge
+    back only once their parent's falls under tau / merge, so a camera that hovers does not make nodes
+    blink. Nodes wholly beyond the camera's far plane are left out. The refinement spends at most
+    `refine_ms` a frame, nearest nodes first, and carries the rest to the next frames, so a big world or
+    a teleport costs a bounded slice of each frame; `refine_ms=None` refines to the end every frame. The nodes picked are built
     nearest first, by `builders` workers at once, and uploaded within `upload_bytes_per_frame`. One not
     built yet leaves its nearest drawn ancestor drawn, and a drawn node hides everything under it, so
     each spot is drawn once.
@@ -336,12 +338,19 @@ class QuadStreamer(_Uploads):
         workers: str = "thread",
         material=None,
         builders: int = 1,
+        refine_ms: float | None = 2.0,
     ):
         self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders)
         self.cell, self.origin, self.levels = float(cell), (int(origin[0]), int(origin[1])), int(levels)
         self.exists, self.error, self.tau, self.merge = exists, error, float(tau), float(merge)
+        self.refine_ms = refine_ms
         self._selected: set = set()
         self._kids: dict = {}  # node -> its existing children
+        self._cut: set | None = None  # the nodes that tile the tree now; None before the first focus
+        self._queue: list = []  # this pass's nodes still to check, nearest last
+        self._pass_quiet, self._pass_started = True, False
+        self._order: list | None = None  # the cut as a list, rebuilt when it changes
+        self._cut_changed = False
 
     def _box(self, node):
         L, a, b = node
@@ -367,26 +376,62 @@ class QuadStreamer(_Uploads):
         return kids
 
     def _select(self, x, z, height) -> list:
-        """The nodes to draw this frame, by screen error with hysteresis, nearest first."""
+        """The nodes to draw this frame, nearest first: the kept cut, refined within `refine_ms`.
+
+        The cut tiles the tree. Its nodes are checked nearest first, a pass over all of them at a time,
+        carried over to the next frame when the budget runs out: a node whose error is over `tau` splits
+        into its children, and four siblings merge into their parent once its error is under tau / merge.
+        Without a budget, passes run until one changes nothing, which is the full walk's answer: a
+        parent's error is at least twice its child's, so a fixed point of these two rules is the walk's."""
         cam = self.engine.camera
         focal = self.engine.h / (2.0 * math.tan(math.radians(cam.fov) / 2.0))
-        out = []
-        root = (self.levels, 0, 0)
-        stack = [root] if self.exists(*root) else []
-        while stack:
-            node = stack.pop()
-            d = self._distance(node, x, z, height)
-            if d > cam.far:
-                continue
-            kids = self._children(node)
-            err = self.error(node[0]) * focal / d
-            limit = self.tau if node in self._selected else self.tau / self.merge
-            if not kids or err <= limit:
-                out.append(node)
-            else:
-                stack.extend(kids)
-        out.sort(key=lambda n: self._distance(n, x, z, height))
-        return out
+        if self._cut is None:
+            root = (self.levels, 0, 0)
+            self._cut = {root} if self.exists(*root) else set()
+        stop = None if self.refine_ms is None else perf_counter() + self.refine_ms / 1000.0
+        checked = 0
+        while True:
+            if not self._queue:
+                if self._pass_quiet and self._pass_started:  # the last pass changed nothing: settled
+                    self._pass_started = False
+                    break
+                self._queue = sorted(self._cut, key=lambda n: -self._distance(n, x, z, height))
+                self._pass_quiet, self._pass_started = True, True
+                if not self._queue:
+                    break
+            if stop is not None and checked >= 16 and perf_counter() > stop:
+                break
+            self._check(self._queue.pop(), x, z, height, focal, cam.far)
+            checked += 1
+        if self._cut_changed or self._order is None:
+            self._order = list(self._cut)
+            self._cut_changed = False
+        d = {n: self._distance(n, x, z, height) for n in self._order}
+        return sorted((n for n in self._order if d[n] <= cam.far), key=d.__getitem__)
+
+    def _check(self, node, x, z, height, focal, far):
+        """Split `node` or merge it with its siblings, if its error says so; queue what changed."""
+        if node not in self._cut:  # merged away earlier in this pass
+            return
+        d = self._distance(node, x, z, height)
+        kids = self._children(node)
+        if kids and d <= far and self.error(node[0]) * focal / d > self.tau:
+            self._cut.discard(node)
+            self._cut.update(kids)
+            self._queue.extend(sorted(kids, key=lambda n: -self._distance(n, x, z, height)))
+            self._pass_quiet, self._cut_changed = False, True
+            return
+        L, a, b = node
+        if L >= self.levels:
+            return
+        parent = (L + 1, a >> 1, b >> 1)
+        sibs = self._children(parent)
+        if all(s in self._cut for s in sibs) and \
+                self.error(L + 1) * focal / self._distance(parent, x, z, height) <= self.tau / self.merge:
+            self._cut.difference_update(sibs)
+            self._cut.add(parent)
+            self._queue.append(parent)  # it may merge on up
+            self._pass_quiet, self._cut_changed = False, True
 
     def _ancestors(self, node):
         L, a, b = node
