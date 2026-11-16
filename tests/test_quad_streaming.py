@@ -151,3 +151,74 @@ def test_parent_stays_until_children_ready():
         time.sleep(0.005)
     assert s.drawn() == {(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1)}  # all four at once, the root gone
     s.close()
+
+
+def _settle(s, x, z, h, tries=600):
+    for _ in range(tries):
+        s.focus(x, z, h)
+        if not s._pending and s._quiet:
+            return
+        time.sleep(0.002)
+    raise AssertionError("never settled")
+
+
+def test_still_camera_skips_selection(monkeypatch):
+    s = streamer(6)
+    _settle(s, 500.0, 500.0, 2.0)
+    calls = {"n": 0}
+    real = QuadStreamer._distance
+
+    def counting(self, *a):
+        calls["n"] += 1
+        return real(self, *a)
+
+    monkeypatch.setattr(QuadStreamer, "_distance", counting)
+    drawn = s.drawn()
+    s.focus(500.0, 500.0, 2.0)
+    assert calls["n"] == 0 and s.drawn() == drawn
+    s.close()
+
+
+def test_build_finishing_while_still_is_drawn():
+    gate = threading.Event()
+
+    def build(L, a, b):
+        if (L, a, b) == (0, 0, 0):
+            gate.wait(5)
+        return tri()
+
+    s = streamer(2, build)
+    for _ in range(50):
+        s.focus(100.0, 100.0, 1.0)
+        time.sleep(0.002)
+    assert (0, 0, 0) not in s.drawn()
+    gate.set()
+    for _ in range(400):
+        s.focus(100.0, 100.0, 1.0)
+        if (0, 0, 0) in s.drawn():
+            break
+        time.sleep(0.005)
+    assert (0, 0, 0) in s.drawn()
+    s.close()
+
+
+def test_fov_change_while_still_reselects():
+    s = streamer(6)
+    _settle(s, 500.0, 500.0, 2.0)
+    before = set(s._cut)
+    s.engine.camera.fov /= 4  # four times the zoom: far nodes now show more error and split
+    s.focus(500.0, 500.0, 2.0)
+    for _ in range(50):
+        s.focus(500.0, 500.0, 2.0)
+    assert len(s._cut) > len(before)
+    s.close()
+
+
+def test_distances_match_scalar():
+    s = streamer(8)
+    rng = np.random.default_rng(0)
+    nodes = [(int(L), int(rng.integers(0, 1 << (8 - L))), int(rng.integers(0, 1 << (8 - L))))
+             for L in rng.integers(0, 9, 500)]
+    want = [s._distance(n, 1234.5, -300.0, 7.0) for n in nodes]
+    assert np.allclose(s._distances(nodes, 1234.5, -300.0, 7.0), want)
+    s.close()
