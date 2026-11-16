@@ -92,13 +92,19 @@ def _uploads(e, monkeypatch, change=None):
     from manifoldx.renderer import _BatchBuffers
 
     calls = []
-    orig = _BatchBuffers.upload_transforms
+    orig, orig_rows = _BatchBuffers.upload_transforms, _BatchBuffers.write_rows
 
     def spy(self, data):
         calls.append(len(data))
         return orig(self, data)
 
+    def spy_rows(self, name, rows, values):  # a few changed rows go up alone
+        if name == "transforms":
+            calls.append(len(rows))
+        return orig_rows(self, name, rows, values)
+
     monkeypatch.setattr(_BatchBuffers, "upload_transforms", spy)
+    monkeypatch.setattr(_BatchBuffers, "write_rows", spy_rows)
     if change:
         change(e)
     e.render_frame(supersample=1)
