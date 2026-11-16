@@ -121,7 +121,7 @@ pre.code .lang{position:absolute;top:4px;right:8px;font-size:10px;color:var(--fa
 
 <h2>Tasks</h2>
 
-<details class="task" id="task-1" data-state="pending">
+<details class="task" id="task-1" data-state="done">
 <summary><span class="num">1</span><span><span class="ttl">PR A: pin CPython 3.14t</span><span class="files">pyproject.toml · .python-version · uv.lock · .github/workflows/test.yml · docs.yml · release.yml</span></span><span class="state">pending</span></summary>
 <div class="body">
 <ol class="steps">
@@ -145,7 +145,7 @@ def test_gil_is_off_after_importing_manifoldx():
 </div>
 </details>
 
-<details class="task" id="task-2" data-state="pending">
+<details class="task" id="task-2" data-state="done">
 <summary><span class="num">2</span><span><span class="ttl">Compute kernels read lazy annotations</span><span class="files">src/manifoldx/compute/_core.py · tests/test_compute.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <ol class="steps">
@@ -162,7 +162,7 @@ def test_gil_is_off_after_importing_manifoldx():
 </div>
 </details>
 
-<details class="task" id="task-3" data-state="pending">
+<details class="task" id="task-3" data-state="done">
 <summary><span class="num">3</span><span><span class="ttl">Engine.close() releases the GPU device</span><span class="files">src/manifoldx/engine.py · tests/conftest.py · tests/test_engine_close.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -313,6 +313,8 @@ def test_system_split_has_every_system(): ...      # after a frame, engine.syste
 <li>The GIL warning fires when the first parallel system is registered, not at every engine start: a GIL build with no parallel systems has nothing to warn about.</li>
 <li><code>engine.system</code> keeps reading <code>func.__annotations__</code>: for functions it works on 3.14, and the spike's annotation failures were all in <code>Compute</code> (<code>compute/_core.py:173</code>).</li>
 <li>The spec did not name <code>Engine.close()</code>; it said the engine releases the device on close. The method is new public API.</li>
+<li>Devices cannot be released without the collector: in wgpu-py a <code>GPUDevice</code> and its <code>GPUQueue</code> point at each other, so even a destroyed device stays until <code>gc.collect()</code>; on the desktop the 64th request then fails whether engines are closed or not. <code>Engine.close()</code> destroys the device, clears the engine's attributes (its bridges and compute runner point back at it) and runs one collection, 45 ms. The test suite collects every 25 tests instead of closing each engine (<code>tests/conftest.py</code>).</li>
+<li>The transpiler also failed on 3.14 because every class with annotations gains a generated <code>__annotate_func__</code>; <code>_collect_method_asts</code> (<code>compute/transpile.py:56</code>) now skips dunder members.</li>
 <li><code>engine.spawn</code> raises inside a parallel system, because it writes the store at once (<code>engine.py:1063</code>). <code>engine.destroy</code> works there, since it only appends a command.</li>
 </ul>
 </main>
