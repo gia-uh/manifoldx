@@ -141,10 +141,10 @@ def independent_systems(k: int, *, parallel: bool = True):
         )
 
         def step(q, dt: float, _column=column):
-            # ~1 ms of small numpy calls, the shape of ftscale.py's system: a
+            # ~2.5 ms of small numpy calls, the shape of ftscale.py's system: a
             # few passes over this system's own (2,000, 3) block.
             v = q[_column].value.data
-            for _ in range(24):
+            for _ in range(96):
                 v = np.sin(v) * 0.5 + np.sqrt(v * v + 0.25)
                 v = np.tanh(v * 0.5)
             q[_column].value = v
