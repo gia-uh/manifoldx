@@ -144,13 +144,14 @@ def quadstream_settled(levels):
 
 @case("frame", "quadstream_moving", sizes=[6, 8, 10], smoke=3)
 def quadstream_moving(levels):
-    """QuadStreamer.focus alone with the camera moving 0.5 m a call over a settled tree of `levels` levels."""
+    """QuadStreamer.focus alone with the camera moving 0.5 m a call, back and forth within 25 m of the
+    spot a tree of `levels` levels settled at, so every node it needs is built: selection, not building."""
     s, mid = _settled_streamer(levels)
-    at = [mid]
+    k = [0]
 
     def step():
-        at[0] += 0.5
-        s.focus(at[0], mid, 20.0)
+        k[0] += 1
+        s.focus(mid + 25.0 - abs(k[0] % 100 - 50) * 0.5, mid, 20.0)
 
     ms = measure(step)
     out = {"ms": ms, "nodes": len(s.drawn())}
