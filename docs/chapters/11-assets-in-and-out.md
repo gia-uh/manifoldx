@@ -384,6 +384,16 @@ twenty-five cells around the plaza: the four open plaza cells in the middle and
 twenty-one building plots with the heights the survey chose. The district is no
 longer one mesh in memory; it is a window that follows the camera.
 
+A world too large for one ring of cells, such as a whole island seen from a
+hill, uses `QuadStreamer` instead. Its tiles form a quadtree: a node at level
+`L` covers `2**L` cells a side, `build(L, a, b)` makes its mesh (a coarse
+summary above level 0), and `exists(L, a, b)` says whether the node holds
+anything. Each frame `focus(x, z, height)` picks the coarsest nodes whose
+`error(L)`, projected on the screen from the camera's distance, stays under
+`tau` pixels, so near ground is drawn cell by cell and far ground in a few
+large nodes. A camera that has not moved, with everything it selected drawn,
+costs nothing on the next `focus`.
+
 To open the finished plaza in a window, install the `desktop` extra and end the
 program with `engine.run()`, which draws every frame until you close it.
 
