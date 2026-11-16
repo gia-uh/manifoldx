@@ -89,12 +89,12 @@ class _Uploads:
     the key's mesh at world position pos.
     """
 
-    def _start(self, engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material):
+    def _start(self, engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material, builders=1):
         if workers == "thread":
-            self._pool = ThreadPoolExecutor(max_workers=1)
+            self._pool = ThreadPoolExecutor(max_workers=builders)
         elif workers == "process":
             self._pool = ProcessPoolExecutor(
-                max_workers=1, mp_context=multiprocessing.get_context("spawn")
+                max_workers=builders, mp_context=multiprocessing.get_context("spawn")
             )
         else:
             raise ValueError(f'workers must be "thread" or "process", got {workers!r}')
@@ -312,8 +312,9 @@ class QuadStreamer(_Uploads):
     while its error seen from the camera, error * focal / distance, is above `tau` pixels; one that was
     refined merges back only once that falls under tau / merge, so a camera that hovers does not make
     nodes blink. Nodes wholly beyond the camera's far plane are left out. The nodes picked are built
-    nearest first and uploaded within `upload_bytes_per_frame`. One not built yet leaves its nearest drawn
-    ancestor drawn, and a drawn node hides everything under it, so each spot is drawn once.
+    nearest first, by `builders` workers at once, and uploaded within `upload_bytes_per_frame`. One not
+    built yet leaves its nearest drawn ancestor drawn, and a drawn node hides everything under it, so
+    each spot is drawn once.
 
         streamer = QuadStreamer(engine, cell=200.0, origin=(-2048, -1024), levels=13,
                                 exists=tree.exists, build=build_node, error=lambda L: 200.0 * 2**L / 16)
@@ -334,11 +335,13 @@ class QuadStreamer(_Uploads):
         upload_bytes_per_frame: int = 2 << 20,
         workers: str = "thread",
         material=None,
+        builders: int = 1,
     ):
-        self._start(engine, build, None, upload_bytes_per_frame, workers, material)
+        self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders)
         self.cell, self.origin, self.levels = float(cell), (int(origin[0]), int(origin[1])), int(levels)
         self.exists, self.error, self.tau, self.merge = exists, error, float(tau), float(merge)
         self._selected: set = set()
+        self._kids: dict = {}  # node -> its existing children
 
     def _box(self, node):
         L, a, b = node
@@ -354,11 +357,14 @@ class QuadStreamer(_Uploads):
         return max(math.sqrt(dx * dx + dz * dz + height * height), 1e-3)
 
     def _children(self, node):
-        L, a, b = node
-        if L == 0:
-            return []
-        kids = [(L - 1, 2 * a + da, 2 * b + db) for da in (0, 1) for db in (0, 1)]
-        return [k for k in kids if self.exists(*k)]
+        """The node's existing children, asked of `exists` once and kept: the tree does not change."""
+        kids = self._kids.get(node)
+        if kids is None:
+            L, a, b = node
+            kids = [] if L == 0 else [k for k in ((L - 1, 2 * a + da, 2 * b + db) for da in (0, 1) for db in (0, 1))
+                                      if self.exists(*k)]
+            self._kids[node] = kids
+        return kids
 
     def _select(self, x, z, height) -> list:
         """The nodes to draw this frame, by screen error with hysteresis, nearest first."""
