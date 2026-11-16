@@ -53,6 +53,13 @@ def meshes_moving(n):
     return _frame(scenes.meshes(n, moving=True))
 
 
+@case("frame", "parallel_systems", sizes=[1, 4, 8], smoke=1)
+def parallel_systems(k):
+    """k independent systems of 2,000 entities each, registered as one parallel group when the
+    engine supports it (serially on an engine without @engine.system(parallel=True))."""
+    return _frame(scenes.independent_systems(k))
+
+
 @case("frame", "unique_meshes", sizes=[100, 1_000, 5_000], smoke=5)
 def unique_meshes(n):
     """n entities with a geometry each: one draw batch per entity."""

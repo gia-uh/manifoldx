@@ -100,3 +100,61 @@ def skinned(n: int):
         Mesh(geo), Material(StandardMaterial("#cccccc")), Transform(pos=_positions(n)), n=n
     )
     return engine, first
+
+
+# One component class per independent column, built on first use so k can be any
+# size. The names are stable: a second scene of the same k reuses the classes.
+_COLUMNS: dict = {}
+
+
+def _column(i: int):
+    from manifoldx.components import Component
+    from manifoldx.types import Vector3
+
+    cls = _COLUMNS.get(i)
+    if cls is None:
+        name = f"ParallelColumn{i}"
+        cls = type(name, (Component,), {"__annotations__": {"value": Vector3}})
+        _COLUMNS[i] = cls
+    return cls
+
+
+def independent_systems(k: int, *, parallel: bool = True):
+    """k independent systems, each moving 2,000 entities of a component of its own.
+
+    One group when the engine has parallel systems; on a build without the
+    `parallel` argument the same systems register serially, so `--against main`
+    times the work rather than failing on the new keyword.
+    """
+    import inspect
+
+    import manifoldx as mx
+    from manifoldx.types import Vector3  # noqa: F401  (the annotation below uses it)
+
+    engine = headless_engine(2_000 * k)
+    supports_parallel = "parallel" in inspect.signature(mx.Engine.system).parameters
+    for i in range(k):
+        column = _column(i)
+        column.register(engine.store)
+        engine.store.spawn(
+            2_000, **{column.__name__: np.random.default_rng(i).random((2_000, 3), np.float32)}
+        )
+
+        def step(q, dt: float, _column=column):
+            # ~1 ms of small numpy calls, the shape of ftscale.py's system: a
+            # few passes over this system's own (2,000, 3) block.
+            v = q[_column].value.data
+            for _ in range(24):
+                v = np.sin(v) * 0.5 + np.sqrt(v * v + 0.25)
+                v = np.tanh(v * 0.5)
+            q[_column].value = v
+
+        step.__name__ = f"step{i}"
+        step.__qualname__ = f"independent_systems.<locals>.step{i}"
+        step.__annotations__ = {"q": mx.Query[column], "dt": float}
+        if supports_parallel:
+            engine.system(step, parallel=parallel)
+        else:
+            engine.system(step)
+
+    return engine
