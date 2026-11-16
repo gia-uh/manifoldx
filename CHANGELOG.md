@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reversed-Z depth: the scene's depth buffer is `depth32float`, cleared to 0 and tested with `greater`; `Camera.get_projection_matrix` maps the near plane to depth 1 and the far plane to 0. Two surfaces half a metre apart at 8 km keep their order (with `depth24plus` they merged within about 40 m). Shadow maps keep their own convention.
+
 ### Added
 
 - `place_car(..., pitch=, roll=)`: tilt a placed car about its own axes after the yaw, so it can sit on a slope.

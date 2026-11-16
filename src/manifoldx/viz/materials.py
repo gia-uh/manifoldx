@@ -193,7 +193,7 @@ fn vs_main(in: VSIn, @builtin(instance_index) iidx: u32) -> VSOut {
         // → NDC offset = quad_local.x * pixel_width / viewport_size.x.
         let ndc_dx = in.position.x * material.pixel_width / globals.viewport_size.x;
         let ndc_dy = in.position.y * material.pixel_height / globals.viewport_size.y;
-        clip = vec4<f32>(world_center.x + ndc_dx, world_center.y + ndc_dy, 0.0, 1.0);
+        clip = vec4<f32>(world_center.x + ndc_dx, world_center.y + ndc_dy, 1.0, 1.0);  // near plane (reversed depth)
     }
 
     var out: VSOut;
@@ -396,7 +396,7 @@ fn vs_main(in: VSIn, @builtin(instance_index) iidx: u32) -> VSOut {
         // Transform.scale.{x,y,z} sets the half-length of the line in NDC
         // units along whichever axis the geometry runs along.
         let ndc_pos = (model * vec4<f32>(in.position, 1.0)).xyz;
-        clip = vec4<f32>(ndc_pos.x, ndc_pos.y, 0.0, 1.0);
+        clip = vec4<f32>(ndc_pos.x, ndc_pos.y, 1.0, 1.0);  // near plane (reversed depth)
     }
     var out: VSOut;
     out.clip_position = clip;
