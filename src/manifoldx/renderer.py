@@ -175,6 +175,16 @@ class _BatchBuffers:
         self.upload_transforms(build())
         self._transforms_key = (np.array(entities, copy=True), cache.version)
 
+    def write_rows(self, name: str, rows: "np.ndarray", values: "np.ndarray") -> None:
+        """Write `values[k]` into row `rows[k]` (ascending) of the buffer `name` ("transforms",
+        "scalar_values" or "radii"), already sized for them, one write per contiguous run of rows."""
+        buf = getattr(self, f"{name}_buf")
+        values = np.ascontiguousarray(values, dtype=np.float32)
+        stride = values.nbytes // len(values)
+        breaks = np.flatnonzero(np.diff(rows) != 1) + 1
+        for run, vals in zip(np.split(rows, breaks), np.split(values, breaks)):
+            self._device.queue.write_buffer(buf, int(run[0]) * stride, vals.tobytes())
+
     def upload_transforms(self, data: "np.ndarray"):
         n_bytes = data.nbytes
         if self.transforms_buf is None or self.transforms_capacity < n_bytes:
@@ -413,6 +423,19 @@ def _color_hex_to_vec4(color_hex: str) -> np.ndarray:
 # =============================================================================
 
 
+class _Routing:
+    """RenderPipeline._routing's answer for one live set: batches per pass, and the mesh entities to cull."""
+
+    def __init__(self, flags, alive, mats, geoms, vols):
+        self.flags, self.alive, self.mats, self.geoms, self.vols = flags, alive, mats, geoms, vols
+        self.axis_batches: dict = {}
+        self.label_batches: dict = {}
+        self.volume_batches: list = []
+        self.sprite_batches: dict = {}
+        self.mesh_candidates = np.zeros(0, np.int64)
+        self.mesh_groups: list = []  # [((geom_id, mat_type, mat_subtype, mat_id), local indices)]
+
+
 class RenderPipeline:
     """
     Instanced render pipeline.
@@ -427,6 +450,7 @@ class RenderPipeline:
         self._store = store
         self._device = device
         self._transform_cache = TransformCache(store.max_entities)
+        self._routing_cache = None  # _Routing for the last live set, see _routing
         # Between run() and end_frame() the store does not change: matrices and shadow bounds
         # are computed once there and reused by every pass.
         self._in_frame = False
@@ -1484,6 +1508,50 @@ class RenderPipeline:
 
         _gui_pass.render_gui_pass(self, engine, render_pass)
 
+    def _routing(self, engine, alive_indices, mats, geoms, vols, flags) -> "_Routing":
+        """Which pass draws each live entity, grouped into batches; kept until the live set, a material,
+        geometry or volume id, or the registered components change, so a still scene skips the sorting.
+
+        Priority: axis > label > volume > sprite > mesh. It depends only on the material, so each
+        distinct material is classified once and entities are grouped by sorting. An entity is a
+        sprite when PointCloud is registered and it has no Mesh geometry (geom_id == 0). Axis frames
+        carry both AxisFrame and an AXIS_LINE_* mesh, so they win over the mesh path."""
+        cached = self._routing_cache
+        if (cached is not None and cached.flags == flags and np.array_equal(cached.alive, alive_indices)
+                and np.array_equal(cached.mats, mats) and np.array_equal(cached.geoms, geoms)
+                and (vols is None) == (cached.vols is None) and (vols is None or np.array_equal(cached.vols, vols))):
+            return cached
+        from manifoldx.viz import AxisMaterial, LabelMaterial, VolumeMaterial
+
+        has_mesh, has_point_cloud, has_text_label, has_axis_frame, has_volume = flags
+        uniq, inv = np.unique(mats, return_inverse=True)
+        routes = [(has_axis_frame, AxisMaterial), (has_text_label, LabelMaterial), (has_volume, VolumeMaterial)]
+        kind = np.zeros(len(uniq), np.int8)  # 0 sprite or mesh, 1 axis, 2 label, 3 volume
+        for u, mid in enumerate(uniq):
+            mat_obj = engine._material_registry.get(int(mid)) if mid > 0 else None
+            kind[u] = next((r for r, (on, cls) in enumerate(routes, 1) if on and isinstance(mat_obj, cls)), 0)
+        kind = kind[inv]
+
+        r = _Routing(flags=flags, alive=alive_indices.copy(), mats=mats.copy(), geoms=geoms.copy(),
+                     vols=None if vols is None else vols.copy())
+        r.axis_batches = {k: v for k, v in _groups(np.flatnonzero(kind == 1), geoms, mats)}
+        r.label_batches = {k[0]: v for k, v in _groups(np.flatnonzero(kind == 2), mats)}
+        if vols is not None:
+            r.volume_batches = [(int(i), int(mats[i]), int(vols[i])) for i in np.flatnonzero((kind == 3) & (vols > 0))]
+        if has_point_cloud:
+            r.sprite_batches = {k[0]: v for k, v in _groups(np.flatnonzero((kind == 0) & (geoms == 0)), mats)}
+        if has_mesh:
+            r.mesh_candidates = np.flatnonzero((kind == 0) & (geoms > 0))
+            for (geom_id, mat_id), v in _groups(r.mesh_candidates, geoms, mats):
+                mat_obj = engine._material_registry.get(mat_id) if mat_id > 0 else None
+                mat_type = type(mat_obj).__name__ if mat_obj else "BasicMaterial"
+                mat_subtype = getattr(mat_obj, "pipeline_subtype", None) if mat_obj else None
+                # mat_id is part of the key so two material *instances* of the
+                # same class never share a uniform buffer.
+                r.mesh_groups.append(((geom_id, mat_type, mat_subtype, mat_id), v))
+        self._routing_cache = r
+        return r
+
     def _render_scene_passes(self, engine, render_pass):
         """Issue draw calls for scene entities (mesh / sprite / volume / label / axis)."""
         # Get all alive entities on the camera's layers
@@ -1538,48 +1606,24 @@ class RenderPipeline:
         if has_volume:
             volume_data = self._store.get_component_data("Volume", alive_indices)
 
-        # Per-entity routing. Priority: axis > label > volume > sprite > mesh. It depends
-        # only on the material, so each distinct material is classified once and entities
-        # are grouped by sorting: a Python loop over entities cost ~100 ms at 100k.
-        # An entity is a sprite when PointCloud is registered AND it has no Mesh
-        # geometry (geom_id == 0). Axis frames carry both AxisFrame *and* an
-        # AXIS_LINE_* mesh, so they need to win over the mesh path.
-        from manifoldx.viz import AxisMaterial, LabelMaterial, VolumeMaterial
-
         n = len(alive_indices)
         mats = material_data[:, 0].astype(np.int64) if material_data is not None else np.zeros(n, np.int64)
         geoms = mesh_data[:, 0].astype(np.int64) if mesh_data is not None else np.zeros(n, np.int64)
-        uniq, inv = np.unique(mats, return_inverse=True)
-        routes = [(has_axis_frame, AxisMaterial), (has_text_label, LabelMaterial), (has_volume, VolumeMaterial)]
-        kind = np.zeros(len(uniq), np.int8)  # 0 sprite or mesh, 1 axis, 2 label, 3 volume
-        for u, mid in enumerate(uniq):
-            mat_obj = engine._material_registry.get(int(mid)) if mid > 0 else None
-            kind[u] = next((r for r, (on, cls) in enumerate(routes, 1) if on and isinstance(mat_obj, cls)), 0)
-        kind = kind[inv]
-
-        axis_batches = {k: v for k, v in _groups(np.flatnonzero(kind == 1), geoms, mats)}
-        label_batches = {k[0]: v for k, v in _groups(np.flatnonzero(kind == 2), mats)}
-        volume_batches = []  # list of (entity_local_idx, mat_id, vol_id)
-        if volume_data is not None:
-            vols = volume_data[:, 0].astype(np.int64)
-            volume_batches = [(int(i), int(mats[i]), int(vols[i])) for i in np.flatnonzero((kind == 3) & (vols > 0))]
-        sprite_batches = {}
-        if has_point_cloud:
-            sprite_batches = {k[0]: v for k, v in _groups(np.flatnonzero((kind == 0) & (geoms == 0)), mats)}
+        vols = volume_data[:, 0].astype(np.int64) if volume_data is not None else None
+        flags = (has_mesh, has_point_cloud, has_text_label, has_axis_frame, has_volume)
+        routing = self._routing(engine, alive_indices, mats, geoms, vols, flags)
+        axis_batches, label_batches = routing.axis_batches, routing.label_batches
+        volume_batches, sprite_batches = routing.volume_batches, routing.sprite_batches
 
         # Frustum culling: a mesh whose bounding sphere is out of view is not drawn. Only
         # entities with geometry are tested: sprites and labels would never be culled.
         mesh_batches = {}  # (geom_id, mat_type, mat_subtype, mat_id) -> local indices
-        if has_mesh:
-            idx = np.flatnonzero((kind == 0) & (geoms > 0))
-            idx = idx[self._in_frustum(engine, geoms[idx], model_matrices[idx], mats[idx], vp.T)]
-            for (geom_id, mat_id), v in _groups(idx, geoms, mats):
-                mat_obj = engine._material_registry.get(mat_id) if mat_id > 0 else None
-                mat_type = type(mat_obj).__name__ if mat_obj else "BasicMaterial"
-                mat_subtype = getattr(mat_obj, "pipeline_subtype", None) if mat_obj else None
-                # mat_id is part of the key so two material *instances* of the
-                # same class never share a uniform buffer.
-                mesh_batches[(geom_id, mat_type, mat_subtype, mat_id)] = v
+        cand = routing.mesh_candidates
+        if has_mesh and len(cand):
+            visible = np.zeros(n, dtype=bool)
+            visible[cand[self._in_frustum(engine, geoms[cand], model_matrices[cand], mats[cand], vp.T)]] = True
+            shown = [(key, v[visible[v]]) for key, v in routing.mesh_groups]
+            mesh_batches = dict(sorted(((k, v) for k, v in shown if len(v)), key=lambda kv: kv[1][0]))
 
         # Get camera position for globals
         camera_pos = np.array([0.0, 0.0, 5.0], dtype=np.float32)

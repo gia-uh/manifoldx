@@ -6,6 +6,9 @@ import wgpu
 from manifoldx.viz.materials import ColormapMaterial
 
 
+_MAX_RUNS = 64  # more runs of changed rows than this: one full upload beats many small writes
+
+
 def render_sprite_batches(
     rp, engine, render_pass, sprite_batches, model_matrices, material_data
 ):
@@ -41,13 +44,20 @@ def render_sprite_batches(
     else:
         radius_data = np.ones((len(ent_arr),), dtype=np.float32)
     cache, last = rp._transform_cache, getattr(rp, "_sprite_uploaded", None)
-    if (
-        last is None
-        or not np.array_equal(last["entities"], entity_indices)
-        or cache.changed_since(last["version"], entity_indices)
-        or not np.array_equal(last["scalars"], scalar_data)
-        or not np.array_equal(last["radii"], radius_data)
-    ):
+    same = last is not None and np.array_equal(last["entities"], entity_indices)
+    moved = cache._row_version[entity_indices] > last["version"] if same else None
+    changed = (moved | (last["scalars"] != scalar_data) | (last["radii"] != radius_data)) if same else None
+    if same and not changed.any():
+        pass  # a still cloud: nothing to send
+    elif same and len(np.flatnonzero(np.diff(np.flatnonzero(changed)) != 1)) < _MAX_RUNS:
+        rows = np.flatnonzero(changed)  # few runs of rows moved or changed: send those alone
+        matrices = model_matrices[ent_arr[rows]].reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16)
+        rp._sprite_batch_buffers.write_rows("transforms", rows, matrices)
+        rp._sprite_batch_buffers.write_rows("scalar_values", rows, scalar_data[rows])
+        rp._sprite_batch_buffers.write_rows("radii", rows, radius_data[rows])
+        rp._sprite_uploaded = {"entities": entity_indices, "version": cache.version,
+                               "scalars": scalar_data, "radii": radius_data}
+    else:
         all_matrices = model_matrices[ent_arr]  # (total_instances, 16)
         all_matrices_t = all_matrices.reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16)
         rp._sprite_batch_buffers.upload_transforms(all_matrices_t.astype(np.float32))
