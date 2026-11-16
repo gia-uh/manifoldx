@@ -385,10 +385,11 @@ class QuadStreamer(_Uploads):
         parent's error is at least twice its child's, so a fixed point of these two rules is the walk's."""
         cam = self.engine.camera
         focal = self.engine.h / (2.0 * math.tan(math.radians(cam.fov) / 2.0))
-        if self._cut is None:
+        first = self._cut is None
+        if first:  # refined to the end: coarse nodes drawn first would hide everything under them till all is built
             root = (self.levels, 0, 0)
             self._cut = {root} if self.exists(*root) else set()
-        stop = None if self.refine_ms is None else perf_counter() + self.refine_ms / 1000.0
+        stop = None if self.refine_ms is None or first else perf_counter() + self.refine_ms / 1000.0
         checked = 0
         while True:
             if not self._queue:

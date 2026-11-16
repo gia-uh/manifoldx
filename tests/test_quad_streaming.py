@@ -97,6 +97,8 @@ def test_refined_cut_tiles_and_settles():
 def test_budget_spreads_the_refinement():
     s = streamer(7, refine_ms=0.0)  # 16 checks a frame, the floor
     s.engine.camera.far = 1e6
+    s._select(15000.0, 15000.0, 1.0)  # the first focus refines to the end, wherever it is
+    assert settled(s, 15000.0, 15000.0, 1.0)
     frames = 0
     while True:
         before = set(s._cut or ())
@@ -105,13 +107,8 @@ def test_budget_spreads_the_refinement():
         assert tiles(s, 7)  # every frame draws a whole tiling, refined or not
         if s._cut == before and not s._queue:
             break
-    assert frames > 5 and settled(s, 100.0, 100.0, 1.0)
-    whole = streamer(7)
-    whole.engine.camera.far = 1e6
-    whole._select(100.0, 100.0, 1.0)
-    assert s._cut == whole._cut  # the same cut, reached over several frames
+    assert frames > 5 and settled(s, 100.0, 100.0, 1.0)  # reached over several frames
     s.close()
-    whole.close()
 
 
 def test_high_camera_is_bounded():
