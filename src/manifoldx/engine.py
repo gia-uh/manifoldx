@@ -22,6 +22,36 @@ from manifoldx.camera import Camera
 from manifoldx.input import InputState, _InputBridge
 
 
+
+def _overlapping_copy(rgba: np.ndarray) -> np.ndarray:
+    """RGB of a contiguous (h, w, 4) uint8 array in one pass: each pixel's 4 bytes are written 3 bytes
+    after the last one's, so the next pixel's red overwrites this one's alpha."""
+    h, w = rgba.shape[:2]
+    out = np.empty(h * w * 3 + 1, np.uint8)  # one spare byte for the last pixel's alpha
+    np.ndarray((h * w,), np.uint32, buffer=out, strides=(3,))[...] = rgba.reshape(-1).view(np.uint32)
+    return out[:-1].reshape(h, w, 3)
+
+
+def _overlap_is_ordered() -> bool:
+    """Whether numpy writes the overlapping copy in ascending order here, checked once on a small frame."""
+    probe = np.arange(4 * 257 * 3, dtype=np.uint32).astype(np.uint8).reshape(3, 257, 4)
+    return bool(np.array_equal(_overlapping_copy(probe), probe[:, :, :3]))
+
+
+_OVERLAP_OK = None
+
+
+def _drop_alpha(rgba: np.ndarray) -> np.ndarray:
+    """A C-contiguous (h, w, 3) copy of an (h, w, 4) uint8 frame. Slicing off alpha copies 3 of every 4
+    bytes one at a time (about 16 ms at 1080p); one overlapping 32-bit copy does it in about 2 ms."""
+    global _OVERLAP_OK
+    if _OVERLAP_OK is None:
+        _OVERLAP_OK = _overlap_is_ordered()
+    rgba = np.ascontiguousarray(rgba, dtype=np.uint8)
+    if _OVERLAP_OK:
+        return _overlapping_copy(rgba)
+    return rgba[:, :, :3].copy()
+
 class _TransformProxy:
     """Read/write the Transform row of a single entity (pos 0:3, rot 3:7, scale 7:10).
 
@@ -1532,7 +1562,7 @@ class Engine:
             else:
                 self._render_only(getattr(self, "_last_dt", 0.0) or 0.0)
             frame = self._render_canvas.draw()
-        return np.asarray(frame)[:, :, :3].copy()
+        return _drop_alpha(np.asarray(frame))
 
     def _flat_for_label(self, label: int):
         from manifoldx.resources import FlatMaterial
