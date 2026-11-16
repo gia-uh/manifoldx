@@ -410,21 +410,27 @@ class QuadStreamer(_Uploads):
 
         # What to draw: each selected node once it is built and on the GPU, else what covers its spot now;
         # then nothing under a node that is drawn, so four children replace their parent in one frame.
-        under: dict = {}  # node -> the drawn nodes below it
-        for d in self._drawn:
-            for u in self._ancestors(d):
-                under.setdefault(u, []).append(d)
+        # The selection is disjoint, so the ancestor map and filter are only needed once a node falls back.
+        under = None  # node -> the drawn nodes below it, built on the first fallback
         show = set()
+        fell_back = False
         for n in selected:
             if n in self._drawn or (n in self._ready and self._on_gpu(n)):
                 show.add(n)
-            else:  # not ready: what covers its spot now stays, a coarser node above or finer ones below
-                up = next((u for u in self._ancestors(n) if u in self._drawn), None)
-                if up is not None:
-                    show.add(up)
-                else:
-                    show.update(under.get(n, ()))
-        show = {n for n in show if not any(u in show for u in self._ancestors(n))}
+                continue
+            fell_back = True  # not ready: what covers its spot now stays, a coarser node above or finer ones below
+            up = next((u for u in self._ancestors(n) if u in self._drawn), None)
+            if up is not None:
+                show.add(up)
+                continue
+            if under is None:
+                under = {}
+                for d in self._drawn:
+                    for u in self._ancestors(d):
+                        under.setdefault(u, []).append(d)
+            show.update(under.get(n, ()))
+        if fell_back:
+            show = {n for n in show if not any(u in show for u in self._ancestors(n))}
         for n in [n for n in self._drawn if n not in show]:
             self._undraw(n)
         for n in sorted(show - set(self._drawn), key=lambda n: self._distance(n, x, z, height)):
