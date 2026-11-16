@@ -29,6 +29,31 @@ def sprites(n: int):
     return engine
 
 
+def sprites_mixed(n: int):
+    """n point sprites of one material, of which max(1, n // 100) move every frame (a starfield with rain)."""
+    import manifoldx as mx
+    from manifoldx.components import Component, Material, Transform
+    from manifoldx.types import Float
+    from manifoldx.viz import ColormapMaterial, PointCloud, Radius, ScalarValue
+
+    Mover = type("Mover", (Component,), {"__annotations__": {"k": Float}})  # this module's annotations are strings
+
+    engine = headless_engine(n)
+    engine.camera.fit(60)
+    mat = ColormapMaterial(cmap="viridis", vmin=0, vmax=1)
+    still, moving = n - max(1, n // 100), max(1, n // 100)
+    for count, extra in ((still, {}), (moving, {"Mover": Mover(k=np.zeros(moving))})):
+        engine.spawn(PointCloud(), Material(mat), Transform(pos=_positions(count)),
+                     ScalarValue(value=np.random.default_rng(1).uniform(0, 1, count).astype(np.float32)),
+                     Radius(radius=np.full(count, 0.1, np.float32)), n=count, **extra)
+
+    @engine.system
+    def fall(q: mx.Query[Transform, Mover], dt: float):
+        q[Transform].position -= np.float32(0.01)
+
+    return engine
+
+
 def meshes(n: int, *, shadows: bool = False, moving: bool = False, vertex_colors: bool = False):
     """n instances of one cube geometry with one StandardMaterial."""
     import manifoldx as mx

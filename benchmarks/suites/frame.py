@@ -23,6 +23,12 @@ def sprites(n):
     return _frame(scenes.sprites(n))
 
 
+@case("frame", "sprites_mixed", sizes=[10_000, 100_000, 300_000], smoke=200)
+def sprites_mixed(n):
+    """n point sprites, 1% of them moved by a system every frame."""
+    return _frame(scenes.sprites_mixed(n))
+
+
 @case("frame", "meshes", sizes=SIZES, smoke=10)
 def meshes(n):
     """n static instances of one mesh."""
