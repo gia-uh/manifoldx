@@ -27,6 +27,7 @@ files:
   - chapters/13-working-with-an-agent.md
   - chapters/14-the-plaza-end-to-end.md
   - chapters/15-models-from-drawings.md
+  - chapters/16-using-every-core.md
 
 outputs:
   site:

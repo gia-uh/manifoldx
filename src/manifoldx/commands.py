@@ -47,6 +47,10 @@ class CommandBuffer:
         """Add a command to the buffer."""
         self._commands.append(cmd)
 
+    def extend(self, other: "CommandBuffer") -> None:
+        """Append another buffer's commands, in their order, after these."""
+        self._commands.extend(other._commands)
+
     def clear(self):
         """Clear all commands."""
         self._commands.clear()

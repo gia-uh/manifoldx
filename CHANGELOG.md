@@ -9,12 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ManifoldX now requires CPython 3.14, and the free-threaded build (3.14t) is the supported interpreter: `requires-python` is `>=3.14`, `.python-version` is `3.14t`, and CI runs the suite and both the GIL and the free-threaded tests on it. The 3.14 fixes include compute kernels reading class annotations lazily (`inspect.get_annotations`) and the transpiler skipping the generated dunder members.
+- `Engine.close()` releases the GPU device an engine requested, after doing what a hot reload's detach does. A device passed in with `gpu=` belongs to its owner and stays up. On free-threaded Python an engine left to the collector keeps its device long enough to exhaust GPU memory, so a script that builds many engines should close each one.
 - Reversed-Z depth: the scene's depth buffer is `depth32float`, cleared to 0 and tested with `greater`; `Camera.get_projection_matrix` maps the near plane to depth 1 and the far plane to 0. Two surfaces half a metre apart at 8 km keep their order (with `depth24plus` they merged within about 40 m). Shadow maps keep their own convention.
 - The mesh and shadow passes upload their instances' transforms only when the instance list changed or one of its transforms did: 13.6 ms a pass saved at 100k static instances.
 - The renderer recomputes a model matrix only when its entity's `Transform` changed, whatever wrote it, and the sprite pass uploads its per-instance buffers only when a sprite, its transform, value or radius changed: 100k static sprites cost 18 ms a frame instead of 72 (#243).
 
 ### Added
 
+- `@engine.system(parallel=True)`: consecutive systems marked parallel form a group and run at the same time on a frame pool with one thread per core, each with its own command buffer, and the buffers are appended to the frame's in registration order. A system without the flag is a barrier. On a build with the GIL, with `MANIFOLDX_PARALLEL=serial`, or for a group of one system, the group runs one system after another on the calling thread. A parallel system may read and write through its query, `engine.emit` and `engine.destroy`; `engine.spawn` raises because it writes the store at once.
+- `engine.system_split` (seconds per system name, reset each frame) and `engine.group_split` (each group's wall seconds, in run order); the dev channel's `--debug` line adds the five slowest systems and reports the names as `systems name ms ...`. Book chapter 16 and the `parallel_systems` frame benchmark cover the new phase.
 - `streaming.QuadStreamer`: streams a quadtree of cells by screen error, near nodes fine and far nodes coarse, with merge hysteresis; a node not built yet leaves what covers its spot drawn, and nodes beyond the camera's far plane are skipped. Example `examples/quad_streaming.py`, benchmark `frame quadstream`.
 - `place_car(..., pitch=, roll=)`: tilt a placed car about its own axes after the yaw, so it can sit on a slope.
 - `manifoldx asset FILE COMMAND`: run one asset file's stages from the shell (`draw`, `build`, `lint`, `inspect`,

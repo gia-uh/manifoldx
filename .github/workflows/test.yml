@@ -68,7 +68,7 @@ jobs:
       - name: Run the free-threading tests with the GIL on
         env:
           PYTHON_GIL: '1'
-        run: uv run pytest tests/test_free_threading.py -v --tb=short
+        run: uv run pytest tests/test_free_threading.py tests/test_parallel_systems.py -v --tb=short
 
   web:
     # The export and replay tests create an offscreen device for the app's

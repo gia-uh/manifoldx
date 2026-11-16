@@ -23,6 +23,18 @@ def test_command_buffer_clear():
     assert len(buf) == 0
 
 
+def test_command_buffer_extend_appends_in_order():
+    """extend() appends the other buffer's commands after this one's, in their order."""
+    from manifoldx.commands import CommandBuffer, Command, CommandType
+    a, b = CommandBuffer(), CommandBuffer()
+    a.append(Command(CommandType.NOP, {"n": 1}))
+    b.append(Command(CommandType.NOP, {"n": 2}))
+    b.append(Command(CommandType.NOP, {"n": 3}))
+    a.extend(b)
+    assert [cmd.data["n"] for cmd in a._commands] == [1, 2, 3]
+    assert len(b) == 2
+
+
 def test_command_types():
     """Verify command types are correctly numbered."""
     from manifoldx.commands import CommandType

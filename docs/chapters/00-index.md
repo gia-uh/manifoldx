@@ -25,7 +25,7 @@ pip install "manifold-gfx[desktop]"   # a window on your desktop
 pip install "manifold-gfx[offline]"   # frames and videos without a window
 ```
 
-ManifoldX needs Python 3.13 and a GPU that speaks Vulkan, Metal or Direct3D 12.
+ManifoldX needs Python 3.14 and a GPU that speaks Vulkan, Metal or Direct3D 12.
 On a machine without one, a software Vulkan driver such as Mesa's lavapipe is
 enough for still frames.
 
@@ -46,3 +46,4 @@ enough for still frames.
 13. Working with an agent: hot reload, the dev channel and the web page.
 14. The plaza, end to end.
 15. Models from drawings: assets built from an image model's drawings, linted and corrected.
+16. Using every core: four systems, four cores, and what a parallel system may do.
