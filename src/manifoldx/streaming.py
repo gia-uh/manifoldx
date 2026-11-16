@@ -369,14 +369,17 @@ class QuadStreamer(_Uploads):
         dz = max(z0 - z, 0.0, z - (z0 + side))
         return max(math.sqrt(dx * dx + dz * dz + height * height), 1e-3)
 
-    def _distances(self, nodes, x, z, height) -> np.ndarray:
-        """_distance for many nodes at once, as one array."""
+    def _boxes(self, nodes):
+        """(x0, z0, side) arrays of these nodes' squares."""
+        L, a, b = np.asarray(nodes, np.int64).reshape(-1, 3).T
+        side = (1 << L) * self.cell
+        return (self.origin[0] + a * (1 << L)) * self.cell, (self.origin[1] + b * (1 << L)) * self.cell, side
+
+    def _distances(self, nodes, x, z, height, boxes=None) -> np.ndarray:
+        """_distance for many nodes at once, as one array; `boxes` is their _boxes, when kept."""
         if not len(nodes):
             return np.zeros(0)
-        L, a, b = np.asarray(nodes, np.int64).T
-        side = (1 << L) * self.cell
-        x0 = (self.origin[0] + a * (1 << L)) * self.cell
-        z0 = (self.origin[1] + b * (1 << L)) * self.cell
+        x0, z0, side = boxes if boxes is not None else self._boxes(nodes)
         dx = np.maximum(np.maximum(x0 - x, 0.0), x - (x0 + side))
         dz = np.maximum(np.maximum(z0 - z, 0.0), z - (z0 + side))
         return np.maximum(np.sqrt(dx * dx + dz * dz + height * height), 1e-3)
@@ -423,8 +426,9 @@ class QuadStreamer(_Uploads):
             checked += 1
         if self._cut_changed or self._order is None:
             self._order = list(self._cut)
+            self._order_boxes = self._boxes(self._order)
             self._cut_changed = False
-        d = self._distances(self._order, x, z, height)
+        d = self._distances(self._order, x, z, height, self._order_boxes)
         near = np.flatnonzero(d <= cam.far)
         return [self._order[k] for k in near[np.argsort(d[near], kind="stable")]]
 
@@ -518,9 +522,8 @@ class QuadStreamer(_Uploads):
             self._stats["dropped"] += 1
         for n in [n for n in self._pending if n not in keep]:
             self._pending.pop(n).cancel()
-        # Quiet: the refinement settled, nothing builds, and every selected node is drawn.
-        self._quiet = not (self._queue or self._pass_started or self._pending or fell_back
-                           or any(n not in self._drawn for n in selected))
+        # Quiet: the refinement settled, nothing builds, and every selected node is drawn (none fell back).
+        self._quiet = not (self._queue or self._pass_started or self._pending or fell_back)
 
     def drawn(self) -> set[tuple[int, int, int]]:
         """The nodes drawn now, empty ones (build returned None) included."""
