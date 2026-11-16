@@ -22,12 +22,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.14t'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
-          python-version: '3.13'
+          python-version: '3.14t'
 
       - name: Install dependencies
         # Offline backend for headless rendering, Pillow (viz) for the texture
@@ -46,6 +46,30 @@ jobs:
       - name: Run linter
         run: uv run ruff check src/ tests/
 
+  gil:
+    # The same interpreter with the GIL forced on (PYTHON_GIL=1): parallel
+    # systems must fall back to running one after another.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.14t'
+
+      - name: Install dependencies
+        run: uv sync --locked --extra offline --dev
+
+      - name: Run the free-threading tests with the GIL on
+        env:
+          PYTHON_GIL: '1'
+        run: uv run pytest tests/test_free_threading.py -v --tb=short
+
   web:
     # The export and replay tests create an offscreen device for the app's
     # startup. lavapipe (mesa-vulkan-drivers) gives the runner a software
@@ -61,12 +85,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.14t'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
-          python-version: '3.13'
+          python-version: '3.14t'
 
       - name: Install dependencies
         run: uv sync --extra offline --extra viz --extra svg --dev
@@ -94,7 +118,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
-          python-version: '3.13'
+          python-version: '3.14t'
 
       - name: Install dependencies and Chromium
         run: |
