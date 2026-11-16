@@ -59,6 +59,16 @@ def unique_meshes(n):
     return _frame(scenes.unique_meshes(n))
 
 
+@case("frame", "still_frame", sizes=[256, 1024, 2048], smoke=32)
+def still_frame(side):
+    """render_frame(supersample=1) of an empty side × side scene: the readback and its copy."""
+    import manifoldx as mx
+
+    engine = mx.Engine("still", width=side, height=side)
+    engine.render_frame(supersample=1)
+    return measure(lambda: engine.render_frame(supersample=1))
+
+
 @case("frame", "ids_pass", sizes=SIZES, smoke=10)
 def ids_pass(n):
     """render_frame(pass_='ids') over n mesh instances, one group."""
