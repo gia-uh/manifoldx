@@ -793,9 +793,9 @@ class RenderPipeline:
                 },
                 # Standard depth: lines occlude correctly with the 3D scene.
                 depth_stencil={
-                    "format": wgpu.TextureFormat.depth24plus,
+                    "format": wgpu.TextureFormat.depth32float,
                     "depth_write_enabled": True,
-                    "depth_compare": wgpu.CompareFunction.less,
+                    "depth_compare": wgpu.CompareFunction.greater,
                 },
                 fragment={
                     "module": shader_module,
@@ -892,9 +892,9 @@ class RenderPipeline:
                 # Depth-test on (labels behind opaque geometry are occluded)
                 # but depth-write off (overlapping labels alpha-blend cleanly).
                 depth_stencil={
-                    "format": wgpu.TextureFormat.depth24plus,
+                    "format": wgpu.TextureFormat.depth32float,
                     "depth_write_enabled": False,
-                    "depth_compare": wgpu.CompareFunction.less_equal,
+                    "depth_compare": wgpu.CompareFunction.greater_equal,
                 },
                 fragment={
                     "module": shader_module,
@@ -1024,9 +1024,9 @@ class RenderPipeline:
                     "cull_mode": wgpu.CullMode.back,
                 },
                 depth_stencil={
-                    "format": wgpu.TextureFormat.depth24plus,
+                    "format": wgpu.TextureFormat.depth32float,
                     "depth_write_enabled": True,
-                    "depth_compare": wgpu.CompareFunction.less,
+                    "depth_compare": wgpu.CompareFunction.greater,
                 },
                 fragment={
                     "module": shader_module,
@@ -1206,9 +1206,9 @@ class RenderPipeline:
                                   else wgpu.CullMode.front if _mirrored else wgpu.CullMode.back),
                 },
                 depth_stencil={
-                    "format": wgpu.TextureFormat.depth24plus,
+                    "format": wgpu.TextureFormat.depth32float,
                     "depth_write_enabled": not _blended,
-                    "depth_compare": wgpu.CompareFunction.less,
+                    "depth_compare": wgpu.CompareFunction.greater,
                 },
                 fragment={
                     "module": shader_module,

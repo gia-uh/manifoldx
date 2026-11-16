@@ -54,7 +54,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOut {
         vec2<f32>(-1.0,  3.0),
     );
     var out: VertexOut;
-    out.clip_pos = vec4<f32>(pos[vid], 0.0, 1.0);
+    out.clip_pos = vec4<f32>(pos[vid], 1.0, 1.0);  // the near plane under reversed depth: always passes
     return out;
 }
 
@@ -113,8 +113,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         1.0 - (pixel.y / globals.viewport_size.y) * 2.0,
     );
     // Unproject NDC near/far into world space.
-    let inv_vp_near = inverse_mat4(globals.vp) * vec4<f32>(ndc, 0.0, 1.0);
-    let inv_vp_far  = inverse_mat4(globals.vp) * vec4<f32>(ndc, 1.0, 1.0);
+    // Reversed depth: the near plane is z = 1, the far plane z = 0.
+    let inv_vp_near = inverse_mat4(globals.vp) * vec4<f32>(ndc, 1.0, 1.0);
+    let inv_vp_far  = inverse_mat4(globals.vp) * vec4<f32>(ndc, 0.0, 1.0);
     let world_near = inv_vp_near.xyz / inv_vp_near.w;
     let world_far  = inv_vp_far.xyz  / inv_vp_far.w;
     let ro_world = world_near;
@@ -268,9 +269,9 @@ def get_or_create_volume_pipeline(rp, device, texture_format):
             "cull_mode": wgpu.CullMode.none,
         },
         depth_stencil={
-            "format": wgpu.TextureFormat.depth24plus,
+            "format": wgpu.TextureFormat.depth32float,
             "depth_write_enabled": False,
-            "depth_compare": wgpu.CompareFunction.less_equal,
+            "depth_compare": wgpu.CompareFunction.greater_equal,
         },
         multisample={"count": 1, "mask": 0xFFFFFFFF, "alpha_to_coverage_enabled": False},
     )
