@@ -423,6 +423,20 @@ def _color_hex_to_vec4(color_hex: str) -> np.ndarray:
 # =============================================================================
 
 
+class _Rows:
+    """Rows `indices` of `base`, gathered only when indexed: `rows[local]` is `base[indices[local]]`.
+    The passes read a few matrices each, so the frame never copies every live entity's matrix."""
+
+    def __init__(self, base, indices):
+        self.base, self.indices = base, indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, local):
+        return self.base[self.indices[local]]
+
+
 class _Routing:
     """RenderPipeline._routing's answer for one live set: batches per pass, and the mesh entities to cull."""
 
@@ -1593,7 +1607,13 @@ class RenderPipeline:
         view_mat = camera.get_view_matrix().T.astype(np.float32)
 
         # Get transform data
-        model_matrices = self._model_matrices(alive_indices)
+        cache = self._transform_cache  # what _model_matrices does, without gathering every row
+        if not self._in_frame:
+            cache.refresh(self._store)
+        dirty = cache._dirty[alive_indices]
+        if dirty.any():
+            cache._recompute_matrices(self._store, alive_indices[dirty])
+        model_matrices = _Rows(cache._matrix_cache, alive_indices)
 
         # Get mesh and material IDs
         mesh_data = None
