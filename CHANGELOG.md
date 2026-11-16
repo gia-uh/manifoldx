@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The renderer recomputes a model matrix only when its entity's `Transform` changed, whatever wrote it, and the sprite pass uploads its per-instance buffers only when a sprite, its transform, value or radius changed: 100k static sprites cost 18 ms a frame instead of 72 (#243).
+
 ### Added
 
 - `place_car(..., pitch=, roll=)`: tilt a placed car about its own axes after the yaw, so it can sit on a slope.
