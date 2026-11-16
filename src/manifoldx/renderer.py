@@ -1357,12 +1357,12 @@ class RenderPipeline:
         n = len(geom_ids)
         if n == 0:
             return np.zeros(0, dtype=bool)
-        c = np.empty((n, 3))
-        r = np.empty(n)
-        geom_ids = np.asarray(geom_ids).astype(np.int64)
-        for g in np.unique(geom_ids):  # one lookup per geometry, not per instance
-            sel = geom_ids == g
-            c[sel], r[sel] = self._bounds(engine, int(g))
+        uniq, inv = np.unique(np.asarray(geom_ids).astype(np.int64), return_inverse=True)
+        c = np.empty((len(uniq), 3))
+        r = np.empty(len(uniq))
+        for k, g in enumerate(uniq):  # one lookup per geometry, not per instance
+            c[k], r[k] = self._bounds(engine, int(g))
+        c, r = c[inv], r[inv]
         m = np.asarray(models, dtype=np.float64).reshape(n, 4, 4)
         centre = np.einsum("nij,nj->ni", m[:, :3, :3], c) + m[:, :3, 3]
         a = m[:, :3, :3]  # largest column norm: the scale; summing rows beats norm on (N,3,3)
