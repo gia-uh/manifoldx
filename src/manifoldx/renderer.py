@@ -164,6 +164,16 @@ class _BatchBuffers:
         self.label_indices_capacity = 0
         self.joint_blocks_buf = None
         self.joint_blocks_capacity = 0
+        self._transforms_key = None  # (entities, cache version) of what transforms_buf holds, if known
+
+    def upload_transforms_for(self, entities: "np.ndarray", cache: "TransformCache", build) -> None:
+        """Upload build()'s column-major matrices for `entities`, unless the buffer already holds these
+        entities' matrices and none of them was recomputed since: a static scene skips the gather and copy."""
+        key = self._transforms_key
+        if key is not None and np.array_equal(key[0], entities) and not cache.changed_since(key[1], entities):
+            return
+        self.upload_transforms(build())
+        self._transforms_key = (np.array(entities, copy=True), cache.version)
 
     def upload_transforms(self, data: "np.ndarray"):
         n_bytes = data.nbytes
@@ -174,6 +184,7 @@ class _BatchBuffers:
             )
             self.transforms_capacity = n_bytes
         self._device.queue.write_buffer(self.transforms_buf, 0, data.tobytes())
+        self._transforms_key = None
 
     def upload_scalar_values(self, data: "np.ndarray"):
         n_bytes = data.nbytes

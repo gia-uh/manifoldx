@@ -34,10 +34,13 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
         return
     all_local_indices = np.concatenate(all_local_indices)
 
-    # Transpose all matrices for WGSL column-major layout and upload once
-    all_matrices = model_matrices[all_local_indices]  # (total_instances, 16)
-    all_matrices_t = all_matrices.reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16)
-    rp._batch_buffers.upload_transforms(all_matrices_t.astype(np.float32))
+    # Transpose all matrices for WGSL column-major layout and upload once, unless the buffer holds them
+    rp._batch_buffers.upload_transforms_for(
+        np.asarray(entity_indices)[all_local_indices],
+        rp._transform_cache,
+        lambda: model_matrices[all_local_indices].reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16)
+        .astype(np.float32),
+    )
     joint_blocks_uploaded = False
     mat_states = {}  # mat_id -> (needs_lights, buffer, buffer size), built once this frame
 

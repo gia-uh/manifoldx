@@ -118,3 +118,47 @@ def test_sprite_moves_values_and_radii_are_uploaded(monkeypatch):
     assert _uploads(e, monkeypatch, lambda e: e.store._components["ScalarValue"].__setitem__((alive[1], 0), 0.9)) == 1
     assert _uploads(e, monkeypatch, lambda e: e.store._components["Radius"].__setitem__((alive[2], 0), 0.3)) == 1
     assert _uploads(e, monkeypatch) == 0
+
+
+def _transform_uploads(e, monkeypatch, change=None):
+    from manifoldx.renderer import _BatchBuffers
+
+    calls = []
+    orig = _BatchBuffers.upload_transforms
+
+    def spy(self, data):
+        calls.append(self)
+        return orig(self, data)
+
+    monkeypatch.setattr(_BatchBuffers, "upload_transforms", spy)
+    if change:
+        change(e)
+    e.render_frame(supersample=1)
+    monkeypatch.undo()
+    rp = e._render_pipeline
+    return {"mesh": sum(b is rp._batch_buffers for b in calls), "shadow": sum(b is rp._shadow_batch_buffers for b in calls)}
+
+
+def _shadowed_scene():
+    from manifoldx.resources import DirectionalLight
+
+    e, h = _scene()
+    e.set_sun(DirectionalLight(color="#ffffff", intensity=3.0, direction=(-0.5, -1.0, -0.3)))
+    e.enable_shadows(target=(0, 0, 0), extent=8.0, resolution=256)
+    e.render_frame(supersample=1)
+    return e, h
+
+
+def test_static_meshes_and_shadow_casters_are_not_uploaded_again(monkeypatch):
+    e, _ = _shadowed_scene()
+    assert _transform_uploads(e, monkeypatch) == {"mesh": 0, "shadow": 0}
+
+
+def test_a_moved_mesh_is_uploaded_to_both_passes(monkeypatch):
+    e, h = _shadowed_scene()
+
+    def move(e):
+        h.transform.pos = (0.5, 0.0, 0.0)
+
+    assert _transform_uploads(e, monkeypatch, move) == {"mesh": 1, "shadow": 1}
+    assert _transform_uploads(e, monkeypatch) == {"mesh": 0, "shadow": 0}
