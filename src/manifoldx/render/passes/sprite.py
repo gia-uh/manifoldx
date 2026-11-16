@@ -28,34 +28,33 @@ def render_sprite_batches(
     if not instance_offset:
         return
 
-    # Collect per-instance arrays
+    # Per-instance arrays: uploaded again only when the sprites, their transforms, values or radii changed
+    # since the last upload, so a static cloud costs a few comparisons a frame.
     ent_arr = np.concatenate(all_local_indices)
-
-    # Transform matrices
-    all_matrices = model_matrices[ent_arr]  # (total_instances, 16)
-    all_matrices_t = all_matrices.reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16)
-    rp._sprite_batch_buffers.upload_transforms(all_matrices_t.astype(np.float32))
-
-    # Scalar values (must be registered if we're rendering sprites)
+    entity_indices = np.flatnonzero(rp._store._alive)[ent_arr]
     if "ScalarValue" in rp._store._components:
-        # Get entity indices (not local indices) for component lookup
-        alive_indices = np.where(rp._store._alive)[0]
-        entity_indices = alive_indices[ent_arr]
-        scalar_data = rp._store.get_component_data("ScalarValue", entity_indices)
-        rp._sprite_batch_buffers.upload_scalar_values(scalar_data[:, 0].astype(np.float32))
+        scalar_data = rp._store.get_component_data("ScalarValue", entity_indices)[:, 0].astype(np.float32)
     else:
         scalar_data = np.zeros((len(ent_arr),), dtype=np.float32)
-        rp._sprite_batch_buffers.upload_scalar_values(scalar_data)
-
-    # Radii
     if "Radius" in rp._store._components:
-        alive_indices = np.where(rp._store._alive)[0]
-        entity_indices = alive_indices[ent_arr]
-        radius_data = rp._store.get_component_data("Radius", entity_indices)
-        rp._sprite_batch_buffers.upload_radii(radius_data[:, 0].astype(np.float32))
+        radius_data = rp._store.get_component_data("Radius", entity_indices)[:, 0].astype(np.float32)
     else:
         radius_data = np.ones((len(ent_arr),), dtype=np.float32)
+    cache, last = rp._transform_cache, getattr(rp, "_sprite_uploaded", None)
+    if (
+        last is None
+        or not np.array_equal(last["entities"], entity_indices)
+        or cache.changed_since(last["version"], entity_indices)
+        or not np.array_equal(last["scalars"], scalar_data)
+        or not np.array_equal(last["radii"], radius_data)
+    ):
+        all_matrices = model_matrices[ent_arr]  # (total_instances, 16)
+        all_matrices_t = all_matrices.reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16)
+        rp._sprite_batch_buffers.upload_transforms(all_matrices_t.astype(np.float32))
+        rp._sprite_batch_buffers.upload_scalar_values(scalar_data)
         rp._sprite_batch_buffers.upload_radii(radius_data)
+        rp._sprite_uploaded = {"entities": entity_indices, "version": cache.version,
+                               "scalars": scalar_data, "radii": radius_data}
 
     # Get sprite quad geometry and create buffers if needed
     sprite_geom_id = engine._geometry_registry.get_id("sprite_quad")
