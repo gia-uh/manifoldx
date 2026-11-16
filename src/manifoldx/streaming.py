@@ -113,17 +113,20 @@ class _Uploads:
         self._stats = {"built": 0, "uploaded": 0, "dropped": 0, "max_frame_ms": 0.0}
         self._last = None
 
-    def _tick(self) -> None:
-        """Note the time since the last focus() and collect the finished builds."""
+    def _tick(self) -> int:
+        """Note the time since the last focus() and collect the finished builds; returns how many."""
         now = perf_counter()
         if self._last is not None:
             self._stats["max_frame_ms"] = max(self._stats["max_frame_ms"], (now - self._last) * 1000.0)
         self._last = now
+        got = 0
         for c, fut in list(self._pending.items()):
             if fut.done():
                 del self._pending[c]
                 self._ready[c] = fut.result()
                 self._stats["built"] += 1
+                got += 1
+        return got
 
     def _on_gpu(self, c) -> bool:
         """Whether cell c can be drawn without building a buffer on the frame."""
@@ -349,6 +352,7 @@ class QuadStreamer(_Uploads):
         self._cut: set | None = None  # the nodes that tile the tree now; None before the first focus
         self._queue: list = []  # this pass's nodes still to check, nearest last
         self._pass_quiet, self._pass_started = True, False
+        self._quiet, self._still = False, None  # focus() returns early while quiet at the same camera
         self._order: list | None = None  # the cut as a list, rebuilt when it changes
         self._cut_changed = False
 
@@ -364,6 +368,18 @@ class QuadStreamer(_Uploads):
         dx = max(x0 - x, 0.0, x - (x0 + side))
         dz = max(z0 - z, 0.0, z - (z0 + side))
         return max(math.sqrt(dx * dx + dz * dz + height * height), 1e-3)
+
+    def _distances(self, nodes, x, z, height) -> np.ndarray:
+        """_distance for many nodes at once, as one array."""
+        if not len(nodes):
+            return np.zeros(0)
+        L, a, b = np.asarray(nodes, np.int64).T
+        side = (1 << L) * self.cell
+        x0 = (self.origin[0] + a * (1 << L)) * self.cell
+        z0 = (self.origin[1] + b * (1 << L)) * self.cell
+        dx = np.maximum(np.maximum(x0 - x, 0.0), x - (x0 + side))
+        dz = np.maximum(np.maximum(z0 - z, 0.0), z - (z0 + side))
+        return np.maximum(np.sqrt(dx * dx + dz * dz + height * height), 1e-3)
 
     def _children(self, node):
         """The node's existing children, asked of `exists` once and kept: the tree does not change."""
@@ -396,7 +412,8 @@ class QuadStreamer(_Uploads):
                 if self._pass_quiet and self._pass_started:  # the last pass changed nothing: settled
                     self._pass_started = False
                     break
-                self._queue = sorted(self._cut, key=lambda n: -self._distance(n, x, z, height))
+                cut = list(self._cut)
+                self._queue = [cut[k] for k in np.argsort(-self._distances(cut, x, z, height), kind="stable")]
                 self._pass_quiet, self._pass_started = True, True
                 if not self._queue:
                     break
@@ -407,8 +424,9 @@ class QuadStreamer(_Uploads):
         if self._cut_changed or self._order is None:
             self._order = list(self._cut)
             self._cut_changed = False
-        d = {n: self._distance(n, x, z, height) for n in self._order}
-        return sorted((n for n in self._order if d[n] <= cam.far), key=d.__getitem__)
+        d = self._distances(self._order, x, z, height)
+        near = np.flatnonzero(d <= cam.far)
+        return [self._order[k] for k in near[np.argsort(d[near], kind="stable")]]
 
     def _check(self, node, x, z, height, focal, far):
         """Split `node` or merge it with its siblings, if its error says so; queue what changed."""
@@ -440,8 +458,18 @@ class QuadStreamer(_Uploads):
             yield (L + up, a >> up, b >> up)
 
     def focus(self, x: float, z: float, height: float = 0.0) -> None:
-        """Move the camera to world position (x, height, z) and stream for it. Call it once a frame."""
-        self._tick()
+        """Move the camera to world position (x, height, z) and stream for it. Call it once a frame.
+
+        A camera that has not moved, with every selected node drawn and nothing building, costs
+        nothing: the last frame's answer stands."""
+        got = self._tick()
+        cam = self.engine.camera
+        still = (float(x), float(z), float(height), cam.fov, cam.far, self.engine.h)
+        last = self._still
+        if (self._quiet and not got and last is not None and last[3:] == still[3:]
+                and max(abs(last[0] - still[0]), abs(last[1] - still[1]), abs(last[2] - still[2])) < self.cell * 1e-3):
+            return
+        self._still = still
         selected = self._select(float(x), float(z), float(height))
         self._selected = set(selected)
         for n in selected:
@@ -490,6 +518,9 @@ class QuadStreamer(_Uploads):
             self._stats["dropped"] += 1
         for n in [n for n in self._pending if n not in keep]:
             self._pending.pop(n).cancel()
+        # Quiet: the refinement settled, nothing builds, and every selected node is drawn.
+        self._quiet = not (self._queue or self._pass_started or self._pending or fell_back
+                           or any(n not in self._drawn for n in selected))
 
     def drawn(self) -> set[tuple[int, int, int]]:
         """The nodes drawn now, empty ones (build returned None) included."""
