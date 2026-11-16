@@ -42,6 +42,9 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
         .astype(np.float32),
     )
     joint_blocks_uploaded = False
+    draw_list = rp.__dict__.setdefault("_draw_list", {})  # batch key -> (buffers, material, state, pipeline, layout)
+    seen = set()
+    bound = [None] * 6  # pipeline, groups 0-2, vertex buffer, index buffer: what the pass holds now
     mat_states = {}  # mat_id -> (needs_lights, buffer, buffer size), built once this frame
 
     # ---------------------------------------------------------------
@@ -68,14 +71,22 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
         if mat_obj is None:
             continue
 
-        pipeline, bind_group_layout = rp._get_or_create_pipeline(
-            rp._device,
-            engine._texture_format,
-            geom_id,
-            mat_obj,
-            engine._material_registry,
-            geometry_buffers=gpu_buffers,
-        )
+        # The batch's pipeline is kept between frames while its geometry buffers, material object and
+        # pipeline state stay the same, so a still scene resolves none.
+        state = getattr(mat_obj, "pipeline_state", None)
+        entry = draw_list.get((geom_id, mat_type, mat_subtype, mat_id))
+        if entry is None or entry[0] is not gpu_buffers or entry[1] is not mat_obj or entry[2] != state:
+            entry = (gpu_buffers, mat_obj, state, *rp._get_or_create_pipeline(
+                rp._device,
+                engine._texture_format,
+                geom_id,
+                mat_obj,
+                engine._material_registry,
+                geometry_buffers=gpu_buffers,
+            ))
+            draw_list[(geom_id, mat_type, mat_subtype, mat_id)] = entry
+        seen.add((geom_id, mat_type, mat_subtype, mat_id))
+        pipeline, bind_group_layout = entry[3], entry[4]
 
         # Per-mat_id uniform buffer: one per material instance, allocated
         # lazily on first sight. Sizing follows the existing convention
@@ -208,8 +219,12 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
             )
             rp._mesh_bind_groups[(mat_id, has_joints)] = (resources, bind_group)
 
-        render_pass.set_pipeline(pipeline)
-        render_pass.set_bind_group(0, bind_group)
+        if pipeline is not bound[0]:
+            render_pass.set_pipeline(pipeline)
+            bound[:4] = [pipeline, None, None, None]  # another layout may not keep the groups
+        if bind_group is not bound[1]:
+            render_pass.set_bind_group(0, bind_group)
+            bound[1] = bind_group
 
         if needs_lights:
             ibl_env = engine._ready_environment()
@@ -220,7 +235,9 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
                 if ibl_env is not None and rp._ibl_active_bind_group is not None
                 else rp._ibl_placeholder_bind_group
             )
-            render_pass.set_bind_group(1, ibl_bg)
+            if ibl_bg is not bound[2]:
+                render_pass.set_bind_group(1, ibl_bg)
+                bound[2] = ibl_bg
 
             # group(2): shadow map (active when a sun + enable_shadows() are set,
             # else a 1x1 placeholder so the pipeline layout is always satisfied).
@@ -241,10 +258,16 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
                         {"binding": 1, "resource": rp._shadow_sampler},
                     ],
                 ))
-            render_pass.set_bind_group(2, rp._shadow_bind_group[1])
+            if rp._shadow_bind_group[1] is not bound[3]:
+                render_pass.set_bind_group(2, rp._shadow_bind_group[1])
+                bound[3] = rp._shadow_bind_group[1]
 
-        render_pass.set_vertex_buffer(0, gpu_buffers["vertex_buffer"])
-        render_pass.set_index_buffer(gpu_buffers["index_buffer"], wgpu.IndexFormat.uint32)
+        if gpu_buffers["vertex_buffer"] is not bound[4]:
+            render_pass.set_vertex_buffer(0, gpu_buffers["vertex_buffer"])
+            bound[4] = gpu_buffers["vertex_buffer"]
+        if gpu_buffers["index_buffer"] is not bound[5]:
+            render_pass.set_index_buffer(gpu_buffers["index_buffer"], wgpu.IndexFormat.uint32)
+            bound[5] = gpu_buffers["index_buffer"]
 
         # first_instance offsets into the shared transform buffer
         render_pass.draw_indexed(
@@ -254,3 +277,5 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
             base_vertex=0,
             first_instance=first_instance,
         )
+    for key in [k for k in draw_list if k not in seen][: max(0, len(draw_list) - 2 * len(seen))]:
+        del draw_list[key]  # batches gone for a while: keep at most twice the live count
