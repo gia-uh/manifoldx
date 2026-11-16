@@ -58,3 +58,26 @@ def pytest_configure(config):
     # The first request above replaced wgpu.gpu with the backend's object.
     wgpu.gpu.request_adapter_sync = _no_gpu
     wgpu.gpu.request_adapter_async = _no_gpu_async
+
+
+
+_tests_since_collect = 0
+
+
+@pytest.fixture(autouse=True)
+def collect_gpu_devices():
+    """Run the collector every 25 tests, so engines' GPU devices are freed.
+
+    A wgpu device and its queue point at each other, so only the collector
+    frees a device. On free-threaded Python it runs too rarely for a suite
+    that builds an engine per test, and after about 60 devices the next
+    request fails. Engine.close() does the same for one engine, at 45 ms each.
+    """
+    global _tests_since_collect
+    yield
+    _tests_since_collect += 1
+    if _tests_since_collect >= 25:
+        _tests_since_collect = 0
+        import gc
+
+        gc.collect()

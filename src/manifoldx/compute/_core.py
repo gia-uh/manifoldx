@@ -16,6 +16,7 @@ Spec: `.knowledge/analysis/2026-05-06-compute-systems-design.md`.
 """
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any, Callable, Dict, Generic, Optional, TypeVar
 
 import numpy as np
@@ -170,7 +171,9 @@ class Compute:
         uniforms: Dict[str, Any] = {}
         uniform_defaults: Dict[str, Any] = {}
 
-        annotations = cls.__dict__.get("__annotations__", {})
+        # inspect.get_annotations, not __dict__["__annotations__"]: Python 3.14
+        # evaluates class annotations lazily and leaves that key unset.
+        annotations = inspect.get_annotations(cls)
         for name, ann in annotations.items():
             if name.startswith("_"):
                 continue

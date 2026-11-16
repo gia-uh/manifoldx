@@ -54,7 +54,9 @@ def _collect_method_asts(cls: type) -> Dict[str, ast.FunctionDef]:
     """
     methods: Dict[str, ast.FunctionDef] = {}
     for name, member in cls.__dict__.items():
-        if not inspect.isfunction(member):
+        # Dunders are not kernel methods; Python 3.14 also adds a generated
+        # __annotate_func__ to every class with annotations.
+        if not inspect.isfunction(member) or (name.startswith("__") and name.endswith("__")):
             continue
         try:
             src = textwrap.dedent(inspect.getsource(member))

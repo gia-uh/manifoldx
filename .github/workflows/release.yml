@@ -21,7 +21,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
-          python-version: '3.13'
+          python-version: '3.14t'
 
       - name: Install dependencies from the lockfile
         run: uv sync --locked --extra offline --extra viz --extra svg --dev
@@ -51,7 +51,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
-          python-version: '3.13'
+          python-version: '3.14t'
 
       - name: Build the sdist and the wheel
         run: uv build

@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Alejandro Piad", email = "apiad@apiad.net" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "numpy>=2.4.4",
     "rendercanvas>=2.6.3",
@@ -18,7 +18,8 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Education",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 3 - Stable",
     "Topic :: Multimedia :: Graphics",
     "Topic :: Software Development :: Libraries",
 ]
@@ -40,7 +41,7 @@ packages = ["src/manifoldx"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

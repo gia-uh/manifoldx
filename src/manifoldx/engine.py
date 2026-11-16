@@ -1,5 +1,6 @@
 import asyncio
 import argparse
+import gc
 import wgpu
 import sys
 import numpy as np
@@ -351,6 +352,8 @@ class Engine:
         self._wgpu_context = None
         self._adapter = None
         self._device = None
+        self._owns_device = False  # True when this engine requested _device itself
+        self._closed = False
         self._event_loop = None
         self._present_mode = "fifo"
         self._texture_format = wgpu.TextureFormat.bgra8unorm
@@ -1206,10 +1209,12 @@ class Engine:
 
         if gpu is not None:
             self._adapter, self._device, self._texture_format = gpu
+            self._owns_device = False
         else:
             # Request adapter and device (use sync API to avoid deprecation warnings)
             self._adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
             self._device = self._adapter.request_device_sync()
+            self._owns_device = True
 
             # Get preferred texture format from canvas context
             # Configure the swap chain (sRGB target: it encodes gamma, once)
@@ -1690,6 +1695,30 @@ class Engine:
         for executor in (self._executor, self._process_executor):
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
+
+    def close(self) -> None:
+        """Stop the engine and free the GPU device it requested; safe to call twice.
+
+        Fires 'shutdown' and stops async tasks and background workers, as a hot
+        reload does. A device passed in with `gpu=` belongs to its owner and stays
+        up. Call it when a script builds many engines, such as one render_frame
+        engine per image: on free-threaded Python an engine left to the garbage
+        collector keeps its device long enough to exhaust GPU memory.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._detach()
+        if self._owns_device and self._device is not None:
+            self._device.destroy()
+        # The engine's parts point back at it (input and GUI bridges, compute
+        # runner), and in wgpu a device and its queue point at each other, so
+        # only the collector frees a device. Drop every attribute, then collect
+        # once: the device is freed now, not when the collector next runs.
+        # A closed engine is not usable again.
+        self.__dict__.clear()
+        self._closed = True
+        gc.collect()
 
     def run(self):
         """Run the engine with real-time rendering.
