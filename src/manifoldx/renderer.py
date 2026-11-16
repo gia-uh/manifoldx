@@ -280,11 +280,34 @@ class TransformCache:
 
     Stores: _matrix_cache (N, 16) - mat4x4<f32> per entity
             _dirty (N,) bool - needs recompute
+            _seen (N, 10) - the Transform row each matrix was computed from
+
+    refresh() compares the store's Transform rows with `_seen` and recomputes the rows that differ, so a
+    write reaches the next frame whatever made it (a query, a handle, the array itself) and a static
+    entity costs a comparison, not a matrix.
     """
 
     def __init__(self, max_entities: int):
         self._matrix_cache = np.zeros((max_entities, 16), dtype=np.float32)
         self._dirty = np.ones(max_entities, dtype=bool)  # All dirty initially
+        self._seen = np.full((max_entities, 10), np.nan, dtype=np.float32)  # NaN: never computed
+        self.version = 0  # counts the recomputes; _row_version holds the one that last touched each row
+        self._row_version = np.zeros(max_entities, dtype=np.int64)
+
+    def changed_since(self, version: int, indices: np.ndarray) -> bool:
+        """Whether any of these rows was recomputed after `version`."""
+        return len(indices) > 0 and int(self._row_version[indices].max()) > version
+
+    def refresh(self, store):
+        """Recompute the matrices of the alive rows whose Transform changed since they were computed."""
+        hw = store._high_water
+        if hw == 0:
+            return
+        data = store._components["Transform"][:hw]
+        changed = (self._dirty[:hw] | (data != self._seen[:hw]).any(axis=1)) & store._alive[:hw]
+        idx = np.flatnonzero(changed)
+        if len(idx):
+            self._recompute_matrices(store, idx)
 
     def mark_dirty(self, indices: np.ndarray):
         """Mark entities as needing recompute."""
@@ -360,6 +383,9 @@ class TransformCache:
 
         self._matrix_cache[indices] = matrices
         self._dirty[indices] = False
+        self._seen[indices] = transform_data
+        self.version += 1
+        self._row_version[indices] = self.version
 
 
 def _color_hex_to_vec4(color_hex: str) -> np.ndarray:
@@ -1728,24 +1754,18 @@ class RenderPipeline:
             )
 
     def _model_matrices(self, indices):
-        """(N,16) row-major model matrices: computed once in a frame, afresh on every call outside one."""
+        """(N,16) row-major model matrices: as of the frame's start in one, as the store is now outside one."""
         if not self._in_frame:
-            self._transform_cache.mark_dirty(indices)
+            self._transform_cache.refresh(self._store)
         return self._transform_cache.get_transforms(self._store, indices)
 
     def run(self, engine, dt: float):
         """Execute full render pipeline (CPU-side prep). Starts a frame, which end_frame() closes."""
-        self._transform_cache.mark_dirty(slice(None))
         self._frame_bounds = None
         self._in_frame = True
         if "Transform" not in self._store._components:
             return
-
-        alive_indices = np.where(self._store._alive)[0]
-        if len(alive_indices) == 0:
-            return
-
-        self._transform_cache.get_transforms(self._store, alive_indices)
+        self._transform_cache.refresh(self._store)
 
     def end_frame(self):
         """Close the frame run() opened: later reads see the store as it is then."""
