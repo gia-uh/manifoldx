@@ -128,6 +128,7 @@ class Meter:
         self.start = self.last = None
         self.frames, self.total, self.worst = 0, 0.0, 0.0
         self.split = {"update": 0.0, "acquire": 0.0, "render": 0.0}  # summed over the second
+        self.systems = {}  # system name -> seconds summed over the second
         self.gc_runs, self.gc_time, self.gc_at = [0, 0, 0], 0.0, None
         self.logged = 0.0
         gc.callbacks.append(self._gc)
@@ -146,14 +147,17 @@ class Meter:
                 LOG.info("slow gc: generation %d took %.0f ms, %d collected", info["generation"], 1000 * took,
                          info["collected"])
 
-    def frame(self, now, split=None):
-        """After each frame, with the time it ended and engine.frame_split (seconds per part)."""
+    def frame(self, now, split=None, systems=None):
+        """After each frame, with the time it ended, engine.frame_split (seconds per part) and
+        engine.system_split (seconds per system name)."""
         if self.last is not None:
             dt = now - self.last
             self.frames += 1
             self.total += dt
             for part, seconds in (split or {}).items():
                 self.split[part] += seconds
+            for name, seconds in (systems or {}).items():
+                self.systems[name] = self.systems.get(name, 0.0) + seconds
             self.worst = max(self.worst, dt)
             if dt >= SLOW_FRAME:
                 LOG.info("slow frame %.0f ms", 1000 * dt)
@@ -168,15 +172,24 @@ class Meter:
             parts = {part: round(1000 * seconds / n, 1) for part, seconds in self.split.items()}
             parts["idle"] = round(max(0.0, m["frame_ms"] - sum(parts.values())), 1)  # between frames: the loop
             m["split_ms"] = parts
+            slowest = sorted(((seconds / n, name) for name, seconds in self.systems.items()), reverse=True)[:5]
+            if slowest:
+                m["systems_ms"] = {name: round(1000 * seconds, 1) for seconds, name in slowest}
             self.history.append(m)
             if now - self.logged >= METRICS_LOG:
                 self.logged = now
-                LOG.info("fps %.0f, frame %.1f ms (worst %.0f; update %.1f, render %.1f, acquire %.1f, idle %.1f), "
-                         "%.0f MB, gc %s in %.0f ms", m["fps"], m["frame_ms"], m["worst_ms"], parts["update"],
-                         parts["render"], parts["acquire"], parts["idle"], m["rss_mb"],
-                         "/".join(map(str, self.gc_runs)), m["gc"]["ms"])
+                line = ("fps %.0f, frame %.1f ms (worst %.0f; update %.1f, render %.1f, acquire %.1f, idle %.1f), "
+                        "%.0f MB, gc %s in %.0f ms")
+                values = [m["fps"], m["frame_ms"], m["worst_ms"], parts["update"], parts["render"],
+                          parts["acquire"], parts["idle"], m["rss_mb"], "/".join(map(str, self.gc_runs)),
+                          m["gc"]["ms"]]
+                if slowest:
+                    line += ", systems %s"
+                    values.append(" ".join(f"{name} {1000 * seconds:.1f}" for seconds, name in slowest))
+                LOG.info(line, *values)
             self.start, self.frames, self.total, self.worst = now, 0, 0.0, 0.0
             self.split = dict.fromkeys(self.split, 0.0)
+            self.systems = dict.fromkeys(self.systems, 0.0)
             self.gc_runs, self.gc_time = [0, 0, 0], 0.0
 
 
@@ -231,7 +244,8 @@ class Channel:
         """After a frame, under --debug: measure it, and log the keys pressed since the last one."""
         if self.meter is None:
             return
-        self.meter.frame(time.perf_counter(), getattr(engine, "frame_split", None))
+        self.meter.frame(time.perf_counter(), getattr(engine, "frame_split", None),
+                         getattr(engine, "system_split", None))
         keys = engine.input.pressed_keys
         if down := sorted(keys - self.keys):
             LOG.info("keys %s", " ".join(down))
