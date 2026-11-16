@@ -124,12 +124,15 @@ def render_shadow_map(rp, engine, command_encoder):
     # Upload all model matrices (column-major) once; record per-geometry offsets.
     all_mats, all_entities, draw_info, offset = [], [], {}, 0
     for geom_id, (mats, entities) in instances.items():
-        mats_t = mats.reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16)
         draw_info[geom_id] = (offset, len(mats))
-        all_mats.append(mats_t)
+        all_mats.append(mats)
         all_entities.append(entities)
         offset += len(mats)
-    rp._shadow_batch_buffers.upload_transforms(np.concatenate(all_mats).astype(np.float32))
+    rp._shadow_batch_buffers.upload_transforms_for(
+        np.concatenate(all_entities),
+        rp._transform_cache,
+        lambda: np.concatenate(all_mats).reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16).astype(np.float32),
+    )
     skinned_bind_group = None
 
     bind_group = rp._device.create_bind_group(

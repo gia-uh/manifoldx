@@ -42,7 +42,8 @@ def _model(pos, rot=(0, 0, 0, 1), scale=(1, 1, 1)):
 
 
 class _Frames:
-    """Draws frames and records the model matrices the mesh pass uploads, row-major (N, 4, 4)."""
+    """Draws frames and returns the model matrices the mesh pass's buffer holds, row-major (N, 4, 4): its
+    latest upload, since a frame whose instances did not change uploads nothing."""
 
     def __init__(self, engine):
         self.engine = engine
@@ -56,12 +57,13 @@ class _Frames:
             return real(mats)
 
         buffers.upload_transforms = upload
+        buffers._transforms_key = None  # forget what the buffer holds, so the first draw records it
 
     def draw(self):
-        self.uploads.clear()
+        before = len(self.uploads)
         self.engine._draw_frame()
-        assert len(self.uploads) == 1
-        return self.uploads[0]
+        assert len(self.uploads) - before <= 1 and self.uploads
+        return self.uploads[-1]
 
 
 def _spawn(engine, pos, rot=(0, 0, 0, 1), scale=(1, 1, 1)):
