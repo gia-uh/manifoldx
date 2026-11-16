@@ -199,7 +199,7 @@ def test_three_hundred_engines_in_a_row(): ...       # gc.disable(); 300 x (Engi
 </div>
 </details>
 
-<details class="task" id="task-5" data-state="pending">
+<details class="task" id="task-5" data-state="done">
 <summary><span class="num">5</span><span><span class="ttl">PR B: benchmark case and pinning tests first</span><span class="files">benchmarks/suites/frame.py · benchmarks/scenes.py · tests/test_parallel_systems.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <ol class="steps">
@@ -221,7 +221,7 @@ def test_system_split_has_every_system(): ...      # after a frame, engine.syste
 </div>
 </details>
 
-<details class="task" id="task-6" data-state="pending">
+<details class="task" id="task-6" data-state="done">
 <summary><span class="num">6</span><span><span class="ttl">One command buffer per running system</span><span class="files">src/manifoldx/engine.py · src/manifoldx/commands.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -238,7 +238,7 @@ def test_system_split_has_every_system(): ...      # after a frame, engine.syste
 </div>
 </details>
 
-<details class="task" id="task-7" data-state="pending">
+<details class="task" id="task-7" data-state="done">
 <summary><span class="num">7</span><span><span class="ttl">Parallel groups</span><span class="files">src/manifoldx/engine.py (system) · src/manifoldx/systems.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -258,7 +258,7 @@ def test_system_split_has_every_system(): ...      # after a frame, engine.syste
 </div>
 </details>
 
-<details class="task" id="task-8" data-state="pending">
+<details class="task" id="task-8" data-state="done">
 <summary><span class="num">8</span><span><span class="ttl">Serial fallback and the GIL warning</span><span class="files">src/manifoldx/systems.py · tests/test_parallel_systems.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <ol class="steps">
@@ -270,7 +270,7 @@ def test_system_split_has_every_system(): ...      # after a frame, engine.syste
 </div>
 </details>
 
-<details class="task" id="task-9" data-state="pending">
+<details class="task" id="task-9" data-state="done">
 <summary><span class="num">9</span><span><span class="ttl">Time per system</span><span class="files">src/manifoldx/systems.py · src/manifoldx/engine.py · src/manifoldx/devchannel.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <ol class="steps">
@@ -282,7 +282,7 @@ def test_system_split_has_every_system(): ...      # after a frame, engine.syste
 </div>
 </details>
 
-<details class="task" id="task-10" data-state="pending">
+<details class="task" id="task-10" data-state="done">
 <summary><span class="num">10</span><span><span class="ttl">Book chapter, changelog, PR B</span><span class="files">docs/chapters/16-using-every-core.md · docs/chapters/00-index.md · CHANGELOG.md</span></span><span class="state">pending</span></summary>
 <div class="body">
 <ol class="steps">
@@ -315,6 +315,7 @@ def test_system_split_has_every_system(): ...      # after a frame, engine.syste
 <li>The spec did not name <code>Engine.close()</code>; it said the engine releases the device on close. The method is new public API.</li>
 <li>Devices cannot be released without the collector: in wgpu-py a <code>GPUDevice</code> and its <code>GPUQueue</code> point at each other, so even a destroyed device stays until <code>gc.collect()</code>; on the desktop the 64th request then fails whether engines are closed or not. <code>Engine.close()</code> destroys the device, clears the engine's attributes (its bridges and compute runner point back at it) and runs one collection, 45 ms. The test suite collects every 25 tests instead of closing each engine (<code>tests/conftest.py</code>).</li>
 <li>The transpiler also failed on 3.14 because every class with annotations gains a generated <code>__annotate_func__</code>; <code>_collect_method_asts</code> (<code>compute/transpile.py:56</code>) now skips dunder members.</li>
+<li>The benchmark's systems do about 2.5 ms of numpy work each, not 1 ms (<code>benchmarks/scenes.py:147</code>): at 1 ms the 6-core/12-thread desktop reaches 2.1× at 4 systems and 2.3× at 8, short of this plan's 2.5×/3× targets; 96 passes reach 2.8× and 3.6×.</li>
 <li><code>engine.spawn</code> raises inside a parallel system, because it writes the store at once (<code>engine.py:1063</code>). <code>engine.destroy</code> works there, since it only appends a command.</li>
 </ul>
 </main>
