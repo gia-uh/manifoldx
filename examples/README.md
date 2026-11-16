@@ -20,6 +20,7 @@ uv run python examples/<name>.py --render --duration 3 --output /tmp/<name>.mp4
 Two examples are written for `manifoldx export --web` (`know-how/web-export.md`), and their
 replays in `tests/web/` check that the page runs them as Python does:
 
+- `quad_streaming.py`: a plain of boxes 100 km wide streamed as a quadtree by screen error, from 20 m up to 6 km.
 - `web_walk.py`: walk a yard in first person and pick boxes; plain Python per frame.
 - `web_crowd.py`: rings of boxes spawned, drifted, destroyed and picked by query systems;
   the entity store in the page end to end. Its controls panel has a Button that throws a wave,

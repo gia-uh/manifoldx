@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `streaming.QuadStreamer`: streams a quadtree of cells by screen error, near nodes fine and far nodes coarse, with merge hysteresis; a node not built yet leaves what covers its spot drawn, and nodes beyond the camera's far plane are skipped. Example `examples/quad_streaming.py`, benchmark `frame quadstream`.
 - `place_car(..., pitch=, roll=)`: tilt a placed car about its own axes after the yaw, so it can sit on a slope.
 - `manifoldx asset FILE COMMAND`: run one asset file's stages from the shell (`draw`, `build`, `lint`, `inspect`,
   `paint`, `render`), with `--json`, `--budget`, `--model`, `--again`, `--max-tris`, `--lod low` and `--out`; exit

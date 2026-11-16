@@ -63,9 +63,9 @@ class _Cell:
         self.geo, self.info, self.vbytes, self.ibytes = geo, info, vbytes, ibytes
 
 
-def _pack(build, i, j):
-    """The worker's job: build cell (i, j) and pack it for its GPU buffers."""
-    data = build(i, j)
+def _pack(build, *key):
+    """The worker's job: build cell (i, j), or node (L, a, b), and pack it for its GPU buffers."""
+    data = build(*key)
     if data is None:
         return None
     geo = {
@@ -82,24 +82,14 @@ def _pack(build, i, j):
     return _Cell(geo, info, vbytes, geo["indices"].tobytes())
 
 
-class Streamer:
-    """Builds, uploads and frees cell meshes around a focus point."""
+class _Uploads:
+    """What both streamers share: the worker, the GPU uploads in slices, drawing and freeing by key.
 
-    def __init__(
-        self,
-        engine,
-        cell: float,
-        build: Callable[[int, int], MeshData | None],
-        radius: int = 1,
-        ready_radius: int = 2,
-        uploads_per_frame: int = 2,
-        upload_bytes_per_frame: int = 2 << 20,
-        workers: str = "thread",
-        material=None,
-        turn: tuple[int, int] = (0, 1),
-    ):
-        if ready_radius < radius:
-            raise ValueError(f"ready_radius ({ready_radius}) must be at least radius ({radius})")
+    A key is a cell (i, j) for Streamer and a node (L, a, b) for QuadStreamer; `_draw(key, pos)` spawns
+    the key's mesh at world position pos.
+    """
+
+    def _start(self, engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material):
         if workers == "thread":
             self._pool = ThreadPoolExecutor(max_workers=1)
         elif workers == "process":
@@ -112,77 +102,28 @@ class Streamer:
             from manifoldx.resources import StandardMaterial
 
             material = StandardMaterial("#ffffff", roughness=0.9, vertex_colors=True)
-        self.engine, self.cell, self.build = engine, float(cell), build
-        self.radius, self.ready_radius, self.uploads_per_frame = (
-            radius,
-            ready_radius,
-            uploads_per_frame,
-        )
+        self.engine, self.build = engine, build
+        self.uploads_per_frame = uploads_per_frame
         self.material = material
-        self.turn = turn
-        self._calls = 0
         self.upload_bytes_per_frame = max(4, int(upload_bytes_per_frame) // 4 * 4)
-        self._pending = {}  # cell -> Future
-        self._ready = {}  # cell -> _Cell | None, built and kept
-        self._gpu = {}  # cell -> its upload: geometry id, buffers, bytes written, done
-        self._drawn = {}  # cell -> EntityHandle | None (None: an empty cell)
+        self._pending = {}  # key -> Future
+        self._ready = {}  # key -> _Cell | None, built and kept
+        self._gpu = {}  # key -> its upload: geometry id, buffers, bytes written, done
+        self._drawn = {}  # key -> EntityHandle | None (None: an empty cell)
         self._stats = {"built": 0, "uploaded": 0, "dropped": 0, "max_frame_ms": 0.0}
         self._last = None
 
-    def focus(self, x: float, z: float) -> None:
-        """Move the focus to world position (x, z). Call it once a frame."""
+    def _tick(self) -> None:
+        """Note the time since the last focus() and collect the finished builds."""
         now = perf_counter()
         if self._last is not None:
-            self._stats["max_frame_ms"] = max(
-                self._stats["max_frame_ms"], (now - self._last) * 1000.0
-            )
+            self._stats["max_frame_ms"] = max(self._stats["max_frame_ms"], (now - self._last) * 1000.0)
         self._last = now
-        fi, fj = math.floor(x / self.cell), math.floor(z / self.cell)
-
-        def ring(cell):
-            return max(abs(cell[0] - fi), abs(cell[1] - fj))
-
         for c, fut in list(self._pending.items()):
             if fut.done():
                 del self._pending[c]
                 self._ready[c] = fut.result()
                 self._stats["built"] += 1
-        for c in [c for c in self._drawn if ring(c) > self.radius]:
-            self._undraw(c)
-        for c in [c for c in self._ready if ring(c) > self.ready_radius]:
-            del self._ready[c]
-            self._unload(c)
-            self._stats["dropped"] += 1
-        for c in [c for c in self._pending if ring(c) > self.ready_radius]:
-            self._pending.pop(c).cancel()
-
-        r = self.ready_radius
-        wanted = sorted(
-            ((fi + di, fj + dj) for di in range(-r, r + 1) for dj in range(-r, r + 1)),
-            key=lambda c: (c[0] - fi) ** 2 + (c[1] - fj) ** 2,
-        )
-        for c in wanted:
-            if c not in self._ready and c not in self._pending:
-                self._pending[c] = self._pool.submit(_pack, self.build, *c)
-        room = self.upload_bytes_per_frame
-        for c in wanted:
-            if room <= 0:
-                break
-            if self._ready.get(c) is not None and not self._on_gpu(c):
-                room -= self._upload(c, room)
-        budget = self.uploads_per_frame if self._calls % self.turn[1] == self.turn[0] else 0
-        self._calls += 1
-        for c in wanted:
-            if budget == 0:
-                break
-            if (
-                ring(c) <= self.radius
-                and c not in self._drawn
-                and c in self._ready
-                and self._on_gpu(c)
-            ):
-                self._draw(c)
-                budget -= 1
 
     def _on_gpu(self, c) -> bool:
         """Whether cell c can be drawn without building a buffer on the frame."""
@@ -247,7 +188,7 @@ class Streamer:
             buf.destroy()
         self.engine._geometry_registry.release(up["id"])
 
-    def _draw(self, c):
+    def _draw(self, c, pos):
         cell = self._ready[c]
         if cell is None:
             self._drawn[c] = None
@@ -257,7 +198,7 @@ class Streamer:
         self._drawn[c] = self.engine.spawn(
             Mesh(cell.geo),
             Material(self.material),
-            Transform(pos=(c[0] * self.cell, 0.0, c[1] * self.cell)),
+            Transform(pos=pos),
         )
         # Drawn before any device: its buffers come from the render pass, and are still ours to free.
         self._gpu.setdefault(c, {"id": self._drawn[c]._geometry_id, "done": True})
@@ -267,15 +208,6 @@ class Streamer:
         handle = self._drawn.pop(c)
         if handle is not None:
             handle.destroy(free_geometry=False)
-
-    def drawn(self) -> set[tuple[int, int]]:
-        """The cells drawn now, empty cells (build returned None) included."""
-        return set(self._drawn)
-
-    def stats(self) -> dict:
-        """built, uploaded and dropped cell counts, and the longest gap between
-        two focus() calls in ms (one frame, when focus runs once a frame)."""
-        return dict(self._stats)
 
     def close(self) -> None:
         """Stop the worker and destroy every drawn cell."""
@@ -288,4 +220,229 @@ class Streamer:
         self._ready.clear()
 
 
-__all__ = ["MeshData", "Streamer"]
+
+class Streamer(_Uploads):
+    """Builds, uploads and frees cell meshes around a focus point."""
+
+    def __init__(
+        self,
+        engine,
+        cell: float,
+        build: Callable[[int, int], MeshData | None],
+        radius: int = 1,
+        ready_radius: int = 2,
+        uploads_per_frame: int = 2,
+        upload_bytes_per_frame: int = 2 << 20,
+        workers: str = "thread",
+        material=None,
+        turn: tuple[int, int] = (0, 1),
+    ):
+        if ready_radius < radius:
+            raise ValueError(f"ready_radius ({ready_radius}) must be at least radius ({radius})")
+        self._start(engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material)
+        self.cell = float(cell)
+        self.radius, self.ready_radius = radius, ready_radius
+        self.turn = turn
+        self._calls = 0
+
+    def focus(self, x: float, z: float) -> None:
+        """Move the focus to world position (x, z). Call it once a frame."""
+        self._tick()
+        fi, fj = math.floor(x / self.cell), math.floor(z / self.cell)
+
+        def ring(cell):
+            return max(abs(cell[0] - fi), abs(cell[1] - fj))
+
+        for c in [c for c in self._drawn if ring(c) > self.radius]:
+            self._undraw(c)
+        for c in [c for c in self._ready if ring(c) > self.ready_radius]:
+            del self._ready[c]
+            self._unload(c)
+            self._stats["dropped"] += 1
+        for c in [c for c in self._pending if ring(c) > self.ready_radius]:
+            self._pending.pop(c).cancel()
+
+        r = self.ready_radius
+        wanted = sorted(
+            ((fi + di, fj + dj) for di in range(-r, r + 1) for dj in range(-r, r + 1)),
+            key=lambda c: (c[0] - fi) ** 2 + (c[1] - fj) ** 2,
+        )
+        for c in wanted:
+            if c not in self._ready and c not in self._pending:
+                self._pending[c] = self._pool.submit(_pack, self.build, *c)
+        room = self.upload_bytes_per_frame
+        for c in wanted:
+            if room <= 0:
+                break
+            if self._ready.get(c) is not None and not self._on_gpu(c):
+                room -= self._upload(c, room)
+        budget = self.uploads_per_frame if self._calls % self.turn[1] == self.turn[0] else 0
+        self._calls += 1
+        for c in wanted:
+            if budget == 0:
+                break
+            if (
+                ring(c) <= self.radius
+                and c not in self._drawn
+                and c in self._ready
+                and self._on_gpu(c)
+            ):
+                self._draw(c, (c[0] * self.cell, 0.0, c[1] * self.cell))
+                budget -= 1
+
+    def drawn(self) -> set[tuple[int, int]]:
+        """The cells drawn now, empty cells (build returned None) included."""
+        return set(self._drawn)
+
+    def stats(self) -> dict:
+        """built, uploaded and dropped cell counts, and the longest gap between
+        two focus() calls in ms (one frame, when focus runs once a frame)."""
+        return dict(self._stats)
+
+
+class QuadStreamer(_Uploads):
+    """Streams a quadtree of cells: near nodes fine, far nodes coarse, chosen by their error on screen.
+
+    Node (L, a, b) covers cells origin[0] + a*2^L to origin[0] + (a+1)*2^L - 1 in i, and the same in j;
+    the root is (levels, 0, 0) and level 0 is one cell. `exists(L, a, b)` says whether a node holds
+    anything; a node's children are the existing (L-1, 2a+da, 2b+db). `build(L, a, b)` returns its
+    MeshData relative to the node's corner, in a worker, and `error(L)` its geometric error in metres.
+
+    Each focus() picks the nodes to draw by a walk from the root: a node is refined into its children
+    while its error seen from the camera, error * focal / distance, is above `tau` pixels; one that was
+    refined merges back only once that falls under tau / merge, so a camera that hovers does not make
+    nodes blink. Nodes wholly beyond the camera's far plane are left out. The nodes picked are built
+    nearest first and uploaded within `upload_bytes_per_frame`. One not built yet leaves its nearest drawn
+    ancestor drawn, and a drawn node hides everything under it, so each spot is drawn once.
+
+        streamer = QuadStreamer(engine, cell=200.0, origin=(-2048, -1024), levels=13,
+                                exists=tree.exists, build=build_node, error=lambda L: 200.0 * 2**L / 16)
+        streamer.focus(cam_x, cam_z, height=cam_y)   # world float64, once a frame
+    """
+
+    def __init__(
+        self,
+        engine,
+        cell: float,
+        origin: tuple[int, int],
+        levels: int,
+        exists: Callable[[int, int, int], bool],
+        build: Callable[[int, int, int], MeshData | None],
+        error: Callable[[int], float],
+        tau: float = 6.0,
+        merge: float = 1.5,
+        upload_bytes_per_frame: int = 2 << 20,
+        workers: str = "thread",
+        material=None,
+    ):
+        self._start(engine, build, None, upload_bytes_per_frame, workers, material)
+        self.cell, self.origin, self.levels = float(cell), (int(origin[0]), int(origin[1])), int(levels)
+        self.exists, self.error, self.tau, self.merge = exists, error, float(tau), float(merge)
+        self._selected: set = set()
+
+    def _box(self, node):
+        L, a, b = node
+        side = (1 << L) * self.cell
+        x0 = (self.origin[0] + a * (1 << L)) * self.cell
+        z0 = (self.origin[1] + b * (1 << L)) * self.cell
+        return x0, z0, side
+
+    def _distance(self, node, x, z, height):
+        x0, z0, side = self._box(node)
+        dx = max(x0 - x, 0.0, x - (x0 + side))
+        dz = max(z0 - z, 0.0, z - (z0 + side))
+        return max(math.sqrt(dx * dx + dz * dz + height * height), 1e-3)
+
+    def _children(self, node):
+        L, a, b = node
+        if L == 0:
+            return []
+        kids = [(L - 1, 2 * a + da, 2 * b + db) for da in (0, 1) for db in (0, 1)]
+        return [k for k in kids if self.exists(*k)]
+
+    def _select(self, x, z, height) -> list:
+        """The nodes to draw this frame, by screen error with hysteresis, nearest first."""
+        cam = self.engine.camera
+        focal = self.engine.h / (2.0 * math.tan(math.radians(cam.fov) / 2.0))
+        out = []
+        root = (self.levels, 0, 0)
+        stack = [root] if self.exists(*root) else []
+        while stack:
+            node = stack.pop()
+            d = self._distance(node, x, z, height)
+            if d > cam.far:
+                continue
+            kids = self._children(node)
+            err = self.error(node[0]) * focal / d
+            limit = self.tau if node in self._selected else self.tau / self.merge
+            if not kids or err <= limit:
+                out.append(node)
+            else:
+                stack.extend(kids)
+        out.sort(key=lambda n: self._distance(n, x, z, height))
+        return out
+
+    def _ancestors(self, node):
+        L, a, b = node
+        for up in range(1, self.levels - L + 1):
+            yield (L + up, a >> up, b >> up)
+
+    def focus(self, x: float, z: float, height: float = 0.0) -> None:
+        """Move the camera to world position (x, height, z) and stream for it. Call it once a frame."""
+        self._tick()
+        selected = self._select(float(x), float(z), float(height))
+        self._selected = set(selected)
+        for n in selected:
+            if n not in self._ready and n not in self._pending:
+                self._pending[n] = self._pool.submit(_pack, self.build, *n)
+        room = self.upload_bytes_per_frame
+        for n in selected:
+            if room <= 0:
+                break
+            if self._ready.get(n) is not None and not self._on_gpu(n):
+                room -= self._upload(n, room)
+
+        # What to draw: each selected node once it is built and on the GPU, else what covers its spot now;
+        # then nothing under a node that is drawn, so four children replace their parent in one frame.
+        under: dict = {}  # node -> the drawn nodes below it
+        for d in self._drawn:
+            for u in self._ancestors(d):
+                under.setdefault(u, []).append(d)
+        show = set()
+        for n in selected:
+            if n in self._drawn or (n in self._ready and self._on_gpu(n)):
+                show.add(n)
+            else:  # not ready: what covers its spot now stays, a coarser node above or finer ones below
+                up = next((u for u in self._ancestors(n) if u in self._drawn), None)
+                if up is not None:
+                    show.add(up)
+                else:
+                    show.update(under.get(n, ()))
+        show = {n for n in show if not any(u in show for u in self._ancestors(n))}
+        for n in [n for n in self._drawn if n not in show]:
+            self._undraw(n)
+        for n in sorted(show - set(self._drawn), key=lambda n: self._distance(n, x, z, height)):
+            x0, z0, _ = self._box(n)
+            self._draw(n, (x0, 0.0, z0))
+
+        keep = self._selected | show
+        for n in [n for n in self._ready if n not in keep]:
+            del self._ready[n]
+            self._unload(n)
+            self._stats["dropped"] += 1
+        for n in [n for n in self._pending if n not in keep]:
+            self._pending.pop(n).cancel()
+
+    def drawn(self) -> set[tuple[int, int, int]]:
+        """The nodes drawn now, empty ones (build returned None) included."""
+        return set(self._drawn)
+
+    def stats(self) -> dict:
+        """held (built or building), drawn nodes by level, built, dropped, and the longest frame in ms."""
+        by_level: dict[int, int] = {}
+        for L, _a, _b in self._drawn:
+            by_level[L] = by_level.get(L, 0) + 1
+        return {**self._stats, "held": len(self._ready) + len(self._pending), "by_level": by_level}
+
+
+__all__ = ["MeshData", "QuadStreamer", "Streamer"]
