@@ -82,6 +82,9 @@ def _pack(build, *key):
     return _Cell(geo, info, vbytes, geo["indices"].tobytes())
 
 
+_VECTOR_FROM = 256  # QuadStreamer computes distances with numpy from this many nodes up
+
+
 class _Uploads:
     """What both streamers share: the worker, the GPU uploads in slices, drawing and freeing by key.
 
@@ -377,8 +380,8 @@ class QuadStreamer(_Uploads):
 
     def _distances(self, nodes, x, z, height, boxes=None) -> np.ndarray:
         """_distance for many nodes at once, as one array; `boxes` is their _boxes, when kept."""
-        if not len(nodes):
-            return np.zeros(0)
+        if len(nodes) < _VECTOR_FROM and boxes is None:  # building the arrays costs more than it saves
+            return np.array([self._distance(n, x, z, height) for n in nodes], dtype=float)
         x0, z0, side = boxes if boxes is not None else self._boxes(nodes)
         dx = np.maximum(np.maximum(x0 - x, 0.0), x - (x0 + side))
         dz = np.maximum(np.maximum(z0 - z, 0.0), z - (z0 + side))
@@ -426,7 +429,7 @@ class QuadStreamer(_Uploads):
             checked += 1
         if self._cut_changed or self._order is None:
             self._order = list(self._cut)
-            self._order_boxes = self._boxes(self._order)
+            self._order_boxes = self._boxes(self._order) if len(self._order) >= _VECTOR_FROM else None
             self._cut_changed = False
         d = self._distances(self._order, x, z, height, self._order_boxes)
         near = np.flatnonzero(d <= cam.far)
