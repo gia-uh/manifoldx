@@ -99,3 +99,61 @@ def quadstream(levels):
     out = {"ms": ms, "nodes": len(s.drawn())}
     s.close()
     return out
+
+
+def _settled_streamer(levels):
+    """A QuadStreamer over a full tree, settled with the camera 20 m up over the middle; returns it and mid."""
+    import time
+
+    import numpy as np
+
+    import manifoldx as mx
+    from manifoldx.streaming import MeshData, QuadStreamer
+
+    def build(L, a, b):
+        p = np.array([[0, 0, 0], [8, 0, 0], [0, 0, 8]], np.float32)
+        return MeshData(p, np.tile([0, 1, 0], (3, 1)).astype(np.float32), np.full((3, 3), 0.5, np.float32),
+                        np.array([0, 2, 1], np.uint32))
+
+    engine = mx.Engine("quadstream", width=64, height=64)
+    engine.camera.far = 15000.0
+    s = QuadStreamer(engine, 100.0, (0, 0), levels, lambda L, a, b: True, build, error=lambda L: 100.0 * 2**L / 16)
+    start(engine)
+    mid = 100.0 * 2 ** (levels - 1)
+    engine.set_origin(mid, mid)
+    for _ in range(400):
+        s.focus(mid, mid, 20.0)
+        engine._draw_frame()
+        if not s._pending and len(s.drawn()) == len(s._selected):
+            break
+        time.sleep(0.005)
+    for _ in range(20):  # let the refinement passes finish
+        s.focus(mid, mid, 20.0)
+    return s, mid
+
+
+@case("frame", "quadstream_settled", sizes=[6, 8, 10], smoke=3)
+def quadstream_settled(levels):
+    """QuadStreamer.focus alone with the camera still over a settled tree of `levels` levels."""
+    s, mid = _settled_streamer(levels)
+    ms = measure(lambda: s.focus(mid, mid, 20.0))
+    out = {"ms": ms, "nodes": len(s.drawn())}
+    s.close()
+    return out
+
+
+@case("frame", "quadstream_moving", sizes=[6, 8, 10], smoke=3)
+def quadstream_moving(levels):
+    """QuadStreamer.focus alone with the camera moving 0.5 m a call, back and forth within 25 m of the
+    spot a tree of `levels` levels settled at, so every node it needs is built: selection, not building."""
+    s, mid = _settled_streamer(levels)
+    k = [0]
+
+    def step():
+        k[0] += 1
+        s.focus(mid + 25.0 - abs(k[0] % 100 - 50) * 0.5, mid, 20.0)
+
+    ms = measure(step)
+    out = {"ms": ms, "nodes": len(s.drawn())}
+    s.close()
+    return out
