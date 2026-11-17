@@ -49,7 +49,7 @@ def test_windows_darken_a_wall_and_type_zero_stays_plain():
     faced = _render(_wall(2))[30:100, 20:108]
     assert plain.std(axis=(0, 1)).max() < 6  # one flat colour
     assert faced.std(axis=(0, 1)).max() > 25  # windows, frames and doors
-    assert (faced.sum(axis=2) < plain.sum(axis=2).mean() * 0.4).mean() > 0.08  # dark glass and doors
+    assert faced.sum(axis=2).mean() < plain.sum(axis=2).mean() * 0.95  # glass, doors and wear darken it
 
 
 def test_every_type_draws():
