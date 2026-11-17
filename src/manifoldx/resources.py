@@ -1306,7 +1306,9 @@ fn facade_albedo(base: vec3<f32>, f: vec4<f32>, fw: vec2<f32>) -> vec3<f32> {
     let cell = floor(f.xy);
     let p = fract(f.xy);
     let aa = max(fw, vec2<f32>(1e-4)) * 0.75;
-    let seed = f.w * 61.7;
+    // The seed arrives interpolated, a few ulps apart from pixel to pixel; rounded, every pixel of a
+    // building hashes the same.
+    let seed = floor(f.w * 64.0 + 0.5);
     let r = sp_h1(cell + vec2<f32>(seed, seed * 1.37));
     let ground = cell.y < 0.5;
     // Wear: soft patches, and streaks running down from each floor line.
@@ -1324,7 +1326,7 @@ fn facade_albedo(base: vec3<f32>, f: vec4<f32>, fw: vec2<f32>) -> vec3<f32> {
         case 6: { w = 0.42; h = 0.45; sill = 0.3;  shutters = true; }                                // suburban
         default: { w = 0.55; h = 0.12; sill = 0.76; }                                               // warehouse
     }
-    let k = i32(f.w * 4.0);
+    let k = i32(seed) % 4;
     var shutter = vec3<f32>(0.05, 0.19, 0.09);
     if (k == 1) { shutter = vec3<f32>(0.04, 0.11, 0.24); }
     else if (k == 2) { shutter = vec3<f32>(0.17, 0.08, 0.03); }
