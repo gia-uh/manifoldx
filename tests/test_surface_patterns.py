@@ -63,8 +63,21 @@ def test_a_far_surface_fades_to_its_flat_colour():
 def test_patterns_ride_in_the_material_uniforms():
     m = StandardMaterial(color="#ffffff", vertex_colors=True, surface_patterns={1: (2.0, 0.3, 2, 0.1, 0.9)})
     d = m.get_data(1, None)[0]
-    assert d.size == 60
+    assert d.size == 64
     assert d[16:20].tolist() == pytest.approx([2.0, 0.3, 2, 0.1])  # grass, overridden
-    assert d[44] == pytest.approx(0.9)  # grass darkness: 16 + 28
+    assert d[52] == pytest.approx(0.9)  # grass darkness: 16 + 36
+    assert d[16 + 32:16 + 36].tolist() == pytest.approx(SURFACE_PATTERNS[9][:4])  # worn pavement, last
     assert d[20:24].tolist() == pytest.approx(SURFACE_PATTERNS[2][:4])  # cobbles, default
     assert StandardMaterial(color="#ffffff").get_data(1, None).shape == (1, 16)  # no vertex colours
+
+
+def test_pavements_draw_slabs_and_the_worn_one_is_darker_in_places():
+    """Pattern 8 draws joints between square slabs; 9, the same slabs worn, adds dark stains and cracks."""
+    eye = dict(eye=(0, 4, 3), target=(0, 0, 0))
+    flat = _render(_ground(0), **eye)[30:90, 10:86]
+    new = _render(_ground(8), **eye)[30:90, 10:86]
+    worn = _render(_ground(9), **eye)[30:90, 10:86]
+    assert new.std(axis=(0, 1)).max() > 6  # joints and slab tones
+    assert np.abs(flat.mean(axis=(0, 1)) - new.mean(axis=(0, 1))).max() < 25  # round the same colour
+    assert np.abs(new - worn).max() > 30  # not the same picture
+    assert np.percentile(worn.sum(axis=2), 5) < np.percentile(new.sum(axis=2), 5)  # its darkest spots are darker
