@@ -1273,6 +1273,144 @@ SURFACE_PATTERNS = {
 }
 
 
+_FACADE_WGSL = """
+// ---- facades: windows, doors, shutters, balconies and wear, from a per-vertex facade coordinate ----
+// f.x counts bays along the wall (an integer is the edge between two), f.y counts floors up (0 to 1 is
+// the ground floor), f.z is the building type (0: no facade) and f.w the building's seed in [0, 1).
+fn fc_box(p: vec2<f32>, lo: vec2<f32>, hi: vec2<f32>, aa: vec2<f32>) -> f32 {
+    let a = smoothstep(lo - aa, lo + aa, p) * (vec2<f32>(1.0) - smoothstep(hi - aa, hi + aa, p));
+    return a.x * a.y;
+}
+fn fc_window(col: vec3<f32>, p: vec2<f32>, w: f32, sill: f32, h: f32, aa: vec2<f32>, r: f32,
+             shutters: bool, shutter: vec3<f32>) -> vec3<f32> {
+    let lo = vec2<f32>(0.5 - w * 0.5, sill);
+    let hi = vec2<f32>(0.5 + w * 0.5, sill + h);
+    let frame_w = vec2<f32>(0.035, 0.03);
+    var c = mix(col, vec3<f32>(0.78, 0.76, 0.71), fc_box(p, lo - frame_w, hi + frame_w, aa));
+    var glass = vec3<f32>(0.03, 0.045, 0.06) * (0.6 + 0.8 * r);
+    glass = mix(glass, vec3<f32>(0.12, 0.14, 0.16), smoothstep(0.55, 1.0, (p.y - sill) / h) * 0.4);
+    var fill = glass;
+    if (shutters && r < 0.45) {  // closed louvred shutters
+        let louvre = 0.8 + 0.2 * smoothstep(0.35, 0.65, fract(p.y * 34.0));
+        let split = 1.0 - 0.6 * (1.0 - smoothstep(0.0, 0.006, abs(p.x - 0.5)));
+        fill = shutter * louvre * split;
+    }
+    c = mix(c, fill, fc_box(p, lo, hi, aa));
+    // a sill under the window
+    c = mix(c, vec3<f32>(0.82, 0.8, 0.75), fc_box(p, vec2<f32>(lo.x - 0.05, sill - 0.035), vec2<f32>(hi.x + 0.05, sill), aa));
+    return c;
+}
+fn facade_albedo(base: vec3<f32>, f: vec4<f32>, fw: vec2<f32>) -> vec3<f32> {
+    let t = i32(f.z + 0.5);
+    if (t <= 0) { return base; }
+    let cell = floor(f.xy);
+    let p = fract(f.xy);
+    let aa = max(fw, vec2<f32>(1e-4)) * 0.75;
+    // The seed arrives interpolated, a few ulps apart from pixel to pixel; rounded, every pixel of a
+    // building hashes the same.
+    let seed = floor(f.w * 64.0 + 0.5);
+    let r = sp_h1(cell + vec2<f32>(seed, seed * 1.37));
+    let ground = cell.y < 0.5;
+    // Wear: soft patches, and streaks running down from each floor line.
+    let blotch = sp_vnoise(f.xy * vec2<f32>(1.3, 2.1) + vec2<f32>(seed));
+    let streak = sp_vnoise(vec2<f32>(f.x * 7.0 + seed, f.y * 0.7));
+    var col = base * (0.84 + 0.24 * blotch) * (1.0 - 0.22 * smoothstep(0.55, 0.92, streak) * (1.0 - p.y));
+    var w = 0.45; var h = 0.6; var sill = 0.2; var balcony = false; var cornice = false;
+    var shutters = false; var ribbon = false; var panels = false;
+    switch t {
+        case 1: { w = 0.46; h = 0.66; sill = 0.14; balcony = true; cornice = true; shutters = true; }  // colonial
+        case 2: { w = 0.44; h = 0.62; sill = 0.16; balcony = true; cornice = true; shutters = true; }  // eclectic
+        case 3: { w = 0.56; h = 0.5;  sill = 0.25; cornice = true; }                                 // Vedado house
+        case 4: { w = 0.92; h = 0.55; sill = 0.27; ribbon = true; }                                  // tower
+        case 5: { w = 0.42; h = 0.42; sill = 0.3;  panels = true; }                                  // prefabricated
+        case 6: { w = 0.42; h = 0.45; sill = 0.3;  shutters = true; }                                // suburban
+        default: { w = 0.55; h = 0.12; sill = 0.76; }                                               // warehouse
+    }
+    let k = i32(seed) % 4;
+    var shutter = vec3<f32>(0.05, 0.19, 0.09);
+    if (k == 1) { shutter = vec3<f32>(0.04, 0.11, 0.24); }
+    else if (k == 2) { shutter = vec3<f32>(0.17, 0.08, 0.03); }
+    else if (k == 3) { shutter = vec3<f32>(0.55, 0.55, 0.5); }
+    if (ground) {
+        if (t == 1 || t == 2) {  // tall doors and shop fronts in the old city
+            let open = r < 0.4;
+            let dark = select(shutter * 0.9 * (0.85 + 0.15 * smoothstep(0.3, 0.7, fract(p.x * 6.0))),
+                              vec3<f32>(0.025, 0.02, 0.018), open);
+            col = mix(col, vec3<f32>(0.8, 0.78, 0.72), fc_box(p, vec2<f32>(0.15, 0.0), vec2<f32>(0.85, 0.86), aa));
+            col = mix(col, dark, fc_box(p, vec2<f32>(0.19, 0.0), vec2<f32>(0.81, 0.82), aa));
+        } else if (t == 7) {
+            if (r < 0.35) {  // a roller door
+                let slat = 0.85 + 0.15 * smoothstep(0.3, 0.7, fract(p.y * 30.0));
+                col = mix(col, vec3<f32>(0.32, 0.33, 0.32) * slat, fc_box(p, vec2<f32>(0.08, 0.0), vec2<f32>(0.92, 0.55), aa));
+            }
+            col = fc_window(col, p, w, sill, h, aa, r, false, shutter);
+        } else if (t == 4) {  // a glazed lobby
+            col = fc_window(col, p, 0.86, 0.02, 0.8, aa, r, false, shutter);
+        } else if (r < 0.22) {  // a door
+            col = mix(col, vec3<f32>(0.8, 0.78, 0.72), fc_box(p, vec2<f32>(0.3, 0.0), vec2<f32>(0.7, 0.78), aa));
+            col = mix(col, shutter * 0.8, fc_box(p, vec2<f32>(0.33, 0.0), vec2<f32>(0.67, 0.75), aa));
+        } else {
+            col = fc_window(col, p, w, max(sill, 0.28), h, aa, r, shutters, shutter);
+        }
+        // the plinth
+        col = mix(col, col * 0.7, 1.0 - smoothstep(0.03, 0.05, p.y));
+    } else {
+        if (ribbon) {  // a balcony slab and a parapet band under each ribbon of windows
+            col = mix(col, vec3<f32>(0.8, 0.8, 0.77), fc_box(p, vec2<f32>(-0.1, 0.0), vec2<f32>(1.1, 0.22), aa));
+        }
+        col = fc_window(col, p, w, sill, h, aa, r, shutters, shutter);
+        if (balcony && sp_h1(vec2<f32>(cell.y, seed)) < 0.75) {  // an iron railing in front of the window
+            let lo = vec2<f32>(0.5 - w * 0.5 - 0.07, sill);
+            let hi = vec2<f32>(0.5 + w * 0.5 + 0.07, sill + 0.24);
+            let bars = 1.0 - smoothstep(0.15, 0.3, fract(p.x * 22.0));
+            let rail = 1.0 - smoothstep(0.0, 0.012, abs(p.y - hi.y));
+            let iron = vec3<f32>(0.03, 0.03, 0.03);
+            col = mix(col, iron, fc_box(p, lo, hi, aa) * max(bars * 0.85, rail));
+            col = mix(col, vec3<f32>(0.7, 0.68, 0.64), fc_box(p, vec2<f32>(lo.x, sill - 0.05), vec2<f32>(hi.x, sill), aa));
+        }
+        if (panels) {  // the joints of the prefabricated panels
+            let joint = max(1.0 - smoothstep(0.0, 0.012, min(p.x, 1.0 - p.x)), 1.0 - smoothstep(0.0, 0.015, p.y));
+            col = mix(col, col * 0.62, joint);
+        }
+    }
+    if (cornice) {  // a moulding at each floor line, lit on top and shadowed under
+        let band = fc_box(p, vec2<f32>(-0.1, 0.0), vec2<f32>(1.1, 0.045), aa);
+        col = mix(col, base * 1.3 + vec3<f32>(0.04), band * select(1.0, 0.0, cell.y < 0.5));
+        col = mix(col, col * 0.6, (1.0 - smoothstep(0.045, 0.07, p.y)) * (1.0 - band) * select(1.0, 0.0, cell.y < 0.5));
+    }
+    // Far away, the pattern fades to the average it makes, so it does not shimmer.
+    let fade = 1.0 - smoothstep(0.25, 0.6, max(fw.x, fw.y));
+    return mix(base * 0.78, col, fade);
+}
+"""
+
+# The vertex-colour shader for geometry that carries a "facade" key: four floats per vertex after the
+# colour (resources.pack_vertices), which facade_albedo turns into windows, doors and wear.
+_STANDARDMATERIAL_FACADE_SHADER = (
+    _STANDARDMATERIAL_VCOLOR_SHADER.replace(
+        "    @location(2) color:    vec4<f32>,   // rgb + surface pattern id\n",
+        "    @location(2) color:    vec4<f32>,   // rgb + surface pattern id\n"
+        "    @location(3) facade:   vec4<f32>,   // bays along, floors up, building type, seed\n",
+    )
+    .replace(
+        "    @location(2) vcolor:       vec4<f32>,\n};",
+        "    @location(2) vcolor:       vec4<f32>,\n    @location(3) vfacade:      vec4<f32>,\n};",
+    )
+    .replace("    out.vcolor = in.color;\n", "    out.vcolor = in.color;\n    out.vfacade = in.facade;\n")
+    .replace(
+        "    let sp_fw = length(fwidth(sp_proj));\n",
+        "    let sp_fw = length(fwidth(sp_proj));\n    let fc_fw = fwidth(in.vfacade.xy);\n",
+    )
+    .replace(
+        "                                       i32(in.vcolor.w + 0.5), sp_proj, sp_fw);\n",
+        "                                       i32(in.vcolor.w + 0.5), sp_proj, sp_fw);\n"
+        "    let vertex_albedo = facade_albedo(surface_albedo_v, in.vfacade, fc_fw);\n",
+    )
+    .replace("    let vertex_albedo = surface_albedo(in.vcolor.xyz", "    let surface_albedo_v = surface_albedo(in.vcolor.xyz")
+    .replace(_SURFACE_PATTERNS_WGSL, _SURFACE_PATTERNS_WGSL + _FACADE_WGSL, 1)
+)
+
+
 class StandardMaterial(Material):
     """PBR material with GGX BRDF. Optional 2D albedo map.
 
@@ -1352,9 +1490,9 @@ class StandardMaterial(Material):
         return {4: self.albedo_map}
 
     @classmethod
-    def _compile(cls, textured: bool = False, vertex_colors: bool = False) -> str:
+    def _compile(cls, textured: bool = False, vertex_colors: bool = False, facade: bool = False) -> str:
         if vertex_colors:
-            return _STANDARDMATERIAL_VCOLOR_SHADER
+            return _STANDARDMATERIAL_FACADE_SHADER if facade else _STANDARDMATERIAL_VCOLOR_SHADER
         return _STANDARDMATERIAL_TEXTURED_SHADER if textured else _STANDARDMATERIAL_SHADER
 
     @classmethod
@@ -1434,14 +1572,18 @@ def pack_vertices(geometry_obj: dict):
             normals = geometry_obj["normals"].astype(np.float32)
             colors = geometry_obj["colors"].astype(np.float32)
             n_verts = len(positions)
-            interleaved = np.zeros((n_verts, 10), dtype=np.float32)
+            has_facade = "facade" in geometry_obj
+            interleaved = np.zeros((n_verts, 14 if has_facade else 10), dtype=np.float32)
             interleaved[:, 0:3] = positions
             interleaved[:, 3:6] = normals
             interleaved[:, 6:9] = colors
             if "surfaces" in geometry_obj:  # the surface pattern id, 0 for none
                 interleaved[:, 9] = np.asarray(geometry_obj["surfaces"], dtype=np.float32)
+            if has_facade:  # bays along, floors up, building type, seed (StandardMaterial's facades)
+                interleaved[:, 10:14] = np.asarray(geometry_obj["facade"], dtype=np.float32).reshape(-1, 4)
             data = interleaved.tobytes()
-            buffers["stride"] = 10 * 4  # pos(3) + normal(3) + color(3) + surface id(1)
+            buffers["stride"] = interleaved.shape[1] * 4  # pos(3) + normal(3) + color(3) + surface id(1) [+ facade(4)]
+            buffers["has_facade"] = has_facade
             buffers["has_normals"] = True
             buffers["has_uvs"] = False
             buffers["has_colors"] = True
