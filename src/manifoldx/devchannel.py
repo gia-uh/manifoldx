@@ -172,7 +172,7 @@ class Meter:
                  "rss_mb": round(_rss_mb(), 1), "gc": {"runs": list(self.gc_runs), "ms": round(1000 * self.gc_time, 1)}}
             n = max(self.frames, 1)
             parts = {part: round(1000 * seconds / n, 1) for part, seconds in self.split.items()}
-            parts["idle"] = round(max(0.0, m["frame_ms"] - sum(parts.values())), 1)  # between frames: the loop
+            parts["idle"] = round(max(0.0, m["frame_ms"] - sum(v for k, v in parts.items() if k != "overlap")), 1)  # between frames: the loop
             m["split_ms"] = parts
             slowest = sorted(((seconds / n, name) for name, seconds in self.systems.items()), reverse=True)[:5]
             if slowest:

@@ -258,3 +258,18 @@ def test_metrics_under_debug(tmp_path, monkeypatch):
         assert got[-1]["split_ms"]["render"] > 0
     finally:
         h.channel.close()
+
+
+def test_the_meter_does_not_count_overlap_as_frame_time():
+    # overlap is time update and render already hold; idle must not lose it twice
+    meter = devchannel.Meter()
+    try:
+        t = 100.0
+        split = {"update": 0.01, "acquire": 0.0, "render": 0.01, "overlap": 0.008}
+        for dt in [0.0] + [0.05] * 21:
+            t += dt
+            meter.frame(t, split)
+    finally:
+        meter.close()
+    parts = meter.history[0]["split_ms"]
+    assert parts["overlap"] == 8.0 and parts["idle"] == 30.0
