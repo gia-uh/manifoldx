@@ -140,6 +140,7 @@ figure svg{width:100%;height:auto;display:block}
 <tr><td>background work uses every core by default</td><td class="why">Background tasks are pure functions by contract (<code>engine.background</code> docstring), so running several at once is safe. <code>workers=1</code> keeps the old one-at-a-time order.</td><td><span class="who">maintainer</span></td></tr>
 <tr><td>pipelined on by default in the window, off headless</td><td class="why">It is the largest gain for an interactive app. Headless frames (<code>render_frame</code>, <code>manifoldx look</code>, benchmarks, tests) must draw exactly the state the systems just produced.</td><td><span class="who">maintainer</span></td></tr>
 <tr><td>pipelining ships off first, then becomes the default</td><td class="why">havana-driver opts in first and finds the cases where the render and the systems share state. A one-line PR flips the default after it plays clean.</td><td><span class="who">maintainer</span></td></tr>
+<tr><td>pipelining defers engine calls instead of copying render state</td><td class="why">One rule at one choke point (a decorator and <code>__setattr__</code> hooks) instead of a snapshot spread through the renderer. The cost is read-your-writes within a pipelined frame.</td><td><span class="who">maintainer</span></td></tr>
 <tr><td>the render stays on the main thread; the systems move</td><td class="why">The window, its events and the wgpu device stay on the thread that owns them today. Only systems, which touch numpy arrays and the command buffer, run on another thread.</td><td><span class="who">agent</span></td></tr>
 <tr><td>one command buffer per running system</td><td class="why">Query writes already go to the command buffer and are applied after all systems (<code>engine.py</code> step 6). Giving each system its own buffer and applying them in registration order keeps the result identical to a serial run, with no lock.</td><td><span class="who">agent</span></td></tr>
 <tr><td>with the GIL on, the same code runs serially</td><td class="why">A GIL build gains nothing from threads in Python code. The engine warns once, runs groups one system at a time and turns pipelining off.</td><td><span class="who">agent</span></td></tr>
@@ -181,7 +182,7 @@ figure svg{width:100%;height:auto;display:block}
 
   <text x="0" y="178" class="lb">pipelined: main thread renders N while a worker runs the systems of N+1</text>
   <rect x="0" y="188" width="40" height="22" fill="#6f6b62"/><text x="5" y="203" class="bxl">ev</text>
-  <rect x="40" y="188" width="200" height="22" fill="#e0a872"/><text x="46" y="203" class="bx">render N (snapshot)</text>
+  <rect x="40" y="188" width="200" height="22" fill="#e0a872"/><text x="46" y="203" class="bx">render N</text>
   <rect x="40" y="214" width="60" height="22" fill="#9db07e"/><text x="46" y="229" class="bx">A</text>
   <rect x="40" y="238" width="60" height="22" fill="#9db07e"/><text x="46" y="253" class="bx">B</text>
   <rect x="100" y="214" width="50" height="22" fill="#9fb4d0"/><text x="106" y="229" class="bx">C</text>
@@ -190,9 +191,9 @@ figure svg{width:100%;height:auto;display:block}
   <rect x="240" y="188" width="30" height="22" fill="#6f6b62"/><text x="243" y="203" class="bxl">ap</text>
   <line x1="270" y1="182" x2="270" y2="264" stroke="#d9806f"/>
 </svg>
-<figcaption>Schematic, not to scale. ev: events and handlers. ap: apply the command buffers, run GPU compute and take the snapshot. Green: parallel systems. Blue: a serial system, which waits for the group before it.</figcaption>
+<figcaption>Schematic, not to scale. ev: events and handlers. ap: apply the command buffers and the deferred engine calls, then run GPU compute. Green: parallel systems. Blue: a serial system, which waits for the group before it.</figcaption>
 </figure>
-<p>With pipelining, a frame takes events plus the larger of systems and render, plus the apply and snapshot step, instead of events plus systems plus render.</p>
+<p>With pipelining, a frame takes events plus the larger of systems and render, plus the apply step, instead of events plus systems plus render.</p>
 </section>
 
 <section id="s4">
@@ -257,17 +258,26 @@ def rebuild_index(q: mx.Query[Building], dt: float):
 
 <section id="s8">
 <h2><span class="n">08</span>Pipelined frames</h2>
-<pre>engine = mx.Engine("havana", pipelined=True)   <span class="c"># phase 5 default: True in engine.run() on 3.14t</span></pre>
+<pre>engine = mx.Engine("havana", pipelined=True)   <span class="c"># off by default until havana-driver plays clean</span></pre>
 <ol>
-<li>The main thread handles events and runs event handlers for frame N+1, as today.</li>
-<li>It hands the systems of N+1 to a worker thread, which runs them with their groups on the frame pool.</li>
-<li>Meanwhile the main thread renders frame N from the snapshot: render pipeline, encode, submit, present.</li>
-<li>The main thread waits for the systems, applies the command buffers, runs GPU compute and takes the snapshot of N+1.</li>
+<li>The main thread handles events and runs event handlers for frame N+1, as today. Nothing else runs at that moment, so handlers act at once.</li>
+<li>It hands the systems of N+1 to a worker thread, which runs them with their groups on the frame pool. Each system writes only into its command buffer.</li>
+<li>Meanwhile the main thread renders frame N: render pipeline, encode, submit, present. No other thread changes what it reads.</li>
+<li>The main thread waits for the worker, applies the buffers in registration order, runs GPU compute, and starts the next frame.</li>
 </ol>
+<h3>Deferred engine calls, not a snapshot</h3>
+<p>An audit of the render path (46 kinds of write, 21 GPU call sites) showed that copying what the render reads would reach the renderer, the registries, the streamer and the GUI, and grow with every field the render reads later. Instead, while a pipelined frame's systems run, every engine call that changes render state becomes a command in the system's buffer, applied in call order on the main thread at step 4:</p>
 <ul>
-<li>The snapshot is a copy of the component arrays the render pipeline reads (transforms, meshes, materials, lights, sprites, camera). Only rows written since the last snapshot are copied, from the command buffer's indices; a still scene copies nothing.</li>
-<li>The cost is one frame of input latency, about 16 ms at 60 fps. Frames stay in lockstep: frame N+1's systems never run ahead by more than one frame.</li>
-<li>Render-side state that systems change outside the ECS arrays (a material's parameters, geometry the streamer uploads, the camera set from a handler) is the risk. Phase 5 lists each such path, either moves it through the snapshot or applies it at step 4, and adds a test per path. havana-driver runs with <code>pipelined=True</code> during phase 5 to find the ones the list misses.</li>
+<li><code>spawn</code> reserves its indices under a lock and returns a valid handle at once; the rows and the alive bit are written at apply.</li>
+<li>Entity handle setters (transform, geometry, material, joints, destroy), <code>set_origin</code>, <code>set_material</code>, <code>set_joints</code>.</li>
+<li>Camera methods and field writes, lights, sun, spot, shadows, fog, environment, <code>background_color</code>, benders: method calls through a decorator, plain attribute writes through <code>__setattr__</code> on <code>Camera</code>, the light classes, materials and the environment.</li>
+<li>Registry registration and updates (geometry, material, volume, textures), and every device call reachable from a system, the streamer's uploads and frees included.</li>
+<li>GUI tree and theme changes.</li>
+</ul>
+<p>The cost is read-your-writes inside one frame: a system that sets the camera and reads it back gets last frame's pose, as query writes already behave. With pipelining off, and always in headless frames, calls act at once as today.</p>
+<ul>
+<li><code>MANIFOLDX_PIPELINE=check</code> keeps a version number on each structure the render reads and raises at the end of a frame if one changed while the render ran, naming it. Tests that render run once with pipelining and the check on.</li>
+<li>Frames stay in lockstep: the systems of N+1 never run ahead by more than one frame. The cost is one frame of input latency, about 16 ms at 60 fps.</li>
 <li>Off for <code>render_frame</code>, <code>manifoldx look</code>, benchmarks and tests, whatever the constructor says, and off when the GIL is on.</li>
 </ul>
 </section>
@@ -307,7 +317,7 @@ tiles.on_ready(lambda results: ...)</pre>
 <tr><td>2 · background</td><td><code>workers="cores"</code> default, <code>engine.map</code></td><td class="why">1 PR, small</td><td class="why">tile and asset builds on every core</td></tr>
 <tr><td>3 · rows</td><td><code>parallel="rows"</code>, <code>chunk</code>, its default picked by benchmark</td><td class="why">1 PR, small</td><td class="why">close to the core count for systems over large queries</td></tr>
 <tr><td>4 · sliced</td><td><code>budget_ms</code> generator systems, progress in <code>engine.state</code></td><td class="why">1 PR, small</td><td class="why">no frame spikes from long jobs</td></tr>
-<tr><td>5 · pipelined</td><td>snapshot, worker thread for systems, render-side state paths; off by default, havana-driver opts in. Then a one-line PR makes it the default in <code>engine.run()</code></td><td class="why">2 PRs, large, plus the flip</td><td class="why">frame = max(systems, render) instead of their sum; havana-driver about 15.7 → 9 ms (estimate)</td></tr>
+<tr><td>5 · pipelined</td><td>deferred engine calls, worker thread for systems, check mode; off by default, havana-driver opts in. Then a one-line PR makes it the default in <code>engine.run()</code></td><td class="why">2 PRs, large, plus the flip</td><td class="why">frame = max(systems, render) instead of their sum; havana-driver about 15.7 → 9 ms (estimate)</td></tr>
 </tbody>
 </table>
 <p>Phase 1 is one release: the pin and the groups ship together, so an app pays the single-thread slowdown only in a version that can win it back. havana-driver marks its independent systems <code>parallel=True</code> in the same week.</p>
