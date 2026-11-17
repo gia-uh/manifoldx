@@ -59,8 +59,13 @@ class _VersionedArray(np.ndarray):
         return obj
 
     def __array_finalize__(self, obj):
-        if obj is not None:
+        # Only a view shares the store's memory, so only a view keeps its
+        # counter. A copy (fancy indexing, .copy(), a ufunc result) is private
+        # scratch: the renderer writes into its own copies while it draws.
+        if obj is not None and np.may_share_memory(self, obj):
             self._version = getattr(obj, "_version", None)
+        else:
+            self._version = None
 
     def _bump(self) -> None:
         counter = getattr(self, "_version", None)
