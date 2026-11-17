@@ -152,24 +152,86 @@ def test_destroy_in_parallel_system_lands_in_order():
     assert survivors(True)[1:5] == [False, False, False, False]
 
 
-def test_spawn_in_parallel_system_raises():
-    """RuntimeError naming the system and saying spawn belongs in a serial system."""
+def test_spawn_in_parallel_system_defers_until_the_group_applies():
+    """A parallel spawn: the handle is valid at once, the row is invisible to a query until the
+    group's buffers apply, and it is alive and filled afterwards."""
     engine = _engine()
+    Value.register(engine.store)
+    seen = {}
 
     @engine.system(parallel=True)
-    def grower(q, dt: float):
-        engine.spawn(Value(value=1.0))
+    def grower(q: mx.Query[Value], dt: float):
+        handle = engine.spawn(Value(value=7.0))
+        seen["handle"] = handle
+        seen["reserved"] = bool(engine.store._reserved[handle.index])
+        seen["alive"] = bool(engine.store._alive[handle.index])
+        seen["rows"] = len(engine.store.get_component_view(["Value"], engine))
+
+    _step(engine)
+
+    handle = seen["handle"]
+    assert handle is not None and handle.index >= 0
+    # Valid at once: the slot is reserved, so no other spawn takes it, and no row exists yet.
+    assert seen["reserved"] is True
+    assert seen["alive"] is False
+    assert seen["rows"] == 0
+    # Applied at the frame's flush, like the group's query writes.
+    assert engine.store._alive[handle.index]
+    assert engine.store._components["Value"][handle.index, 0] == pytest.approx(7.0)
+    assert list(engine.store.get_component_view(["Value"], engine)) == [handle.index]
+
+
+def test_two_parallel_systems_spawn_disjoint_indices_in_registration_order():
+    """Two systems spawning in one group: disjoint indices, and their writes reach the store in
+    registration order (the store's release hooks hear each spawn in that order)."""
+    engine = _engine()
+    Value.register(engine.store)
+    handles = {}
+    released = []
+    engine.store._release_hooks.append(
+        lambda indices: released.append(tuple(int(i) for i in indices))
+    )
+
+    def first(q, dt: float):
+        handles["first"] = [engine.spawn(Value(value=1.0)).index for _ in range(3)]
+
+    def second(q, dt: float):
+        handles["second"] = [engine.spawn(Value(value=2.0)).index for _ in range(3)]
+
+    engine.system(first, parallel=True)
+    engine.system(second, parallel=True)
+    _step(engine)
+
+    a, b = handles["first"], handles["second"]
+    assert len(a) == len(b) == 3
+    assert set(a).isdisjoint(b)
+    assert sorted(a + b) == list(range(6))
+    assert released == [(i,) for i in a] + [(i,) for i in b]
+    assert engine.store._alive[a + b].all()
+
+
+def test_serial_system_after_the_group_sees_the_spawn():
+    """A spawn from a parallel group is in the store once its buffers apply, so a serial
+    system that runs after the group finds it in its query; inside the same frame it does
+    not, as query writes already behave."""
+    engine = _engine()
+    Value.register(engine.store)
+    counts = []
 
     @engine.system(parallel=True)
-    def other(q, dt: float):
-        pass
+    def grower(q: mx.Query[Value], dt: float):
+        if len(q) == 0:
+            engine.spawn(Value(value=3.0))
 
-    with pytest.raises(RuntimeError) as caught:
-        _step(engine)
-    message = str(caught.value)
-    assert grower.__qualname__ in message
-    assert "serial system" in message
-    assert "spawn" in message
+    @engine.system
+    def watcher(q: mx.Query[Value], dt: float):
+        counts.append(len(q))
+
+    _step(engine)  # the group spawns; the serial system runs before the flush
+    _step(engine)  # the serial system's query sees the spawned entity
+
+    assert counts == [0, 1]
+    assert engine.store._components["Value"][0, 0] == pytest.approx(3.0)
 
 
 def test_exception_names_the_system():

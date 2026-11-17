@@ -365,20 +365,12 @@ def test_two_threads_spawning_at_once_get_disjoint_indices():
     assert _alive_count(engine) == 50
 
 
-def test_spawn_in_a_parallel_group_raises_without_deferral_and_defers_with_it():
+def test_spawn_in_a_system_without_deferral_acts_at_once():
+    """A serial system's spawn is not deferred: the row and the alive bit exist on return."""
     engine = _engine()
-
-    def spawn_in_group():
-        with engine._in_parallel("p"):
-            return engine.spawn(Transform())
-
-    with pytest.raises(RuntimeError, match="parallel system p"):
-        spawn_in_group()
-    with engine._defer_calls():
-        with engine._in_parallel("p"):
-            handle = engine.spawn(Transform(pos=(7.0, 8.0, 9.0)))
-    assert handle is not None and not engine.store._alive[handle.index]
-    _apply(engine)
+    with engine._in_system("s"):
+        handle = engine.spawn(Transform(pos=(7.0, 8.0, 9.0)))
+    assert handle is not None
     assert engine.store._alive[handle.index]
     assert np.allclose(engine.store._components["Transform"][handle.index, 0:3], (7, 8, 9))
 
