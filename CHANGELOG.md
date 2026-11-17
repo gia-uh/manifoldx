@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `manifoldx run` no longer drops `__main__` on a save when the launcher is a console script in the project's `.venv` (`uv run manifoldx run -m pkg.mod`). Files under `sys.prefix` are never the app's, so `multiprocessing` with spawn keeps working after a reload (#268).
+
 ### Changed
 
 - ManifoldX now requires CPython 3.14, and the free-threaded build (3.14t) is the supported interpreter: `requires-python` is `>=3.14`, `.python-version` is `3.14t`, and CI runs the suite and both the GIL and the free-threaded tests on it. The 3.14 fixes include compute kernels reading class annotations lazily (`inspect.get_annotations`) and the transpiler skipping the generated dunder members.
