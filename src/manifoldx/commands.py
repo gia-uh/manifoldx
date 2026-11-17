@@ -16,6 +16,7 @@ class CommandType:
     SPAWN = 1  # Create new entities with component data
     DESTROY = 2  # Mark entities as dead
     UPDATE_COMPONENT = 3  # Apply computed values to component arrays
+    CALL = 4  # Call a function: a deferred engine call, applied in call order
 
 
 # =============================================================================
@@ -59,9 +60,16 @@ class CommandBuffer:
         return len(self._commands)
 
     def execute(self, store):
-        """Execute all commands in order, modifying entity store."""
-        for cmd in self._commands:
-            self._execute_command(cmd, store)
+        """Execute all commands in order, modifying entity store.
+
+        A CALL may append further commands while it runs (a deferred
+        `EntityHandle.destroy` queues its DESTROY); those run in the same
+        pass, after it, in call order.
+        """
+        i = 0
+        while i < len(self._commands):
+            self._execute_command(self._commands[i], store)
+            i += 1
 
     def _execute_command(self, cmd: Command, store):
         """Execute a single command."""
@@ -84,6 +92,15 @@ class CommandBuffer:
                 store._components[component_name][indices, col_start:col_end] = new_data
             else:
                 store._components[component_name][indices] = new_data
+
+        elif cmd.type == CommandType.CALL:
+            queued = cmd.data["origin"]
+            try:
+                cmd.data["fn"](*cmd.data["args"], **cmd.data["kwargs"])
+            except Exception as error:
+                if queued:
+                    error.add_note(f"in deferred call queued by system {queued}")
+                raise
 
         elif cmd.type == CommandType.NOP:
             pass

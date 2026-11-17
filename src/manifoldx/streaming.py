@@ -40,6 +40,7 @@ from typing import Callable, NamedTuple
 
 import numpy as np
 
+from manifoldx import _deferred
 from manifoldx.renderer import vertex_bounds
 from manifoldx.resources import pack_vertices
 
@@ -85,6 +86,11 @@ def _pack(build, *key):
 _VECTOR_FROM = 256  # QuadStreamer computes distances with numpy from this many nodes up
 
 
+def _streamer_engine(args, kwargs):
+    """The engine a streamer method belongs to; the object is not the engine itself."""
+    return args[0].engine
+
+
 class _Uploads:
     """What both streamers share: the worker, the GPU uploads in slices, drawing and freeing by key.
 
@@ -116,6 +122,10 @@ class _Uploads:
         self._stats = {"built": 0, "uploaded": 0, "dropped": 0, "max_frame_ms": 0.0}
         self._last = None
 
+    def _is_deferred(self) -> bool:
+        """Whether this thread's calls to this streamer's engine are deferred."""
+        return self.engine._deferring()
+
     def _tick(self) -> int:
         """Note the time since the last focus() and collect the finished builds; returns how many."""
         now = perf_counter()
@@ -137,6 +147,7 @@ class _Uploads:
             return True  # nothing to upload, or no device yet: the render pass builds the buffers
         return self._gpu.get(c, {}).get("done", False)
 
+    @_deferred.deferred_in_pipeline(find=_streamer_engine)
     def _upload(self, c, room: int) -> int:
         """Copy up to `room` bytes of cell c to its GPU buffers; returns the bytes copied."""
         import wgpu
@@ -185,6 +196,7 @@ class _Uploads:
             cell.vbytes = cell.ibytes = None
         return spent
 
+    @_deferred.deferred_in_pipeline(find=_streamer_engine)
     def _unload(self, c):
         """Free cell c's GPU buffers, whole or half written."""
         up = self._gpu.pop(c, None)
@@ -194,6 +206,7 @@ class _Uploads:
             buf.destroy()
         self.engine._geometry_registry.release(up["id"])
 
+    @_deferred.deferred_in_pipeline(find=_streamer_engine)
     def _draw(self, c, pos):
         cell = self._ready[c]
         if cell is None:
@@ -281,7 +294,11 @@ class Streamer(_Uploads):
             if room <= 0:
                 break
             if self._ready.get(c) is not None and not self._on_gpu(c):
-                room -= self._upload(c, room)
+                if self._is_deferred():
+                    self._upload(c, room)  # queued whole at apply: it spends the frame's budget
+                    room = 0
+                else:
+                    room -= self._upload(c, room)
         budget = self.uploads_per_frame if self._calls % self.turn[1] == self.turn[0] else 0
         self._calls += 1
         for c in wanted:
@@ -487,7 +504,11 @@ class QuadStreamer(_Uploads):
             if room <= 0:
                 break
             if self._ready.get(n) is not None and not self._on_gpu(n):
-                room -= self._upload(n, room)
+                if self._is_deferred():
+                    self._upload(n, room)  # queued whole at apply: it spends the frame's budget
+                    room = 0
+                else:
+                    room -= self._upload(n, room)
 
         # What to draw: each selected node once it is built and on the GPU, else what covers its spot now;
         # then nothing under a node that is drawn, so four children replace their parent in one frame.

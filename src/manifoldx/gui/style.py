@@ -14,6 +14,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from manifoldx import _deferred
+
 DEFAULT_THEME: dict[str, Any] = {
     "bg": "#222",
     "fg": "#ddd",
@@ -40,12 +42,14 @@ def reset() -> None:
     _classes = {}
 
 
+@_deferred.deferred_in_pipeline
 def set_theme(theme: dict[str, Any]) -> None:
     """Merge `theme` over the current theme. Keys absent from `theme`
     keep their previous values."""
     _theme.update(theme)
 
 
+@_deferred.deferred_in_pipeline
 def define(class_name: str, props: dict[str, Any]) -> None:
     """Register or replace a named style class."""
     _classes[class_name] = dict(props)

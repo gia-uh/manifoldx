@@ -9,6 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+from manifoldx import _deferred
 from manifoldx.gui import style
 from manifoldx.gui.style import parse_padding
 
@@ -26,6 +27,10 @@ class Widget(ABC):
     A widget owns its style references (`style` is a class name, `style_overrides`
     is a per-instance dict) and exposes the surface the layout, painter, and
     bridge need.
+
+    A write to a field of a widget that is in the tree defers while its engine
+    defers, so the render never reads a field a system is changing. A widget
+    built inside a system is not in the tree yet, so its constructor acts at once.
     """
 
     def __init__(
@@ -36,6 +41,21 @@ class Widget(ABC):
     ) -> None:
         self.style = style
         self.style_overrides = dict(style_overrides) if style_overrides else {}
+
+    def __setattr__(self, name, value):
+        engine = _deferred.current()
+        if self._defer_write(engine, name):
+            _deferred.defer(engine, object.__setattr__, self, name, value)
+            return
+        object.__setattr__(self, name, value)
+
+    def _defer_write(self, engine, name) -> bool:
+        return (
+            engine is not None
+            and engine._deferring()
+            and not name.startswith("_")
+            and self.__dict__.get("_gui_attached", False)
+        )
 
     def effective_style(self) -> dict[str, Any]:
         return _style_resolve(self.style, self.style_overrides)
@@ -74,9 +94,24 @@ class Panel(Widget):
             raise ValueError(
                 f"invalid anchor {anchor!r}; expected one of {sorted(_VALID_ANCHORS)}"
             )
-        self.children: list[Widget] = list(children or [])
+        self._children: list[Widget] = list(children or [])
         self.anchor = anchor
         self.offset = tuple(offset)
+
+    @property
+    def children(self) -> list[Widget]:
+        """The panel's children; mutated through a queued view while the engine defers."""
+        engine = _deferred.current()
+        return _deferred.deferring_list(engine, self._children) if engine is not None else self._children
+
+    @children.setter
+    def children(self, value) -> None:
+        value = list(value)
+        engine = _deferred.current()
+        if engine is not None and engine._deferring():
+            _deferred.defer(engine, object.__setattr__, self, "_children", value)
+            return
+        self._children = value
 
     def intrinsic_size(self) -> tuple[float, float]:
         # Containers without explicit size grow to fit their viewport slot;
@@ -220,6 +255,13 @@ def _measure_text(text: str, font_size: int, font: str | None = None) -> tuple[f
     return (float(w), float(h))
 
 
+def _set_attached(widget: Widget, attached: bool) -> None:
+    """Mark a widget and its descendants as part of (or out of) the rendered tree."""
+    widget.__dict__["_gui_attached"] = attached
+    for child in getattr(widget, "children", ()) or ():
+        _set_attached(child, attached)
+
+
 class _GuiRoot:
     """Container exposed as `engine.gui`. List-like over root panels, plus
     a `pointer_over_gui` flag the bridge will toggle (Plan 2).
@@ -247,13 +289,32 @@ class _GuiRoot:
             return float(screen_height) / float(self.design_height)
         return float(self.scale)
 
+    def __setattr__(self, name, value):
+        engine = _deferred.current()
+        if (
+            engine is not None
+            and engine._deferring()
+            and not name.startswith("_")
+            and name in self.__dict__
+        ):
+            _deferred.defer(engine, object.__setattr__, self, name, value)
+            return
+        object.__setattr__(self, name, value)
+
+    @_deferred.deferred_in_pipeline
     def append(self, panel: Panel) -> None:
         self._panels.append(panel)
+        _set_attached(panel, True)
 
+    @_deferred.deferred_in_pipeline
     def remove(self, panel: Panel) -> None:
         self._panels.remove(panel)
+        _set_attached(panel, False)
 
+    @_deferred.deferred_in_pipeline
     def clear(self) -> None:
+        for panel in self._panels:
+            _set_attached(panel, False)
         self._panels.clear()
 
     def __iter__(self):

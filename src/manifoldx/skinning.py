@@ -10,6 +10,8 @@ import re
 
 import numpy as np
 
+from manifoldx import _deferred
+
 MAX_JOINTS = 32
 
 JOINT_LOCATION = 7  # vertex attribute location of the joint index
@@ -75,6 +77,7 @@ class JointStore:
         return np.concatenate([np.array(reused, dtype=np.uint32),
                                np.arange(self._next - fresh, self._next, dtype=np.uint32)])
 
+    @_deferred.deferred_in_pipeline
     def set(self, entity: int, matrices: np.ndarray):
         """Write (J, 4, 4) row-major matrices into the entity's block; upload J*64 bytes."""
         block = int(self.block_of[entity])
@@ -86,6 +89,7 @@ class JointStore:
         if self._current():
             self._device.queue.write_buffer(self.buffer, block * _BLOCK_BYTES, self.mirror[block, :n].tobytes())
 
+    @_deferred.deferred_in_pipeline
     def set_many(self, entities, matrices: np.ndarray):
         """Write (N, J, 4, 4) row-major matrices into the entities' blocks; upload the touched blocks once."""
         entities = np.asarray(entities, dtype=np.int64)
@@ -103,6 +107,7 @@ class JointStore:
         """The entity's first j joint matrices, (j, 4, 4) float32 row-major; identity when never posed."""
         return self.mirror[self.block_of[entity], :j].transpose(0, 2, 1).copy()
 
+    @_deferred.deferred_in_pipeline
     def release(self, entities):
         """Free the blocks of destroyed or respawned entities, reset to identity."""
         entities = np.asarray(entities, dtype=np.int64)
@@ -117,6 +122,7 @@ class JointStore:
                 self._device.queue.write_buffer(self.buffer, b * _BLOCK_BYTES, _IDENTITY_BLOCK.tobytes())
             self._free.append(b)
 
+    @_deferred.deferred_in_pipeline
     def ensure_buffer(self, device):
         """The storage buffer holding every block; (re)created with the full mirror when it grew."""
         import wgpu

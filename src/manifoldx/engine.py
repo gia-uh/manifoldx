@@ -18,6 +18,7 @@ from time import perf_counter_ns
 import manifoldx.ecs as ecs
 from manifoldx.ecs import EntityStore
 from manifoldx.commands import CommandBuffer, Command, CommandType
+from manifoldx import _deferred
 from manifoldx.systems import SystemRegistry
 from manifoldx.resources import GeometryRegistry, MaterialRegistry, VolumeRegistry
 from manifoldx.renderer import RenderPipeline
@@ -79,6 +80,7 @@ class _TransformProxy:
         )
 
     @pos.setter
+    @_deferred.deferred_in_pipeline
     def pos(self, v):
         rel = np.asarray(v, np.float64) - self._offset()
         self._store._components["Transform"][self._i, 0:3] = rel.astype(np.float32)
@@ -88,6 +90,7 @@ class _TransformProxy:
         return self._store._components["Transform"][self._i, 3:7].copy()
 
     @rot.setter
+    @_deferred.deferred_in_pipeline
     def rot(self, v):
         self._store._components["Transform"][self._i, 3:7] = np.asarray(v, np.float32)
 
@@ -96,6 +99,7 @@ class _TransformProxy:
         return self._store._components["Transform"][self._i, 7:10].copy()
 
     @scale.setter
+    @_deferred.deferred_in_pipeline
     def scale(self, v):
         self._store._components["Transform"][self._i, 7:10] = np.asarray(v, np.float32)
 
@@ -109,6 +113,7 @@ class EntityHandle:
         self._geometry_id = geometry_id
         self.transform = _TransformProxy(engine.store, index, engine)
 
+    @_deferred.deferred_in_pipeline
     def destroy(self, free_geometry: bool = True):
         """Destroy this entity and free its geometry's GPU buffers.
 
@@ -121,6 +126,7 @@ class EntityHandle:
         if free_geometry and self._geometry_id is not None:
             self._engine._geometries_to_free.add(self._geometry_id)
 
+    @_deferred.deferred_in_pipeline
     def set_geometry(self, mesh):
         """Overwrite this entity's vertex buffer (requires equal vertex count).
 
@@ -172,6 +178,7 @@ class EntityHandle:
             )
         self._engine._device.queue.write_buffer(bufs["vertex_buffer"], 0, inter.tobytes())
 
+    @_deferred.deferred_in_pipeline
     def set_material(self, material):
         """Draw this entity with `material` from the next frame on.
 
@@ -181,6 +188,7 @@ class EntityHandle:
         mat_id = self._engine._material_registry.register(material)
         self._engine.store._components["Material"][self.index, 0] = mat_id
 
+    @_deferred.deferred_in_pipeline
     def set_joints(self, matrices):
         """Pose this entity's joints: (J, 4, 4) matrices, 1 <= J <= MAX_JOINTS.
 
@@ -445,19 +453,19 @@ class Engine:
         self._last_time = None
         self._start_time = None
         self.elapsed: float = 0.0
-        self.background_color = (0.1, 0.1, 0.2)  # RGB clear color; set for e.g. fog horizon
+        self._background_color = (0.1, 0.1, 0.2)  # RGB clear color; set for e.g. fog horizon
         self._executor = None
         self._process_executor = None
         self._pending_tasks = []
-        self.fog_enabled = False
-        self.fog_start = 0.0
+        self._fog_enabled = False
+        self._fog_start = 0.0
         # Points that swaying meshes part around, such as grass around whatever walks
         # through it: up to renderer.MAX_BENDERS (x, z, radius, strength) in world coordinates.
         # Inside the radius a vertex below 1 unit of its model's height leans away from
         # the point by strength times its sway height, fading out toward the edge.
-        self.benders = []
-        self.fog_end = 1.0
-        self.fog_color = (0.1, 0.1, 0.2)
+        self._benders = []
+        self._fog_end = 1.0
+        self._fog_color = (0.1, 0.1, 0.2)
 
         # Register built-in components
         Transform.register(self.store)
@@ -466,7 +474,6 @@ class Engine:
 
         # Camera for MVP matrices
         self._camera = Camera()
-        self.camera = self._camera
 
         # External lights (not in ECS)
         self._lights = []
@@ -606,15 +613,130 @@ class Engine:
         finally:
             self._command_tls.buffer = previous
 
+    def _deferring(self) -> bool:
+        """Whether this thread defers render-state writes into the command buffer."""
+        return _deferred.deferring(self)
+
+    @contextmanager
+    def _defer_calls(self):
+        """Defer this thread's engine calls into its command buffer until the block ends.
+
+        The switch a pipelined frame sets around its systems (PR D), and what
+        tests use. Off by default: with it off every call acts at once, as before.
+        The commands run at the frame's apply step; here, `commands.execute`.
+        """
+        with _deferred.defer_calls(self):
+            yield
+
+    @contextmanager
+    def _in_system(self, name: str):
+        """Mark this thread as running system `name`, so its deferred calls note it."""
+        previous = getattr(self._command_tls, "system_name", None)
+        self._command_tls.system_name = name
+        try:
+            yield
+        finally:
+            self._command_tls.system_name = previous
+
     @contextmanager
     def _in_parallel(self, name: str):
         """Mark the current thread as running parallel system `name`, until the block ends."""
         previous = getattr(self._command_tls, "parallel_system", None)
         self._command_tls.parallel_system = name
-        try:
-            yield
-        finally:
-            self._command_tls.parallel_system = previous
+        with self._in_system(name):
+            try:
+                yield
+            finally:
+                self._command_tls.parallel_system = previous
+
+    # === Render-state fields behind deferring properties ===
+    # A plain attribute write from a system would race the render; these
+    # setters queue the write as a CALL while the thread defers, and act at
+    # once otherwise. The renderer reads the properties, never the fields.
+
+    @property
+    def camera(self) -> Camera:
+        """The camera the render draws with."""
+        return self._camera
+
+    @camera.setter
+    def camera(self, value) -> None:
+        if self._deferring():
+            _deferred.defer(self, setattr, self, "_camera", value)
+            return
+        self._camera = value
+
+    @property
+    def background_color(self):
+        """The clear colour (RGB, linear) of a frame drawn without a background."""
+        return self._background_color
+
+    @background_color.setter
+    def background_color(self, value) -> None:
+        if self._deferring():
+            _deferred.defer(self, setattr, self, "_background_color", value)
+            return
+        self._background_color = value
+
+    @property
+    def fog_enabled(self) -> bool:
+        return self._fog_enabled
+
+    @fog_enabled.setter
+    def fog_enabled(self, value) -> None:
+        if self._deferring():
+            _deferred.defer(self, setattr, self, "_fog_enabled", value)
+            return
+        self._fog_enabled = value
+
+    @property
+    def fog_start(self) -> float:
+        return self._fog_start
+
+    @fog_start.setter
+    def fog_start(self, value) -> None:
+        if self._deferring():
+            _deferred.defer(self, setattr, self, "_fog_start", value)
+            return
+        self._fog_start = value
+
+    @property
+    def fog_end(self) -> float:
+        return self._fog_end
+
+    @fog_end.setter
+    def fog_end(self, value) -> None:
+        if self._deferring():
+            _deferred.defer(self, setattr, self, "_fog_end", value)
+            return
+        self._fog_end = value
+
+    @property
+    def fog_color(self):
+        return self._fog_color
+
+    @fog_color.setter
+    def fog_color(self, value) -> None:
+        if self._deferring():
+            _deferred.defer(self, setattr, self, "_fog_color", value)
+            return
+        self._fog_color = value
+
+    @property
+    def benders(self):
+        """Up to renderer.MAX_BENDERS (x, z, radius, strength) points that swaying meshes part around.
+
+        While the thread defers, this is a view whose mutations are queued.
+        """
+        return _deferred.deferring_list(self, self._benders)
+
+    @benders.setter
+    def benders(self, value) -> None:
+        value = list(value)
+        if self._deferring():
+            _deferred.defer(self, setattr, self, "_benders", value)
+            return
+        self._benders = value
 
     def _get_frame_pool(self) -> ThreadPoolExecutor:
         """The pool a group runs on: one thread per core, created on first use."""
@@ -688,6 +810,7 @@ class Engine:
         """
         return self._volume_registry.register(data, name=name)
 
+    @_deferred.deferred_in_pipeline
     def update_volume(self, handle: int, data: "np.ndarray") -> None:
         """Replace voxel data for a registered volume. Same shape required.
 
@@ -738,10 +861,12 @@ class Engine:
         self._compute_runner.register(cls)
         return cls
 
+    @_deferred.deferred_in_pipeline
     def set_lights(self, lights: list):
         """Set external lights (passed to renderer, not in ECS)."""
         self._lights = lights
 
+    @_deferred.deferred_in_pipeline
     def add_light(self, light):
         """Add a single light to the external lights list."""
         self._lights.append(light)
@@ -796,6 +921,7 @@ class Engine:
         """The floating origin (x, z) in world coordinates, float64."""
         return self._origin
 
+    @_deferred.deferred_in_pipeline
     def set_origin(self, x: float, z: float) -> None:
         """Move the floating origin: every entity then draws at pos - origin.
 
@@ -836,6 +962,7 @@ class Engine:
         for gid in pending - used:
             self._geometry_registry.release(gid)
 
+    @_deferred.deferred_in_pipeline
     def enable_fog(self, start, end, color=None):
         """Linear distance fog for StandardMaterial; color defaults to background_color."""
         self.fog_enabled = True
@@ -843,6 +970,7 @@ class Engine:
         self.fog_end = float(end)
         self.fog_color = tuple(color) if color is not None else tuple(self.background_color)
 
+    @_deferred.deferred_in_pipeline
     def set_sun(self, light):
         """Set the single directional sun (a DirectionalLight).
 
@@ -852,6 +980,7 @@ class Engine:
         """
         self._sun = light
 
+    @_deferred.deferred_in_pipeline
     def set_spot(self, light):
         """Set the single spot light (a SpotLight) — a flashlight cone with
         angular + distance falloff. Consumed by StandardMaterial; when shadows
@@ -859,6 +988,7 @@ class Engine:
         """
         self._spot = light
 
+    @_deferred.deferred_in_pipeline
     def enable_shadows(
         self,
         target=(0.0, 0.0, 0.0),
@@ -889,6 +1019,7 @@ class Engine:
             "auto_fit": bool(auto_fit),
         }
 
+    @_deferred.deferred_in_pipeline
     def set_environment(self, env):
         """Set the IBL environment.
 
@@ -1117,14 +1248,8 @@ class Engine:
         return dt
 
     # === Spawn & Destroy ===
-    def spawn(self, *args, n: int = 1, **kwargs):
-        """Spawn n entities now, with these components, and return a handle to the first (None for n=0)."""
-        parallel = getattr(self._command_tls, "parallel_system", None)
-        if parallel is not None:
-            raise RuntimeError(
-                "engine.spawn writes the store at once: call it from a serial system, "
-                f"not from parallel system {parallel}"
-            )
+    def _spawn_data(self, n: int, args: tuple, kwargs: dict):
+        """Turn a spawn's components into the arrays the store writes, and the first geometry id."""
         # Handle Mesh, Material, and Transform component objects
         processed_kwargs = {}
         mesh_geo_id = None
@@ -1168,13 +1293,32 @@ class Engine:
         if isinstance(t, Transform) and t._pos is not None and self._origin != (0.0, 0.0):
             rel = np.asarray(t._pos, np.float64) - np.array([self._origin[0], 0.0, self._origin[1]])
             processed_kwargs["Transform"][:, 0:3] = rel.astype(np.float32)
+        return processed_kwargs, mesh_geo_id
 
-        # NOW spawn the entities immediately (not deferred)
-        if n > 0:
-            indices = self.store.spawn(n, **processed_kwargs)
+    def spawn(self, *args, n: int = 1, **kwargs):
+        """Spawn n entities now, with these components, and return a handle to the first (None for n=0).
+
+        While calls are deferred, the indices are reserved now (so the handle is
+        valid at once) and the rows, the alive bit and the hooks are written at
+        the apply step, in call order with the handle's setters and destroy.
+        """
+        parallel = getattr(self._command_tls, "parallel_system", None)
+        if parallel is not None and not self._deferring():
+            raise RuntimeError(
+                "engine.spawn writes the store at once: call it from a serial system, "
+                f"not from parallel system {parallel}"
+            )
+        processed_kwargs, mesh_geo_id = self._spawn_data(n, args, kwargs)
+        if n <= 0:
+            return None
+        if self._deferring():
+            indices = self.store.reserve(n)
+            _deferred.defer(self, self.store.write_reserved, indices, **processed_kwargs)
             return EntityHandle(self, int(indices[0]), mesh_geo_id)
-        return None
+        indices = self.store.spawn(n, **processed_kwargs)
+        return EntityHandle(self, int(indices[0]), mesh_geo_id)
 
+    @_deferred.deferred_in_pipeline
     def set_joints(self, indices, matrices):
         """Pose many skinned entities in one call: matrices[k] poses entity indices[k].
 
@@ -1206,6 +1350,7 @@ class Engine:
                 )
         self._render_pipeline._joints.set_many(idx, m)
 
+    @_deferred.deferred_in_pipeline
     def set_material(self, entity, material) -> None:
         """Draw `entity` (an EntityHandle or an entity index) with `material` from the
         next frame on, as EntityHandle.set_material does. Raises ValueError when the
@@ -1509,14 +1654,17 @@ class Engine:
                                        _clear_color(background), fog)
         return handle
 
+    @_deferred.deferred_in_pipeline
     def refresh_texture(self, handle) -> None:
         """Render a render_to_texture view again on the next frame."""
         self._views[handle.id].pending = True
 
+    @_deferred.deferred_in_pipeline
     def set_texture_live(self, handle, live: bool) -> None:
         """Render a render_to_texture view every frame (True) or only on request."""
         self._views[handle.id].live = bool(live)
 
+    @_deferred.deferred_in_pipeline
     def drop_texture(self, handle) -> None:
         """Stop rendering a render_to_texture view; its texture keeps the last image."""
         self._views.pop(handle.id, None)

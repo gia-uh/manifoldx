@@ -121,7 +121,7 @@ pre.code .lang{position:absolute;top:4px;right:8px;font-size:10px;color:var(--fa
 
 <h2>Tasks</h2>
 
-<details class="task" id="task-1" data-state="pending">
+<details class="task" id="task-1" data-state="done">
 <summary><span class="num">1</span><span><span class="ttl">PR C: the deferral switch and the CALL command</span><span class="files">src/manifoldx/commands.py · src/manifoldx/engine.py · tests/test_deferred_calls.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <h4>interfaces</h4>
@@ -139,7 +139,7 @@ pre.code .lang{position:absolute;top:4px;right:8px;font-size:10px;color:var(--fa
 </div>
 </details>
 
-<details class="task" id="task-2" data-state="pending">
+<details class="task" id="task-2" data-state="done">
 <summary><span class="num">2</span><span><span class="ttl">Spawn reserves indices, writes at apply</span><span class="files">src/manifoldx/ecs.py · src/manifoldx/engine.py (spawn) · tests/test_deferred_calls.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <ol class="steps">
@@ -151,7 +151,7 @@ pre.code .lang{position:absolute;top:4px;right:8px;font-size:10px;color:var(--fa
 </div>
 </details>
 
-<details class="task" id="task-3" data-state="pending">
+<details class="task" id="task-3" data-state="done">
 <summary><span class="num">3</span><span><span class="ttl">Every render-state writer defers</span><span class="files">engine.py · camera.py · lights · resources.py · skinning.py · streaming.py · gui.py · textures.py</span></span><span class="state">pending</span></summary>
 <div class="body">
 <ol class="steps">
@@ -197,7 +197,15 @@ pre.code .lang{position:absolute;top:4px;right:8px;font-size:10px;color:var(--fa
 
 <h2>Where this plan departs from the spec</h2>
 <ul>
-<li>Nothing yet. The audit report moves into the repo as <code>.knowledge/analysis/2026-11-17-pipelining-audit.md</code> with this plan.</li>
+<li><code>GeometryRegistry.create_buffers</code> (deferred) and <code>JointStore.ensure_buffer</code> (<code>src/manifoldx/skinning.py:125</code>) return nothing to a system that calls them while deferring; the two callers that use their return values, the render pipeline and the streamer's apply, run with the flag off. They are private methods whose whole point is a device call on the main thread.</li>
+<li>Registry id allocation stays immediate, under a lock: <code>GeometryRegistry.register</code> (<code>src/manifoldx/resources.py:1570</code>), <code>register_by_name</code> (<code>:1593</code>), <code>MaterialRegistry.register</code> (<code>:1630</code>) and <code>VolumeRegistry.register</code> (<code>:2037</code>) return the id or handle their caller uses at once (<code>Mesh.get_data</code>, the <code>Material</code> component, the <code>Volume</code> component's handle). What defers is every call site that publishes them to the render (spawn, set_material, the streamer's upload); the id counters are locked instead, which is what the audit's class d asked for.</li>
+<li><code>Engine.component</code> (<code>src/manifoldx/engine.py:788</code>) stays immediate: it is a decorator and returns the class, and registering a component is setup work. <code>Engine.compute</code> (<code>:831</code>) is the same, and its <code>create_shader_module</code> belongs to setup.</li>
+<li><code>Engine.render_to_texture</code> (<code>src/manifoldx/engine.py:1611</code>) and the <code>load_texture</code> family (<code>src/manifoldx/textures.py:70</code>, <code>:90</code>, <code>:152</code>) stay immediate: each returns a <code>TextureHandle</code> its caller uses at once (a material's albedo map, a GUI <code>Image</code>, a view). <code>refresh_texture</code>, <code>set_texture_live</code>, <code>drop_texture</code> and <code>write_texture</code> do defer.</li>
+<li><code>Engine.get_label_atlas</code> (<code>src/manifoldx/engine.py:510</code>) and <code>LabelTextureAtlas.get_or_create</code> (<code>src/manifoldx/viz/text.py:116</code>) stay immediate: both return a value (the atlas, a slice index). The atlas' own <code>upload_dirty</code> (<code>:191</code>) is render-side.</li>
+<li>Direct array writes stay immediate: <code>store._components[...][rows] = ...</code> (<code>src/manifoldx/viz/shims.py:225</code>) is not a call, so nothing can intercept it. A system that writes store rows by hand should go through a <code>Query</code>, whose writes already queue an <code>UPDATE_COMPONENT</code>.</li>
+<li><code>ValueDisplay</code>'s getter (<code>src/manifoldx/gui/value_display.py:40</code>) runs on the render thread; it is a read, not a write.</li>
+<li><code>trace.Tracer</code> (<code>src/manifoldx/trace/tracer.py:42</code>) owns a second device and its methods return pixels; it does not defer.</li>
+<li>The audit report moves into the repo as <code>.knowledge/analysis/2026-11-17-pipelining-audit.md</code> with this plan.</li>
 </ul>
 </main>
 <script>

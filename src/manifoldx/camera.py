@@ -4,8 +4,10 @@ import math
 
 import numpy as np
 
+from manifoldx import _deferred
 
-class Camera:
+
+class Camera(_deferred._DeferredWrites):
     """Camera with position, target, FOV and projection."""
 
     def __init__(
@@ -119,27 +121,32 @@ class Camera:
         xy[:, 1] = (1 - clip[:, 1] / w) / 2 * height
         return xy, w
 
+    @_deferred.deferred_in_pipeline
     def move_to(self, position):
         """Set camera world position."""
         self.position = np.array(position, dtype=np.float32)
         self._compute_spherical()
 
+    @_deferred.deferred_in_pipeline
     def move_by(self, delta):
         """Move camera by delta in world space."""
         self.position += np.array(delta, dtype=np.float32)
         self._compute_spherical()
 
+    @_deferred.deferred_in_pipeline
     def look_at(self, target):
         """Set the point the camera looks at."""
         self.target = np.array(target, dtype=np.float32)
         self._compute_spherical()
 
+    @_deferred.deferred_in_pipeline
     def set_pose(self, position, target):
         """Set both position and target at once."""
         self.position = np.array(position, dtype=np.float32)
         self.target = np.array(target, dtype=np.float32)
         self._compute_spherical()
 
+    @_deferred.deferred_in_pipeline
     def orbit(self, d_azimuth=0.0, d_elevation=0.0):
         """Rotate camera around target by delta angles.
 
@@ -163,6 +170,7 @@ class Camera:
 
         self.position = self.target + self._distance * direction
 
+    @_deferred.deferred_in_pipeline
     def pan(self, dx, dy, relative_to_viewport=True):
         """Pan the camera perpendicular to view direction.
 
@@ -189,6 +197,7 @@ class Camera:
         """Get current distance from camera to target."""
         return float(self._distance)
 
+    @_deferred.deferred_in_pipeline
     def zoom(self, factor):
         """Zoom by dividing distance to target by factor.
 
@@ -203,6 +212,7 @@ class Camera:
         forward = self.get_forward()
         self.position = self.target - forward * self._distance
 
+    @_deferred.deferred_in_pipeline
     def dolly(self, distance):
         """Move camera toward/away from target by distance.
 
@@ -215,6 +225,7 @@ class Camera:
         forward = self.get_forward()
         self.position = self.target - forward * self._distance
 
+    @_deferred.deferred_in_pipeline
     def fit(self, radius, center=(0, 0, 0), margin=0.8, azimuth=45, elevation=30):
         """Position camera to frame a sphere.
 
@@ -242,6 +253,7 @@ class Camera:
 
         self.position = self.target + self._distance * direction
 
+    @_deferred.deferred_in_pipeline
     def fit_bounds(self, center, extent, margin=0.8, azimuth=45, elevation=30):
         """Position camera to frame an axis-aligned bounding box.
 

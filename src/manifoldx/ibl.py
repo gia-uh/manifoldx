@@ -9,6 +9,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from manifoldx import _deferred
+
 # The precompute's shape. PRECOMPUTE_VERSION goes into the disk cache key with the rest,
 # so a change to the algorithm or to any of these numbers never reads a stale entry.
 PRECOMPUTE_VERSION = 2
@@ -23,7 +25,7 @@ def _cache_dir() -> Path:
     return Path(root) / "ibl"
 
 
-class EnvironmentMap:
+class EnvironmentMap(_deferred._DeferredWrites):
     """Equirectangular float32 radiance data (H, W, 3), linear colour space.
 
     Build via class methods; pass to engine.set_environment().
