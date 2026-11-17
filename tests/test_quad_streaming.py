@@ -222,3 +222,64 @@ def test_distances_match_scalar():
     want = [s._distance(n, 1234.5, -300.0, 7.0) for n in nodes]
     assert np.allclose(s._distances(nodes, 1234.5, -300.0, 7.0), want)
     s.close()
+
+
+def test_small_moves_keep_the_settled_cut_and_order(monkeypatch):
+    s = streamer(6)
+    _settle(s, 500.0, 500.0, 2.0)
+    calls = {"n": 0}
+    real = QuadStreamer._check
+
+    def counting(self, *a):
+        calls["n"] += 1
+        return real(self, *a)
+
+    monkeypatch.setattr(QuadStreamer, "_check", counting)
+    picked = s._select(500.0, 500.0, 2.0)
+    for k in range(1, 20):  # 1 m a frame, under move (25 m)
+        assert s._select(500.0 + k, 500.0, 2.0) is picked
+    assert calls["n"] == 0
+    s._select(500.0 + s.move, 500.0, 2.0)  # a full move: a new pass checks the cut again
+    assert calls["n"] > 0
+    s.close()
+
+
+def test_moving_camera_with_nothing_new_skips_the_draw_set(monkeypatch):
+    s = streamer(6)
+    _settle(s, 500.0, 500.0, 2.0)
+    drawn = s.drawn()
+    calls = {"n": 0}
+    real = QuadStreamer._on_gpu
+
+    def counting(self, *a):
+        calls["n"] += 1
+        return real(self, *a)
+
+    monkeypatch.setattr(QuadStreamer, "_on_gpu", counting)
+    for k in range(1, 20):
+        s.focus(500.0 + k, 500.0, 2.0)
+    assert calls["n"] == 0 and s.drawn() == drawn
+    s.close()
+
+
+def test_build_finishing_while_moving_is_drawn():
+    gate = threading.Event()
+
+    def build(L, a, b):
+        if (L, a, b) == (0, 0, 0):
+            gate.wait(5)
+        return tri()
+
+    s = streamer(2, build)
+    for k in range(50):
+        s.focus(100.0 + k * 0.01, 100.0, 1.0)
+        time.sleep(0.002)
+    assert (0, 0, 0) not in s.drawn()
+    gate.set()
+    for k in range(400):
+        s.focus(100.5 + k * 0.01, 100.0, 1.0)
+        if (0, 0, 0) in s.drawn():
+            break
+        time.sleep(0.005)
+    assert (0, 0, 0) in s.drawn()
+    s.close()
