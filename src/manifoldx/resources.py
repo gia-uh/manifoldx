@@ -1,9 +1,13 @@
 """GPU resource management: Geometry, Material registries and factories."""
 
+import threading
+
 import numpy as np
 import wgpu
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
+
+from manifoldx import _deferred
 
 # _SPRITE_QUAD is imported lazily inside GeometryRegistry.__init__ to avoid
 # a circular import: resources -> viz.geometry -> viz -> viz.materials -> resources.
@@ -14,7 +18,7 @@ from typing import Any, Dict, Optional
 # =============================================================================
 
 
-class Material(ABC):
+class Material(_deferred._DeferredWrites, ABC):
     """Abstract base class for PBR materials."""
 
     binding_slot: int = -1
@@ -1496,6 +1500,7 @@ class GeometryRegistry:
         self._name_to_id: Dict[str, int] = {}  # name -> registry id
         self._next_id = 1
         self._gpu_buffers: Dict[int, dict] = {}  # id -> {vertex_buffer, index_buffer}
+        self._lock = threading.Lock()  # the id counter: two threads must not share an id
 
         # Register built-in geometries by name
         self._register_builtin(_sprite_quad["name"], _sprite_quad)
@@ -1537,6 +1542,7 @@ class GeometryRegistry:
         self._gpu_buffers[geometry_id] = buffers
         return buffers
 
+    @_deferred.deferred_in_pipeline
     def adopt_buffers(self, geometry_id: int, buffers: dict) -> None:
         """Take GPU buffers built elsewhere for a registered geometry: the dict
         create_buffers would have made (pack_vertices' info plus vertex_buffer,
@@ -1547,6 +1553,7 @@ class GeometryRegistry:
         """Get GPU buffers for geometry."""
         return self._gpu_buffers.get(geometry_id)
 
+    @_deferred.deferred_in_pipeline
     def release(self, geometry_id: int) -> None:
         """Forget a geometry and destroy its GPU buffers. Named built-ins stay."""
         if geometry_id in self._name_to_id.values():
@@ -1561,16 +1568,21 @@ class GeometryRegistry:
             self._object_to_id.pop(id(geo), None)
 
     def register(self, geometry_obj) -> int:
-        """Register a geometry, return ID. Same object returns same ID."""
-        obj_id = id(geometry_obj)
-        if obj_id in self._object_to_id:
-            return self._object_to_id[obj_id]
+        """Register a geometry, return ID. Same object returns same ID.
 
-        new_id = self._next_id
-        self._next_id += 1
-        self._object_to_id[obj_id] = new_id
-        self._geometries[new_id] = geometry_obj
-        return new_id
+        The id is handed out under a lock: a caller uses the id at once, so
+        this acts now even while calls are deferred (see the plan's departures).
+        """
+        with self._lock:
+            obj_id = id(geometry_obj)
+            if obj_id in self._object_to_id:
+                return self._object_to_id[obj_id]
+
+            new_id = self._next_id
+            self._next_id += 1
+            self._object_to_id[obj_id] = new_id
+            self._geometries[new_id] = geometry_obj
+            return new_id
 
     def _register_builtin(self, name: str, geometry_obj: dict) -> int:
         """Register a named built-in geometry. Returns the assigned ID."""
@@ -1613,18 +1625,24 @@ class MaterialRegistry:
         self._materials: Dict[int, Any] = {}
         self._object_to_id: Dict[int, int] = {}
         self._next_id = 1
+        self._lock = threading.Lock()  # the id counter: two threads must not share an id
 
     def register(self, material_obj) -> int:
-        """Register material, return ID. Same object returns same ID."""
-        obj_id = id(material_obj)
-        if obj_id in self._object_to_id:
-            return self._object_to_id[obj_id]
+        """Register material, return ID. Same object returns same ID.
 
-        new_id = self._next_id
-        self._next_id += 1
-        self._object_to_id[obj_id] = new_id
-        self._materials[new_id] = material_obj
-        return new_id
+        The id is handed out under a lock: a caller uses the id at once, so
+        this acts now even while calls are deferred (see the plan's departures).
+        """
+        with self._lock:
+            obj_id = id(material_obj)
+            if obj_id in self._object_to_id:
+                return self._object_to_id[obj_id]
+
+            new_id = self._next_id
+            self._next_id += 1
+            self._object_to_id[obj_id] = new_id
+            self._materials[new_id] = material_obj
+            return new_id
 
     def get(self, material_id: int) -> Any:
         """Get material by ID."""
@@ -1873,7 +1891,7 @@ def standard(color, roughness: float = 0.5, metallic: float = 0.0) -> StandardMa
 # =============================================================================
 
 
-class PointLight:
+class PointLight(_deferred._DeferredWrites):
     """Point light for GPU."""
 
     def __init__(self, color, intensity, position, distance=0, decay=2):
@@ -1906,7 +1924,7 @@ class PointLight:
         return data
 
 
-class SpotLight:
+class SpotLight(_deferred._DeferredWrites):
     """Spot light for GPU."""
 
     def __init__(
@@ -1956,7 +1974,7 @@ class SpotLight:
         return data
 
 
-class DirectionalLight:
+class DirectionalLight(_deferred._DeferredWrites):
     """Directional light for GPU."""
 
     def __init__(self, color, intensity, direction):
@@ -2014,6 +2032,7 @@ class VolumeRegistry:
         self._device = device
         self._volumes: Dict[int, _VolumeResource] = {}
         self._next_id = 1
+        self._lock = threading.Lock()  # the id counter: two threads must not share an id
 
     def register(self, data: np.ndarray, *, name: str | None = None) -> int:
         if data.ndim != 3:
@@ -2028,11 +2047,13 @@ class VolumeRegistry:
                 "volume data must be C-contiguous; "
                 "call `np.ascontiguousarray(array)` before registering."
             )
-        handle = self._next_id
-        self._next_id += 1
-        self._volumes[handle] = _VolumeResource(data=data, name=name or f"volume_{handle}")
+        with self._lock:
+            handle = self._next_id
+            self._next_id += 1
+            self._volumes[handle] = _VolumeResource(data=data, name=name or f"volume_{handle}")
         return handle
 
+    @_deferred.deferred_in_pipeline
     def update(self, handle: int, data: np.ndarray) -> None:
         res = self.get(handle)
         if data.shape != res.data.shape:

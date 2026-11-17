@@ -14,6 +14,8 @@ from typing import Any, Dict
 import numpy as np
 import wgpu
 
+from manifoldx import _deferred
+
 
 class TextureSizeError(ValueError):
     """Image is larger than the device's max_texture_dimension_2d limit."""
@@ -165,6 +167,7 @@ def texture_from_svg(engine, svg, size_px: int | tuple[int, int]) -> TextureHand
     return texture_from_array(engine, _svg.rasterize_svg(data, w, h))
 
 
+@_deferred.deferred_in_pipeline
 def write_texture(engine, handle: TextureHandle, rgba: np.ndarray, origin=(0, 0)) -> None:
     """Overwrite part of a texture in place: `rgba` is a (h, w, 4) uint8 sRGB patch with
     straight alpha, written with its top-left corner at `origin` = (x, y) pixels.
