@@ -1151,10 +1151,31 @@ fn sp_tiles(u: vec2<f32>, aa: f32, w: f32) -> vec2<f32> {
     return vec2<f32>(0.5 * sp_h1(c + row * 5.0) + 0.5 * clamp(f.y, 0.0, 1.0),
                      1.0 - smoothstep(w, w + aa, min(dy, side)));
 }
-// The albedo of surface `id` (0 none, 1 grass .. 7 tiles) round the linear colour `base`,
+// Square cement slabs a metre across with their joints, a tone per slab. worn adds what age does: a crack
+// across some slabs, stains that spread over several, and here and there a broken slab gone dark.
+fn sp_pavement(u: vec2<f32>, aa: f32, w: f32, worn: bool) -> vec2<f32> {
+    let c = floor(u);
+    let f = fract(u);
+    let joint = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y));
+    var ink = 1.0 - smoothstep(w, w + aa, joint);
+    var t = 0.42 + 0.22 * sp_h1(c) + 0.12 * (sp_vnoise(u * 2.7) - 0.5);
+    if (worn) {
+        if (sp_h1(c + 7.3) < 0.35) {  // one crack, corner to edge
+            let a = sp_h2(c + 1.7) * vec2<f32>(1.0, 0.25);
+            let b = vec2<f32>(0.2, 0.75) + sp_h2(c + 4.1) * vec2<f32>(0.6, 0.25);
+            let wob = 0.04 * (sp_vnoise(u * 9.0) - 0.5);
+            ink = max(ink, 1.0 - smoothstep(w * 0.6, w * 0.6 + aa, sp_seg(f + wob, a, b)));
+        }
+        let stain = sp_fbm(u * 0.35 + 11.0);
+        t = t - 0.35 * smoothstep(0.58, 0.72, stain);
+        if (sp_h1(c + 3.9) < 0.06) { t = 0.12; }  // a broken slab: the dark under it shows
+    }
+    return vec2<f32>(clamp(t, 0.0, 1.0), ink);
+}
+// The albedo of surface `id` (0 none, 1 grass .. 7 tiles, 8 pavement, 9 worn pavement) round the linear colour `base`,
 // at pattern coordinate `proj` (world units) whose screen derivative length is `fw`.
 fn surface_albedo(base: vec3<f32>, id: i32, proj: vec2<f32>, fw: f32) -> vec3<f32> {
-    if (id <= 0 || id > 7) { return base; }
+    if (id <= 0 || id > 9) { return base; }
     let k0 = id - 1;
     let prm = material.patterns[k0];  // scale, contrast, tones, ink width
     let dark = material.darks[k0 / 4][k0 % 4];
@@ -1169,7 +1190,9 @@ fn surface_albedo(base: vec3<f32>, id: i32, proj: vec2<f32>, fw: f32) -> vec3<f3
         case 3: { r = sp_bricks(u, vec2<f32>(0.5, 0.25), aa, prm.w); }
         case 4: { r = sp_bricks(u, vec2<f32>(1.0, 0.55), aa, prm.w); }
         case 5: { r = sp_planks(u, aa, prm.w); }
-        default: { r = sp_tiles(u, aa, prm.w); }
+        case 6: { r = sp_tiles(u, aa, prm.w); }
+        case 7: { r = sp_pavement(u, aa, prm.w, false); }
+        default: { r = sp_pavement(u, aa, prm.w, true); }
     }
     let t = r.x;
     var k = select(-0.5, 0.5, t >= 0.5);
@@ -1196,8 +1219,8 @@ _STANDARDMATERIAL_VCOLOR_SHADER = (
     .replace(
         "    cut:       vec4<f32>,   // x0, z0, x1, z1: an xz rectangle where nothing draws (empty when x1 <= x0)\n};",
         "    cut:       vec4<f32>,   // x0, z0, x1, z1: an xz rectangle where nothing draws (empty when x1 <= x0)\n"
-        "    patterns:  array<vec4<f32>, 7>,  // per surface: scale, contrast, tones, ink width\n"
-        "    darks:     array<vec4<f32>, 2>,  // per surface: ink darkness, four to a vec4\n};",
+        "    patterns:  array<vec4<f32>, 9>,  // per surface: scale, contrast, tones, ink width\n"
+        "    darks:     array<vec4<f32>, 3>,  // per surface: ink darkness, four to a vec4\n};",
     )
     .replace(
         "@group(0) @binding(3) var<uniform> light_data: LightData;\n",
@@ -1270,6 +1293,8 @@ SURFACE_PATTERNS = {
     5: (1.0, 0.10, 2, 0.05, 0.45),
     6: (1.0, 0.10, 2, 0.05, 0.45),
     7: (1.0, 0.16, 3, 0.07, 0.60),
+    8: (1.0, 0.10, 3, 0.025, 0.45),
+    9: (0.9, 0.14, 3, 0.03, 0.55),
 }
 
 
@@ -1522,11 +1547,11 @@ class StandardMaterial(Material):
         if self.cut is not None:
             data[:, 12:16] = self.cut
         if self.vertex_colors:  # the pattern table the vcolor shader reads
-            table = np.zeros((n, 44), dtype=np.float32)
-            for sid in range(1, 8):
+            table = np.zeros((n, 48), dtype=np.float32)
+            for sid in range(1, 10):
                 scale, contrast, tones, ink, dark = self.surface_patterns[sid]
                 table[:, (sid - 1) * 4:(sid - 1) * 4 + 4] = (scale, contrast, tones, ink)
-                table[:, 28 + sid - 1] = dark
+                table[:, 36 + sid - 1] = dark
             data = np.concatenate([data, table], axis=1)
         return data
 
