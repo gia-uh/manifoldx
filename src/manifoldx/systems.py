@@ -148,7 +148,8 @@ class SystemRegistry:
 
     def _run_one(self, engine, system: System, dt: float):
         """A serial system: the calling thread, no buffer bound (the frame's is used)."""
-        self._time(engine, system, lambda: system.run(engine, dt))
+        with engine._in_system(system.name):
+            self._time(engine, system, lambda: system.run(engine, dt))
 
     def _run_group(self, engine, group: list[System], dt: float):
         """A run of consecutive parallel systems, on the pool or one after another."""

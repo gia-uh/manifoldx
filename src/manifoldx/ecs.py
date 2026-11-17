@@ -1,5 +1,7 @@
 """Core Entity Component System: EntityStore, ComponentView, Query, decorators."""
 
+import threading
+
 import numpy as np
 from typing import TYPE_CHECKING
 
@@ -36,6 +38,11 @@ class EntityStore:
         # Per component, which slots have it: set by the spawn that filled the slot.
         self._members: dict[str, np.ndarray] = {}
         self._free_list: list[int] = []  # Reusable dead entity indices
+        # Slots handed out by reserve() and not written yet: not alive and not
+        # members, and never handed out again, so two threads spawning at once
+        # get disjoint indices.
+        self._reserved = np.zeros(max_entities, dtype=bool)
+        self._lock = threading.Lock()
         # One past the highest slot ever spawned into: every live entity sits
         # below it, so GPU syncs move only rows [0, _high_water).
         self._high_water = 0
@@ -53,8 +60,71 @@ class EntityStore:
             shape: Shape of each component value (e.g., (3,) for Vector3)
         """
         full_shape = (self.max_entities,) + shape
-        self._components[name] = np.zeros(full_shape, dtype=dtype)
-        self._members[name] = np.zeros(self.max_entities, dtype=bool)
+        with self._lock:
+            self._components[name] = np.zeros(full_shape, dtype=dtype)
+            self._members[name] = np.zeros(self.max_entities, dtype=bool)
+
+    def reserve(self, n: int) -> np.ndarray:
+        """Allocate n entity slots: not alive, no component rows, no hooks fired.
+
+        Under a lock, so two threads spawning at once get disjoint indices; a
+        reserved slot is never handed out again until it is written (or the
+        process ends). `spawn` reserves and writes in one call; a deferred
+        `Engine.spawn` reserves now and calls `write_reserved` at the apply step.
+        """
+        if n <= 0:
+            return np.zeros(0, dtype=np.int32)
+        with self._lock:
+            # Free list first, popped from its end, then the lowest never-used
+            # slots that nobody has reserved. Every free-list slot is dead.
+            k = min(n, len(self._free_list))
+            reused = self._free_list[len(self._free_list) - k :][::-1]
+            dead = np.flatnonzero(~self._alive & ~self._reserved)
+            if len(dead) < n:
+                raise RuntimeError(
+                    f"Max entities {self.max_entities} reached: spawning {n} with "
+                    f"{len(dead)} free slots; raise it with Engine(max_entities=...)"
+                )
+            fresh = dead[~np.isin(dead, reused)][: n - k] if k else dead[:n]
+            indices = np.concatenate([np.asarray(reused, dtype=np.int32), fresh.astype(np.int32)])
+            del self._free_list[len(self._free_list) - k :]
+            self._reserved[indices] = True
+        return indices
+
+    def write_reserved(self, indices: np.ndarray, **component_data):
+        """Make a `reserve`d batch alive and write its component rows.
+
+        Fires the registration hooks (joint blocks included) for exactly these
+        indices. Until this runs the batch is invisible to a query.
+        """
+        indices = np.asarray(indices, dtype=np.int32)
+        with self._lock:
+            self._reserved[indices] = False
+            self._alive[indices] = True
+            if len(indices):
+                self._high_water = max(self._high_water, int(indices.max()) + 1)
+            # A filled slot has the components given and Transform, and forgets the rest.
+            for name, members in self._members.items():
+                members[indices] = name in component_data or name == "Transform"
+        for hook in self._release_hooks:
+            hook(indices)
+
+        # Write component data to storage
+        for comp_name, data in component_data.items():
+            if comp_name not in self._components:
+                raise ValueError(f"Component {comp_name} not registered")
+
+            data = np.asarray(data, dtype=self._components[comp_name].dtype)
+
+            # Broadcast scalar to array
+            if data.size == 1 and len(indices) > 1:
+                data = np.full((len(indices),) + data.shape, data.item(), dtype=data.dtype)
+            elif data.shape[0] != len(indices):
+                raise ValueError(
+                    f"Component {comp_name}: expected {len(indices)} rows, got {data.shape[0]}"
+                )
+
+            self._components[comp_name][indices] = data
 
     def spawn(self, n: int, **component_data) -> np.ndarray:
         """
@@ -68,43 +138,8 @@ class EntityStore:
         Returns:
             np.ndarray of entity indices
         """
-        # Free list first, popped from its end, then the lowest never-used slots.
-        # Every free-list slot is dead, so the remaining dead slots exclude them.
-        k = min(n, len(self._free_list))
-        reused = self._free_list[len(self._free_list) - k :][::-1]
-        dead = np.flatnonzero(~self._alive)
-        if len(dead) < n:
-            raise RuntimeError(
-                f"Max entities {self.max_entities} reached: spawning {n} with "
-                f"{len(dead)} free slots; raise it with Engine(max_entities=...)"
-            )
-        fresh = dead[~np.isin(dead, reused)][: n - k] if k else dead[:n]
-        indices = np.concatenate([np.asarray(reused, dtype=np.int32), fresh.astype(np.int32)])
-        del self._free_list[len(self._free_list) - k :]
-        self._alive[indices] = True
-        if len(indices):
-            self._high_water = max(self._high_water, int(indices.max()) + 1)
-        for hook in self._release_hooks:
-            hook(indices)
-        # A filled slot has the components given and Transform, and forgets the rest.
-        for name, members in self._members.items():
-            members[indices] = name in component_data or name == "Transform"
-
-        # Write component data to storage
-        for comp_name, data in component_data.items():
-            if comp_name not in self._components:
-                raise ValueError(f"Component {comp_name} not registered")
-
-            data = np.asarray(data, dtype=self._components[comp_name].dtype)
-
-            # Broadcast scalar to array
-            if data.size == 1 and n > 1:
-                data = np.full((n,) + data.shape, data.item(), dtype=data.dtype)
-            elif data.shape[0] != n:
-                raise ValueError(f"Component {comp_name}: expected {n} rows, got {data.shape[0]}")
-
-            self._components[comp_name][indices] = data
-
+        indices = self.reserve(n)
+        self.write_reserved(indices, **component_data)
         return indices
 
     def destroy(self, indices: np.ndarray):
@@ -120,11 +155,11 @@ class EntityStore:
         # enter the free list twice (two spawns would then share its slot).
         indices = np.unique(np.asarray(indices))
         indices = indices[self._alive[indices]]
-        self._alive[indices] = False
+        with self._lock:
+            self._alive[indices] = False
+            self._free_list.extend(indices.tolist())
         for hook in self._release_hooks:
             hook(indices)
-        # Add to free list for reuse
-        self._free_list.extend(indices.tolist())
 
     def get_component_view(self, component_names: list[str], engine=None) -> "ComponentView":
         """A view of the alive entities that have every named component, ascending.
