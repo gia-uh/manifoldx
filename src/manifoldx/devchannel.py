@@ -155,6 +155,8 @@ class Meter:
             self.frames += 1
             self.total += dt
             for part, seconds in (split or {}).items():
+                if part not in self.split:  # e.g. a pipelined frame's overlap
+                    self.split[part] = 0.0
                 self.split[part] += seconds
             for name, seconds in (systems or {}).items():
                 self.systems[name] = self.systems.get(name, 0.0) + seconds

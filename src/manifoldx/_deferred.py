@@ -109,9 +109,22 @@ class _DeferredWrites:
     def __setattr__(self, name, value):
         engine = current()
         if self._defer_write(engine, name):
-            defer(engine, object.__setattr__, self, name, value)
+            defer(engine, self._set_and_bump, name, value)
             return
         object.__setattr__(self, name, value)
+        self._bump_version(name)
+
+    def _set_and_bump(self, name, value):
+        object.__setattr__(self, name, value)
+        self._bump_version(name)
+
+    def _bump_version(self, name) -> None:
+        """Count a public field write, for MANIFOLDX_PIPELINE=check."""
+        if name.startswith("_"):
+            return
+        counter = self.__dict__.get("_version")
+        if counter is not None:
+            counter.bump()
 
     def _defer_write(self, engine, name) -> bool:
         return (
