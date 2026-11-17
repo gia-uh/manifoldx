@@ -151,17 +151,23 @@ uv run python -m benchmarks frame --case parallel_systems --sizes 1 4 8 --agains
 
 A query is safe because query reads come from the start of the frame and query
 writes are commands: neither system can see the other's half-done work. The
-same reasoning does not cover everything a system can reach:
+same reasoning covers engine calls: every system of a group runs with its
+engine calls deferred, so they land as commands in its buffer, next to its
+query writes.
 
 - **Yes:** read and write through its query, call `engine.emit`, and call
   `engine.destroy`. Destroy only appends a command, so it lands in the system's
   buffer with the writes.
-- **No:** call `engine.spawn`. Spawn writes the entity store at once, and the
-  other systems are reading it; the call raises a `RuntimeError` naming the
-  system, and tells you to spawn from a serial system.
+- **Yes, deferred:** any engine call that changes render state, `engine.spawn`
+  included. A spawn reserves its indices at once, so the handle it returns is
+  valid immediately, its transform setters included; the rows and the alive bit
+  land with the rest of the group's commands, after the group, in registration
+  order. Read-your-writes lags within the frame, as it already does for query
+  writes: the new entity is not in a query until the next frame.
 - **No:** write a shared Python object without a lock, or rely on another
-  system of the same group having run. A group's systems are ordered with
-  respect to the frame, not to each other.
+  system of the same group having run, its spawns and other engine calls
+  included. A group's systems are ordered with respect to the frame, not to
+  each other.
 
 The last rule is easy to break by accident with a module-level list or counter.
 If a number changes when you did not expect it to, run the group serially

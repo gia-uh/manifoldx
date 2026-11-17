@@ -219,9 +219,10 @@ def drift(q: mx.Query[Transform, Velocity], dt: float):
 <ul>
 <li><code>@engine.system</code> keeps working bare. With arguments it takes <code>parallel</code>, <code>chunk</code> and <code>budget_ms</code>.</li>
 <li>Consecutive systems marked <code>parallel=True</code>, in registration order, form a group. A group's systems run at the same time on the frame pool, which has one thread per core.</li>
-<li>A system without <code>parallel=True</code> is a barrier: it starts after the group before it ends, and the next group starts after it ends. Its side effects outside the query (globals, <code>engine.spawn</code>, entity handles) happen in the same order as today.</li>
+<li>A system without <code>parallel=True</code> is a barrier: it starts after the group before it ends, and the next group starts after it ends. Its own side effects outside the query (globals, <code>engine.spawn</code>, entity handles) act at once, as today; a group's deferred ones land after every system has run.</li>
 <li>Each system writes to its own command buffer. After the group ends, the buffers are appended to the frame's buffer in registration order. Since query writes are already applied only after all systems (step 6 of <code>_draw_frame</code>), every system already reads the state from the start of the frame, so a group produces exactly the store a serial run produces.</li>
-<li>What a parallel system must not do: write to shared Python objects without a lock, call engine methods other than through its query and <code>engine.emit</code>, or depend on another system of its group having run. The docs say so, and a debug mode (<code>MANIFOLDX_PARALLEL=serial</code>) runs groups serially to tell a race from a bug.</li>
+<li>A group's systems always run with deferred engine calls, on the pool and in the serial fallback alike: an engine call that changes render state (<code>engine.spawn</code> included) becomes a <code>CALL</code> command in the system's own buffer and runs with it, in registration order, after the group — exactly as a query write does. The handle a deferred <code>spawn</code> returns is valid at once (its indices are reserved); its rows, alive bit and hooks are written at the apply step, so read-your-writes lags within the frame. A serial system outside a pipelined frame still acts at once.</li>
+<li>What a parallel system must not do: write to shared Python objects without a lock, or depend on another system of its group having run, including on its engine calls having taken effect. The docs say so, and a debug mode (<code>MANIFOLDX_PARALLEL=serial</code>) runs groups serially to tell a race from a bug.</li>
 <li>An exception in a parallel system is raised on the main thread after its group ends, with the system's name, as a serial system's exception is today.</li>
 </ul>
 </section>
@@ -274,7 +275,7 @@ def rebuild_index(q: mx.Query[Building], dt: float):
 <li>Registry registration and updates (geometry, material, volume, textures), and every device call reachable from a system, the streamer's uploads and frees included.</li>
 <li>GUI tree and theme changes.</li>
 </ul>
-<p>The cost is read-your-writes inside one frame: a system that sets the camera and reads it back gets last frame's pose, as query writes already behave. With pipelining off, and always in headless frames, calls act at once as today.</p>
+<p>The cost is read-your-writes inside one frame: a system that sets the camera and reads it back gets last frame's pose, as query writes already behave. With pipelining off, a serial system's calls act at once as today; a parallel group's always defer (section 05).</p>
 <ul>
 <li><code>MANIFOLDX_PIPELINE=check</code> keeps a version number on each structure the render reads and raises at the end of a frame if one changed while the render ran, naming it. Tests that render run once with pipelining and the check on.</li>
 <li>Frames stay in lockstep: the systems of N+1 never run ahead by more than one frame. The cost is one frame of input latency, about 16 ms at 60 fps.</li>
