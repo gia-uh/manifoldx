@@ -193,6 +193,75 @@ program runs unchanged on a normal CPython. `engine.group_split` lists each
 group's wall seconds in run order, so the same printout shows what serial mode
 costs.
 
+## Pipelined frames
+
+A frame has two halves that use different resources: the systems read and write
+the entity store, and the render reads the store and talks to the GPU. The
+parallel plaza already splits the first half across cores. `pipelined=True`
+splits the two halves from each other: while the main thread draws frame N, one
+worker thread runs frame N+1's systems, and the frame after that applies their
+commands.
+
+```python
+engine = mx.Engine("plaza", width=1280, height=720, pipelined=True)
+```
+
+On the free-threaded build, `run()` turns it on. On a build with the GIL it
+warns once and runs serially, and every headless path — `render_frame`,
+`_draw_still` and the dev channel's look — stays serial whatever the
+constructor says. The first frame of a run is serial too: its systems have to
+run before anything can be drawn. After that the render is always one frame
+behind the store, which is the price: about one frame of input latency, 16 ms
+at 60 fps.
+
+The systems keep their groups. A parallel group still runs on the frame pool;
+what changes is that the whole systems phase is handed to the frame's systems
+thread, and every system on it defers the engine calls that change render
+state. Those calls become `CALL` commands, applied on the main thread after
+the render and before the next frame's systems. The frame's store is therefore
+the store a serial run produces, with the render one frame behind.
+
+### What a system sees
+
+Read-your-writes changes, as it already does for query writes. Setting the
+camera and reading it back inside the same frame returns the previous pose; the
+new one is there for the next frame's systems and for the next render. The same
+holds for lights, materials, fog, the GUI and registry updates, and a deferred
+spawn returns a handle with a reserved index at once while its rows, alive bit
+and joint blocks land at the apply step.
+
+`engine.frame_split` gains `overlap`: the seconds the render and the systems
+spent running at the same time. Compare it with `update` and `render` to see
+how much of the frame the two halves actually shared.
+
+### Check mode
+
+`MANIFOLDX_PIPELINE=check` pins the contract that a system changes only its
+command buffer. The store's component arrays, members and alive mask, the
+geometry, material and volume registries, the camera and the lights carry
+version counters that every write bumps. The render records them when it
+starts and compares them when it ends, and a difference raises:
+
+```text
+RuntimeError: pipelined frame: the entity store changed while the render read it
+```
+
+The message names the structure that changed. Registering a new component type
+is setup, not a render-state write — the first spawn of a new type is allowed
+while the render runs. Run the tests and a drive with `MANIFOLDX_PIPELINE=check`
+before trusting a new system to the pipeline.
+
+The `pipelined` frame case measures the shape: a render of about 6 ms against
+systems of 2, 6 and 12 ms, serial versus pipelined. A 6 ms system under a 6 ms
+render should approach 6 ms a frame where serial costs about 12.
+
+```bash
+uv run python -m benchmarks frame --case pipelined
+```
+
+The case drives `_draw_frame` on an offscreen canvas with the pipeline forced
+on, because the window loop is what turns it on in a real run.
+
 ## The picture
 
 The final frame is the whole plaza again, with every walker where its own system

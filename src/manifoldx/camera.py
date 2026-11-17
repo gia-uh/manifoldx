@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 
-from manifoldx import _deferred
+from manifoldx import _deferred, _versions
 
 
 class Camera(_deferred._DeferredWrites):
@@ -13,6 +13,8 @@ class Camera(_deferred._DeferredWrites):
     def __init__(
         self, position=(0, 1, 2), target=(0, 0, 0), fov=60, up=(0, 1, 0), near=0.1, far=1000.0
     ):
+        # Bumped by every public field write, for MANIFOLDX_PIPELINE=check.
+        self._version = _versions._Counter()
         self.position = np.array(position, dtype=np.float32)
         self.target = np.array(target, dtype=np.float32)
         self.fov = fov

@@ -7,7 +7,7 @@ import wgpu
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
-from manifoldx import _deferred
+from manifoldx import _deferred, _versions
 
 # _SPRITE_QUAD is imported lazily inside GeometryRegistry.__init__ to avoid
 # a circular import: resources -> viz.geometry -> viz -> viz.materials -> resources.
@@ -1501,12 +1501,19 @@ class GeometryRegistry:
         self._next_id = 1
         self._gpu_buffers: Dict[int, dict] = {}  # id -> {vertex_buffer, index_buffer}
         self._lock = threading.Lock()  # the id counter: two threads must not share an id
+        # Bumped when a geometry appears or goes, for MANIFOLDX_PIPELINE=check.
+        self._version = _versions._Counter()
 
         # Register built-in geometries by name
         self._register_builtin(_sprite_quad["name"], _sprite_quad)
         self._register_builtin(_axis_line_x["name"], _axis_line_x)
         self._register_builtin(_axis_line_y["name"], _axis_line_y)
         self._register_builtin(_axis_line_z["name"], _axis_line_z)
+
+    @property
+    def _version_value(self) -> int:
+        """A number that changes when the set of geometries or their buffers change."""
+        return self._version.value
 
     def create_buffers(self, geometry_id: int, geometry_obj: dict, queue):
         """Create GPU buffers for geometry.
@@ -1548,6 +1555,7 @@ class GeometryRegistry:
         create_buffers would have made (pack_vertices' info plus vertex_buffer,
         and index_buffer and index_count when indexed)."""
         self._gpu_buffers[geometry_id] = buffers
+        self._version.bump()
 
     def get_gpu_buffers(self, geometry_id: int) -> dict:
         """Get GPU buffers for geometry."""
@@ -1566,6 +1574,7 @@ class GeometryRegistry:
         geo = self._geometries.pop(geometry_id, None)
         if geo is not None:
             self._object_to_id.pop(id(geo), None)
+        self._version.bump()
 
     def register(self, geometry_obj) -> int:
         """Register a geometry, return ID. Same object returns same ID.
@@ -1582,6 +1591,7 @@ class GeometryRegistry:
             self._next_id += 1
             self._object_to_id[obj_id] = new_id
             self._geometries[new_id] = geometry_obj
+            self._version.bump()
             return new_id
 
     def _register_builtin(self, name: str, geometry_obj: dict) -> int:
@@ -1626,6 +1636,12 @@ class MaterialRegistry:
         self._object_to_id: Dict[int, int] = {}
         self._next_id = 1
         self._lock = threading.Lock()  # the id counter: two threads must not share an id
+        self._version = _versions._Counter()
+
+    @property
+    def _version_value(self) -> int:
+        """A number that changes when a material is registered."""
+        return self._version.value
 
     def register(self, material_obj) -> int:
         """Register material, return ID. Same object returns same ID.
@@ -1642,6 +1658,7 @@ class MaterialRegistry:
             self._next_id += 1
             self._object_to_id[obj_id] = new_id
             self._materials[new_id] = material_obj
+            self._version.bump()
             return new_id
 
     def get(self, material_id: int) -> Any:
@@ -1895,6 +1912,7 @@ class PointLight(_deferred._DeferredWrites):
     """Point light for GPU."""
 
     def __init__(self, color, intensity, position, distance=0, decay=2):
+        self._version = _versions._Counter()
         self.color = color
         self.intensity = intensity
         self.position = position
@@ -1938,6 +1956,7 @@ class SpotLight(_deferred._DeferredWrites):
         distance=0,
         decay=2,
     ):
+        self._version = _versions._Counter()
         self.color = color
         self.intensity = intensity
         self.position = position
@@ -1978,6 +1997,7 @@ class DirectionalLight(_deferred._DeferredWrites):
     """Directional light for GPU."""
 
     def __init__(self, color, intensity, direction):
+        self._version = _versions._Counter()
         self.color = color
         self.intensity = intensity
         self.direction = direction
@@ -2033,6 +2053,12 @@ class VolumeRegistry:
         self._volumes: Dict[int, _VolumeResource] = {}
         self._next_id = 1
         self._lock = threading.Lock()  # the id counter: two threads must not share an id
+        self._version = _versions._Counter()
+
+    @property
+    def _version_value(self) -> int:
+        """A number that changes when a volume is registered or updated."""
+        return self._version.value
 
     def register(self, data: np.ndarray, *, name: str | None = None) -> int:
         if data.ndim != 3:
@@ -2051,6 +2077,7 @@ class VolumeRegistry:
             handle = self._next_id
             self._next_id += 1
             self._volumes[handle] = _VolumeResource(data=data, name=name or f"volume_{handle}")
+            self._version.bump()
         return handle
 
     @_deferred.deferred_in_pipeline
@@ -2067,6 +2094,7 @@ class VolumeRegistry:
             raise ValueError("volume data must be C-contiguous.")
         res.data = data
         res.dirty = True
+        self._version.bump()
 
     def get(self, handle: int) -> _VolumeResource:
         if handle not in self._volumes:

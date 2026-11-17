@@ -155,6 +155,8 @@ class Meter:
             self.frames += 1
             self.total += dt
             for part, seconds in (split or {}).items():
+                if part not in self.split:  # e.g. a pipelined frame's overlap
+                    self.split[part] = 0.0
                 self.split[part] += seconds
             for name, seconds in (systems or {}).items():
                 self.systems[name] = self.systems.get(name, 0.0) + seconds
@@ -170,7 +172,7 @@ class Meter:
                  "rss_mb": round(_rss_mb(), 1), "gc": {"runs": list(self.gc_runs), "ms": round(1000 * self.gc_time, 1)}}
             n = max(self.frames, 1)
             parts = {part: round(1000 * seconds / n, 1) for part, seconds in self.split.items()}
-            parts["idle"] = round(max(0.0, m["frame_ms"] - sum(parts.values())), 1)  # between frames: the loop
+            parts["idle"] = round(max(0.0, m["frame_ms"] - sum(v for k, v in parts.items() if k != "overlap")), 1)  # between frames: the loop
             m["split_ms"] = parts
             slowest = sorted(((seconds / n, name) for name, seconds in self.systems.items()), reverse=True)[:5]
             if slowest:

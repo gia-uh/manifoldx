@@ -3,6 +3,7 @@ import argparse
 import gc
 import os
 import threading
+import warnings
 import wgpu
 import sys
 import numpy as np
@@ -18,8 +19,8 @@ from time import perf_counter_ns
 import manifoldx.ecs as ecs
 from manifoldx.ecs import EntityStore
 from manifoldx.commands import CommandBuffer, Command, CommandType
-from manifoldx import _deferred
-from manifoldx.systems import SystemRegistry
+from manifoldx import _deferred, _versions
+from manifoldx.systems import SystemRegistry, _gil_is_on
 from manifoldx.resources import GeometryRegistry, MaterialRegistry, VolumeRegistry
 from manifoldx.renderer import RenderPipeline
 from manifoldx.components import Component, Transform, Mesh, Material
@@ -44,6 +45,22 @@ def _overlap_is_ordered() -> bool:
 
 
 _OVERLAP_OK = None
+
+
+_pipeline_gil_warned = False
+
+
+def _warn_pipeline_gil() -> None:
+    """Say once that pipelined frames need the free-threaded build."""
+    global _pipeline_gil_warned
+    if _pipeline_gil_warned:
+        return
+    _pipeline_gil_warned = True
+    warnings.warn(
+        "GIL on: pipelined frames run serially (use the free-threaded build, 3.14t)",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 def _drop_alpha(rgba: np.ndarray) -> np.ndarray:
@@ -341,6 +358,7 @@ class Engine:
         max_fps: float = 240.0,
         max_entities: int = 100_000,
         check_numerics: bool = True,
+        pipelined: bool = False,
     ):
         self.title = title
         self.h = height
@@ -356,6 +374,13 @@ class Engine:
         self.max_fps = max_fps
         self.check = check_numerics  # Enable/disable validation warnings
         ecs.ENABLE_VALIDATION = check_numerics  # Set global flag for ECS validation
+        # Render frame N while frame N+1's systems run, in run() on a
+        # free-threaded build. Off by default; always off for headless frames.
+        self.pipelined = bool(pipelined)
+        self._pipeline_on = False  # set by run(); `_draw_frame` obeys it
+        self._pipeline_frames = 0  # frames drawn; the first one is serial
+        self._pipeline_executor: ThreadPoolExecutor | None = None
+        self._pipeline_check = _versions._check_enabled()
 
         # Private stuff
         self._running = False
@@ -391,9 +416,11 @@ class Engine:
         self.state = hot._state if hot._state is not None else hot.State()
         self._looks = []  # futures waiting for the next presented frame as PNG bytes (the dev server's look)
         self._look_copy = None  # a frame copied for them, read back on the frame after
-        # Seconds the last frame spent: updating (events, async, systems), acquiring the window's
-        # next image (vsync, or the GPU behind), and rendering the rest. manifoldx run --debug reads it.
-        self.frame_split = {"update": 0.0, "acquire": 0.0, "render": 0.0}
+        # Seconds the last frame spent: updating (events, async, systems), acquiring
+        # the window's next image (vsync, or the GPU behind), rendering the rest, and
+        # (in a pipelined frame) how much of the update overlapped the render.
+        # manifoldx run --debug reads it.
+        self.frame_split = {"update": 0.0, "acquire": 0.0, "render": 0.0, "overlap": 0.0}
         self._acquire_s = 0.0
 
         # Input layer — keyboard + mouse + resize. The bridge attaches to
@@ -416,6 +443,8 @@ class Engine:
 
         # === ECS Infrastructure ===
         self.store = EntityStore(max_entities)
+        if self._pipeline_check:
+            self.store._watch()
         # One command buffer per running system: the current thread's while a
         # system runs (see _bind_commands), otherwise the frame's.
         self._frame_commands = CommandBuffer()
@@ -1442,6 +1471,39 @@ class Engine:
 
     # === Frame Rendering (shared by run() and render()) ===
 
+    def _get_pipeline_executor(self) -> ThreadPoolExecutor:
+        """The systems thread of a pipelined frame, one frame at a time."""
+        if self._pipeline_executor is None:
+            self._pipeline_executor = ThreadPoolExecutor(
+                1, thread_name_prefix="manifoldx-systems"
+            )
+        return self._pipeline_executor
+
+    def _version_state(self) -> dict:
+        """What the render reads, as version numbers, for MANIFOLDX_PIPELINE=check."""
+        camera = self._camera
+        lights = [self._sun, self._spot, *self._lights]
+        return {
+            "the entity store": self.store._version_value,
+            "the geometry registry": self._geometry_registry._version_value,
+            "the material registry": self._material_registry._version_value,
+            "the volume registry": self._volume_registry._version_value,
+            "the camera": (id(camera), getattr(getattr(camera, "_version", None), "value", None)),
+            "the lights": tuple(
+                (id(light), getattr(getattr(light, "_version", None), "value", None))
+                for light in lights
+            ),
+        }
+
+    def _check_versions(self, before: dict) -> None:
+        """Fail if a structure the render read changed while it ran."""
+        after = self._version_state()
+        for name, version in before.items():
+            if after[name] != version:
+                raise RuntimeError(
+                    f"pipelined frame: {name} changed while the render read it"
+                )
+
     def _draw_frame(self):
         """Draw a single frame. Backend-agnostic - used by both run() and render()."""
         started = time.perf_counter()
@@ -1493,40 +1555,109 @@ class Engine:
         # Step 4: pump asyncio loop (async handlers + waiter wakers).
         self._pump_aio_loop()
 
-        # Step 5: run user systems (may emit commands).
-        self.systems.run_all(self, dt)
+        # The first frame is serial: its systems have to run before anything
+        # can render. A dev-channel look also takes the serial path, so the
+        # frame it captures is the one its systems made.
+        pipeline = self._pipeline_on and self._pipeline_frames > 0 and not self._looks
+        if not pipeline:
+            # Step 5: run user systems (may emit commands).
+            self.systems.run_all(self, dt)
 
-        # Step 6: flush command buffer (events + handlers + systems).
-        # Commands queued between frames (async tasks resumed by the running loop
-        # in run() mode) are still in the buffer here, so they are not lost.
-        self.commands.execute(self.store)
-        self.commands.clear()
+            # Step 6: flush command buffer (events + handlers + systems).
+            # Commands queued between frames (async tasks resumed by the running
+            # loop in run() mode) are still in the buffer here, so they are not lost.
+            self.commands.execute(self.store)
+            self.commands.clear()
+            self._free_geometries()
+
+            # Step 7: GPU compute systems.
+            self._compute_runner.run_all(dt)
+            self._frame_index += 1
+
+            # Under a fixed timestep the clock is the sum of the steps simulated so
+            # far: this step is done, so the next frame (and every reader after it)
+            # sees one more dt. Wall-clock mode leaves elapsed to _compute_dt.
+            if is_fixed:
+                self.elapsed += dt
+
+            updated = time.perf_counter()
+            self._render_only(dt)
+            self.frame_split = {
+                "update": updated - started,
+                "acquire": self._acquire_s,
+                "render": time.perf_counter() - updated - self._acquire_s,
+                "overlap": 0.0,
+            }
+            self._pipeline_frames += 1
+            return True  # Continue rendering
+
+        # Pipelined: hand this frame's systems to one worker, draw the state the
+        # last frame applied while they run, then wait and apply their buffers.
+        systems_buffer = CommandBuffer()
+
+        def run_systems():
+            with self._bind_commands(systems_buffer), self._defer_calls():
+                self.systems.run_all(self, dt, defer=True)
+
+        systems_started = time.perf_counter()
+        systems = self._get_pipeline_executor().submit(run_systems)
+        render_started = time.perf_counter()
+        render_error: BaseException | None = None
+        try:
+            self._render_only(dt)
+        except BaseException as error:  # wait for the worker, then surface this one
+            render_error = error
+        render_ended = time.perf_counter()
+        systems_error: BaseException | None = None
+        try:
+            systems.result()
+        except BaseException as error:
+            systems_error = error
+        systems_ended = time.perf_counter()
+
+        if render_error is not None:
+            raise render_error
+        if systems_error is not None:
+            raise systems_error
+
+        # Step 6: events and handlers queued theirs before the systems started;
+        # the systems' buffer follows, so apply both in call order.
+        self._frame_commands.extend(systems_buffer)
+        self._frame_commands.execute(self.store)
+        self._frame_commands.clear()
         self._free_geometries()
 
         # Step 7: GPU compute systems.
         self._compute_runner.run_all(dt)
         self._frame_index += 1
-
-        # Under a fixed timestep the clock is the sum of the steps simulated so
-        # far: this step is done, so the next frame (and every reader after it)
-        # sees one more dt. Wall-clock mode leaves elapsed to _compute_dt.
         if is_fixed:
             self.elapsed += dt
 
         updated = time.perf_counter()
-        self._render_only(dt)
-        self.frame_split = {"update": updated - started, "acquire": self._acquire_s,
-                            "render": time.perf_counter() - updated - self._acquire_s}
+        render_seconds = render_ended - render_started
+        self.frame_split = {
+            "update": (updated - started) - render_seconds,
+            "acquire": self._acquire_s,
+            "render": render_seconds - self._acquire_s,
+            "overlap": max(
+                0.0,
+                min(systems_ended, render_ended) - max(systems_started, render_started),
+            ),
+        }
+        self._pipeline_frames += 1
         return True  # Continue rendering
 
     def _render_only(self, dt):
         """Steps 8 onward of _draw_frame: draw the current state, no simulation."""
+        before = self._version_state() if self._pipeline_check else None
         # Step 8: render pipeline.
         self._render_pipeline.run(self, dt)
         try:
             self._draw_passes()
         finally:
             self._render_pipeline.end_frame()
+        if before is not None:
+            self._check_versions(before)
 
     def _draw_passes(self):
 
@@ -1768,14 +1899,21 @@ class Engine:
             )
 
     def _draw_still(self, simulate: bool = True) -> np.ndarray:
-        frame = None
-        for _ in range(self._STILL_FRAMES):
-            if simulate:
-                self._draw_frame()
-            else:
-                self._render_only(getattr(self, "_last_dt", 0.0) or 0.0)
-            frame = self._render_canvas.draw()
-        return _drop_alpha(np.asarray(frame))
+        # Headless frames are always serial, whatever the constructor says: a
+        # still's systems have to have run before it is drawn.
+        pipeline = self._pipeline_on
+        self._pipeline_on = False
+        try:
+            frame = None
+            for _ in range(self._STILL_FRAMES):
+                if simulate:
+                    self._draw_frame()
+                else:
+                    self._render_only(getattr(self, "_last_dt", 0.0) or 0.0)
+                frame = self._render_canvas.draw()
+            return _drop_alpha(np.asarray(frame))
+        finally:
+            self._pipeline_on = pipeline
 
     def _flat_for_label(self, label: int):
         from manifoldx.resources import FlatMaterial
@@ -1906,6 +2044,9 @@ class Engine:
         if self._frame_pool is not None:
             self._frame_pool.shutdown(wait=False, cancel_futures=True)
             self._frame_pool = None
+        if self._pipeline_executor is not None:
+            self._pipeline_executor.shutdown(wait=False, cancel_futures=True)
+            self._pipeline_executor = None
 
     def close(self) -> None:
         """Stop the engine and free the GPU device it requested; safe to call twice.
@@ -1957,6 +2098,13 @@ class Engine:
         self._init_canvas(canvas)
 
         self._running = True
+        self._pipeline_frames = 0  # the first frame of a run is serial
+        if self.pipelined:
+            if _gil_is_on():
+                _warn_pipeline_gil()
+                self._pipeline_on = False
+            else:
+                self._pipeline_on = True
 
         # 'startup' fires on the first frame, inside the running loop (see _run_loop).
         self._startup_pending = True
@@ -2034,6 +2182,9 @@ class Engine:
         self._init_canvas(canvas)
 
         self._running = True
+
+        # Video rendering is headless: never pipeline it.
+        self._pipeline_on = False
 
         # Set up video writer with imageio-ffmpeg
         writer = self._get_video_writer(output, fps, self.w, self.h, codec, quality)

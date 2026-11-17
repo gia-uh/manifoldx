@@ -6,6 +6,7 @@ import time
 import typing
 import warnings
 from concurrent.futures import wait
+from contextlib import nullcontext
 from typing import Any, Callable
 
 from manifoldx.commands import CommandBuffer
@@ -102,8 +103,11 @@ class SystemRegistry:
             system.removed = True
         self._systems = [s for s in self._systems if s.func is not func]
 
-    def run_all(self, engine, dt: float):
+    def run_all(self, engine, dt: float, *, defer: bool = False):
         """Execute all systems in order.
+
+        `defer` marks every system's thread as deferring its engine calls (a
+        pipelined frame, whose render runs meanwhile), pool threads included.
 
         Consecutive `parallel=True` systems form one group: each runs on the
         frame pool with a command buffer of its own, and the buffers are
@@ -126,7 +130,7 @@ class SystemRegistry:
                 i += 1
                 continue
             if not system.parallel:
-                self._run_one(engine, system, dt)
+                self._run_one(engine, system, dt, defer)
                 i += 1
                 continue
             group = []
@@ -135,7 +139,7 @@ class SystemRegistry:
                     group.append(snapshot[i])
                 i += 1
             if group:
-                self._run_group(engine, group, dt)
+                self._run_group(engine, group, dt, defer)
 
     def _time(self, engine, system: System, run):
         """Run `run()` for `system`, adding its seconds to engine.system_split."""
@@ -146,12 +150,16 @@ class SystemRegistry:
             seconds = time.perf_counter() - started
             engine.system_split[system.name] = engine.system_split.get(system.name, 0.0) + seconds
 
-    def _run_one(self, engine, system: System, dt: float):
+    def _run_one(self, engine, system: System, dt: float, defer: bool = False):
         """A serial system: the calling thread, no buffer bound (the frame's is used)."""
-        with engine._in_system(system.name):
-            self._time(engine, system, lambda: system.run(engine, dt))
+        try:
+            with engine._in_system(system.name), (engine._defer_calls() if defer else nullcontext()):
+                self._time(engine, system, lambda: system.run(engine, dt))
+        except Exception as error:
+            error.add_note(f"in system {system.name}")
+            raise
 
-    def _run_group(self, engine, group: list[System], dt: float):
+    def _run_group(self, engine, group: list[System], dt: float, defer: bool = False):
         """A run of consecutive parallel systems, on the pool or one after another."""
         started = time.perf_counter()
         one_by_one = _parallel_is_off() or _gil_is_on() or len(group) == 1
@@ -163,7 +171,9 @@ class SystemRegistry:
             # mix with the frame's just because the pool is unavailable.
             for system, buf in pairs:
                 try:
-                    with engine._bind_commands(buf), engine._in_parallel(system.name):
+                    with engine._bind_commands(buf), engine._in_parallel(system.name), (
+                        engine._defer_calls() if defer else nullcontext()
+                    ):
                         self._time(engine, system, lambda s=system: s.run(engine, dt))
                 except Exception as error:  # every system of a group runs, then the first fails
                     errors.append((system, error))
@@ -171,7 +181,9 @@ class SystemRegistry:
             pool = engine._get_frame_pool()
 
             def work(system: System, buf: CommandBuffer):
-                with engine._bind_commands(buf), engine._in_parallel(system.name):
+                with engine._bind_commands(buf), engine._in_parallel(system.name), (
+                    engine._defer_calls() if defer else nullcontext()
+                ):
                     self._time(engine, system, lambda: system.run(engine, dt))
 
             futures = [(system, buf, pool.submit(work, system, buf)) for system, buf in pairs]
@@ -182,9 +194,11 @@ class SystemRegistry:
                     errors.append((system, error))
 
         engine.group_split.append(time.perf_counter() - started)
-        # In registration order, whatever order the systems finished in.
+        # In registration order, whatever order the systems finished in, into
+        # whatever buffer the caller bound (the frame's, or a pipelined frame's
+        # systems buffer).
         for _, buf in pairs:
-            engine._frame_commands.extend(buf)
+            engine.commands.extend(buf)
         if errors:
             for system, error in errors:
                 error.add_note(f"in parallel system {system.name}")

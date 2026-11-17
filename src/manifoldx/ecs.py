@@ -5,6 +5,8 @@ import threading
 import numpy as np
 from typing import TYPE_CHECKING
 
+from manifoldx import _deferred, _versions
+
 
 if TYPE_CHECKING:
     from manifoldx.commands import CommandBuffer
@@ -49,6 +51,37 @@ class EntityStore:
         # Called with the indices of every spawn and destroy, so per-entity
         # state kept outside the store (joint blocks) never outlives its entity.
         self._release_hooks: list = []
+        # Bumped by every write to the arrays and the alive/members masks, for
+        # MANIFOLDX_PIPELINE=check. The arrays are wrapped by watch().
+        self._version = _versions._Counter()
+        self._watched = False
+
+    def _watch(self) -> None:
+        """Bump the version on in-place writes to the arrays, for check mode.
+
+        Called once by Engine when MANIFOLDX_PIPELINE=check. Until then the
+        arrays are plain ndarrays and the counter tracks only the store's own
+        writes; check mode needs the rest, because a system can write a row by
+        hand.
+        """
+        if self._watched:
+            return
+        self._watched = True
+        self._alive = _versions._VersionedArray(self._alive, self._version)
+        for name, array in self._components.items():
+            self._components[name] = _versions._VersionedArray(array, self._version)
+        for name, array in self._members.items():
+            self._members[name] = _versions._VersionedArray(array, self._version)
+
+    @property
+    def _version_value(self) -> int:
+        """A number that changes whenever the store's rows or masks change."""
+        return self._version.value
+
+    def _wrap(self, array: np.ndarray) -> np.ndarray:
+        if self._watched:
+            return _versions._VersionedArray(array, self._version)
+        return array
 
     def register_component(self, name: str, dtype: np.dtype, shape: tuple):
         """
@@ -61,8 +94,14 @@ class EntityStore:
         """
         full_shape = (self.max_entities,) + shape
         with self._lock:
-            self._components[name] = np.zeros(full_shape, dtype=dtype)
-            self._members[name] = np.zeros(self.max_entities, dtype=bool)
+            self._components[name] = self._wrap(np.zeros(full_shape, dtype=dtype))
+            self._members[name] = self._wrap(np.zeros(self.max_entities, dtype=bool))
+        # Registering a component is setup, not a render-state write: a system
+        # spawning the first entity of a new type does it while the render runs,
+        # and it adds a name the render did not read. Do not fail the check on
+        # it (the plan's register_component gap).
+        if not _deferred.deferring():
+            self._version.bump()
 
     def reserve(self, n: int) -> np.ndarray:
         """Allocate n entity slots: not alive, no component rows, no hooks fired.

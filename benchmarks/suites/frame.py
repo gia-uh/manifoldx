@@ -1,6 +1,8 @@
 """Per-frame CPU cost of whole scenes: render prep, batching, culling, uploads, encoding."""
 
-from benchmarks import scenes
+import numpy as np
+
+from benchmarks import harness, scenes
 from benchmarks.harness import case, count_calls, frame_ms, measure, start
 
 SIZES = [1_000, 10_000, 100_000]
@@ -58,6 +60,60 @@ def parallel_systems(k):
     """k independent systems of 2,000 entities each, registered as one parallel group when the
     engine supports it (serially on an engine without @engine.system(parallel=True))."""
     return _frame(scenes.independent_systems(k))
+
+
+@case("frame", "pipelined", sizes=[2, 6, 12], smoke=2)
+def pipelined(system_ms):
+    """A ~6 ms render against a system of `system_ms` ms, serial then pipelined; drives the window
+    path's _draw_frame on an offscreen canvas with the pipeline forced on."""
+    import time
+
+    import manifoldx as mx
+    from manifoldx.components import Transform
+
+    # The real scene renders in about 6 ms on the GPU desktop; the smoke size
+    # keeps tests quick (the harness lowers REPEAT to 1 there).
+    n = 22_000 if harness.REPEAT > 1 else 200
+
+    def build(pipeline):
+        engine = scenes.meshes(n)
+
+        @engine.system
+        def spin(q: mx.Query[Transform], dt: float):
+            data = q[Transform].position.data
+            deadline = time.perf_counter() + system_ms / 1000.0
+            while time.perf_counter() < deadline:
+                data = np.sin(data) * 0.5 + 0.5
+            q[Transform].position = data
+
+        start(engine)
+        if pipeline:
+            # run() turns this on for a free-threaded window; a benchmark pins
+            # it here because _draw_frame is driven directly.
+            engine._pipeline_on = True
+            engine._pipeline_frames = 0
+        return engine
+
+    serial = build(False)
+    piped = build(True)
+    try:
+        serial_ms = frame_ms(serial, frames=5, warmup=2)
+        pipelined_ms = frame_ms(piped, frames=5, warmup=2)
+        # One frame can stall on the OS scheduler; report the median overlap of
+        # a few more frames, not whichever frame happened to be last.
+        overlaps = []
+        for _ in range(7):
+            piped._draw_frame()
+            piped._render_canvas.draw()
+            overlaps.append(piped.frame_split["overlap"])
+        return {
+            "ms": serial_ms,
+            "pipelined_ms": pipelined_ms,
+            "overlap_ms": 1000.0 * float(np.median(overlaps)),
+        }
+    finally:
+        serial.close()
+        piped.close()
 
 
 @case("frame", "unique_meshes", sizes=[100, 1_000, 5_000], smoke=5)
