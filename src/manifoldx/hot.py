@@ -76,8 +76,12 @@ class HotReloader:
         self.channel = None
 
     def _owned(self, path):
+        """Whether a file is the app's. The interpreter's environment never is, though a project's .venv sits
+        in its folder: its console scripts run as __main__, which must survive a reload."""
         path = os.path.abspath(path)
-        return path.startswith(self._root) and "site-packages" not in path and not path.startswith(_MANIFOLDX_DIR)
+        env = os.path.abspath(sys.prefix) + os.sep
+        return (path.startswith(self._root) and "site-packages" not in path and not path.startswith(_MANIFOLDX_DIR)
+                and not path.startswith(env))
 
     def _load(self):
         """Run the app until it calls engine.run(); return that engine, or None if it never did."""

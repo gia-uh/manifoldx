@@ -198,3 +198,30 @@ def test_reload_cancels_old_async_handlers(tmp_path):
         hot.step()
     assert all(t.done() for t in old_tasks)
     assert hot.state.ticks % 1000 < 10  # only the new ticker still counts
+
+
+def test_a_launcher_in_the_projects_venv_stays_main_across_reloads(tmp_path, monkeypatch):
+    # `uv run manifoldx run -m pkg.mod`: __main__ is .venv/bin/manifoldx, inside the project folder.
+    import types
+
+    (tmp_path / "venvpkg").mkdir()
+    write(tmp_path / "venvpkg" / "__init__.py", "")
+    write(tmp_path / "venvpkg" / "entry.py", APP.format(version=1))
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    write(tmp_path / ".venv" / "bin" / "manifoldx", "")
+    launcher = types.ModuleType("__main__")
+    launcher.__file__ = str(tmp_path / ".venv" / "bin" / "manifoldx")
+    monkeypatch.setitem(sys.modules, "__main__", launcher)
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / ".venv"))
+    monkeypatch.chdir(tmp_path)
+    hot = HotReloader(module="venvpkg.entry", canvas_factory=offscreen, poll=0, channel=False)
+    try:
+        hot.start()
+        hot.step()
+        write(tmp_path / "venvpkg" / "entry.py", APP.format(version=2))
+        hot.step()
+        hot.step()
+        assert hot.state.version == 2
+        assert sys.modules["__main__"] is launcher
+    finally:
+        sys.modules.pop("venvpkg", None)
