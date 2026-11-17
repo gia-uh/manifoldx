@@ -108,6 +108,8 @@ class SystemRegistry:
 
         `defer` marks every system's thread as deferring its engine calls (a
         pipelined frame, whose render runs meanwhile), pool threads included.
+        A group's systems always defer, `defer` or not: its engine calls become
+        commands in its own buffer, applied with the buffer after the group.
 
         Consecutive `parallel=True` systems form one group: each runs on the
         frame pool with a command buffer of its own, and the buffers are
@@ -139,7 +141,7 @@ class SystemRegistry:
                     group.append(snapshot[i])
                 i += 1
             if group:
-                self._run_group(engine, group, dt, defer)
+                self._run_group(engine, group, dt)
 
     def _time(self, engine, system: System, run):
         """Run `run()` for `system`, adding its seconds to engine.system_split."""
@@ -159,8 +161,14 @@ class SystemRegistry:
             error.add_note(f"in system {system.name}")
             raise
 
-    def _run_group(self, engine, group: list[System], dt: float, defer: bool = False):
-        """A run of consecutive parallel systems, on the pool or one after another."""
+    def _run_group(self, engine, group: list[System], dt: float):
+        """A run of consecutive parallel systems, on the pool or one after another.
+
+        Every system of the group runs inside `engine._defer_calls()`: its
+        render-state engine calls (a spawn included) become CALL commands in its
+        own buffer, applied in registration order once the group ends, exactly
+        as its query writes already are.
+        """
         started = time.perf_counter()
         one_by_one = _parallel_is_off() or _gil_is_on() or len(group) == 1
         pairs = [(system, CommandBuffer()) for system in group]
@@ -171,8 +179,10 @@ class SystemRegistry:
             # mix with the frame's just because the pool is unavailable.
             for system, buf in pairs:
                 try:
-                    with engine._bind_commands(buf), engine._in_parallel(system.name), (
-                        engine._defer_calls() if defer else nullcontext()
+                    with (
+                        engine._bind_commands(buf),
+                        engine._in_system(system.name),
+                        engine._defer_calls(),
                     ):
                         self._time(engine, system, lambda s=system: s.run(engine, dt))
                 except Exception as error:  # every system of a group runs, then the first fails
@@ -181,8 +191,11 @@ class SystemRegistry:
             pool = engine._get_frame_pool()
 
             def work(system: System, buf: CommandBuffer):
-                with engine._bind_commands(buf), engine._in_parallel(system.name), (
-                    engine._defer_calls() if defer else nullcontext()
+                # The flag is thread-local: enter it here, not around the submit.
+                with (
+                    engine._bind_commands(buf),
+                    engine._in_system(system.name),
+                    engine._defer_calls(),
                 ):
                     self._time(engine, system, lambda: system.run(engine, dt))
 
