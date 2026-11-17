@@ -358,7 +358,7 @@ class Engine:
         max_fps: float = 240.0,
         max_entities: int = 100_000,
         check_numerics: bool = True,
-        pipelined: bool = False,
+        pipelined: bool | None = None,
     ):
         self.title = title
         self.h = height
@@ -376,7 +376,9 @@ class Engine:
         ecs.ENABLE_VALIDATION = check_numerics  # Set global flag for ECS validation
         # Render frame N while frame N+1's systems run, in run() on a
         # free-threaded build. Off by default; always off for headless frames.
-        self.pipelined = bool(pipelined)
+        # None: pipelined in run() on the free-threaded build, serial with the GIL
+        # (silently). True asks for it and warns when the GIL makes it serial.
+        self.pipelined = pipelined
         self._pipeline_on = False  # set by run(); `_draw_frame` obeys it
         self._pipeline_frames = 0  # frames drawn; the first one is serial
         self._pipeline_executor: ThreadPoolExecutor | None = None
@@ -2099,9 +2101,10 @@ class Engine:
 
         self._running = True
         self._pipeline_frames = 0  # the first frame of a run is serial
-        if self.pipelined:
+        if self.pipelined is not False:
             if _gil_is_on():
-                _warn_pipeline_gil()
+                if self.pipelined:
+                    _warn_pipeline_gil()
                 self._pipeline_on = False
             else:
                 self._pipeline_on = True

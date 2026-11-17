@@ -197,17 +197,18 @@ costs.
 
 A frame has two halves that use different resources: the systems read and write
 the entity store, and the render reads the store and talks to the GPU. The
-parallel plaza already splits the first half across cores. `pipelined=True`
-splits the two halves from each other: while the main thread draws frame N, one
+parallel plaza already splits the first half across cores. Pipelining, on by
+default in `run()`, splits the two halves from each other: while the main thread draws frame N, one
 worker thread runs frame N+1's systems, and the frame after that applies their
 commands.
 
 ```python
-engine = mx.Engine("plaza", width=1280, height=720, pipelined=True)
+engine = mx.Engine("plaza", width=1280, height=720, pipelined=False)  # opt out
 ```
 
-On the free-threaded build, `run()` turns it on. On a build with the GIL it
-warns once and runs serially, and every headless path — `render_frame`,
+On the free-threaded build, `run()` pipelines unless the engine says
+`pipelined=False`. On a build with the GIL it runs serially, and warns once
+only when the engine asked for `pipelined=True`, and every headless path — `render_frame`,
 `_draw_still` and the dev channel's look — stays serial whatever the
 constructor says. The first frame of a run is serial too: its systems have to
 run before anything can be drawn. After that the render is always one frame
