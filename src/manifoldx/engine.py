@@ -669,17 +669,6 @@ class Engine:
         finally:
             self._command_tls.system_name = previous
 
-    @contextmanager
-    def _in_parallel(self, name: str):
-        """Mark the current thread as running parallel system `name`, until the block ends."""
-        previous = getattr(self._command_tls, "parallel_system", None)
-        self._command_tls.parallel_system = name
-        with self._in_system(name):
-            try:
-                yield
-            finally:
-                self._command_tls.parallel_system = previous
-
     # === Render-state fields behind deferring properties ===
     # A plain attribute write from a system would race the render; these
     # setters queue the write as a CALL while the thread defers, and act at
@@ -1329,16 +1318,11 @@ class Engine:
     def spawn(self, *args, n: int = 1, **kwargs):
         """Spawn n entities now, with these components, and return a handle to the first (None for n=0).
 
-        While calls are deferred, the indices are reserved now (so the handle is
-        valid at once) and the rows, the alive bit and the hooks are written at
-        the apply step, in call order with the handle's setters and destroy.
+        From a parallel system the indices are reserved now (so the handle is
+        valid at once) and the rows, the alive bit and the hooks are written
+        after its group, in registration order with its siblings' writes.
+        While a thread defers calls, the same holds until the apply step.
         """
-        parallel = getattr(self._command_tls, "parallel_system", None)
-        if parallel is not None and not self._deferring():
-            raise RuntimeError(
-                "engine.spawn writes the store at once: call it from a serial system, "
-                f"not from parallel system {parallel}"
-            )
         processed_kwargs, mesh_geo_id = self._spawn_data(n, args, kwargs)
         if n <= 0:
             return None

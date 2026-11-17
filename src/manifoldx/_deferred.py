@@ -1,11 +1,12 @@
 """Deferring engine calls into the current command buffer.
 
-With pipelining off, which is the default and always the case in headless
-frames, every engine call acts at once, exactly as before. While a pipelined
-frame's systems run, a thread is marked as deferring (``Engine._defer_calls()``
-in tests, the systems thread in a pipelined frame): the calls that change what
-the render reads append a ``CALL`` command to that thread's command buffer
-instead, and run, in call order, on the main thread at the apply step.
+A serial system outside a pipelined frame makes every engine call act at once,
+exactly as before: headless frames included. While a thread defers — a
+pipelined frame's systems thread (``Engine._defer_calls()``, which tests also
+use), or any system of a parallel group, which always defers — the calls that
+change what the render reads append a ``CALL`` command to that thread's command
+buffer instead, and run, in call order, on the main thread once the group (or
+the frame) applies its buffers.
 
 Read-your-writes inside one frame is the cost: a system that sets the camera
 and reads it back gets the previous pose, as query writes already behave.
