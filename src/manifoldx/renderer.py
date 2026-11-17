@@ -780,7 +780,7 @@ class RenderPipeline:
             # of new meshes compiles nothing new.
             gb = geometry_buffers or {}
             layout = ("layout", gb.get("stride", 6 * 4), gb.get("has_uvs", False),
-                      gb.get("has_colors", False), gb.get("joints_offset"))
+                      gb.get("has_colors", False), gb.get("joints_offset"), gb.get("has_facade", False))
             key = (layout, material_type, material_subtype, getattr(material, "pipeline_state", None))
 
         if key in self._pipelines:
@@ -986,7 +986,8 @@ class RenderPipeline:
         if is_textured:
             shader_source = material._compile(textured=True)
         elif material_subtype == "vcolor":
-            shader_source = material._compile(vertex_colors=True)
+            shader_source = material._compile(vertex_colors=True,
+                                              facade=(geometry_buffers or {}).get("has_facade", False))
         else:
             shader_source = material._compile()
         # Skinned geometry gets its own pipeline (the key holds geometry_id) whose
@@ -1226,6 +1227,10 @@ class RenderPipeline:
                         "shader_location": 2,
                     }
                 )
+                if (geometry_buffers or {}).get("has_facade"):
+                    vertex_attributes.append(
+                        {"format": wgpu.VertexFormat.float32x4, "offset": 10 * 4, "shader_location": 3}
+                    )
             if skinned:
                 vertex_attributes.append(
                     {

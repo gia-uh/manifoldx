@@ -53,6 +53,7 @@ class MeshData(NamedTuple):
     colors: np.ndarray  # f32[N, 3], linear
     indices: np.ndarray  # u32[M]
     surfaces: np.ndarray | None = None  # i[N]: surface pattern ids (resources.SURFACE_PATTERNS)
+    facade: np.ndarray | None = None  # f32[N, 4]: bays along, floors up, building type, seed (facade_albedo)
 
 
 class _Cell:
@@ -77,6 +78,8 @@ def _pack(build, *key):
     }
     if data.surfaces is not None:
         geo["surfaces"] = np.asarray(data.surfaces, np.int32)
+    if data.facade is not None:
+        geo["facade"] = np.asarray(data.facade, np.float32)
     vbytes, info = pack_vertices(geo)
     if len(geo["positions"]):
         geo["bounds"] = vertex_bounds(geo["positions"])  # the frustum test reads it, not the frame
