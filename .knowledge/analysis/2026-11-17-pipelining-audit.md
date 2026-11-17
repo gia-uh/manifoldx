@@ -6,8 +6,7 @@ handler / async task can mutate. Read-only audit; no repo changes.
 
 Repo: manifoldx, branch `main` at commit 43057af.
 Spec: section 08 "Pipelined frames" of `.knowledge/specs/2026-11-16-parallel-systems-design.html`
-(the file is not in the repo tree at this commit; it is stored at
-`.knowledge/specs/2026-11-16-parallel-systems-design.html`).
+(as it stood before the deferred-calls revision).
 There is no `pipelined` flag in the code yet; every path below is the current serial code.
 
 Type legend: **NP** = numpy array, **PY** = Python container (dict/list/set/object),
