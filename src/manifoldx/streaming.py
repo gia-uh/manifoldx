@@ -121,6 +121,7 @@ class _Uploads:
         self._drawn = {}  # key -> EntityHandle | None (None: an empty cell)
         self._stats = {"built": 0, "uploaded": 0, "dropped": 0, "max_frame_ms": 0.0}
         self._last = None
+        self._landed = 0  # uploads finished so far
 
     def _is_deferred(self) -> bool:
         """Whether this thread's calls to this streamer's engine are deferred."""
@@ -193,6 +194,7 @@ class _Uploads:
                 },
             )
             up["done"] = True
+            self._landed += 1
             cell.vbytes = cell.ibytes = None
         return spent
 
@@ -336,10 +338,14 @@ class QuadStreamer(_Uploads):
     back only once their parent's falls under tau / merge, so a camera that hovers does not make nodes
     blink. Nodes wholly beyond the camera's far plane are left out. The refinement spends at most
     `refine_ms` a frame, nearest nodes first, and carries the rest to the next frames, so a big world or
-    a teleport costs a bounded slice of each frame; `refine_ms=None` refines to the end every frame. The nodes picked are built
+    a teleport costs a bounded slice of each frame; `refine_ms=None` refines to the end every frame. Once a
+    pass settles, the next starts only after the camera moves `move` metres (cell / 8 by default) or its fov,
+    far plane or viewport changes, or tau does, and the nodes keep their order till then. A game may
+    change `tau` while it runs, to trade detail for frame time. The nodes picked are built
     nearest first, by `builders` workers at once, and uploaded within `upload_bytes_per_frame`. One not
     built yet leaves its nearest drawn ancestor drawn, and a drawn node hides everything under it, so
-    each spot is drawn once.
+    each spot is drawn once. A frame where the selection, the builds and the uploads did not change only
+    carries on the uploads in flight.
 
         streamer = QuadStreamer(engine, cell=200.0, origin=(-2048, -1024), levels=13,
                                 exists=tree.exists, build=build_node, error=lambda L: 200.0 * 2**L / 16)
@@ -362,11 +368,18 @@ class QuadStreamer(_Uploads):
         material=None,
         builders: int = 1,
         refine_ms: float | None = 2.0,
+        move: float | None = None,
     ):
         self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders)
         self.cell, self.origin, self.levels = float(cell), (int(origin[0]), int(origin[1])), int(levels)
         self.exists, self.error, self.tau, self.merge = exists, error, float(tau), float(merge)
         self.refine_ms = refine_ms
+        self.move = self.cell / 8 if move is None else float(move)
+        self._pass_at = None  # the camera the last pass started at
+        self._sel, self._sel_at = None, None  # the nodes to draw, nearest first, and the camera they were for
+        self._shown_for, self._shown_landed = None, -1  # the selection and uploads the drawn set was last made for
+        self._to_upload: list = []  # selected nodes built and not on the GPU yet, nearest first
+        self._fell_back = False
         self._selected: set = set()
         self._kids: dict = {}  # node -> its existing children
         self._cut: set | None = None  # the nodes that tile the tree now; None before the first focus
@@ -424,6 +437,7 @@ class QuadStreamer(_Uploads):
         parent's error is at least twice its child's, so a fixed point of these two rules is the walk's."""
         cam = self.engine.camera
         focal = self.engine.h / (2.0 * math.tan(math.radians(cam.fov) / 2.0))
+        here = (x, z, height, cam.fov, cam.far, self.engine.h, self.tau)
         first = self._cut is None
         if first:  # refined to the end: coarse nodes drawn first would hide everything under them till all is built
             root = (self.levels, 0, 0)
@@ -435,6 +449,9 @@ class QuadStreamer(_Uploads):
                 if self._pass_quiet and self._pass_started:  # the last pass changed nothing: settled
                     self._pass_started = False
                     break
+                if not self._pass_started and not self._moved(self._pass_at, here):
+                    break  # settled for a camera this close: nothing new to check
+                self._pass_at = here
                 cut = list(self._cut)
                 self._queue = [cut[k] for k in np.argsort(-self._distances(cut, x, z, height), kind="stable")]
                 self._pass_quiet, self._pass_started = True, True
@@ -447,10 +464,20 @@ class QuadStreamer(_Uploads):
         if self._cut_changed or self._order is None:
             self._order = list(self._cut)
             self._order_boxes = self._boxes(self._order) if len(self._order) >= _VECTOR_FROM else None
-            self._cut_changed = False
-        d = self._distances(self._order, x, z, height, self._order_boxes)
-        near = np.flatnonzero(d <= cam.far)
-        return [self._order[k] for k in near[np.argsort(d[near], kind="stable")]]
+            self._cut_changed, self._sel = False, None
+        if self._sel is None or self._moved(self._sel_at, here):
+            d = self._distances(self._order, x, z, height, self._order_boxes)
+            near = np.flatnonzero(d <= cam.far)
+            self._sel = [self._order[k] for k in near[np.argsort(d[near], kind="stable")]]
+            self._sel_at = here
+        return self._sel
+
+    def _moved(self, before, here) -> bool:
+        """Whether the camera at `here` is `move` metres or more from `before`, or its fov, far plane,
+        viewport or tau changed."""
+        if before is None or before[3:] != here[3:]:
+            return True
+        return math.dist(before[:3], here[:3]) >= self.move
 
     def _check(self, node, x, z, height, focal, far):
         """Split `node` or merge it with its siblings, if its error says so; queue what changed."""
@@ -488,32 +515,52 @@ class QuadStreamer(_Uploads):
         nothing: the last frame's answer stands."""
         got = self._tick()
         cam = self.engine.camera
-        still = (float(x), float(z), float(height), cam.fov, cam.far, self.engine.h)
+        still = (float(x), float(z), float(height), cam.fov, cam.far, self.engine.h, self.tau)
         last = self._still
         if (self._quiet and not got and last is not None and last[3:] == still[3:]
                 and max(abs(last[0] - still[0]), abs(last[1] - still[1]), abs(last[2] - still[2])) < self.cell * 1e-3):
             return
         self._still = still
         selected = self._select(float(x), float(z), float(height))
+        if not got and selected is self._shown_for and self._landed == self._shown_landed:
+            # Nothing that decides what to draw changed: carry on the uploads in flight, nearest first.
+            room = self.upload_bytes_per_frame
+            for n in self._to_upload:
+                if room <= 0:
+                    break
+                if n in self._ready and not self._on_gpu(n):
+                    if self._is_deferred():
+                        self._upload(n, room)
+                        room = 0
+                    else:
+                        room -= self._upload(n, room)
+            self._quiet = not (self._queue or self._pass_started or self._pending or self._fell_back)
+            return
         self._selected = set(selected)
         for n in selected:
             if n not in self._ready and n not in self._pending:
                 self._pending[n] = self._pool.submit(_pack, self.build, *n)
         room = self.upload_bytes_per_frame
-        for n in selected:
+        self._to_upload = [n for n in selected
+                           if n not in self._drawn and self._ready.get(n) is not None and not self._on_gpu(n)]
+        for n in self._to_upload:
             if room <= 0:
                 break
-            if self._ready.get(n) is not None and not self._on_gpu(n):
+            if not self._on_gpu(n):
                 if self._is_deferred():
                     self._upload(n, room)  # queued whole at apply: it spends the frame's budget
                     room = 0
                 else:
                     room -= self._upload(n, room)
 
+        landed = self._landed  # what the draw set below sees; an upload finished after it calls for another
+
         # What to draw: each selected node once it is built and on the GPU, else what covers its spot now;
         # then nothing under a node that is drawn, so four children replace their parent in one frame.
-        # The selection is disjoint, so the ancestor map and filter are only needed once a node falls back.
-        under = None  # node -> the drawn nodes below it, built on the first fallback
+        # The selection is disjoint, so only a coarser node drawn for one that fell back can cover others.
+        under: dict = {}  # level -> {node at that level: the drawn nodes below it}, built per level on need
+        ups = set()  # the coarser nodes kept for nodes that fell back
+        cover: dict = {}  # node -> its nearest drawn ancestor or None, for the walks up that share a path
         show = set()
         fell_back = False
         for n in selected:
@@ -521,18 +568,33 @@ class QuadStreamer(_Uploads):
                 show.add(n)
                 continue
             fell_back = True  # not ready: what covers its spot now stays, a coarser node above or finer ones below
-            up = next((u for u in self._ancestors(n) if u in self._drawn), None)
+            up, walked = None, []
+            for u in self._ancestors(n):
+                if u in cover:
+                    up = cover[u]
+                    break
+                walked.append(u)
+                if u in self._drawn:
+                    up = u
+                    break
+            for u in walked:
+                cover[u] = up
             if up is not None:
                 show.add(up)
+                ups.add(up)
                 continue
-            if under is None:
-                under = {}
+            L = n[0]
+            if L not in under:
+                below = under[L] = {}
                 for d in self._drawn:
-                    for u in self._ancestors(d):
-                        under.setdefault(u, []).append(d)
-            show.update(under.get(n, ()))
-        if fell_back:
-            show = {n for n in show if not any(u in show for u in self._ancestors(n))}
+                    if d[0] < L:
+                        k = L - d[0]
+                        below.setdefault((L, d[1] >> k, d[2] >> k), []).append(d)
+            show.update(under[L].get(n, ()))
+        if ups:
+            levels = sorted({u[0] for u in ups})
+            show = {n for n in show
+                    if not any((M, n[1] >> (M - n[0]), n[2] >> (M - n[0])) in ups for M in levels if M > n[0])}
         for n in [n for n in self._drawn if n not in show]:
             self._undraw(n)
         for n in sorted(show - set(self._drawn), key=lambda n: self._distance(n, x, z, height)):
@@ -547,6 +609,7 @@ class QuadStreamer(_Uploads):
         for n in [n for n in self._pending if n not in keep]:
             self._pending.pop(n).cancel()
         # Quiet: the refinement settled, nothing builds, and every selected node is drawn (none fell back).
+        self._shown_for, self._shown_landed, self._fell_back = selected, landed, fell_back
         self._quiet = not (self._queue or self._pass_started or self._pending or fell_back)
 
     def drawn(self) -> set[tuple[int, int, int]]:
