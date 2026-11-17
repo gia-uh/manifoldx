@@ -283,3 +283,14 @@ def test_build_finishing_while_moving_is_drawn():
         time.sleep(0.005)
     assert (0, 0, 0) in s.drawn()
     s.close()
+
+
+def test_tau_change_while_still_reselects():
+    s = streamer(6)
+    _settle(s, 500.0, 500.0, 2.0)
+    before = len(s._cut)
+    s.tau *= 4  # four times the error allowed: near nodes merge
+    for _ in range(50):
+        s.focus(500.0, 500.0, 2.0)
+    assert len(s._cut) < before
+    s.close()

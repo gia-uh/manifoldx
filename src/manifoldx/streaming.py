@@ -340,7 +340,8 @@ class QuadStreamer(_Uploads):
     `refine_ms` a frame, nearest nodes first, and carries the rest to the next frames, so a big world or
     a teleport costs a bounded slice of each frame; `refine_ms=None` refines to the end every frame. Once a
     pass settles, the next starts only after the camera moves `move` metres (cell / 8 by default) or its fov,
-    far plane or viewport changes, and the nodes keep their order till then. The nodes picked are built
+    far plane or viewport changes, or tau does, and the nodes keep their order till then. A game may
+    change `tau` while it runs, to trade detail for frame time. The nodes picked are built
     nearest first, by `builders` workers at once, and uploaded within `upload_bytes_per_frame`. One not
     built yet leaves its nearest drawn ancestor drawn, and a drawn node hides everything under it, so
     each spot is drawn once. A frame where the selection, the builds and the uploads did not change only
@@ -436,7 +437,7 @@ class QuadStreamer(_Uploads):
         parent's error is at least twice its child's, so a fixed point of these two rules is the walk's."""
         cam = self.engine.camera
         focal = self.engine.h / (2.0 * math.tan(math.radians(cam.fov) / 2.0))
-        here = (x, z, height, cam.fov, cam.far, self.engine.h)
+        here = (x, z, height, cam.fov, cam.far, self.engine.h, self.tau)
         first = self._cut is None
         if first:  # refined to the end: coarse nodes drawn first would hide everything under them till all is built
             root = (self.levels, 0, 0)
@@ -472,8 +473,8 @@ class QuadStreamer(_Uploads):
         return self._sel
 
     def _moved(self, before, here) -> bool:
-        """Whether the camera at `here` is `move` metres or more from `before`, or its fov, far plane or
-        viewport changed."""
+        """Whether the camera at `here` is `move` metres or more from `before`, or its fov, far plane,
+        viewport or tau changed."""
         if before is None or before[3:] != here[3:]:
             return True
         return math.dist(before[:3], here[:3]) >= self.move
@@ -514,7 +515,7 @@ class QuadStreamer(_Uploads):
         nothing: the last frame's answer stands."""
         got = self._tick()
         cam = self.engine.camera
-        still = (float(x), float(z), float(height), cam.fov, cam.far, self.engine.h)
+        still = (float(x), float(z), float(height), cam.fov, cam.far, self.engine.h, self.tau)
         last = self._still
         if (self._quiet and not got and last is not None and last[3:] == still[3:]
                 and max(abs(last[0] - still[0]), abs(last[1] - still[1]), abs(last[2] - still[2])) < self.cell * 1e-3):
