@@ -33,6 +33,8 @@ class Vehicles:
         self.gear, self.shift_timer, self.rpm = np.ones(n, int), np.zeros(n), np.zeros(n)
         self.drive_cut = np.zeros(n)  # share of the drive the assists take away, 0..1
         self.impulse = np.zeros(n)  # N·s of every contact impulse in the last step
+        self.brake_scale = np.ones((n, w))  # share of the pedal brake each wheel gets: the anti-lock lowers it
+        self.lit = np.zeros((n, 4), bool)  # which assists corrected in the last step
 
     def place(self, i: int, position, yaw: float, ground) -> None:
         """Put vehicle i at rest at (x, z) facing yaw, its wheels on the ground level nearest position's y."""
@@ -122,7 +124,7 @@ class Vehicles:
         engine = np.where((self.shift_timer > 0) | neutral, np.where(neutral, 0.0, np.minimum(engine, 0.0)), engine)
         drive = np.where(driven, (engine * ratio / n_driven)[:, None], 0.0)
         n_hand = np.maximum((p.handbrake & p.wheel_mask).sum(1), 1)
-        brakes = (stop * p.brake_torque)[:, None] * p.brake_share
+        brakes = (stop * p.brake_torque)[:, None] * p.brake_share * self.brake_scale
         brakes = brakes + np.where(p.handbrake, (hand * p.brake_torque / n_hand)[:, None], 0.0)
         brakes = brakes + p.rolling[:, None] * self.load * p.radius + self.extra_brake
         return drive, brakes

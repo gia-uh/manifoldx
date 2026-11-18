@@ -29,4 +29,5 @@ def car(mass=1200.0, drive="rear", tyre=Tyre(), cd=0.35, rolling=0.015, n_wheels
                        engine=Engine(idle_rpm=850, peak_torque_rpm=3500, peak_power_rpm=5500,
                                      idle_torque=0.6 * peak, peak_torque=1.3 * peak, power_torque=peak),
                        gearbox=Gearbox(ratios=(3.6, 2.1, 1.4, 1.0, 0.8), final=3.9),
-                       arb=(9000.0, 4000.0), cd=cd, area=2.0, rolling=rolling, max_steer=0.6)
+                       arb=(9000.0, 4000.0), cd=cd, area=2.0, rolling=rolling, max_steer=0.6,
+                       brake_torque=5000.0)
