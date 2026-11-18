@@ -1,5 +1,6 @@
 """Parametric trucks: the presets' measures, their parts, the dump pose and the merged mesh."""
 
+import hashlib
 from dataclasses import replace
 
 import numpy as np
@@ -7,11 +8,13 @@ import pytest
 
 from manifoldx.modeling.assets.truck import (
     Truck,
+    TruckParams,
     build_truck,
     box_truck,
     cargo_truck_1980s,
     dump_truck,
     fire_engine,
+    passenger_truck,
     tanker,
 )
 from manifoldx.modeling.assets.vehicle import Vehicle
@@ -22,6 +25,7 @@ PRESETS = {
     "tanker": tanker,
     "dump": dump_truck,
     "fire": fire_engine,
+    "passenger": passenger_truck,
 }
 
 
@@ -72,6 +76,9 @@ def test_the_presets_have_the_expected_package():
     assert tanker().body == "tanker" and tanker().axles == 3
     assert dump_truck().body == "dump" and dump_truck().axles == 3
     assert fire_engine().cab == "over" and fire_engine().body == "fire"
+    passenger = passenger_truck()
+    assert (passenger.body, passenger.bench_facing, passenger.bench_rows) == ("passenger", "forward", 3)
+    assert passenger.rear_ladder and passenger.hoops == 4
 
 
 @pytest.mark.parametrize("name", PRESETS)
@@ -171,3 +178,53 @@ def test_detail_scales_the_resolution():
     plain = build_truck(box_truck())
     coarse = build_truck(replace(box_truck(), detail=0.5))
     assert _triangles(coarse) < _triangles(plain)
+
+
+def _signature(truck):
+    """A short hash of the merged mesh's positions, rounded so a no-op change stays bit for bit equal."""
+    p = np.round(np.asarray(truck.merged().positions, np.float64), 3)
+    return hashlib.sha256(p.tobytes()).hexdigest()[:16]
+
+
+def test_the_untouched_truck_presets_build_exactly_as_before():
+    golden = {
+        "cargo_truck_1980s": "6cb655d10afa7fa9",
+        "box_truck": "f84d9418fca40371",
+        "tanker": "0b4d045d387d6cab",
+        "dump_truck": "5d0acff4d2995f90",
+        "fire_engine": "2265b16bcc0d82a5",
+    }
+    for name, digest in golden.items():
+        preset = {"cargo_truck_1980s": cargo_truck_1980s, "box_truck": box_truck, "tanker": tanker,
+                  "dump_truck": dump_truck, "fire_engine": fire_engine}[name]
+        assert _signature(build_truck(preset())) == digest, name
+
+
+def test_a_passenger_truck_carries_benches_hoops_a_canvas_roof_and_a_rear_ladder():
+    p = passenger_truck()
+    truck = build_truck(p)
+    canvas = np.concatenate([mesh.positions for mesh in _pieces(truck, "canvas")]).astype(float)
+    assert canvas[:, 1].max() == pytest.approx(p.canvas_height, abs=0.03)
+    assert np.ptp(canvas[:, 2]) > 0.9 * p.width  # a roof over the whole body
+    ladder = np.concatenate([mesh.positions for mesh in _pieces(truck, "ladder")]).astype(float)
+    rear = ladder[ladder[:, 0] < -p.length / 2 + 0.4]
+    assert len(rear) and np.ptp(rear[:, 1]) > 1.5  # rails down the rear face
+    deck = np.concatenate([mesh.positions for mesh in _pieces(truck, "deck")]).astype(float)
+    seats = deck[(deck[:, 1] > p.deck_height + p.bench_height - 0.06)]
+    assert np.ptp(seats[:, 0]) > 1.5  # rows spread along the body
+
+
+def test_a_side_facing_passenger_body_leaves_a_central_aisle():
+    p = replace(passenger_truck(), bench_facing="side", bench_rows=2)
+    truck = build_truck(p)
+    deck = np.concatenate([mesh.positions for mesh in _pieces(truck, "deck")]).astype(float)
+    seats = deck[deck[:, 1] > p.deck_height + p.bench_height - 0.06]
+    assert seats[:, 2].min() < -0.6 and seats[:, 2].max() > 0.6  # a bench down each side
+    assert np.abs(seats[:, 2]).min() > 0.25  # and nothing in the aisle
+
+
+def test_a_canvas_that_does_not_clear_the_deck_is_refused():
+    with pytest.raises(ValueError, match="deck_height"):
+        TruckParams(body="passenger", canvas_height=2.0, deck_height=2.0).validate()
+    with pytest.raises(ValueError, match="canvas_height"):
+        TruckParams(body="passenger", bench_height=0.8, canvas_height=2.0, deck_height=1.3).validate()

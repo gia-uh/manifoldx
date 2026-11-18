@@ -57,6 +57,14 @@ class CycleParams(ParamsRanges):
     bench_width: float = rng(0.86, 0.3, 1.5, step=0.01, unit='m')
     canopy: bool = False
     canopy_height: float = rng(2.0, 1.0, 3.0, step=0.01, unit='m')  # the top of the hood, from the ground
+    canopy_style: str = choice("flat", 'flat', 'arched', 'folding')  # the hood's shape over the bench or the box
+    canopy_drop: float = rng(0.0, 0.0, 0.6, step=0.01, unit='m')  # the valance hanging below the hood's edge
+    # The rider's cab: a front cowl, a screen and a roof reaching back over the bench.
+    cab: bool = False
+    roof_length: float = rng(1.6, 0.3, 3.0, step=0.01, unit='m')  # from the screen's top back over the bench
+    side_panels: str = choice("open", 'open', 'half')  # open sides, or a waist panel half-way up
+    # The body under the rider: plain boxes, or a scooter's rounded shields in place of the leg shield and rear box.
+    panels: str = choice("box", 'box', 'scooter')
     # How it is driven.
     power: str = choice("pedal", 'pedal', 'engine', 'hub')  # "pedal", "engine" or "hub"
     step_through: bool = False  # a scooter-like frame of panels instead of a diamond
@@ -86,6 +94,14 @@ class CycleParams(ParamsRanges):
             )
         if self.canopy and self.payload == "none":
             raise ValueError("CycleParams.canopy: a canopy needs a bench or a box to stand on")
+        if self.canopy and self.cab:
+            raise ValueError("CycleParams.cab: a cab already roofs the rider; it cannot stand under a canopy")
+        if not self.canopy and (self.canopy_style != "flat" or self.canopy_drop > 0):
+            raise ValueError("CycleParams.canopy_style: an arched or folding hood, or a canopy_drop, needs canopy=True")
+        if self.cab and self.layout != "delta":
+            raise ValueError(f"CycleParams.cab: a closed cab needs a delta layout, not {self.layout!r}")
+        if self.panels == "scooter" and not self.step_through:
+            raise ValueError("CycleParams.panels: scooter panels replace the diamond frame; they need step_through=True")
 
 
 @dataclass
@@ -206,7 +222,31 @@ def electric_moto() -> CycleParams:
             "handlebar": (0.46, 1.02, 0.0),
         },
         power="hub", step_through=True, footboard=True, headlamp="round", tail_lamp=True,
+        panels="scooter",
         frame_paint="#e8553f", box_paint="#bfe8d8", canopy_paint="#bfe8d8",
+    )
+
+
+def passenger_tricycle() -> CycleParams:
+    """An electric passenger tricycle: a closed cab with a screen, a roof over a two-person bench and half sides.
+
+    About 2.4 m long, 1.0 m wide and 1.9 m tall, on a delta of two rear wheels.
+    """
+    return CycleParams(
+        wheels=3, layout="delta", wheel_radius=0.26, tyre_width=0.095, rim_ratio=0.55, spokes=6,
+        wheelbase=1.62, rear_track=0.96, tube_radius=0.024, seat_style="bench", seat_width=0.44,
+        handlebar_width=0.66,
+        joints={
+            "bottom_bracket": (-0.30, 0.30, 0.0),
+            "seat": (-0.34, 0.66, 0.0),
+            "head": (0.66, 0.82, 0.0),
+            "head_top": (0.63, 0.98, 0.0),
+            "handlebar": (0.60, 1.04, 0.0),
+        },
+        payload="bench", bench_length=1.00, bench_width=0.96,
+        cab=True, roof_length=1.95, side_panels="half", canopy_height=1.92,
+        power="hub", step_through=True, footboard=True, headlamp="rect", tail_lamp=True,
+        frame_paint="#f3c633", box_paint="#8fe0cf", canopy_paint="#bfe8d8",
     )
 
 
@@ -377,27 +417,81 @@ def _frame(p: CycleParams, j: dict, body: dict) -> None:
 
 def _panels(p: CycleParams, j: dict, body: dict) -> None:
     """The scooter's body: a leg shield, a footboard, a rear box and a seat post, in place of a diamond."""
+    if p.panels == "scooter":
+        _scooter_panels(p, j, body)
+        return
     seg = _segments(p)
-    head, seat, bb = j["head"], j["seat"], j["bottom_bracket"]
+    head, seat = j["head"], j["seat"]
     board = max(0.16, p.wheel_radius - 0.09)
     if p.footboard:
         _add(body, "paint", _box_at((head[0] - 0.36, board, 0.0), (0.62, 0.045, 0.38)))
         _add(body, "trim", _box_at((head[0] - 0.36, board + 0.028, 0.0), (0.48, 0.015, 0.30)))
-    height = max(0.35, head[1] - board - 0.02)
-    _add(body, "paint", _box_at((head[0] - 0.06, board + height / 2, 0.0), (0.12, height, 0.44), pitch=0.14))
-    front = seat[0] + 0.14
-    back = j["rear_axle"][0] - 0.12
+    if not p.cab:  # the cab builds its own cowl and screen instead of this upright shield
+        height = max(0.35, head[1] - board - 0.02)
+        _add(body, "paint", _box_at((head[0] - 0.06, board + height / 2, 0.0), (0.12, height, 0.44), pitch=0.14))
+    seat_on_bench = p.payload == "bench"
+    front = seat[0] + (0.10 if seat_on_bench else 0.14)
+    back = j["rear_axle"][0] - (0.55 if seat_on_bench else 0.12)
     bottom = max(0.14, p.wheel_radius * 0.55)
-    top = seat[1] + 0.04
+    top = 0.46 if seat_on_bench else seat[1] + 0.04
+    width = max(0.35, p.bench_width - 0.06) if seat_on_bench and not p.cab else (
+        max(0.35, p.bench_width + 0.02) if p.cab else 0.35)
     _add(body, "paint", _box_at(((front + back) / 2, (bottom + top) / 2, 0.0),
-                                (front - back, top - bottom, 0.35)))
-    _add(body, "paint", _round(1.0, 0.30, 0.12, 0.185,
-                               (j["rear_axle"][0] + 0.02, top - 0.10, 0.0)))
+                                (front - back, top - bottom, width)))
+    if seat_on_bench:  # a rail round the passenger tub, and a mudguard over each rear wheel
+        for side in (-1.0, 1.0):
+            _add(body, "paint", _rod((back, top + 0.015, side * (width / 2 - 0.02)),
+                                     (front - 0.02, top + 0.015, side * (width / 2 - 0.02)),
+                                     p.tube_radius * 0.7, seg))
+            _add(body, "paint", _arc((j["rear_axle"][0], p.wheel_radius, side * p.rear_track / 2),
+                                     p.wheel_radius + 0.03, 0.018, p.tyre_width + 0.06,
+                                     0.20, 2.85, max(4, int(round(10 * p.detail)))))
+        _add(body, "paint", _rod((back, top + 0.015, -width / 2 + 0.02),
+                                 (back, top + 0.015, width / 2 - 0.02), p.tube_radius * 0.7, seg))
+    else:
+        _add(body, "paint", _round(1.0, 0.30, 0.12, 0.185,
+                                   (j["rear_axle"][0] + 0.02, top - 0.10, 0.0)))
     _add(body, "paint", _rod(seat, seat + np.array([0.0, 0.05, 0.0]), p.tube_radius, seg))
     if p.tail_lamp:
-        _add(body, "tail", _box_at((back - 0.02, top - 0.12, 0.0), (0.02, 0.08, 0.14)))
-    _add(body, "chrome", _rod((seat[0] - 0.30, seat[1] + 0.02, -0.13),
-                              (seat[0] - 0.30, seat[1] + 0.02, 0.13), 0.012, seg))
+        lamp_y = 0.38 if seat_on_bench else top - 0.12
+        _add(body, "tail", _box_at((back - 0.02, lamp_y, 0.0), (0.02, 0.08, 0.14)))
+    if not seat_on_bench:
+        _add(body, "chrome", _rod((seat[0] - 0.30, seat[1] + 0.02, -0.13),
+                                  (seat[0] - 0.30, seat[1] + 0.02, 0.13), 0.012, seg))
+
+
+def _scooter_panels(p: CycleParams, j: dict, body: dict) -> None:
+    """A scooter's body: a rounded front shield, a flat floorboard and a rounded tail under the seat."""
+    seg = _segments(p)
+    head, seat = j["head"], j["seat"]
+    rear = j["rear_axle"][0]
+    board = max(0.20, p.wheel_radius - 0.05)
+    # The front shield: a slim plate under the bars, leaning back, on a rounded apron over the wheel.
+    _add(body, "paint", _box_at((head[0] - 0.14, board + 0.34, 0.0), (0.12, 0.70, 0.42), pitch=0.12))
+    _add(body, "paint", _round(1.0, 0.15, 0.12, 0.25, (head[0] - 0.26, board + 0.09, 0.0)))
+    _add(body, "chrome", _box_at((head[0] - 0.075, board + 0.36, 0.0), (0.02, 0.52, 0.05), pitch=0.12))
+    if p.footboard:
+        _add(body, "paint", _box_at((head[0] - 0.43, board, 0.0), (0.62, 0.08, 0.46)))
+        _add(body, "trim", _box_at((head[0] - 0.43, board + 0.046, 0.0), (0.52, 0.015, 0.36)))
+    # A low tunnel joining the floorboard to the tail, where the rider's feet meet the seat.
+    _add(body, "paint", _box_at((seat[0] + 0.10, board + 0.10, 0.0), (0.34, 0.16, 0.28), pitch=-0.15))
+    # The tail: flat sides under the seat, a rounded back and a skirt down over the rear wheel.
+    back = rear - 0.20
+    front = seat[0] + 0.16
+    bottom = max(0.24, p.wheel_radius * 0.95)
+    top = seat[1] + 0.07
+    core_back = back + 0.16
+    _add(body, "paint", _box_at(((front + core_back) / 2, (top + bottom) / 2, 0.0),
+                                (front - core_back, top - bottom, 0.40)))
+    _add(body, "paint", _round(1.0, 0.15, (top - bottom) / 2, 0.20, (core_back - 0.02, (top + bottom) / 2, 0.0)))
+    _add(body, "paint", _round(1.0, (front - core_back) / 2 + 0.05, 0.07, 0.19, ((front + core_back) / 2, top - 0.03, 0.0)))
+    if p.tail_lamp:
+        _add(body, "tail", _box_at((back + 0.005, top - 0.12, 0.0), (0.025, 0.08, 0.11)))
+    _add(body, "paint", _arc((rear, p.wheel_radius, 0.0), p.wheel_radius + 0.03, 0.018,
+                             p.tyre_width + 0.06, 0.15, 2.95, max(4, int(round(10 * p.detail)))))
+    _add(body, "chrome", _rod((seat[0] - 0.28, seat[1] + 0.02, -0.15),
+                              (seat[0] - 0.28, seat[1] + 0.02, 0.15), 0.012, seg))
+    _add(body, "black", _box_at((front - 0.16, bottom - 0.02, 0.0), (0.16, 0.06, 0.34)))
 
 
 def _steer(p: CycleParams, j: dict, steer: dict) -> None:
@@ -423,7 +517,13 @@ def _steer(p: CycleParams, j: dict, steer: dict) -> None:
         grip = np.array([bar[0] - 0.045, bar[1] + 0.003, side * (half - 0.10)])
         _add(steer, "black", _rod(grip, end + np.array([-0.01, 0.0, 0.0]), 0.024, seg))
     if p.headlamp:
-        lamp_at = np.array([head[0] + 0.09, head[1] + 0.14, 0.0])
+        board = max(0.20, p.wheel_radius - 0.05)
+        if p.panels == "scooter":
+            lamp_at = np.array([head[0] - 0.12, head[1] + 0.06, 0.0])
+        elif p.cab:
+            lamp_at = np.array([head[0] + 0.16, board + 0.44, 0.0])
+        else:
+            lamp_at = np.array([head[0] + 0.09, head[1] + 0.14, 0.0])
         if p.headlamp == "round":
             bucket = _turn(Mesh.cylinder(0.105, 0.075, max(8, int(round(20 * p.detail)))), np.pi / 2, _AXLE)
             _add(steer, "chrome", bucket.translate(lamp_at))
@@ -435,8 +535,10 @@ def _steer(p: CycleParams, j: dict, steer: dict) -> None:
         _add(steer, "chrome", _rod((head[0] + 0.02, head[1] + 0.10, -0.08),
                                    (head[0] + 0.02, head[1] + 0.10, 0.08), 0.012, seg))
     if p.mudguards or p.step_through:
-        _add(steer, "paint", _arc(j["front_axle"], p.wheel_radius + 0.055, 0.012,
-                                  p.tyre_width + 0.06, 0.30, 2.60, max(4, int(round(10 * p.detail)))))
+        close = p.panels == "scooter" or p.cab  # a scooter's and a cab's mudguard hug the tyre
+        _add(steer, "paint", _arc(j["front_axle"], p.wheel_radius + (0.03 if close else 0.055),
+                                  (0.018 if close else 0.012), p.tyre_width + 0.06, 0.30, 2.60,
+                                  max(4, int(round(10 * p.detail)))))
 
 
 def _seat(p: CycleParams, j: dict, body: dict) -> None:
@@ -461,7 +563,7 @@ def _seat(p: CycleParams, j: dict, body: dict) -> None:
 def _bench(p: CycleParams, j: dict, body: dict) -> None:
     """A bench for two over the rear axle: a slatted cushion, a backrest and an arm rail."""
     seg = _segments(p)
-    x, y, z = j["rear_axle"][0] - 0.04, 0.52, 0.0
+    x, y, z = j["rear_axle"][0] - 0.04, (0.62 if p.cab else 0.52), 0.0
     half_l, half_w = p.bench_length / 2, p.bench_width / 2
     _add(body, "paint", _box_at((x, y - 0.09, z), (p.bench_length, 0.07, p.bench_width)))
     slats = 5
@@ -492,8 +594,36 @@ def _cargo_box(p: CycleParams, j: dict, body: dict) -> None:
         _add(body, "tail", _box_at((x - length / 2 - 0.01, bottom + height * 0.7, z), (0.02, 0.10, 0.14)))
 
 
+def _vault(x0, x1, half_w: float, top: float, rise: float, thickness: float, across: int) -> Mesh:
+    """A closed roof shell: a parabola across the width, swept straight along x, with a thickness under it."""
+    zs = np.linspace(-half_w, half_w, max(3, across) + 1)
+    n = len(zs)
+    P = np.zeros((2, n, 3))
+    for i, x in enumerate((x1, x0)):  # rear edge first
+        P[i, :, 0] = x
+        P[i, :, 2] = zs
+        P[i, :, 1] = top - rise * (zs / half_w) ** 2
+    verts = np.concatenate([P.reshape(-1, 3), (P - np.array([0.0, thickness, 0.0])).reshape(-1, 3)])
+
+    def T(i, j):
+        return i * n + j
+
+    def B(i, j):
+        return 2 * n + i * n + j
+
+    tris = []
+    for j in range(n - 1):
+        tris += [(T(0, j), T(1, j), T(1, j + 1)), (T(0, j), T(1, j + 1), T(0, j + 1))]
+        tris += [(B(0, j), B(0, j + 1), B(1, j + 1)), (B(0, j), B(1, j + 1), B(1, j))]
+        tris += [(T(0, j), B(0, j), B(0, j + 1)), (T(0, j), B(0, j + 1), T(0, j + 1))]
+        tris += [(T(1, j), T(1, j + 1), B(1, j + 1)), (T(1, j), B(1, j + 1), B(1, j))]
+    tris += [(T(0, 0), T(1, 0), B(1, 0)), (T(0, 0), B(1, 0), B(0, 0))]
+    tris += [(T(0, n - 1), B(0, n - 1), B(1, n - 1)), (T(0, n - 1), B(1, n - 1), T(1, n - 1))]
+    return Mesh(positions=verts.astype(np.float32), faces=np.array(tris, np.uint32))
+
+
 def _canopy(p: CycleParams, j: dict, body: dict) -> None:
-    """A hood on two bows, on four posts over the bench or the box."""
+    """A hood over the bench or the box: flat, arched across the width, or a folding hood on visible ribs."""
     seg = _segments(p)
     top = p.canopy_height
     if p.payload == "bench":
@@ -505,18 +635,89 @@ def _canopy(p: CycleParams, j: dict, body: dict) -> None:
         x = j["rear_axle"][0] + 0.28
         base = max(p.wheel_radius * 1.15, 0.36) + p.cargo_size[2]
     half_l, half_w = length / 2, width / 2
-    _add(body, "canopy", _box_at((x, top - 0.012, 0.0), (length, 0.025, width)))
-    for bx in (x - half_l + 0.09, x + half_l - 0.09):
-        bow = [(bx, top - 0.20, -half_w), (bx, top - 0.07, -half_w * 0.5), (bx, top - 0.025, 0.0),
-               (bx, top - 0.07, half_w * 0.5), (bx, top - 0.20, half_w)]
+    rise = 0.0 if p.canopy_style == "flat" else (0.10 if p.canopy_style == "arched" else 0.17)
+    if p.canopy_style == "flat":
+        _add(body, "canopy", _box_at((x, top - 0.012, 0.0), (length, 0.025, width)))
+    else:
+        _add(body, "canopy", _vault(x - half_l, x + half_l, half_w, top, rise, 0.025,
+                                    max(6, int(round(9 * p.detail)))))
+    ribs = 5 if p.canopy_style == "folding" else 2
+    xs = list(np.linspace(x - half_l + 0.09, x + half_l - 0.09, ribs))
+    for k, bx in enumerate(xs):
+        if rise:
+            bow = [(bx, top - 0.02 - rise * (zz / half_w) ** 2, zz)
+                   for zz in (-half_w, -half_w / 2, 0.0, half_w / 2, half_w)]
+            post_y = top - 0.02 - rise
+        else:
+            bow = [(bx, top - 0.20, -half_w), (bx, top - 0.07, -half_w * 0.5), (bx, top - 0.025, 0.0),
+                   (bx, top - 0.07, half_w * 0.5), (bx, top - 0.20, half_w)]
+            post_y = top - 0.20
         for a, b in zip(bow, bow[1:]):
             _add(body, "paint", _rod(a, b, 0.016, seg))
-        for side in (-1.0, 1.0):
-            _add(body, "paint", _rod((bx, base, side * (half_w - 0.06)),
-                                     (bx, top - 0.20, side * half_w), 0.019, seg))
+        if k in (0, len(xs) - 1):  # the end bows carry the hood on posts
+            for side in (-1.0, 1.0):
+                _add(body, "paint", _rod((bx, base, side * (half_w - 0.06)),
+                                         (bx, post_y, side * half_w), 0.019, seg))
     for side in (-1.0, 1.0):
         _add(body, "paint", _rod((x - half_l + 0.09, base, side * (half_w - 0.06)),
                                  (x + half_l - 0.09, base, side * (half_w - 0.06)), 0.016, seg))
+    if p.canopy_drop > 0:
+        drop = p.canopy_drop
+        hem = top - rise - drop - 0.015
+        for side in (-1.0, 1.0):  # a valance along each side, and one across the back
+            _add(body, "canopy", _box_at((x, hem + drop / 2, side * (half_w + 0.004)),
+                                         (length - 0.02, drop, 0.012)))
+        _add(body, "canopy", _box_at((x - half_l - 0.004, hem + drop / 2, 0.0), (0.012, drop, width)))
+
+
+def _cab(p: CycleParams, j: dict, body: dict) -> None:
+    """A passenger tricycle's cab: a rounded cowl, a raked screen, a roof back over the bench and half sides."""
+    seg = _segments(p)
+    head, seat = j["head"], j["seat"]
+    top = p.canopy_height
+    board = max(0.20, p.wheel_radius - 0.05)
+    width = max(0.72, p.bench_width + 0.04)
+    half = width / 2
+    # The cowl: a rounded nose over the front wheel and a panel under the screen.
+    _add(body, "paint", _round(1.0, 0.16, 0.34, half * 0.96, (head[0] - 0.04, board + 0.34, 0.0)))
+    _add(body, "paint", _box_at((head[0] - 0.12, board + 0.16, 0.0), (0.36, 0.32, width), pitch=0.06))
+    # A pedestal under the rider's seat, so the bench does not stand in the air.
+    _add(body, "paint", _box_at((seat[0], 0.56, 0.0), (0.30, 0.20, 0.30)))
+    # The screen, raked back from the cowl to the roof, with a dark frame round the glass.
+    y0, y1 = board + 0.52, top - 0.10
+    lean = 0.16
+    x_screen = head[0] - 0.12
+    angle = np.arctan2(lean, y1 - y0)
+    _add(body, "glass", _box_at((x_screen - lean / 2, (y0 + y1) / 2, 0.0),
+                                (0.022, np.hypot(y1 - y0, lean), width - 0.06), pitch=angle))
+    _add(body, "trim", _box_at((x_screen - lean - 0.01, y1 - 0.02, 0.0),
+                               (0.03, 0.05, width - 0.04), pitch=angle))
+    _add(body, "trim", _box_at((x_screen - 0.01, y0 + 0.02, 0.0),
+                               (0.03, 0.05, width - 0.04), pitch=angle))
+    _add(body, "paint", _rod((x_screen + 0.01, y0, -half + 0.03),
+                             (x_screen - lean + 0.01, y1, -half + 0.03), 0.020, seg))
+    _add(body, "paint", _rod((x_screen + 0.01, y0, half - 0.03),
+                             (x_screen - lean + 0.01, y1, half - 0.03), 0.020, seg))
+    # The roof: from the screen's top back over the bench, on a post at each rear corner.
+    roof_front = x_screen - lean - 0.02
+    roof_back = max(roof_front - p.roof_length, j["rear_axle"][0] - 0.72)
+    _add(body, "paint", _box_at(((roof_front + roof_back) / 2, top - 0.015, 0.0),
+                                (roof_front - roof_back, 0.030, width + 0.12)))
+    _add(body, "paint", _box_at(((roof_front + roof_back) / 2, top - 0.050, -half - 0.045),
+                                (roof_front - roof_back, 0.035, 0.035)))
+    _add(body, "paint", _box_at(((roof_front + roof_back) / 2, top - 0.050, half + 0.045),
+                                (roof_front - roof_back, 0.035, 0.035)))
+    for side in (-1.0, 1.0):
+        _add(body, "paint", _rod((roof_back + 0.06, top - 0.03, side * (half - 0.03)),
+                                 (roof_back + 0.06, 0.46, side * (half - 0.03)), 0.021, seg))
+        if p.side_panels == "half":  # a waist panel along the passenger tub, open above it
+            bench_front = j["rear_axle"][0] - 0.04 + 0.06 + p.bench_length / 2
+            panel_back = roof_back + 0.10
+            span = max(0.10, bench_front - panel_back)
+            _add(body, "paint", _box_at((panel_back + span / 2, 0.55, side * (half - 0.012)),
+                                        (span, 0.18, 0.024)))
+            _add(body, "paint", _box_at((panel_back + span / 2, 0.645, side * (half + 0.002)),
+                                        (span, 0.03, 0.03)))
 
 
 # --- power ---------------------------------------------------------------------------------------------------
@@ -640,6 +841,8 @@ def build_cycle(p: CycleParams | None = None) -> Cycle:
         _cargo_box(p, j, body)
     if p.canopy:
         _canopy(p, j, body)
+    if p.cab:
+        _cab(p, j, body)
     if p.power == "pedal":
         _pedals(p, j, body)
     elif p.power == "engine":
