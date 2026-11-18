@@ -587,6 +587,22 @@ vertical hinges on the right side. The wheels and the lamps are the car's, and
 `merged` poses and colours a bus exactly as it does a car, so a street of buses
 still draws as one entity each.
 
+A truck is neither a car nor a bus but a chassis with a cab and a body bolted on, so it has a builder of its own
+too. `TruckParams` holds its package: length, width, height, two or three axles, the wheelbase and the spacing of
+the rear pair, the wheel and track, and whether the rear axles carry twin wheels; then the cab, either `"forward"`
+with a bonnet ahead of it or `"over"` with a flat face above the engine, its length, height and windscreen rake,
+and two doors that open; then the body, one of a closed cargo box with two rear doors, a flat deck with low sides,
+a horizontal tank with dished ends and a walkway, an open bin that tips about its rear lower edge, or a fire
+engine's lockers, roof ladder and hose reel. `build_truck` turns them into a `Truck`, a `Vehicle` like the car and
+the bus: the cab is one lofted shell with rounded plan corners and an arch cut over the front wheels, the chassis
+carries the fuel tank, steps and mudguards, the doors and the dump bin are parts with hinges, and `Truck.pose`
+opens the doors, tips the bin, rolls the wheels and steers the front axle. The cab takes the `paint` material and
+the body a `body` material of its own, so a box can differ from its tractor; `livery` lays colours and outlines
+from the side view on both flanks. Five presets return ready measurements: `cargo_truck_1980s`, `box_truck`,
+`tanker`, `dump_truck` and `fire_engine`, the last with a white stripe, beacons on the cab roof and a ladder stowed
+over the body. `merged` poses and colours a truck exactly as it does a car, so a yard of them still draws as one
+entity each.
+
 A car's texture can be a flat base paint with crisp details on top. Bake the base
 with `bake_projection(car, {}, size=..., materials={"paint"}, fallback=...)`, then
 place each detail as a `Decal`: an RGBA image, a view, and a centre that is a 3D
