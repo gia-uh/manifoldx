@@ -386,3 +386,74 @@ def test_detail_scales_the_resolution_but_one_is_today():
     assert _triangles(low) < _triangles(one) < _triangles(high)
     assert _triangles(one) == 15760
     build_car(CarParams(sections=10, detail=0.5))  # never fewer than 8 sections
+
+
+# --- step 2 of the vehicle family: wings, fins, a wrapping screen and side trim -------------------------------
+
+
+def _top(car, x, below=False, zmin=None, centre=False):
+    """The highest skin point in a stretch of the car, on one flank or on the centre line."""
+    v = car.part("body").pieces["paint"].positions
+    select = (v[:, 0] < x) if below else (v[:, 0] > x)
+    select &= (np.abs(v[:, 2]) < 0.06) if centre else (v[:, 2] > (zmin if zmin is not None else 0.0))
+    return v[select, 1].max()
+
+
+def test_the_new_options_default_to_todays_car():
+    p = CarParams()
+    assert (p.fender_crown, p.fender_crown_u, p.fin_height, p.fin_start_u, p.fin_width) == (0.0, 0.25, 0.0, 0.7, 0.22)
+    assert (p.windscreen_wrap, p.side_trim) == (0.0, ())
+    assert _triangles(build_car(CarParams())) == 15760
+
+
+def test_fender_crown_raises_the_wings_at_the_nose_but_not_the_centre():
+    base = build_car(CarParams())
+    crowned = build_car(CarParams(fender_crown=0.10, fender_crown_u=0.25))
+    lift = _top(crowned, 1.8, zmin=0.75) - _top(base, 1.8, zmin=0.75)
+    assert 0.07 < lift < 0.12  # about the crown, its outer mask never quite reaching 1
+    assert np.isclose(_top(crowned, 1.9, centre=True), _top(base, 1.9, centre=True), atol=1e-6)
+
+
+def test_fin_height_raises_the_tail_wings_but_not_the_centre():
+    base = build_car(CarParams())
+    finned = build_car(CarParams(fin_height=0.15, fin_start_u=0.7, fin_width=0.22))
+    lift = _top(finned, -1.9, below=True, zmin=0.6) - _top(base, -1.9, below=True, zmin=0.6)
+    assert lift > 0.04
+    assert np.isclose(_top(finned, -1.7, below=True, centre=True), _top(base, -1.7, below=True, centre=True), atol=1e-6)
+
+
+def test_derived_pod_and_fin_lamps_follow_the_wings():
+    p = CarParams(headlamp="round_pod", headlamp_center=None, headlamp_size=(0.16, 0.16), hood_crown=0.03,
+                  fender_crown=0.10, fender_crown_u=0.25,
+                  taillamp="fin", taillamp_center=None, fin_height=0.15, fin_start_u=0.7)
+    car = build_car(p)  # both derived lamps land: no ValueError
+    plain = build_car(CarParams(headlamp="round_pod", headlamp_center=None, headlamp_size=(0.16, 0.16),
+                                hood_crown=0.03, taillamp="fin", taillamp_center=None))
+    lamps = car.part("body").pieces["lamp"].positions
+    lamps = lamps[lamps[:, 0] > 1.6]
+    plain_lamps = plain.part("body").pieces["lamp"].positions
+    plain_lamps = plain_lamps[plain_lamps[:, 0] > 1.6]
+    assert len(lamps) and lamps[:, 1].max() > plain_lamps[:, 1].max() + 0.03
+    tails = car.part("body").pieces["tail"].positions
+    tails = tails[tails[:, 0] < -1.6]
+    plain_tails = plain.part("body").pieces["tail"].positions
+    plain_tails = plain_tails[plain_tails[:, 0] < -1.6]
+    assert len(tails) and tails[:, 1].max() > plain_tails[:, 1].max() + 0.03
+
+
+def test_windscreen_wrap_adds_glass_round_the_a_pillars():
+    plain = build_car(CarParams())
+    wrapped = build_car(CarParams(windscreen_wrap=0.6))
+    def glass(car):
+        return sum(len(mesh.faces) for part in car.parts for mat, mesh in part.pieces.items() if mat == "glass")
+    assert glass(wrapped) > glass(plain)
+
+
+def test_side_trim_lays_a_chrome_strip_along_both_flanks():
+    plain = build_car(CarParams())
+    p = CarParams(side_trim=((0.78, 0.5, 0.9, "chrome"),))
+    car = build_car(p)
+    trim = car.part("body").pieces["chrome"].positions
+    strip = trim[(trim[:, 1] > 0.76) & (trim[:, 1] < 0.80)]
+    assert len(strip) and strip[:, 2].min() < -0.5 and strip[:, 2].max() > 0.5  # both sides
+    assert len(trim) > len(plain.part("body").pieces["chrome"].positions)
