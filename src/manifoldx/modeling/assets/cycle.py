@@ -37,11 +37,11 @@ class CycleParams(ParamsRanges):
 
     wheels: int = choice(2, 2, 3)  # 2 for a bicycle or a motorcycle, 3 for a tricycle
     layout: str = choice("inline", 'inline', 'delta', 'tadpole')  # "inline", "delta" (one front, two rear) or "tadpole" (two front, one rear)
-    wheel_radius: float = rng(0.34, 0.15, 0.55, step=0.005, unit='m')
+    wheel_radius: float = rng(0.34, 0.15, 0.6, step=0.005, unit='m')
     tyre_width: float = rng(0.045, 0.02, 0.15, step=0.001, unit='m')
     rim_ratio: float = rng(0.86, 0.3, 0.95, step=0.01, unit='')  # rim radius over wheel radius
     spokes: int = rng(16, 0, 48, step=1, unit='')  # 0 draws a disc wheel
-    wheelbase: float = rng(1.12, 0.7, 2.5, step=0.01, unit='m')
+    wheelbase: float = rng(1.12, 0.6, 2.5, step=0.01, unit='m')
     rear_track: float = rng(0.86, 0.3, 1.5, step=0.01, unit='m')  # between the rear wheels of a delta, or the front wheels of a tadpole
     # The frame, as named joints. Empty means the defaults below; a preset names only the joints it moves.
     joints: dict = field(default_factory=dict)

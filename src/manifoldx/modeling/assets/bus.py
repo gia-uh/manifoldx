@@ -44,7 +44,7 @@ class BusParams(ParamsRanges):
     length from the front (0) to the rear (1)."""
 
     # Package: the spec sheet.
-    length: float = rng(12.0, 8.6, 18.0, step=0.01, unit='m')
+    length: float = rng(12.0, 6.0, 18.0, step=0.01, unit='m')
     width: float = rng(2.55, 2.0, 3.0, step=0.01, unit='m')
     height: float = rng(3.1, 2.5, 4.5, step=0.01, unit='m')
     corner_radius: float = rng(0.25, 0.0, 0.8, step=0.01, unit='m')  # of the vertical corners, in plan
@@ -88,12 +88,21 @@ class BusParams(ParamsRanges):
     sections: int = rng(24, 4, 80, step=1, unit='')
     detail: float = rng(1.0, 0.25, 2.0, step=0.05, unit='x')  # scales the stations, the wheel's segments and the decals
     crease: float = rng(38.0, 0.0, 180.0, step=1.0, unit='deg')  # degrees: an edge that turns more than this is shaded sharp
-    wheel: str | dict = choice("spokes", 'spokes')
+    wheel: str | dict = choice("spokes", 'spokes', 'hubcap')
     spokes: int = rng(8, 0, 32, step=1, unit='')
     whitewall: float = rng(0.0, 0.0, 0.2, step=0.005, unit='m')
     mirrors: bool = True
 
     def _validate_extra(self) -> None:
+        if self.wheelbase + self.front_overhang >= self.length:
+            raise ValueError(
+                f"BusParams.wheelbase + front_overhang ({self.wheelbase + self.front_overhang:.2f}) "
+                f"must be below length ({self.length:.2f})"
+            )
+        if self.wheelbase <= 2 * self.wheel_radius:
+            raise ValueError(
+                f"BusParams.wheelbase ({self.wheelbase}) overlaps two wheel_radius ({self.wheel_radius}) wheels"
+            )
         spans = []
         for door in self.doors:
             try:

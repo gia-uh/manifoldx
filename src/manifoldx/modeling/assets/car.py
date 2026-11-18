@@ -46,11 +46,11 @@ class CarParams(ParamsRanges):
     the front (0) to the rear (1)."""
 
     # Package: the spec sheet.
-    length: float = rng(4.25, 3.5, 6.0, step=0.01, unit='m')
+    length: float = rng(4.25, 2.5, 5.8, step=0.01, unit='m')
     width: float = rng(1.78, 1.4, 2.2, step=0.01, unit='m')
-    height: float = rng(1.48, 1.1, 2.2, step=0.01, unit='m')
-    wheelbase: float = rng(2.62, 1.6, 3.3, step=0.01, unit='m')
-    front_overhang: float = rng(0.86, 0.3, 1.55, step=0.01, unit='m')
+    height: float = rng(1.48, 1.0, 2.2, step=0.01, unit='m')
+    wheelbase: float = rng(2.62, 1.5, 3.5, step=0.01, unit='m')
+    front_overhang: float = rng(0.86, 0.2, 1.8, step=0.01, unit='m')
     track: float = rng(1.53, 1.1, 2.0, step=0.01, unit='m')
     wheel_radius: float = rng(0.315, 0.2, 0.55, step=0.005, unit='m')
     tyre_width: float = rng(0.205, 0.1, 0.4, step=0.005, unit='m')
@@ -66,11 +66,11 @@ class CarParams(ParamsRanges):
     roof_peak_u: float = rng(0.56, 0.47, 0.77, step=0.01, unit='')  # where the roof is highest
     roof_end_u: float = rng(0.78, 0.57, 0.91, step=0.01, unit='')  # where the roof meets the rear glass
     roof_end_drop: float = rng(0.08, 0.0, 0.5, step=0.01, unit='m')
-    hatch_u: float = rng(0.92, 0.88, 0.99, step=0.01, unit='', min_when_set="bed_u", min_then=0.68)  # where the rear glass ends
+    hatch_u: float = rng(0.92, 0.6, 0.99, step=0.01, unit='')  # where the rear glass ends
     hatch_height: float = rng(1.10, 0.5, 1.7, step=0.01, unit='m')
     tail_top: float = rng(0.86, 0.4, 1.5, step=0.01, unit='m')  # top of the tail at the rear end
     belt_front: float = rng(0.97, 0.25, 1.45, step=0.01, unit='m')  # belt (bottom of the side glass) at the cowl
-    belt_rear: float = rng(1.05, 0.80, 1.45, step=0.01, unit='m')  # and at the end of the roof
+    belt_rear: float = rng(1.05, 0.25, 1.45, step=0.01, unit='m')  # and at the end of the roof
     sill: float = rng(0.20, 0.05, 0.95, step=0.01, unit='m')  # underside between the wheels
     bumper_bottom_front: float = rng(0.36, 0.1, 0.8, step=0.01, unit='m')
     bumper_bottom_rear: float = rng(0.35, 0.1, 0.8, step=0.01, unit='m')
@@ -105,7 +105,7 @@ class CarParams(ParamsRanges):
     lightbar: str | None = choice(None, None, 'bar', 'dome')
     lightbar_colours: tuple = ("#1f4fff", "#e01b1b")
     # Greenhouse.
-    a_pillar_foot: float = rng(0.40, 0.0, 0.95, step=0.01, unit='')  # how far up the windscreen the side glass starts, 0 at the cowl to 1 at the roof
+    a_pillar_foot: float = rng(0.40, 0.0, 1.0, step=0.01, unit='')  # how far up the windscreen the side glass starts, 0 at the cowl to 1 at the roof
     b_pillar_u: float = rng(0.565, 0.3, 0.9, step=0.01, unit='')
     b_pillar_width: float = rng(0.10, 0.02, 0.3, step=0.005, unit='m')
     c_pillar_u: float = rng(0.69, 0.4, 0.95, step=0.01, unit='')  # end of the rear door glass; behind it the quarter is black
@@ -159,8 +159,12 @@ class CarParams(ParamsRanges):
     def _validate_extra(self) -> None:
         if self.wheelbase + self.front_overhang >= self.length:
             raise ValueError(
-                f"CarParams.wheelbase: {self.wheelbase} plus front_overhang {self.front_overhang} "
-                f"do not fit inside length {self.length}"
+                f"CarParams.wheelbase + front_overhang ({self.wheelbase + self.front_overhang:.2f}) "
+                f"must be below length ({self.length:.2f})"
+            )
+        if self.wheelbase <= 2 * self.wheel_radius:
+            raise ValueError(
+                f"CarParams.wheelbase ({self.wheelbase}) overlaps two wheel_radius ({self.wheel_radius}) wheels"
             )
         if not (self.sill < self.belt_front and self.sill < self.belt_rear):
             raise ValueError(
@@ -170,11 +174,47 @@ class CarParams(ParamsRanges):
             raise ValueError(
                 f"CarParams.belt_front: {self.belt_front} and belt_rear {self.belt_rear} are not below height {self.height}"
             )
+        if not (self.belt_front > self.bumper_bottom_front and self.belt_rear > self.bumper_bottom_rear):
+            raise ValueError(
+                f"CarParams.belt_front ({self.belt_front}) and belt_rear ({self.belt_rear}) must be above "
+                f"bumper_bottom_front ({self.bumper_bottom_front}) and bumper_bottom_rear ({self.bumper_bottom_rear})"
+            )
         order = (self.cowl_u, self.windscreen_u, self.roof_peak_u, self.roof_end_u, self.hatch_u)
         if not all(a < b for a, b in zip(order, order[1:])):
             raise ValueError(
                 f"CarParams.cowl_u: {self.cowl_u}, windscreen_u {self.windscreen_u}, roof_peak_u "
                 f"{self.roof_peak_u}, roof_end_u {self.roof_end_u} and hatch_u {self.hatch_u} are not in increasing order"
+            )
+        if self.bed_u is not None and self.hatch_u >= self.bed_u:
+            raise ValueError(
+                f"CarParams.hatch_u ({self.hatch_u}) must be below bed_u ({self.bed_u}) for a pickup"
+            )
+        self._validate_lamps()
+
+    def _validate_lamps(self) -> None:
+        """An explicit lamp centre must land on the face it is drawn on; None derives a centre that does."""
+        half = self.width / 2
+        faces = (
+            ("headlamp_center", self.headlamp_center, "front", self.nose_half, max(self.nose_top, self.hood_front),
+             self.bumper_bottom_front),
+            ("taillamp_center", self.taillamp_center, "rear", self.tail_half, max(self.hatch_height, self.tail_top),
+             self.bumper_bottom_rear),
+        )
+        for name, centre, face, half_ratio, top, bottom in faces:
+            if centre is None:
+                continue
+            lateral, height = centre
+            if height >= top:
+                other = "hatch_height" if face == "rear" else "hood_front"
+            elif height <= bottom:
+                other = f"bumper_bottom_{face}"
+            elif lateral <= 0 or lateral > 0.98 * half * half_ratio:
+                other = "tail_half" if face == "rear" else "nose_half"
+            else:
+                continue
+            raise ValueError(
+                f"CarParams.{name} ({lateral}, {height}) misses the {face} face that {other} leaves; "
+                f"set {name} to None to derive it from the profile"
             )
 
 
@@ -607,7 +647,8 @@ def _region(p: CarParams, u, b, ut, v):
         t = (ut - p.cowl_u) / (p.windscreen_u - p.cowl_u)
         if b == 5 and p.windscreen_wrap > 0 and t < 0.5 * p.windscreen_wrap:
             return "glass"  # the screen bends onto the upper side at its lower corner
-        edge = 6 + 2 * (t - p.a_pillar_foot) / (1 - p.a_pillar_foot) - 0.25
+        # At the roof the side glass starts at the roof itself; the limit keeps the line from dividing by zero.
+        edge = 6 + 2 * (t - p.a_pillar_foot) / max(1 - p.a_pillar_foot, 1e-9) - 0.25
         # A wrapping screen bends the line down at its foot, onto the upper side near the lower corners.
         edge -= 1.5 * p.windscreen_wrap * max(0.0, 1.0 - t) ** 2
         return "glass" if b >= 8 or v < edge else pillar

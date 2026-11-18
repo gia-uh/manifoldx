@@ -24,8 +24,7 @@ def rng(default, lo, hi, step=None, unit: str = "m", **extra):
     """A dataclass field carrying the range an editor should offer for it.
 
     `default` is kept exactly as given; `lo` and `hi` are inclusive. A `None` default marks a nullable number.
-    `extra` carries a builder's own bound, such as `min_when_set`/`min_then` for a value that may go lower when
-    another field is set (a pickup's bed rail against a closed car's hatch).
+    `extra` carries any other editor hint; contradictions between two fields belong in `validate`.
     """
     metadata = {"min": lo, "max": hi, "step": step, "unit": unit, **extra}
     if default is None:
@@ -112,8 +111,6 @@ class ParamsRanges:
                 if value is None and meta.get("nullable"):
                     continue
                 lo, hi = meta["min"], meta["max"]
-                if meta.get("min_when_set") and getattr(self, meta["min_when_set"], None) is not None:
-                    lo = meta["min_then"]
                 if not isinstance(value, (int, float)) or isinstance(value, bool) or not lo <= value <= hi:
                     raise ValueError(f"{cls.__name__}.{f.name}: {value!r} is outside [{lo}, {hi}]")
             elif bool in _bases(hints.get(f.name, f.type)):

@@ -52,7 +52,7 @@ class TruckParams(ParamsRanges):
     the front at +X."""
 
     # Package: the spec sheet.
-    length: float = rng(7.8, 5.7, 16.0, step=0.01, unit='m')
+    length: float = rng(7.8, 4.5, 12.0, step=0.01, unit='m')
     width: float = rng(2.45, 1.9, 3.0, step=0.01, unit='m')
     height: float = rng(3.5, 2.2, 4.5, step=0.01, unit='m')  # overall, over the body or the beacons
     axles: int = choice(2, 2, 3)  # 2 or 3
@@ -111,11 +111,15 @@ class TruckParams(ParamsRanges):
 
     def _validate_extra(self) -> None:
         if self.cab_length >= self.length:
-            raise ValueError(f"TruckParams.cab_length: {self.cab_length} is not shorter than length {self.length}")
+            raise ValueError(f"TruckParams.cab_length ({self.cab_length}) must be below length ({self.length})")
         if self.wheelbase + self.front_overhang >= self.length:
             raise ValueError(
-                f"TruckParams.wheelbase: {self.wheelbase} plus front_overhang {self.front_overhang} "
-                f"do not fit inside length {self.length}"
+                f"TruckParams.wheelbase + front_overhang ({self.wheelbase + self.front_overhang:.2f}) "
+                f"must be below length ({self.length:.2f})"
+            )
+        if self.wheelbase <= 2 * self.wheel_radius:
+            raise ValueError(
+                f"TruckParams.wheelbase ({self.wheelbase}) overlaps two wheel_radius ({self.wheel_radius}) wheels"
             )
 
 
