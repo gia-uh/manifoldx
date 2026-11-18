@@ -1,5 +1,6 @@
 """Bicycles, cargo tricycles, cycle rickshaws and motorcycles: their measurements, parts, steering and wheels."""
 
+import hashlib
 from dataclasses import replace
 
 import numpy as np
@@ -14,11 +15,12 @@ from manifoldx.modeling.assets.cycle import (
     cycle_rickshaw,
     electric_moto,
     motorcycle,
+    passenger_tricycle,
 )
 from manifoldx.modeling.assets.vehicle import Vehicle
 from manifoldx.modeling.mesh import Mesh
 
-PRESETS = (bicycle, cycle_rickshaw, cargo_tricycle, motorcycle, electric_moto)
+PRESETS = (bicycle, cycle_rickshaw, cargo_tricycle, motorcycle, electric_moto, passenger_tricycle)
 
 
 def _verts(part):
@@ -77,6 +79,7 @@ def test_wheel_count_follows_the_layout():
         "cargo_tricycle": {"wheel_front", "wheel_rear_left", "wheel_rear_right"},
         "motorcycle": {"wheel_front", "wheel_rear"},
         "electric_moto": {"wheel_front", "wheel_rear"},
+        "passenger_tricycle": {"wheel_front", "wheel_rear_left", "wheel_rear_right"},
     }
     for preset in PRESETS:
         cycle = build_cycle(preset())
@@ -141,6 +144,9 @@ def test_the_presets_carry_what_their_names_promise():
     assert 0.28 < moto.wheel_radius < 0.33
     scooter = electric_moto()
     assert (scooter.layout, scooter.power, scooter.step_through) == ("inline", "hub", True)
+    assert scooter.panels == "scooter"
+    tricycle = passenger_tricycle()
+    assert (tricycle.layout, tricycle.power, tricycle.payload, tricycle.cab) == ("delta", "hub", "bench", True)
 
 
 def test_the_frame_is_tubes_between_the_named_joints():
@@ -167,3 +173,85 @@ def test_a_bench_seats_two_behind_the_rider():
     bench = _material(cycle, "box")
     assert np.ptp(bench[:, 2]) > 0.6  # wide enough for two
     assert bench[:, 0].mean() < cycle.joints["seat"][0]  # behind the rider
+
+
+def _signature(cycle):
+    """A short hash of the merged mesh's positions, rounded so a no-op change stays bit for bit equal."""
+    p = np.round(np.asarray(cycle.merged().positions, np.float64), 3)
+    return hashlib.sha256(p.tobytes()).hexdigest()[:16]
+
+
+def test_the_untouched_presets_build_exactly_as_before():
+    golden = {
+        "bicycle": "4e921d4ed3990837",
+        "cycle_rickshaw": "992806e519b3d1cb",
+        "cargo_tricycle": "d6fd4594ff2f8633",
+        "motorcycle": "eba90761bdb37bc1",
+    }
+    for name, digest in golden.items():
+        assert _signature(build_cycle(getattr(__import__("manifoldx.modeling.assets.cycle",
+                                                        fromlist=[name]), name)())) == digest, name
+
+
+def test_a_passenger_tricycle_roofs_the_rider_and_the_bench():
+    p = passenger_tricycle()
+    cycle = build_cycle(p)
+    paint = _material(cycle, "paint")
+    roof = paint[paint[:, 1] > p.canopy_height - 0.3]
+    assert roof[:, 1].max() == pytest.approx(p.canopy_height, abs=0.05)
+    assert roof[:, 0].min() < cycle.joints["rear_axle"][0]  # it reaches back over the bench
+    assert roof[:, 0].max() > cycle.joints["seat"][0]  # and reaches over the rider
+    glass = _material(cycle, "glass")
+    assert glass[:, 1].min() > 0.7 and glass[:, 1].max() < p.canopy_height  # a screen under the roof
+    assert glass[:, 0].mean() > cycle.joints["seat"][0]  # ahead of the rider
+
+
+def test_a_passenger_tricycles_sides_are_openable_and_its_roof_shortenable():
+    wide = build_cycle(passenger_tricycle())
+    open_ = build_cycle(replace(passenger_tricycle(), side_panels="open"))
+    short = build_cycle(replace(passenger_tricycle(), roof_length=0.5))
+    assert len(_verts(open_.part("frame"))) < len(_verts(wide.part("frame")))
+    short_roof = _material(short, "paint")
+    wide_roof = _material(wide, "paint")
+    assert np.ptp(short_roof[short_roof[:, 1] > short.params.canopy_height - 0.3][:, 0]) < np.ptp(
+        wide_roof[wide_roof[:, 1] > wide.params.canopy_height - 0.3][:, 0])
+
+
+def test_the_rickshaw_can_carry_a_flat_arched_or_folding_hood_with_a_valance():
+    flat = build_cycle(cycle_rickshaw())
+    arched = build_cycle(replace(cycle_rickshaw(), canopy_style="arched"))
+    folding = build_cycle(replace(cycle_rickshaw(), canopy_style="folding"))
+    dropped = build_cycle(replace(cycle_rickshaw(), canopy_drop=0.4))
+    roof = _material(arched, "canopy")
+    roof = roof[roof[:, 1] > 1.5]  # above the bench slats, which borrow the canopy colour
+    half_w = np.abs(roof[:, 2]).max()
+    middle = roof[np.abs(roof[:, 2]) < 0.08]
+    edge = roof[np.abs(roof[:, 2]) > 0.85 * half_w]
+    assert middle[:, 1].max() > edge[:, 1].max() + 0.05  # arched across its width
+    flat_roof = _material(flat, "canopy")
+    flat_roof = flat_roof[flat_roof[:, 1] > 1.5]
+    assert np.ptp(flat_roof[:, 1]) < 0.05  # flat stays flat
+    assert len(_material(folding, "canopy")) > len(_material(flat, "canopy"))
+    assert _material(dropped, "canopy")[:, 1].min() < flat_roof[:, 1].min() - 0.3
+
+
+def test_a_scooters_panels_are_a_shield_a_floorboard_and_a_rounded_tail():
+    p = electric_moto()
+    cycle = build_cycle(p)
+    paint = _material(cycle, "paint")
+    floor = paint[(paint[:, 1] > 0.16) & (paint[:, 1] < 0.27)]
+    assert np.ptp(floor[:, 0]) > 0.4 and np.ptp(floor[:, 2]) > 0.34  # a board for both feet
+    tail = paint[(paint[:, 0] < cycle.joints["rear_axle"][0] + 0.25) & (paint[:, 1] > 0.3)]
+    assert len(tail) and tail[:, 1].max() < cycle.joints["seat"][1] + 0.18  # a body under the seat
+    assert _material(cycle, "tail").size  # its tail lamp
+
+
+def test_the_cabs_choices_name_the_fields_they_contradict():
+    with pytest.raises(ValueError, match="cab"):
+        CycleParams(cab=True).validate()
+    with pytest.raises(ValueError, match="canopy"):
+        CycleParams(cab=True, layout="delta", wheels=3, canopy=True).validate()
+    with pytest.raises(ValueError, match="canopy_style"):
+        CycleParams(canopy_style="arched").validate()
+    with pytest.raises(ValueError, match="panels"):
+        CycleParams(panels="scooter").validate()

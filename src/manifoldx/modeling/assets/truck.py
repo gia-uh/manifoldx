@@ -83,7 +83,7 @@ class TruckParams(ParamsRanges):
     steps: bool = True
     mudguards: bool = True
     # Body.
-    body: str = choice("box", 'box', 'flatbed', 'tanker', 'dump', 'fire')  # "box", "flatbed", "tanker", "dump" or "fire"
+    body: str = choice("box", 'box', 'flatbed', 'tanker', 'dump', 'fire', 'passenger')  # "box", "flatbed", "tanker", "dump", "fire" or "passenger"
     body_gap: float = rng(0.08, 0.0, 1.0, step=0.01, unit='m')  # between the cab and the body
     body_height: float = rng(3.5, 2.0, 4.5, step=0.01, unit='m')  # the roof of a box or fire body
     body_floor: float = rng(1.10, 0.5, 2.0, step=0.01, unit='m')  # the underside of a box, fire body or bin
@@ -98,9 +98,17 @@ class TruckParams(ParamsRanges):
     ladder: bool = False
     hose_reel: bool = False
     beacons: bool = False
+    # A passenger body: open benches on a deck, under a canvas roof carried on hoops.
+    bench_rows: int = rng(2, 1, 4, step=1, unit='')  # rows across the body, or groups of a side bench
+    bench_facing: str = choice("forward", 'forward', 'side')  # benches facing forward, or along the sides
+    bench_height: float = rng(0.46, 0.3, 0.8, step=0.01, unit='m')  # the seat, above the deck
+    hoops: int = rng(4, 2, 8, step=1, unit='')  # canvas-hoop frames along the body
+    canvas_height: float = rng(3.0, 2.0, 4.2, step=0.01, unit='m')  # the top of the canvas roof
+    rear_ladder: bool = False
     # Colour slots and paint areas: (material name or sRGB hex, polygon in the side view as (u, height)).
     cab_paint: str = field(default="#8fbccc", metadata={"kind": "colour"})
     body_paint: str = field(default="#e8eaec", metadata={"kind": "colour"})
+    canvas_paint: str = field(default="#d8cfae", metadata={"kind": "colour"})
     livery: tuple = ()
     # Resolution and small parts.
     detail: float = rng(1.0, 0.25, 2.0, step=0.05, unit='x')  # scales the stations, wheel segments, slats and rungs; 1 is the default
@@ -121,6 +129,14 @@ class TruckParams(ParamsRanges):
             raise ValueError(
                 f"TruckParams.wheelbase ({self.wheelbase}) overlaps two wheel_radius ({self.wheel_radius}) wheels"
             )
+        if self.body == "passenger" and self.canvas_height <= self.deck_height:
+            raise ValueError(
+                f"TruckParams.canvas_height ({self.canvas_height}) must rise above deck_height ({self.deck_height})"
+            )
+        if self.body == "passenger" and self.bench_height >= self.canvas_height - self.deck_height:
+            raise ValueError(
+                f"TruckParams.bench_height ({self.bench_height}) does not fit under canvas_height ({self.canvas_height})"
+            )
 
 
 @dataclass
@@ -134,7 +150,8 @@ class Truck(Vehicle):
     def palette(self) -> dict:
         """The shared palette, the truck's own materials, the cab and body paint slots, and a material for each hex
         paint area."""
-        extra = {"paint": (self.params.cab_paint, 0.35, 0.10), "body": (self.params.body_paint, 0.45, 0.0)}
+        extra = {"paint": (self.params.cab_paint, 0.35, 0.10), "body": (self.params.body_paint, 0.45, 0.0),
+                 "canvas": (self.params.canvas_paint, 0.9, 0.0)}
         extra.update(TRUCK_MATERIALS)
         for k, (mat, _) in enumerate(self.params.livery):
             if _is_colour(mat):
@@ -685,6 +702,96 @@ def _body_fire(p: TruckParams, parts, piece):
     _beacons(p, parts, piece)
 
 
+def _body_passenger(p: TruckParams, parts, piece):
+    """An open passenger body: a deck with side boards, benches, hoops and a canvas roof, and a rear ladder."""
+    x0, x_rear = _body_span(p)
+    x1 = x_rear + 0.04
+    length = x0 - x1
+    half = p.width / 2
+    deck = p.deck_height
+    seg = max(4, int(round(8 * p.detail)))
+    # The deck, its side boards, a headboard and a tailgate.
+    v, t = _box([(x0 + x1) / 2, deck - 0.05, 0.0], (length, 0.10, p.width))
+    piece("body", "deck", v, t)
+    board = max(p.side_height, 0.30)
+    for side in (-1.0, 1.0):
+        v, t = _box([(x0 + x1) / 2, deck + board / 2, side * (half - 0.03)], (length, board, 0.06))
+        piece("body", "body", v, t)
+        v, t = _box([(x0 + x1) / 2, deck + board + 0.02, side * (half - 0.03)], (length, 0.05, 0.10))
+        piece("body", "deck", v, t)
+    v, t = _box([x0 - 0.04, deck + 0.45, 0.0], (0.07, 0.90, p.width))
+    piece("body", "body", v, t)
+    v, t = _box([x1 + 0.04, deck + board / 2, 0.0], (0.06, board, p.width - 0.02))
+    piece("body", "body", v, t)
+    # The benches: rows across the body facing forward, or long benches along each side.
+    seat = deck + p.bench_height
+    if p.bench_facing == "forward":
+        rows = max(1, p.bench_rows)
+        span = length - 0.70
+        for k in range(rows):
+            cx = x1 + 0.35 + span * (k + 0.5) / rows
+            v, t = _box([cx, seat, 0.0], (0.40, 0.08, p.width - 0.30))
+            piece("body", "deck", v, t)
+            v, t = _box([cx - 0.22, seat + 0.28, 0.0], (0.06, 0.50, p.width - 0.30))
+            piece("body", "body", v, t)
+            for side in (-1.0, 1.0):
+                v, t = _box([cx, (deck + seat) / 2, side * (p.width / 2 - 0.28)], (0.30, seat - deck, 0.05))
+                piece("body", "underbody", v, t)
+    else:
+        groups = max(1, p.bench_rows)
+        span = length - 0.40
+        for side in (-1.0, 1.0):
+            seat_z = side * (half - 0.32)
+            back_z = side * (half - 0.09)
+            v, t = _box([(x0 + x1) / 2, seat, seat_z], (span, 0.08, 0.48))
+            piece("body", "deck", v, t)
+            v, t = _box([(x0 + x1) / 2, seat + 0.26, back_z], (span, 0.46, 0.06))
+            piece("body", "body", v, t)
+            for k in range(groups + 1):
+                gx = x1 + 0.20 + span * k / groups
+                if 0 < k < groups:
+                    v, t = _box([gx, seat + 0.42, seat_z], (0.05, 0.06, 0.46))
+                    piece("body", "trim", v, t)
+                else:
+                    v, t = _box([gx, (deck + seat) / 2, seat_z], (0.06, seat - deck, 0.40))
+                    piece("body", "underbody", v, t)
+    # The hoops: an arch across the body at each station, with a rail along each side.
+    top = p.canvas_height
+    y0 = deck + board
+    n = max(2, p.hoops)
+    for k in range(n):
+        hx = x1 + 0.22 + (length - 0.44) * k / (n - 1)
+        points = [(hx, y0, -half + 0.06), (hx, y0 + 0.58 * (top - y0), -half * 0.62),
+                  (hx, top - 0.03, 0.0), (hx, y0 + 0.58 * (top - y0), half * 0.62),
+                  (hx, y0, half - 0.06)]
+        for a, b in zip(points, points[1:]):
+            v, t = _tube(a, b, 0.024, seg)
+            piece("body", "ladder", v, t)
+    for side in (-1.0, 1.0):
+        v, t = _tube((x1 + 0.20, y0, side * (half - 0.06)), (x0 - 0.20, y0, side * (half - 0.06)), 0.022, seg)
+        piece("body", "ladder", v, t)
+    # The canvas roof and its valance.
+    v, t = _box([(x0 + x1) / 2, top, 0.0], (length - 0.16, 0.04, p.width - 0.08))
+    piece("body", "canvas", v, t)
+    for side in (-1.0, 1.0):
+        v, t = _box([(x0 + x1) / 2, top - 0.12, side * (half - 0.02)], (length - 0.16, 0.20, 0.025))
+        piece("body", "canvas", v, t)
+    v, t = _box([x1 + 0.10, top - 0.12, 0.0], (0.025, 0.20, p.width - 0.08))
+    piece("body", "canvas", v, t)
+    # A ladder down the rear face, on the left of the tail lamps.
+    if p.rear_ladder:
+        lx = x_rear + 0.01
+        z0 = 0.42
+        for z in (z0 - 0.20, z0 + 0.20):
+            v, t = _tube((lx, deck - 0.10, z), (lx, top - 0.12, z), 0.018, seg)
+            piece("body", "ladder", v, t)
+        rungs = max(3, int(round(6 * p.detail)))
+        for k in range(rungs):
+            y = deck + 0.10 + (top - deck - 0.30) * k / (rungs - 1)
+            v, t = _tube((lx, y, z0 - 0.20), (lx, y, z0 + 0.20), 0.014, max(4, seg // 2))
+            piece("body", "ladder", v, t)
+
+
 def _beacons(p: TruckParams, parts, piece):
     """Two small lamps on the cab roof, one of each beacon colour."""
     if not p.beacons:
@@ -781,6 +888,8 @@ def build_truck(p: TruckParams | None = None) -> Truck:
         _body_tanker(p, parts, piece)
     elif p.body == "dump":
         _body_dump(p, parts, piece)
+    elif p.body == "passenger":
+        _body_passenger(p, parts, piece)
     else:
         _body_fire(p, parts, piece)
     if p.body != "fire":
@@ -847,4 +956,17 @@ def fire_engine() -> TruckParams:
         lockers=3, ladder=True, hose_reel=True, beacons=True,
         cab_paint="#c62828", body_paint="#c62828",
         livery=(("#f4f4f2", [(0.25, 2.28), (1.0, 2.28), (1.0, 2.56), (0.25, 2.56)]),),
+    )
+
+
+def passenger_truck() -> TruckParams:
+    """A bonneted passenger truck: a green cab, open benches under a canvas roof on four hoops, a rear ladder."""
+    return TruckParams(
+        length=6.8, width=2.3, height=3.1, axles=2,
+        wheelbase=3.9, front_overhang=1.25, track=1.92, wheel_radius=0.48, tyre_width=0.26,
+        cab="forward", cab_length=1.55, cab_height=2.50, bonnet_length=1.25, bonnet_height=1.35,
+        nose_height=1.10, exhaust=True, body="passenger", body_gap=0.06,
+        deck_height=1.10, side_height=0.34, bench_rows=3, bench_facing="forward",
+        bench_height=0.46, hoops=4, canvas_height=3.05, rear_ladder=True,
+        cab_paint="#3f7f74", body_paint="#e9e3d2", canvas_paint="#d8cfae",
     )

@@ -79,6 +79,11 @@ class BusParams(ParamsRanges):
     pillar_width: float = rng(0.10, 0.02, 0.3, step=0.005, unit='m')
     doors: tuple = ((0.04, 1.2, 2), (0.47, 1.2, 2), (0.86, 1.2, 2))  # (u of the front edge, width, leaves)
     door_bottom: float = rng(0.30, 0.0, 1.0, step=0.01, unit='m')
+    # A coach: a high floor over luggage bays along the lower flank, small tinted windows and one front door.
+    body_style: str = choice("city", 'city', 'coach')  # "city" or "coach"
+    luggage_bays: int = rng(0, 0, 8, step=1, unit='')  # bay doors on each flank
+    bay_bottom: float = rng(0.35, 0.1, 1.2, step=0.01, unit='m')
+    bay_top: float = rng(0.85, 0.3, 2.0, step=0.01, unit='m')
     # Paint areas: (material or hex colour, polygon) in the side, front, rear and plan views.
     livery: tuple = ()
     front_livery: tuple = ()
@@ -122,9 +127,16 @@ class BusParams(ParamsRanges):
             (self.rear_window_bottom, self.rear_window_top, "rear_window"),
             (self.window_bottom, self.window_top, "window"),
             (self.sign_bottom, self.sign_top, "sign"),
+            (self.bay_bottom, self.bay_top, "bay"),
         ):
             if not lo < hi:
-                raise ValueError(f"BusParams.{name}_bottom: {lo} is not below its top {hi}")
+                raise ValueError(
+                    f"BusParams.{name}_bottom ({lo}) must sit below BusParams.{name}_top ({hi})"
+                )
+        if self.luggage_bays > 0 and self.bay_top >= self.floor:
+            raise ValueError(
+                f"BusParams.bay_top ({self.bay_top}) must sit below floor ({self.floor}) for a luggage bay"
+            )
 
 
 @dataclass
@@ -137,7 +149,7 @@ class Bus(Vehicle):
     @property
     def palette(self) -> dict:
         """The shared palette, plus a material for each hex paint area and the route sign's amber."""
-        extra = {"sign": ("#f0b23c", 0.45, 0.0)}
+        extra = {"sign": ("#f0b23c", 0.45, 0.0), "tinted": ("#101619", 0.04, 0.0), "bay": ("#9aa1a6", 0.45, 0.3)}
         for k, (mat, _) in enumerate(_livery_entries(self.params)):
             if _is_colour(mat):
                 extra[f"livery{k}"] = (mat, 0.35, 0.0)
@@ -330,7 +342,7 @@ def _side_material(p: BusParams, u: float, y: float, side: int, raised: bool) ->
     if p.window_bottom < y < p.window_top:
         if _door_at(p, u, side):
             return "paint"  # behind a shut leaf: the cabin's light wall shows through its glass
-        return "black" if _pillar_at(p, u) else "glass"
+        return "black" if _pillar_at(p, u) else ("tinted" if p.body_style == "coach" else "glass")
     if p.window_top <= y <= p.window_top + 0.10:
         return "black"
     return "paint"
@@ -339,7 +351,7 @@ def _side_material(p: BusParams, u: float, y: float, side: int, raised: bool) ->
 def _end_material(p: BusParams, sign: float, y: float) -> str:
     """The material of a horizontal band of an end: screen, rear window, the route sign band, or paint."""
     if sign > 0:
-        if p.sign_bottom <= y <= p.sign_top:
+        if p.body_style != "coach" and p.sign_bottom <= y <= p.sign_top:
             return "black"
         if p.windscreen_bottom <= y <= p.windscreen_top:
             return "glass"
@@ -459,10 +471,11 @@ def _decals(p: BusParams, verts, tris):
     for z0, z1 in ((-1.03, -0.88), (0.88, 1.03), (-0.035, 0.035)):
         front("black", _rect(z0, p.windscreen_bottom, z1, p.windscreen_top), 0.004, step=0.10)
 
-    # The route sign's amber marks, over the black band on the front.
+    # The route sign's amber marks, over the black band on the front (a coach has none).
     y0, y1 = p.sign_bottom + 0.05, p.sign_top - 0.06
-    for z0, z1 in ((-0.42, -0.28), (-0.22, -0.06), (0.04, 0.16), (0.24, 0.40)):
-        front("sign", _rect(z0, y0, z1, y1), 0.010)
+    if p.body_style != "coach":
+        for z0, z1 in ((-0.42, -0.28), (-0.22, -0.06), (0.04, 0.16), (0.24, 0.40)):
+            front("sign", _rect(z0, y0, z1, y1), 0.010)
 
     # Lamps: a dark surround, two lit lenses and an amber marker on each side.
     cy, cz = p.headlamp_center or (0.72, 0.68)
@@ -502,6 +515,50 @@ def _decals(p: BusParams, verts, tris):
     front("plate", _rect(-0.26, 0.42, 0.26, 0.53), 0.008)
     rear("plate", _rect(-0.26, 0.52, 0.26, 0.63), 0.008)
     return out
+
+
+# --- the coach's luggage bays ---------------------------------------------------------------------------------
+
+
+def _coach_skirt(p: BusParams, parts, piece) -> None:
+    """A coach's lower flank: a painted skirt between the wheel arches, with its luggage-bay doors."""
+    if p.body_style != "coach" or p.luggage_bays <= 0:
+        return
+    half = p.width / 2
+    bottom = p.bay_bottom
+    top = max(_underside(p) + 0.02, p.bay_top + 0.08)
+    reach = p.wheel_radius + 0.32
+    spans, cursor = [], -p.length / 2 + 0.30
+    for xa in sorted(_axles(p)):
+        spans.append((cursor, xa - reach))
+        cursor = xa + reach
+    spans.append((cursor, p.length / 2 - 0.45))
+    spans = [(a, b) for a, b in spans if b - a > 0.35]
+    total = sum(b - a for a, b in spans)
+    counts = [max(1, round(p.luggage_bays * (b - a) / total)) for a, b in spans]
+    while sum(counts) > p.luggage_bays:
+        counts[counts.index(max(counts))] -= 1
+    while sum(counts) < p.luggage_bays:
+        counts[counts.index(min(counts))] += 1
+    for (a, b), n in zip(spans, counts):
+        v, t = _box([(a + b) / 2, (bottom + top) / 2, half - 0.02], (b - a, top - bottom, 0.04))
+        piece("body", "paint", v, t)
+        v, t = _box([(a + b) / 2, (bottom + top) / 2, -half + 0.02], (b - a, top - bottom, 0.04))
+        piece("body", "paint", v, t)
+        step = (b - a) / n
+        for k in range(n):
+            cx = a + step * (k + 0.5)
+            leaf = step - 0.14
+            h = p.bay_top - bottom
+            mid = bottom + h / 2
+            for sign in (-1.0, 1.0):
+                v, t = _box([cx, mid, sign * (half - 0.004)], (leaf + 0.04, h + 0.04, 0.018))
+                piece("body", "black", v, t)
+                v, t = _box([cx, mid, sign * (half + 0.006)], (leaf, h, 0.020))
+                piece("body", "bay", v, t)
+                v, t = _box([cx + leaf / 2 - 0.14, mid + h * 0.18, sign * (half + 0.018)],
+                            (0.16, 0.035, 0.022))
+                piece("body", "chrome", v, t)
 
 
 # --- parts ---------------------------------------------------------------------------------------------------
@@ -613,7 +670,27 @@ def build_bus(p: BusParams | None = None) -> Bus:
 
     for mat, dv, dt in _decals(p, verts, tris):
         piece("body", mat, dv, dt)
+    _coach_skirt(p, parts, piece)
     _doors(p, parts, piece)
     _mirrors(p, parts, piece)
     _wheels(p, parts, piece)
     return Bus(p, [part for part in parts.values() if part.pieces])
+
+
+def coach() -> BusParams:
+    """An intercity coach: a high floor, luggage bays along the lower flank, small tinted windows, one front door.
+
+    13 m long, 3.6 m over the roof, with a raked screen and no route-sign band.
+    """
+    return BusParams(
+        length=13.0, width=2.55, height=3.6, corner_radius=0.32, floor=1.00,
+        front_overhang=2.70, wheelbase=6.60, wheel_radius=0.52, tyre_width=0.30,
+        track=2.10, rim_ratio=0.64, arch_gap=0.05,
+        windscreen_bottom=1.55, windscreen_top=3.05, windscreen_rake=0.45,
+        sign_bottom=2.95, sign_top=3.35,
+        rear_window_bottom=1.90, rear_window_top=2.70,
+        window_bottom=1.95, window_top=2.75, pillar_spacing=1.55, pillar_width=0.12,
+        doors=((0.03, 1.05, 1),), door_bottom=0.90,
+        body_style="coach", luggage_bays=4, bay_bottom=0.36, bay_top=0.82,
+        wheel="hubcap", mirrors=True,
+    )
