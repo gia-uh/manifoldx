@@ -508,3 +508,25 @@ def test_side_trim_lays_a_chrome_strip_along_both_flanks():
     strip = trim[(trim[:, 1] > 0.76) & (trim[:, 1] < 0.80)]
     assert len(strip) and strip[:, 2].min() < -0.5 and strip[:, 2].max() > 0.5  # both sides
     assert len(trim) > len(plain.part("body").pieces["chrome"].positions)
+
+
+# --- step 3 of the vehicle family: a shared Vehicle, liveries and a lightbar ----------------------------------
+
+
+def test_livery_and_lightbar_default_to_todays_car():
+    p = CarParams()
+    assert (p.livery, p.lightbar, p.lightbar_colours) == ((), None, ("#1f4fff", "#e01b1b"))
+    base = build_car()
+    materials = {mat for part in base.parts for mat in part.pieces}
+    assert "livery0" not in materials
+    assert not {"beacon_a", "beacon_b"} & materials
+    assert _triangles(base) == 15760
+
+
+def test_car_is_a_vehicle_and_still_the_car_builder():
+    from manifoldx.modeling.assets.car import Car
+    from manifoldx.modeling.assets.vehicle import Vehicle
+
+    assert issubclass(Car, Vehicle)
+    assert isinstance(build_car(), Car)
+    assert isinstance(build_car(), Vehicle)
