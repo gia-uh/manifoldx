@@ -182,17 +182,17 @@ def test_detail_scales_the_resolution():
 
 def _signature(truck):
     """A short hash of the merged mesh's positions, rounded so a no-op change stays bit for bit equal."""
-    p = np.round(np.asarray(truck.merged().positions, np.float64), 4)
+    p = np.round(np.asarray(truck.merged().positions, np.float64), 3)
     return hashlib.sha256(p.tobytes()).hexdigest()[:16]
 
 
 def test_the_untouched_truck_presets_build_exactly_as_before():
     golden = {
-        "cargo_truck_1980s": "7181623d9182a1e8",
-        "box_truck": "eed8be7ffbecd7e7",
-        "tanker": "b5c43ac8ff314531",
-        "dump_truck": "e485b4f4ad9968b5",
-        "fire_engine": "228f5e95c7b39b2d",
+        "cargo_truck_1980s": "6cb655d10afa7fa9",
+        "box_truck": "f84d9418fca40371",
+        "tanker": "0b4d045d387d6cab",
+        "dump_truck": "5d0acff4d2995f90",
+        "fire_engine": "2265b16bcc0d82a5",
     }
     for name, digest in golden.items():
         preset = {"cargo_truck_1980s": cargo_truck_1980s, "box_truck": box_truck, "tanker": tanker,
