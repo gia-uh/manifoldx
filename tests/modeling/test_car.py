@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from manifoldx.modeling.assets.car import CarParams, build_car
 
@@ -246,3 +247,142 @@ def test_pitch_raises_the_nose_and_roll_lowers_the_right_side():
     assert np.isclose(rolled["wheel_fl"][1] - rolled["wheel_fr"][1], p.track * np.sin(0.1), atol=1e-4)
     flat = _hubs(yaw=0.7)
     assert np.isclose(flat["wheel_fl"][1], flat["wheel_rr"][1])
+
+
+# --- step 1 of the vehicle family: the parts that tell the decades apart ---------------------------------------
+
+
+def _triangles(car):
+    return sum(len(mesh.faces) for part in car.parts for mesh in part.pieces.values())
+
+
+def test_the_default_car_mesh_is_unchanged():
+    """The values recorded from origin/main before the new options existed."""
+    car = build_car(CarParams())
+    assert _triangles(car) == 15760
+    body = np.concatenate([_verts(car.part(n)) for n in ("body", "hood", "hatch", "door_fl", "door_fr", "door_rl", "door_rr")])
+    assert np.allclose(body.min(0), [-2.130746, 0.2, -1.025525], atol=1e-4)
+    assert np.allclose(body.max(0), [2.130708, 1.479951, 1.025525], atol=1e-4)
+
+
+@pytest.mark.parametrize("style,mat", [("chrome_bar", "chrome"), ("blade", "chrome"), ("rubber", "trim")])
+def test_a_bumper_is_a_piece_on_the_body_at_both_ends(style, mat):
+    p = CarParams(bumper=style, bumper_height=0.42, bumper_proud=0.06)
+    car = build_car(p)
+    v = car.part("body").pieces[mat].positions
+    front = v[(v[:, 0] > p.length / 2 - 0.25) & (np.abs(v[:, 1] - p.bumper_height) < 0.25)]
+    rear = v[(v[:, 0] < -p.length / 2 + 0.25) & (np.abs(v[:, 1] - p.bumper_height) < 0.25)]
+    assert len(front) and len(rear)
+    # It stands proud of the body but no further, and wraps no wider than the car.
+    assert v[:, 0].max() <= p.length / 2 + p.bumper_proud + 0.01
+    assert v[:, 0].min() >= -p.length / 2 - p.bumper_proud - 0.01
+    assert np.abs(v[:, 2]).max() <= p.width / 2 + p.bumper_proud
+    plain = build_car()
+    assert len(v) > len(plain.part("body").pieces[mat].positions)
+
+
+def test_bumper_overriders_add_two_vertical_guards():
+    plain = build_car(CarParams(bumper="chrome_bar", bumper_proud=0.06))
+    guarded = build_car(CarParams(bumper="chrome_bar", bumper_proud=0.06, overriders=True))
+    assert _triangles(guarded) > _triangles(plain)
+    v = guarded.part("body").pieces["chrome"].positions
+    for sign in (1, -1):
+        guards = v[(sign * v[:, 0] > 1.9) & (v[:, 1] > 0.49) & (v[:, 1] < 0.62)]
+        assert len(guards)  # the bar itself stops at 0.485; these stand above it
+
+
+def test_a_mesh_grille_frames_a_dark_panel_and_full_width_spans_the_nose():
+    base = build_car()
+    narrow = build_car(CarParams(grille_style="mesh"))
+    wide = build_car(CarParams(grille_style="mesh", grille_span="full_width"))
+
+    def front_frame(car):
+        v = car.part("body").pieces["chrome"].positions
+        return v[(v[:, 0] > 1.6) & (v[:, 1] < 0.55)]
+
+    assert not len(front_frame(base))  # no chrome low on the nose until a mesh grille puts its frame there
+    assert len(front_frame(narrow)) and len(front_frame(wide))
+    assert np.abs(front_frame(wide)[:, 2]).max() > np.abs(front_frame(narrow)[:, 2]).max() + 0.05
+    assert {"chrome", "trim"} <= set(narrow.part("body").pieces)  # the frame and its dark panel
+
+
+def test_new_lamp_styles_build_on_the_nose_and_the_tail():
+    for style in ("round_pod", "rect"):
+        car = build_car(CarParams(headlamp=style))
+        v = car.part("body").pieces["lamp"].positions
+        front = v[v[:, 0] > 1.6]
+        assert len(front) and front[:, 1].max() > 0.6
+        if style == "round_pod":
+            assert "chrome" in car.part("body").pieces  # the ring
+    for style in ("fin", "block"):
+        car = build_car(CarParams(taillamp=style, taillamp_center=(0.66, 0.86)))
+        v = car.part("body").pieces["tail"].positions
+        rear = v[v[:, 0] < -1.6]
+        one = rear[rear[:, 2] > 0]  # one lamp, not both sides of the car
+        assert len(one)
+        if style == "fin":
+            assert np.ptp(one[:, 1]) > np.ptp(one[:, 2])  # tall and narrow
+        else:
+            assert np.ptp(one[:, 2]) > 0.1  # a large rectangle
+
+
+def test_a_hubcap_and_a_whitewall_dress_the_wheels():
+    p = CarParams(wheel="hubcap", whitewall=0.05)
+    car = build_car(p)
+    wheel = car.part("wheel_fl")
+    assert "chrome" in wheel.pieces and "whitewall" in wheel.pieces
+    assert "spoke" not in wheel.pieces
+    hub = wheel.pivot
+    cap = wheel.pieces["chrome"].positions
+    assert np.hypot(cap[:, 0] - hub[0], cap[:, 1] - hub[1]).max() <= p.wheel_radius * p.rim_ratio * 1.02
+    wall = wheel.pieces["whitewall"].positions
+    radius = np.hypot(wall[:, 0] - hub[0], wall[:, 1] - hub[1])
+    assert p.wheel_radius * p.rim_ratio < radius.mean() < p.wheel_radius
+    assert abs(np.abs(wall[:, 2] - hub[2]).mean() - p.tyre_width / 2) < 0.01
+
+
+def test_a_painted_roof_is_its_own_material_and_the_pillars_may_take_it():
+    from manifoldx.modeling.assets.car import PALETTE
+
+    assert PALETTE["roof"][0] == PALETTE["paint"][0]
+    assert "roof" not in build_car().part("body").pieces
+    with_pillars = build_car(CarParams(roof_paint=True))
+    without = build_car(CarParams(roof_paint=True, roof_pillars=False))
+    assert "roof" in with_pillars.part("body").pieces
+    assert len(without.part("body").pieces["roof"].positions) < len(with_pillars.part("body").pieces["roof"].positions)
+    black = build_car(CarParams(roof="black"))
+    assert "roof" not in black.part("body").pieces and "black" in black.part("body").pieces
+
+
+def test_none_positions_follow_a_tall_body():
+    tall = dict(height=1.75, hood_front=1.15)
+    low = build_car(CarParams(**tall))
+    auto = build_car(CarParams(**tall, headlamp_center=None, taillamp_center=None, grille=None))
+
+    def lamps(car):
+        v = car.part("body").pieces["lamp"].positions
+        return v[v[:, 0] > 1.7]
+
+    def tails(car):
+        v = car.part("body").pieces["tail"].positions
+        return v[v[:, 0] < -1.7]
+
+    assert lamps(low)[:, 1].max() < 0.9  # the numeric default stays down at the old nose
+    assert lamps(auto)[:, 1].max() > 1.0  # the derived lamp follows hood_front
+    assert tails(low)[:, 1].max() > 1.0  # the numeric default rides up the rear glass
+    assert tails(auto)[:, 1].max() < 0.9  # the derived lamp sits on the tail
+    assert "trim" in auto.part("body").pieces
+
+
+def test_a_decal_that_misses_its_face_raises_naming_the_part():
+    with pytest.raises(ValueError, match="headlamp"):
+        build_car(CarParams(headlamp="round", headlamp_size=(0.06, 0.06), headlamp_center=(0.90, 0.40)))
+    with pytest.raises(ValueError, match="taillamp"):
+        build_car(CarParams(taillamp_center=(0.0, 3.0)))
+
+
+def test_detail_scales_the_resolution_but_one_is_today():
+    low, one, high = build_car(CarParams(detail=0.5)), build_car(), build_car(CarParams(detail=2.0))
+    assert _triangles(low) < _triangles(one) < _triangles(high)
+    assert _triangles(one) == 15760
+    build_car(CarParams(sections=10, detail=0.5))  # never fewer than 8 sections
