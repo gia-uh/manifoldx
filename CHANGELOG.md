@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Interactive `dt` is smoothed (#299): systems in `run()` get a running mean of the recent frame intervals, kept in step with the wall clock (`manifoldx.frame_clock`), instead of the raw start-to-start interval, which under vsync disagrees with the time each image stays on screen and made motion judder. An interval over four times the mean passes through as it is. `Engine(smooth_dt=False)` restores the raw interval; `engine.elapsed` stays on the wall clock.
 - `manifoldx run` no longer drops `__main__` on a save when the launcher is a console script in the project's `.venv` (`uv run manifoldx run -m pkg.mod`). Files under `sys.prefix` are never the app's, so `multiprocessing` with spawn keeps working after a reload (#268).
 
 ### Changed
