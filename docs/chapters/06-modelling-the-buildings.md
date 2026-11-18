@@ -574,6 +574,19 @@ colours and outlines drawn in the side view, projected onto both flanks, and
 `lightbar="bar"` puts a two-colour bar of lamps on the roof, so a police car or a
 taxi is a sedan with two more entries in its `CarParams`.
 
+A bus is not a stretched car, so it has a builder of its own. `BusParams` holds
+the measurements of a low-floor city bus: length, width, height, the radius of
+the vertical corners seen from above, the floor height, the wheelbase and the
+front overhang, the band of windows along each flank and where its pillars stand,
+the windscreen's bottom and top and how far it rakes back, the route sign band,
+the rear window, the lamps and the paint areas. `build_bus` turns them into a
+`Bus`, a `Vehicle` like the car: the body is a box lofted along its length with
+rounded corners in plan and softened roof edges, glass, pillars and the frames of
+the double doors are regions of its faces, and the doors themselves are leaves on
+vertical hinges on the right side. The wheels and the lamps are the car's, and
+`merged` poses and colours a bus exactly as it does a car, so a street of buses
+still draws as one entity each.
+
 A car's texture can be a flat base paint with crisp details on top. Bake the base
 with `bake_projection(car, {}, size=..., materials={"paint"}, fallback=...)`, then
 place each detail as a `Decal`: an RGBA image, a view, and a centre that is a 3D
