@@ -43,6 +43,7 @@ def test_no_energy_gain_over_ramps():
     fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
     run(fleet, ground, 1.0)  # settle
     fleet.velocity[0] = (10.0, 0.0, 0.0)
+    fleet.omega[0] = 10.0 / fleet.p.radius[0]
     e0, worst = energy(fleet, spec), [0.0]
     run(fleet, ground, 8.0, each=lambda f: worst.__setitem__(0, max(worst[0], energy(f, spec))))
     assert fleet.position[0, 0] > 70  # it went down and back up
@@ -55,6 +56,7 @@ def test_climbs_a_kerb_without_taking_off():
     fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
     run(fleet, ground, 1.0)
     fleet.velocity[0] = (10 / 3.6, 0.0, 0.0)
+    fleet.omega[0] = 10 / 3.6 / fleet.p.radius[0]
     airborne, longest = np.zeros(4, int), [0]
 
     def watch(f):
@@ -73,6 +75,7 @@ def test_stays_under_a_bridge():
     run(fleet, ground, 0.5)
     y0 = fleet.position[0, 1]
     fleet.velocity[0] = (5.0, 0.0, 0.0)
+    fleet.omega[0] = 5.0 / fleet.p.radius[0]
     run(fleet, ground, 4.0)
     assert fleet.position[0, 0] > 20
     assert fleet.position[0, 1] == pytest.approx(y0, abs=0.05)

@@ -13,12 +13,12 @@ class Tyre:
     """A simplified Pacejka tyre: B (stiffness), C (shape) and E (curvature) for each direction, and its grip."""
 
     mu: float = 1.0
-    b_lat: float = 10.0
-    c_lat: float = 1.3
-    e_lat: float = 0.97
-    b_long: float = 12.0
-    c_long: float = 1.65
-    e_long: float = 0.97
+    b_lat: float = 11.0  # peak near 0.16 rad, 80 % of the peak at a slip of 1
+    c_lat: float = 1.5
+    e_lat: float = 0.05
+    b_long: float = 18.0  # peak near 0.09 slip ratio, 80 % of the peak when locked
+    c_long: float = 1.45
+    e_long: float = -0.3
 
 
 @dataclass(frozen=True)

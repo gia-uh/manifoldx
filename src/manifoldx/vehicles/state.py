@@ -8,6 +8,7 @@ from typing import Sequence
 import numpy as np
 
 from .spec import VehicleSpec
+from .tyre import peak_slip
 
 TYRE_FIELDS = ("mu", "b_lat", "c_lat", "e_lat", "b_long", "c_long", "e_long")
 
@@ -24,6 +25,8 @@ class Packed:
     spring: np.ndarray
     damper: np.ndarray
     tyre: np.ndarray  # (N, W, 7) in TYRE_FIELDS order
+    kappa_peak: np.ndarray  # (N, W) slip ratio of the longitudinal peak
+    alpha_peak: np.ndarray  # (N, W) slip-angle tangent of the lateral peak
     driven: np.ndarray
     steered: np.ndarray
     brake_share: np.ndarray
@@ -52,6 +55,7 @@ def pack(specs: Sequence[VehicleSpec]) -> Packed:
     f = lambda: np.zeros((n, w))
     mask, mount = np.zeros((n, w), bool), np.zeros((n, w, 3))
     radius, travel, spring, damper, share, inertia = f(), f(), f(), f(), f(), f()
+    kpeak, apeak = np.ones((n, w)), np.ones((n, w))
     tyre = np.zeros((n, w, len(TYRE_FIELDS)))
     driven, steered, handbrake, front = (np.zeros((n, w), bool) for _ in range(4))
     pair, arb = np.tile(np.arange(w), (n, 1)), f()
@@ -63,6 +67,8 @@ def pack(specs: Sequence[VehicleSpec]) -> Packed:
             mask[i, j], mount[i, j] = True, wh.mount
             radius[i, j], travel[i, j], spring[i, j], damper[i, j] = wh.radius, wh.travel, wh.spring, wh.damper
             tyre[i, j] = [getattr(wh.tyre, k) for k in TYRE_FIELDS]
+            t = wh.tyre
+            kpeak[i, j], apeak[i, j] = peak_slip(t.b_long, t.c_long, t.e_long), peak_slip(t.b_lat, t.c_lat, t.e_lat)
             driven[i, j], steered[i, j], handbrake[i, j] = wh.driven, wh.steered, wh.handbrake
             share[i, j], inertia[i, j] = wh.brake_share, wh.inertia
             front[i, j] = wh.mount[0] > 0
@@ -76,7 +82,7 @@ def pack(specs: Sequence[VehicleSpec]) -> Packed:
     return Packed(
         mass=col(lambda s: s.mass), inertia=np.array([s.inertia for s in specs], float),
         size=np.array([s.size for s in specs], float), wheel_mask=mask, mount=mount, radius=radius, travel=travel,
-        spring=spring, damper=damper, tyre=tyre, driven=driven, steered=steered, brake_share=share,
+        spring=spring, damper=damper, tyre=tyre, kappa_peak=kpeak, alpha_peak=apeak, driven=driven, steered=steered, brake_share=share,
         handbrake=handbrake, wheel_inertia=inertia, front=front, pair=pair, arb=arb,
         engine=np.array([[e(s).idle_rpm, e(s).peak_torque_rpm, e(s).peak_power_rpm, e(s).idle_torque,
                           e(s).peak_torque, e(s).power_torque, e(s).engine_brake] for s in specs], float),

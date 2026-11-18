@@ -5,6 +5,17 @@ from __future__ import annotations
 import numpy as np
 
 
+def cross(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """a × b over the last axis, broadcasting; much cheaper than np.cross on small arrays."""
+    ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
+    bx, by, bz = b[..., 0], b[..., 1], b[..., 2]
+    out = np.empty(np.broadcast_shapes(a.shape, b.shape))
+    out[..., 0] = ay * bz - az * by
+    out[..., 1] = az * bx - ax * bz
+    out[..., 2] = ax * by - ay * bx
+    return out
+
+
 def matrices(q: np.ndarray) -> np.ndarray:
     """(N, 4) unit quaternions to (N, 3, 3) matrices whose columns are the car's x, y and z in the world."""
     x, y, z, w = q.T
