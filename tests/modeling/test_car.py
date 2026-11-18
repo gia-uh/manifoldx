@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from manifoldx.modeling.assets.car import CarParams, build_car
+from manifoldx.modeling.assets.car import CarParams, _body_grid, _lamp_centers, build_car
 
 _spec = importlib.util.spec_from_file_location("car_shapes", Path(__file__).parents[2] / "examples/models/car_shapes.py")
 shapes = importlib.util.module_from_spec(_spec)
@@ -306,6 +306,35 @@ def test_a_mesh_grille_frames_a_dark_panel_and_full_width_spans_the_nose():
     assert {"chrome", "trim"} <= set(narrow.part("body").pieces)  # the frame and its dark panel
 
 
+def test_a_mesh_grille_is_an_egg_crate_of_chrome_bars():
+    def grille_chrome(car):
+        mesh = car.part("body").pieces["chrome"]
+        mid = mesh.positions[mesh.faces].mean(1)
+        return int(((mid[:, 0] > 1.6) & (mid[:, 1] < 0.55)).sum())
+
+    one = build_car(CarParams(grille_style="mesh"))
+    low = build_car(CarParams(grille_style="mesh", detail=0.5))
+    high = build_car(CarParams(grille_style="mesh", detail=2.0))
+    assert grille_chrome(one) > 3688  # the frame and three bars, as recorded before the egg-crate
+    assert grille_chrome(low) < grille_chrome(one) < grille_chrome(high)  # the bars follow detail
+
+
+def test_a_round_pod_lands_on_the_wing_tip_at_both_sizes():
+    for size in (0.18, 0.24):
+        p = CarParams(headlamp="round_pod", headlamp_center=None, headlamp_size=(size, size), fender_crown=0.12)
+        car = build_car(p)
+        mesh = car.part("body").pieces["lamp"]
+        tri = mesh.positions[mesh.faces]
+        tri = tri[tri.mean(1)[:, 0] > p.length / 2 - 0.4]  # the headlamps, not the tail
+        one = tri[tri.mean(1)[:, 2] > 0]  # one side of the car
+        assert len(one) > 20
+        head = np.array(_lamp_centers(p)[0])
+        assert np.allclose(one.mean(1)[:, [2, 1]].mean(0), head, atol=0.05)  # it lands where it was derived
+        n = np.cross(one[:, 1] - one[:, 0], one[:, 2] - one[:, 0])
+        n /= np.linalg.norm(n, axis=1, keepdims=True)
+        assert n[:, 0].mean() > 0.5  # the ring looks forward
+
+
 def test_new_lamp_styles_build_on_the_nose_and_the_tail():
     for style in ("round_pod", "rect"):
         car = build_car(CarParams(headlamp=style))
@@ -386,3 +415,96 @@ def test_detail_scales_the_resolution_but_one_is_today():
     assert _triangles(low) < _triangles(one) < _triangles(high)
     assert _triangles(one) == 15760
     build_car(CarParams(sections=10, detail=0.5))  # never fewer than 8 sections
+
+
+# --- step 2 of the vehicle family: wings, fins, a wrapping screen and side trim -------------------------------
+
+
+def _top(car, x, below=False, zmin=None, centre=False):
+    """The highest skin point in a stretch of the car, on one flank or on the centre line."""
+    v = car.part("body").pieces["paint"].positions
+    select = (v[:, 0] < x) if below else (v[:, 0] > x)
+    select &= (np.abs(v[:, 2]) < 0.06) if centre else (v[:, 2] > (zmin if zmin is not None else 0.0))
+    return v[select, 1].max()
+
+
+def test_the_new_options_default_to_todays_car():
+    p = CarParams()
+    assert (p.fender_crown, p.fender_crown_u, p.fin_height, p.fin_start_u, p.fin_width) == (0.0, 0.25, 0.0, 0.7, 0.22)
+    assert (p.windscreen_wrap, p.side_trim) == (0.0, ())
+    assert _triangles(build_car(CarParams())) == 15760
+
+
+def test_fender_crown_raises_the_wings_at_the_nose_but_not_the_centre():
+    def nose(p):
+        _, P, _, _ = _body_grid(p, (p.front_overhang, p.front_overhang - p.wheelbase))
+        return P[0]
+
+    base, crowned = nose(CarParams()), nose(CarParams(fender_crown=0.10, fender_crown_u=0.25))
+
+    def wing(s):
+        return s[:, 1].max()
+
+    def centre(s):
+        return s[np.abs(s[:, 2]) < 1e-9, 1].max()
+
+    assert 0.07 < wing(crowned) - wing(base) < 0.12  # about the crown
+    assert np.isclose(centre(crowned), centre(base))  # the hood's centre keeps its line
+
+
+def test_fender_crown_makes_two_ridges_over_a_low_hood():
+    p = CarParams(fender_crown=0.12)
+    _, P, _, _ = _body_grid(p, (p.front_overhang, p.front_overhang - p.wheelbase))
+    nose = P[0]  # the section at the very front of the car
+    centre = nose[np.abs(nose[:, 2]) < 1e-9, 1].max()
+    wing = nose[:, 1].max()
+    assert wing - centre >= 0.8 * p.fender_crown
+    assert nose[7:11, 1].min() < centre - 0.02  # the hood dips between the crests, a step not a slope
+
+
+def test_fin_height_raises_the_tail_wings_but_not_the_centre():
+    base = build_car(CarParams())
+    finned = build_car(CarParams(fin_height=0.15, fin_start_u=0.7, fin_width=0.22))
+    lift = _top(finned, -1.9, below=True, zmin=0.6) - _top(base, -1.9, below=True, zmin=0.6)
+    assert lift > 0.04
+    assert np.isclose(_top(finned, -1.7, below=True, centre=True), _top(base, -1.7, below=True, centre=True), atol=1e-6)
+
+
+def test_derived_pod_and_fin_lamps_follow_the_wings():
+    p = CarParams(headlamp="round_pod", headlamp_center=None, headlamp_size=(0.16, 0.16), hood_crown=0.03,
+                  fender_crown=0.10, fender_crown_u=0.25,
+                  taillamp="fin", taillamp_center=None, fin_height=0.15, fin_start_u=0.7)
+    car = build_car(p)  # both derived lamps land: no ValueError
+    plain = build_car(CarParams(headlamp="round_pod", headlamp_center=None, headlamp_size=(0.16, 0.16),
+                                hood_crown=0.03, taillamp="fin", taillamp_center=None))
+    lamps = car.part("body").pieces["lamp"].positions
+    lamps = lamps[lamps[:, 0] > 1.6]
+    one = lamps[lamps[:, 2] > 0]
+    assert len(one) and np.allclose(one[:, [2, 1]].mean(0), _lamp_centers(p)[0], atol=0.05)
+    # The pod sits under the raised wing, whose crest now stands over it.
+    paint = car.part("body").pieces["paint"].positions
+    crest = paint[(paint[:, 0] > p.length / 2 - 0.25) & (np.abs(paint[:, 2]) > 0.55), 1].max()
+    assert crest > lamps[:, 1].max() + 0.03
+    tails = car.part("body").pieces["tail"].positions
+    tails = tails[tails[:, 0] < -1.6]
+    plain_tails = plain.part("body").pieces["tail"].positions
+    plain_tails = plain_tails[plain_tails[:, 0] < -1.6]
+    assert len(tails) and tails[:, 1].max() > plain_tails[:, 1].max() + 0.03
+
+
+def test_windscreen_wrap_adds_glass_round_the_a_pillars():
+    plain = build_car(CarParams())
+    wrapped = build_car(CarParams(windscreen_wrap=0.6))
+    def glass(car):
+        return sum(len(mesh.faces) for part in car.parts for mat, mesh in part.pieces.items() if mat == "glass")
+    assert glass(wrapped) > glass(plain)
+
+
+def test_side_trim_lays_a_chrome_strip_along_both_flanks():
+    plain = build_car(CarParams())
+    p = CarParams(side_trim=((0.78, 0.5, 0.9, "chrome"),))
+    car = build_car(p)
+    trim = car.part("body").pieces["chrome"].positions
+    strip = trim[(trim[:, 1] > 0.76) & (trim[:, 1] < 0.80)]
+    assert len(strip) and strip[:, 2].min() < -0.5 and strip[:, 2].max() > 0.5  # both sides
+    assert len(trim) > len(plain.part("body").pieces["chrome"].positions)
