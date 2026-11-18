@@ -41,7 +41,7 @@ class Mesh:
     faces: np.ndarray                # (M, 3) uint32
     normals: np.ndarray | None = None  # (N, 3) float32, lazily computed
     uvs: np.ndarray | None = None      # (N, 2) float32, optional
-    colors: np.ndarray | None = None   # (N, 3) float32, optional per-vertex RGB
+    colors: np.ndarray | None = None   # (N, 3) float32, optional per-vertex RGB in sRGB, like hex colours
     joints: np.ndarray | None = None   # (N,) uint32, optional joint per vertex (skinning)
 
     def __post_init__(self):
@@ -133,7 +133,11 @@ class Mesh:
         )
 
     def with_colors(self, colors: np.ndarray) -> "Mesh":
-        """Return a copy with per-vertex RGB colors (N, 3)."""
+        """Return a copy with per-vertex RGB colors (N, 3).
+
+        Components are sRGB in [0, 1], the same convention as a material's `color=`
+        or a gradient's hex stops; the renderer decodes them to linear light.
+        """
         return replace(self, colors=np.ascontiguousarray(colors, dtype=np.float32))
 
     def color_by(self, field, gradient) -> "Mesh":

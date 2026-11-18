@@ -94,7 +94,12 @@ class Scene:
             pos = np.asarray(geo["positions"] if "positions" in geo else geo["vertices"], np.float32)
             idx = np.asarray(geo["indices"], np.int64).reshape(-1, 3) if "indices" in geo else \
                 np.arange(len(pos)).reshape(-1, 3)
-            attrs = {"normals": geo.get("normals"), "uvs": geo.get("uvs"), "colors": geo.get("colors")}
+            colors = geo.get("colors")
+            if colors is not None:  # manifoldx authors these in sRGB; the tracer works in linear
+                from manifoldx.resources import srgb_to_linear
+
+                colors = srgb_to_linear(np.asarray(colors, np.float32))
+            attrs = {"normals": geo.get("normals"), "uvs": geo.get("uvs"), "colors": colors}
             mats.append(mat)
             parts.append((name, pos, idx, attrs, len(mats) - 1))
         return assemble(parts, mats, camera=camera, lights=list(lights), environment=environment)

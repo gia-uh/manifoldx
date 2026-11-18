@@ -5,7 +5,7 @@ import pytest
 
 import manifoldx as mx
 from manifoldx.components import Material, Mesh, Transform
-from manifoldx.resources import DirectionalLight, StandardMaterial, material_rgb, pack_vertices
+from manifoldx.resources import DirectionalLight, StandardMaterial, pack_vertices
 
 
 def _wall(kind, with_key=True, bays=4.0, floors=3.0):
@@ -13,7 +13,7 @@ def _wall(kind, with_key=True, bays=4.0, floors=3.0):
     geo = {
         "positions": np.array([[-6, 0, 0], [6, 0, 0], [6, 9, 0], [-6, 9, 0]], np.float32),
         "normals": np.tile([0, 0, 1], (4, 1)).astype(np.float32),
-        "colors": np.tile(material_rgb("#e7c3a1"), (4, 1)).astype(np.float32),
+        "colors": np.tile(np.array([0xE7, 0xC3, 0xA1]) / 255.0, (4, 1)).astype(np.float32),
         "indices": np.array([0, 1, 2, 0, 2, 3], np.uint32),
     }
     if with_key:

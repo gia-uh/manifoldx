@@ -1564,7 +1564,9 @@ class StandardMaterial(Material):
 def pack_vertices(geometry_obj: dict):
     """A geometry's vertices as the interleaved bytes its vertex buffer holds,
     and the layout: (data, info), with data None when it has no positions.
-    Pure numpy, so it can run off the frame (a Streamer worker)."""
+    Per-vertex colours are sRGB and are decoded to the linear light the shaders
+    work in, as material colours are. Pure numpy, so it can run off the frame
+    (a Streamer worker)."""
     buffers = {}
     data = None
 
@@ -1595,7 +1597,9 @@ def pack_vertices(geometry_obj: dict):
             buffers["has_colors"] = False
         elif has_normals and has_colors:
             normals = geometry_obj["normals"].astype(np.float32)
-            colors = geometry_obj["colors"].astype(np.float32)
+            # Vertex colours are sRGB, like a material's `color=` or a hex colour in a
+            # gradient; the shader works in linear light, so decode them here, once.
+            colors = srgb_to_linear(geometry_obj["colors"].astype(np.float32))
             n_verts = len(positions)
             has_facade = "facade" in geometry_obj
             interleaved = np.zeros((n_verts, 14 if has_facade else 10), dtype=np.float32)

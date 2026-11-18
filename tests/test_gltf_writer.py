@@ -115,6 +115,8 @@ def test_texture_without_source_is_reported(tmp_path):
 
 
 def test_vertex_colors_only_with_a_vertex_color_material(tmp_path):
+    from manifoldx.resources import srgb_to_linear
+
     geo = tri() | {"colors": np.full((3, 3), 0.5, np.float32)}
     out = tmp_path / "a.glb"
     export_gltf(out, [Node(geo, StandardMaterial("#ffffff", vertex_colors=True)),
@@ -122,7 +124,8 @@ def test_vertex_colors_only_with_a_vertex_color_material(tmp_path):
     g = load(out)
     with_c = g.meshes[g.nodes[0].mesh].primitives[0].attributes
     without = g.meshes[g.nodes[1].mesh].primitives[0].attributes
-    np.testing.assert_allclose(accessor(g, with_c.COLOR_0), geo["colors"])
+    # manifoldx authors vertex colours in sRGB; glTF's COLOR_0 is linear.
+    np.testing.assert_allclose(accessor(g, with_c.COLOR_0), srgb_to_linear(geo["colors"]), atol=1e-6)
     assert without.COLOR_0 is None
 
 

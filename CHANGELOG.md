@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Per-vertex colours are sRGB, the same convention as a material's `color=`, and the renderer, glTF writer and path tracer decode them to linear light on the way in: a `#c62828` box drawn with `Mesh.with_colors(..., vertex_colors=True)` now matches the same hex as `color=` instead of rendering pale (#292).
 - `manifoldx run` no longer drops `__main__` on a save when the launcher is a console script in the project's `.venv` (`uv run manifoldx run -m pkg.mod`). Files under `sys.prefix` are never the app's, so `multiprocessing` with spawn keeps working after a reload (#268).
 
 ### Changed
