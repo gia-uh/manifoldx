@@ -63,6 +63,11 @@ class CarParams:
     sill: float = 0.20  # underside between the wheels
     bumper_bottom_front: float = 0.36
     bumper_bottom_rear: float = 0.35
+    # A bumper of its own: a bar across each end, standing out of the body and wrapping a little round its corners.
+    bumper: str = "skin"  # "skin" (part of the body), "chrome_bar", "blade" or "rubber"
+    bumper_height: float = 0.42  # centre of the bar, from the ground
+    bumper_proud: float = 0.05  # how far the bar stands out of the body (m)
+    overriders: bool = False  # two vertical guards on each bumper
     hood_crown: float = 0.13  # how far the hood's edge sits below its crown
     # Plan and section.
     nose_half: float = 0.76  # half-width at the front end, over the half-width
@@ -81,21 +86,24 @@ class CarParams:
     c_pillar_u: float = 0.69  # end of the rear door glass; behind it the quarter is black
     black_pillars: bool = True
     roof: str = "paint"  # or "black"
+    roof_paint: bool = False  # the roof skin takes the "roof" material, for a two-tone car
+    roof_pillars: bool = True  # the pillars take it too
     # Parts.
     # A lamp is a shape (a dict, see the module's docstring) or one of the plain outlines. A shape
     # is placed by its anchor, sized in its own plane and turned `yaw` degrees from straight ahead toward its side
     # of the car, so a lamp on a corner is drawn as it is seen straight on.
-    headlamp: str | dict = "almond"  # a shape, or "almond", "round" or "bar"
-    headlamp_center: tuple = (0.56, 0.78)  # (lateral, height) of the lamp's anchor: here, the end of the light bar
+    headlamp: str | dict = "almond"  # a shape, or "almond", "round", "bar", "round_pod" or "rect"
+    headlamp_center: tuple | None = (0.56, 0.78)  # (lateral, height); None derives it from the profile
     headlamp_size: tuple = (0.30, 0.14)
     headlamp_yaw: float = 20.0
     drl_bar: bool = False
     drl_height: float = 0.78
     drl_half_length: float = 0.505  # to the inner edge of the headlamps, whose own strip carries it on
-    grille: tuple = (0.60, 0.27, 0.43)  # half-width, bottom, top
-    grille_style: str | dict = "bar"  # a shape, or "bar"
-    taillamp: str | dict = "pill"  # a shape, or "pill"
-    taillamp_center: tuple = (0.66, 0.97)
+    grille: tuple | None = (0.60, 0.27, 0.43)  # half-width, bottom, top; None derives it from the profile
+    grille_style: str | dict = "bar"  # a shape, or "bar" or "mesh"
+    grille_span: str = "between_lamps"  # or "full_width": the grille unit spans the nose round the lamps
+    taillamp: str | dict = "pill"  # a shape, or "pill", "fin" or "block"
+    taillamp_center: tuple | None = (0.66, 0.97)  # None derives it from the profile
     taillamp_size: tuple = (0.26, 0.16)
     taillamp_yaw: float = 25.0
     spoiler: bool = False
@@ -103,8 +111,9 @@ class CarParams:
     mirror: str | dict = "box"  # a shape, or "box"
     mirror_size: tuple = (0.20, 0.165)  # across and up, stalk included, as seen from ahead of the car
     mirror_yaw: float = 22.0  # degrees its outer end is swept back
-    wheel: str | dict = "spokes"  # a shape, or "spokes"
+    wheel: str | dict = "spokes"  # a shape, or "spokes" or "hubcap"
     spokes: int = 5  # of the plain wheel
+    whitewall: float = 0.0  # width (m) of a white band on the tyre's side; 0 for none
     dash: str | dict = "box"  # a shape, or "box"
     steering: str | dict = "ring"  # a shape, or "ring"
     door_card: dict | None = None  # a shape, or None for bare doors
@@ -119,6 +128,7 @@ class CarParams:
     bed_floor: float = 0.9  # height of the bed's floor, above the rear wheel arches
     # Resolution and shading.
     sections: int = 28
+    detail: float = 1.0  # scales the sections along the body and the segments round wheels and lamps; 1 is today
     crease: float = 40.0  # degrees: an edge that turns more than this is shaded sharp
 
 
@@ -318,7 +328,8 @@ def _section(top, bottom, half, belt, roof):
 def _stations(p: CarParams, axles):
     """Section positions as fractions of the length: denser at the ends, plus a fan over each wheel arch and one
     at every edge between regions, so pillars and panel gaps fall on a section."""
-    u = 0.5 - 0.5 * np.cos(np.pi * np.linspace(0, 1, p.sections))
+    sections = max(8, int(round(p.sections * p.detail)))
+    u = 0.5 - 0.5 * np.cos(np.pi * np.linspace(0, 1, sections))
     bw = p.b_pillar_width / 2 / p.length
     u = np.concatenate([u, [p.cowl_u - 0.01, p.cowl_u + 0.01, p.windscreen_u, p.b_pillar_u - bw, p.b_pillar_u,
                             p.b_pillar_u + bw, p.c_pillar_u, p.roof_end_u - 0.01, p.hatch_u]])
@@ -489,8 +500,15 @@ def _region(p: CarParams, u, b, ut, v):
         return "trim"
     if u < p.cowl_u - 0.01 or b <= 5:
         return "paint"
-    roof = "black" if p.roof == "black" else "paint"
-    pillar = "black" if p.black_pillars else "paint"
+    if p.roof == "black":
+        roof = "black"
+        pillar = "black" if p.black_pillars else "paint"
+    elif p.roof_paint:
+        roof = "roof"
+        pillar = "roof" if p.roof_pillars else "paint"
+    else:
+        roof = "paint"
+        pillar = "black" if p.black_pillars else "paint"
     if u < p.windscreen_u:
         # Beside the windscreen the side glass sits under the A-pillar, a line that climbs from the belt to the roof.
         t = (ut - p.cowl_u) / (p.windscreen_u - p.cowl_u)
@@ -615,12 +633,31 @@ def _slabs(outline, width):
     return [q for q in pieces if len(q) >= 3]
 
 
+def _lamp_centers(p: CarParams):
+    """The headlamp's and taillamp's (lateral, height), derived from the profile when they are None."""
+    half = p.width / 2
+    head = p.headlamp_center if p.headlamp_center is not None else (0.63 * half, p.hood_front - 0.07)
+    tail = p.taillamp_center if p.taillamp_center is not None else (0.74 * half, p.tail_top - 0.09)
+    return tuple(head), tuple(tail)
+
+
+def _grille_box(p: CarParams):
+    """The grille's (half-width, bottom, top); derived from the nose when it is None, wider for a full-width unit."""
+    if p.grille is not None:
+        gw, g0, g1 = p.grille
+    else:
+        gw, g0, g1 = 0.675 * p.width / 2, 0.38 * p.nose_top, 0.62 * p.nose_top
+    if p.grille_span == "full_width":
+        gw = 0.94 * p.width / 2
+    return gw, g0, g1
+
+
 def _decals(p: CarParams, verts, tris, parts, corner_uv):
     """Flat outlines projected onto the skin: (material, view, outline) -> (material, part, vertices, triangles)."""
     W, L = p.width, p.length
     out = []
 
-    def add(mat, view, outline, lift=0.006, close=None, frame=None, least=4):
+    def add(mat, view, outline, lift=0.006, close=None, frame=None, least=4, what="decal"):
         # The outline is split into small triangles, so the decal bends with the skin it lands on instead of
         # cutting through it. A frame (anchor on the skin, view direction, the
         # outline's own right axis, half-size, the outline's anchor, island) places an outline drawn in units of
@@ -639,6 +676,20 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
             d = np.array([0.0, 0.0, -sign])
             o = np.column_stack([outline[:, 0], outline[:, 1], np.full(len(outline), sign * (W / 2 + 1))])
         t, k = _raycast(o, d, verts, tris)
+        if view in ("front", "rear"):
+            # A decal meant for an end must land on a face that looks that way. Sideways hits are a mistake:
+            # when not one point reaches the end's face, say which part missed instead of smearing it on a flank.
+            sign = 1 if view == "front" else -1
+            finite = np.isfinite(t)
+            if finite.any():
+                a, b, c = verts[tris[k, 0]], verts[tris[k, 1]], verts[tris[k, 2]]
+                n = np.cross(b - a, c - a)
+                n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
+                on_face = finite & (sign * n[:, 0] > 0.5)
+            else:
+                on_face = finite
+            if not on_face.any():
+                raise ValueError(f"{what} misses the {view} face")
         if not np.isfinite(t).all():
             return
         pts = o + (t - lift)[:, None] * d
@@ -665,11 +716,11 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
             uv = _island(name, (side * pts[:, 2] - y0) / (y1 - y0), (z1 - pts[:, 1]) / (z1 - z0))
         out.append((mat, str(names[counts.argmax()]), pts, tri, uv))
 
-    def both(mat, view, outline, lift=0.006, close=None):
-        add(mat, view, outline, lift, close and (*close, 1))
-        add(mat, view, [(-a, b) for a, b in reversed(outline)], lift, close and (*close, -1))
+    def both(mat, view, outline, lift=0.006, close=None, what="decal"):
+        add(mat, view, outline, lift, close and (*close, 1), what=what)
+        add(mat, view, [(-a, b) for a, b in reversed(outline)], lift, close and (*close, -1), what=what)
 
-    def lens(mat, view, outline, rim=0.72, core=0.34, about=None, island=None):
+    def lens(mat, view, outline, rim=0.72, core=0.34, about=None, island=None, what="decal"):
         """A lamp as a lit rim round a dark lens with a chrome core on top. The lens is the outline shrunk toward
         `about` (its middle by default): off-centre, the rim is wide on the far side and thin on the near one.
         The core is the outline shrunk again, or an outline of its own. With an island, the lamp is drawn there
@@ -678,13 +729,13 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         lo, hi = np.min(outline, axis=0), np.max(outline, axis=0)
         pad = 0.06 * (hi - lo)
         close = island and (island, (*(lo - pad), *(hi + pad)))
-        both(mat, view, outline, close=close)
-        both("black", view, [tuple(c + rim * (np.array(q) - c)) for q in outline], 0.009, close)
+        both(mat, view, outline, close=close, what=what)
+        both("black", view, [tuple(c + rim * (np.array(q) - c)) for q in outline], 0.009, close, what)
         if core:
             both("chrome", view, core if isinstance(core, list) else [tuple(c + core * (np.array(q) - c)) for q in outline],
-                 0.012, close)
+                 0.012, close, what)
 
-    def unit(shape, end, centre, size, yaw, island, lit):
+    def unit(shape, end, centre, size, yaw, island, lit, what="lamp"):
         """A lamp from a shape, on both sides of the car: at the front (end 1) or the rear (-1), its anchor where a
         look straight along the car meets the skin at `centre`, facing `yaw` degrees toward its side."""
         ang = np.radians(yaw)
@@ -693,35 +744,49 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
             start = np.array([[end * (L / 2 + 1), centre[1], side * centre[0]]])
             t0, _ = _raycast(start, ahead, verts, tris)
             if not np.isfinite(t0[0]):
-                continue
+                raise ValueError(f"{what} misses the {'front' if end > 0 else 'rear'} face")
             d = np.array([-end * np.cos(ang), 0.0, -side * np.sin(ang)])
             right = np.array([-end * np.sin(ang), 0.0, side * np.cos(ang)])
             frame = (start[0] + t0[0] * ahead, d, right, size[0] / 2, size[1] / 2, *shape["anchor"], island)
             for k, (m, outline) in enumerate(shape["layers"]):
-                add(lit if m == "lit" else m, "unit", outline, 0.006 + 0.002 * k, frame=frame)
+                add(lit if m == "lit" else m, "unit", outline, 0.006 + 0.002 * k, frame=frame, what=what)
 
     def pill(cx, cy, a, b):
+        n = max(4, int(round(20 * p.detail)))
         return [(cx + a * np.sign(np.cos(v)) * abs(np.cos(v)) ** 0.5, cy + b * np.sign(np.sin(v)) * abs(np.sin(v)) ** 0.5)
-                for v in np.linspace(0, 2 * np.pi, 20, endpoint=False)]
+                for v in np.linspace(0, 2 * np.pi, n, endpoint=False)]
 
     head = p.headlamp if isinstance(p.headlamp, dict) else None
+    head_center, tail_center = _lamp_centers(p)
     if head:
-        unit(head, 1, p.headlamp_center, p.headlamp_size, p.headlamp_yaw, "headlamp", "lamp")
+        unit(head, 1, head_center, p.headlamp_size, p.headlamp_yaw, "headlamp", "lamp", what="headlamp")
     else:
-        cy, cz = p.headlamp_center
+        cy, cz = head_center
         a, bh = p.headlamp_size[0] / 2, p.headlamp_size[1] / 2
-        if p.headlamp == "round":
-            eye = [(cy + bh * np.cos(s), cz + bh * np.sin(s)) for s in np.linspace(0, 2 * np.pi, 16, endpoint=False)]
-        elif p.headlamp == "bar":
-            eye = [(cy - a, cz - bh / 3), (cy + a, cz - bh / 3), (cy + a, cz + bh / 3), (cy - a, cz + bh / 3)]
-        else:  # almond: an ellipse drawn to a point on its inner side, toward the middle of the car
-            s = np.linspace(0, 2 * np.pi, 20, endpoint=False)
-            eye = [(cy + a * np.cos(v), cz + bh * np.sin(v) * (1 - 0.75 * max(0.0, -np.cos(v)))) for v in s]
-        lens("lamp", "front", eye, island="headlamp")
+        if p.headlamp == "round_pod":
+            # A round lamp with a chrome ring standing slightly proud of the skin, the lens set inside it.
+            n = max(4, int(round(16 * p.detail)))
+            s = np.linspace(0, 2 * np.pi, n, endpoint=False)
+            for lift, mat, scale in ((0.009, "chrome", 1.18), (0.012, "black", 1.03), (0.015, "lamp", 0.86)):
+                both(mat, "front", [(cy + scale * bh * np.cos(v), cz + scale * bh * np.sin(v)) for v in s],
+                     lift, what="headlamp")
+        else:
+            if p.headlamp == "round":
+                n = max(4, int(round(16 * p.detail)))
+                eye = [(cy + bh * np.cos(s), cz + bh * np.sin(s)) for s in np.linspace(0, 2 * np.pi, n, endpoint=False)]
+            elif p.headlamp == "rect":
+                eye = [(cy - a, cz - bh), (cy + a, cz - bh), (cy + a, cz + bh), (cy - a, cz + bh)]
+            elif p.headlamp == "bar":
+                eye = [(cy - a, cz - bh / 3), (cy + a, cz - bh / 3), (cy + a, cz + bh / 3), (cy - a, cz + bh / 3)]
+            else:  # almond: an ellipse drawn to a point on its inner side, toward the middle of the car
+                n = max(4, int(round(20 * p.detail)))
+                s = np.linspace(0, 2 * np.pi, n, endpoint=False)
+                eye = [(cy + a * np.cos(v), cz + bh * np.sin(v) * (1 - 0.75 * max(0.0, -np.cos(v)))) for v in s]
+            lens("lamp", "front", eye, island="headlamp", what="headlamp")
     if p.drl_bar:
         h, w = p.drl_height, p.drl_half_length
-        add("lamp", "front", [(-w, h - 0.009), (w, h - 0.009), (w, h + 0.009), (-w, h + 0.009)], 0.010)
-    gw, g0, g1 = p.grille
+        add("lamp", "front", [(-w, h - 0.009), (w, h - 0.009), (w, h + 0.009), (-w, h + 0.009)], 0.010, what="drl")
+    gw, g0, g1 = _grille_box(p)
     grille = p.grille_style if isinstance(p.grille_style, dict) else None
     if grille:
         # The shape is as tall as the grille. Its ends keep their proportions and its middle takes up the length.
@@ -732,18 +797,45 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
             u, v = np.asarray(outline, float).T
             across = np.where(abs(u) < ends, u * (gw - (1 - ends) * scale) / ends, np.sign(u) * (gw - (1 - abs(u)) * scale))
             for slab in _slabs(np.column_stack([across, (g0 + g1) / 2 + v * (g1 - g0) / 2]), 0.12):
-                add({"lit": "lamp", "chrome": "chrome"}.get(m, "trim"), "front", slab, 0.006 + 0.003 * k, least=1)
+                add({"lit": "lamp", "chrome": "chrome"}.get(m, "trim"), "front", slab, 0.006 + 0.003 * k, least=1,
+                    what="grille")
+    elif p.grille_style == "mesh":
+        # A chrome frame round a dark panel set back behind it, with a few thin bars across the recess.
+        t = max(0.02, 0.14 * (g1 - g0))
+        add("chrome", "front", [(-gw, g0), (gw, g0), (gw, g0 + t), (-gw, g0 + t)], 0.009, what="grille")
+        add("chrome", "front", [(-gw, g1 - t), (gw, g1 - t), (gw, g1), (-gw, g1)], 0.009, what="grille")
+        add("chrome", "front", [(-gw, g0 + t), (-gw + t, g0 + t), (-gw + t, g1 - t), (-gw, g1 - t)], 0.009, what="grille")
+        add("chrome", "front", [(gw - t, g0 + t), (gw, g0 + t), (gw, g1 - t), (gw - t, g1 - t)], 0.009, what="grille")
+        add("trim", "front", [(-gw + t, g0 + t), (gw - t, g0 + t), (gw - t, g1 - t), (-gw + t, g1 - t)],
+            0.002, what="grille")
+        for k in range(1, 4):
+            z = -gw + 2 * gw * k / 4
+            add("chrome", "front", [(z - 0.005, g0 + t), (z + 0.005, g0 + t), (z + 0.005, g1 - t), (z - 0.005, g1 - t)],
+                0.004, least=1, what="grille")
     else:
-        add("trim", "front", [(-gw, g0), (gw, g0), (gw * 1.06, g1), (-gw * 1.06, g1)], 0.003)
+        add("trim", "front", [(-gw, g0), (gw, g0), (gw * 1.06, g1), (-gw * 1.06, g1)], 0.003, what="grille")
         if p.fog_rings:
-            lens("lamp", "front", pill(0.74 * gw, (g0 + g1) / 2, 0.20 * gw, 0.36 * (g1 - g0)), rim=0.78, core=0.0)
-    add("plate", "front", [(-0.26, 0.47), (0.26, 0.47), (0.26, 0.59), (-0.26, 0.59)])
+            lens("lamp", "front", pill(0.74 * gw, (g0 + g1) / 2, 0.20 * gw, 0.36 * (g1 - g0)), rim=0.78, core=0.0,
+                 what="fog lamp")
+    add("plate", "front", [(-0.26, 0.47), (0.26, 0.47), (0.26, 0.59), (-0.26, 0.59)], what="number plate")
     tail = p.taillamp if isinstance(p.taillamp, dict) else None
     if tail:
-        unit(tail, -1, p.taillamp_center, p.taillamp_size, p.taillamp_yaw, "taillamp", "tail")
+        unit(tail, -1, tail_center, p.taillamp_size, p.taillamp_yaw, "taillamp", "tail", what="taillamp")
+    elif p.taillamp == "fin":
+        # Tall and narrow, standing at the rear corner.
+        w, h = 0.5 * p.taillamp_size[0] / 2, 1.7 * p.taillamp_size[1] / 2
+        cy, cz = tail_center
+        lens("tail", "rear", [(cy - w, cz - h), (cy + w, cz - h), (cy + w, cz + h), (cy - w, cz + h)],
+             island="taillamp", what="taillamp")
+    elif p.taillamp == "block":
+        cy, cz = tail_center
+        a, bh = p.taillamp_size[0] / 2, p.taillamp_size[1] / 2
+        lens("tail", "rear", [(cy - a, cz - bh), (cy + a, cz - bh), (cy + a, cz + bh), (cy - a, cz + bh)],
+             island="taillamp", what="taillamp")
     else:
-        lens("tail", "rear", pill(*p.taillamp_center, p.taillamp_size[0] / 2, p.taillamp_size[1] / 2), island="taillamp")
-    add("plate", "rear", [(-0.26, 0.52), (0.26, 0.52), (0.26, 0.64), (-0.26, 0.64)])
+        lens("tail", "rear", pill(*tail_center, p.taillamp_size[0] / 2, p.taillamp_size[1] / 2), island="taillamp",
+             what="taillamp")
+    add("plate", "rear", [(-0.26, 0.52), (0.26, 0.52), (0.26, 0.64), (-0.26, 0.64)], what="number plate")
     for view in ("left", "right"):
         for u0, u1, s0, s1 in ((p.cowl_u, p.b_pillar_u, 0.05, 0.0), (p.b_pillar_u, p.c_pillar_u, 0.0, 0.025)):
             x = L / 2 - (u0 + 0.62 * (u1 - u0)) * L
@@ -756,6 +848,53 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     return out
 
 
+def _bumper_parts(p: CarParams, verts):
+    """A bumper at each end as (material, vertices, triangles): a bar standing `bumper_proud` out of the body and
+    turning a little round its corners, with two vertical overriders when asked for."""
+    if p.bumper == "skin":
+        return []
+    mat = "trim" if p.bumper == "rubber" else "chrome"
+    height = {"chrome_bar": 0.13, "blade": 0.07, "rubber": 0.15}.get(p.bumper, 0.12)
+    half = p.width / 2
+    bar = 0.88 * half
+    depth = 0.06 + 0.6 * p.bumper_proud
+    zs = np.array([-1.08, -1.0, 0.0, 1.0, 1.08]) * bar
+    pull = np.array([0.10, 0.03, 0.0, 0.03, 0.10])  # how far each station wraps back toward the body
+    y0, y1 = p.bumper_height - height / 2, p.bumper_height + height / 2
+    out = []
+    for sign in (1, -1):
+        x_end = verts[:, 0].max() if sign > 0 else verts[:, 0].min()
+        x_face = x_end + sign * p.bumper_proud
+        front, back = x_face - sign * pull, x_face - sign * pull - sign * depth
+        v = []
+        for i in range(len(zs)):
+            v += [(front[i], y0, zs[i]), (front[i], y1, zs[i]), (back[i], y1, zs[i]), (back[i], y0, zs[i])]
+        v = np.array(v)
+        faces = []
+
+        def quad(a, b, c, d, want):
+            q = np.array([a, b, c, d])
+            if np.dot(np.cross(v[q[1]] - v[q[0]], v[q[2]] - v[q[0]]), want) < 0:
+                q = q[::-1]
+            faces.extend(((q[0], q[1], q[2]), (q[0], q[2], q[3])))
+
+        for i in range(len(zs) - 1):
+            a0, a1 = i * 4, (i + 1) * 4
+            quad(a0, a1, a1 + 1, a0 + 1, np.array([sign, 0.0, 0.0]))  # front
+            quad(a0 + 1, a1 + 1, a1 + 2, a0 + 2, np.array([0.0, 1.0, 0.0]))  # top
+            quad(a0 + 2, a1 + 2, a1 + 3, a0 + 3, np.array([-sign, 0.0, 0.0]))  # back
+            quad(a0 + 3, a1 + 3, a1, a0, np.array([0.0, -1.0, 0.0]))  # bottom
+        quad(0, 1, 2, 3, np.array([0.0, 0.0, -1.0]))
+        e = (len(zs) - 1) * 4
+        quad(e, e + 1, e + 2, e + 3, np.array([0.0, 0.0, 1.0]))
+        out.append((mat, v, np.array(faces)))
+        if p.overriders:
+            for z in (-0.52 * bar, 0.52 * bar):
+                centre = np.array([x_face - sign * depth / 2, p.bumper_height + 0.02, z])
+                out.append((mat, *_box(centre, (depth, height + 0.20, 0.055))))
+    return out
+
+
 # --- wheels and small parts ----------------------------------------------------------------------------------
 
 
@@ -765,10 +904,22 @@ def _wheel(p: CarParams, x, side):
     shape's layers lie on them."""
     r, w, rr = p.wheel_radius, p.tyre_width, p.wheel_radius * p.rim_ratio
     hub = np.array([x, r, side * (p.track / 2)])
+    segments = max(8, int(round(32 * p.detail)))
     tyre = _revolve([(rr, -w / 2), (r - 0.035, -w / 2), (r, -w / 2 + 0.035), (r, w / 2 - 0.035),
-                     (r - 0.035, w / 2), (rr, w / 2)], 32, side)
-    rim = _revolve([(0.0, w / 2 - 0.05), (rr, w / 2 - 0.05), (rr, -w / 2 + 0.03), (0.0, -w / 2 + 0.03)], 32, side)
+                     (r - 0.035, w / 2), (rr, w / 2)], segments, side)
+    rim = _revolve([(0.0, w / 2 - 0.05), (rr, w / 2 - 0.05), (rr, -w / 2 + 0.03), (0.0, -w / 2 + 0.03)], segments, side)
     out = {"tyre": [tyre], "rim": [rim]}
+    if p.wheel == "hubcap":
+        # A domed chrome disc over the rim, its middle a little proud of its edge.
+        cap = [(0.0, w / 2 + 0.006), (0.45 * rr, w / 2 - 0.002), (0.80 * rr, w / 2 - 0.012),
+               (0.97 * rr, w / 2 - 0.030), (0.97 * rr, w / 2 - 0.060), (0.0, w / 2 - 0.060)]
+        out["chrome"] = [_revolve(cap, segments, side)]
+    if p.whitewall > 0:
+        r0 = rr * 1.04
+        r1 = min(r0 + p.whitewall, r - 0.04)
+        if r1 > r0:
+            band = [(r0, w / 2 + 0.001), (r1, w / 2 + 0.001), (r1, w / 2 - 0.002), (r0, w / 2 - 0.002)]
+            out["whitewall"] = [_revolve(band, segments, side)]
     shape = p.wheel if isinstance(p.wheel, dict) else None
     if shape:
         names = {"dark": "alloy", "metal": "spoke"}
@@ -789,7 +940,7 @@ def _wheel(p: CarParams, x, side):
         for k, (mat, outline) in enumerate(shape["layers"]):
             q, v = flat(outline, top + 0.002 * (k + 1))
             out.setdefault(names.get(mat, mat), []).append((v, _triangulate(q)))
-    else:
+    elif p.wheel != "hubcap":
         for k in range(p.spokes):
             ang = 2 * np.pi * k / p.spokes
             c = np.array([np.cos(ang) * rr / 2, np.sin(ang) * rr / 2, side * (w / 2 - 0.035)])
@@ -1062,6 +1213,8 @@ def build_car(p: CarParams | None = None) -> Car:
                   inner_uv[sel].reshape(-1, 2), -smooth[sel].reshape(-1, 3))
     for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv):
         piece(owner, mat, v, t, uv)
+    for mat, bv, bt in _bumper_parts(p, verts):
+        piece("body", mat, bv, bt, cell=(2, 5))
     if p.bed_u is not None:
         _bed(p, u, P, piece)
 
@@ -1299,11 +1452,12 @@ def _cabin(p: CarParams, parts, piece, xu):
 PALETTE = {
     "interior": ("#2a2c30", 0.85, 0.0), "carpet": ("#1a1b1d", 0.95, 0.0), "dash": ("#1f2023", 0.6, 0.0),
     "seat": ("#3a3c41", 0.8, 0.0),
-    "paint": ("#8fbccc", 0.32, 0.15), "black": ("#0b0c0e", 0.15, 0.0), "glass": ("#1d262c", 0.05, 0.0),
+    "paint": ("#8fbccc", 0.32, 0.15), "roof": ("#8fbccc", 0.32, 0.15),
+    "black": ("#0b0c0e", 0.15, 0.0), "glass": ("#1d262c", 0.05, 0.0),
     "trim": ("#17181a", 0.75, 0.0), "underbody": ("#101010", 0.9, 0.0), "liner": ("#0e0e0e", 0.95, 0.0),
     "lamp": ("#eef3ff", 0.2, 0.0), "tail": ("#c41a12", 0.25, 0.0), "plate": ("#e3e8ea", 0.6, 0.0),
     "chrome": ("#d6dbe0", 0.1, 1.0), "tyre": ("#141414", 0.9, 0.0), "rim": ("#2a2c30", 0.45, 0.3),
-    "spoke": ("#c8cdd2", 0.2, 1.0), "alloy": ("#33363b", 0.3, 0.8),
+    "spoke": ("#c8cdd2", 0.2, 1.0), "alloy": ("#33363b", 0.3, 0.8), "whitewall": ("#f2f0ea", 0.55, 0.0),
 }
 
 
