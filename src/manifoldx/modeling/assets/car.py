@@ -255,13 +255,15 @@ class Car(Vehicle):
         """
         return _landmarks(self.params, self.parts)
 
-    def pose(self, doors=0.0, hood=0.0, hatch=0.0, wheel_turn=0.0, steer=0.0) -> dict:
+    def pose(self, doors=0.0, hood=0.0, hatch=0.0, wheel_turn=0.0, steer=0.0, travel=None) -> dict:
         """Each part's (position, quaternion xyzw) so that car-space vertices land in their posed place.
 
         doors, hood, hatch: 0 shut to 1 fully open (doors may be a dict by part name). wheel_turn: radians the
-        wheels have rolled. steer: radians the front wheels turn, positive to the left.
+        wheels have rolled. steer: radians the front wheels turn, positive to the left. travel: metres each wheel
+        rises from its rest height, in the order the wheels appear in parts.
         """
         out = {}
+        lift = iter(travel if travel is not None else ())
         for p in self.parts:
             if p.kind == "door":
                 q = _axis_angle(p.axis, np.radians(p.open_angle) * (doors.get(p.name, 0.0) if isinstance(doors, dict) else doors))
@@ -273,7 +275,10 @@ class Car(Vehicle):
                     q = _quat_mul(_axis_angle(np.array([0.0, 1.0, 0.0]), steer), q)
             else:
                 q = np.array([0.0, 0.0, 0.0, 1.0])
-            out[p.name] = (p.pivot - _rotate(q, p.pivot), q)
+            offset = p.pivot - _rotate(q, p.pivot)
+            if p.kind == "wheel" and travel is not None:
+                offset = offset + np.array([0.0, float(next(lift, 0.0)), 0.0])
+            out[p.name] = (offset, q)
         return out
 
 
@@ -1760,13 +1765,15 @@ def spawn_car(engine, car: Vehicle, at=(0.0, 0.0, 0.0), yaw=0.0, palette=None, l
     return handles
 
 
-def place_car(handles: dict, car: Vehicle, at=(0.0, 0.0, 0.0), yaw=0.0, pitch=0.0, roll=0.0, **pose) -> None:
+def place_car(handles: dict, car: Vehicle, at=(0.0, 0.0, 0.0), yaw=0.0, pitch=0.0, roll=0.0, rotation=None,
+              **pose) -> None:
     """Move a spawned car to `at`, turned by `yaw` radians about Y, posed as in Car.pose.
 
     `pitch` then tilts it about its own Z axis (positive raises the nose, the +x end) and `roll` about its own
-    X axis (positive lowers the +z side), so a car can sit on a slope.
+    X axis (positive lowers the +z side), so a car can sit on a slope. `rotation`, a quaternion xyzw such as
+    manifoldx.vehicles gives, replaces all three.
     """
-    qy = _quat_mul(_axis_angle(np.array([0.0, 1.0, 0.0]), yaw),
+    qy = np.asarray(rotation, float) if rotation is not None else _quat_mul(_axis_angle(np.array([0.0, 1.0, 0.0]), yaw),
                    _quat_mul(_axis_angle(np.array([0.0, 0.0, 1.0]), pitch),
                              _axis_angle(np.array([1.0, 0.0, 0.0]), roll)))
     for name, (pos, q) in car.pose(**pose).items():

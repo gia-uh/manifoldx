@@ -616,3 +616,32 @@ def test_fender_crown_sweep_builds_meshes_with_valid_indices():
                                                                         cowl_u, windscreen_wrap)
                         assert mesh.faces.min() >= 0, (part.name, material)
                 car.merged()  # the whole car, with every part merged and posed
+
+
+def test_pose_lifts_each_wheel_by_its_travel():
+    from manifoldx.modeling.assets.car import CarParams, build_car
+
+    car = build_car(CarParams())
+    wheels = [p.name for p in car.parts if p.kind == "wheel"]
+    rest = car.pose()
+    lifted = car.pose(travel=[0.05] + [0.0] * (len(wheels) - 1))
+    assert lifted[wheels[0]][0][1] == pytest.approx(rest[wheels[0]][0][1] + 0.05)
+    for name in wheels[1:]:
+        assert np.allclose(lifted[name][0], rest[name][0])
+
+
+def test_place_car_takes_a_rotation():
+    from manifoldx.modeling.assets.car import _axis_angle, place_car
+
+    class H:
+        def __init__(self):
+            self.transform = type("T", (), {})()
+
+    car = build_car(CarParams())
+    a = {p.name: [H()] for p in car.parts}
+    b = {p.name: [H()] for p in car.parts}
+    place_car(a, car, at=(1.0, 0.0, 2.0), yaw=0.7)
+    place_car(b, car, at=(1.0, 0.0, 2.0), rotation=_axis_angle(np.array([0.0, 1.0, 0.0]), 0.7))
+    for name in a:
+        assert np.allclose(a[name][0].transform.pos, b[name][0].transform.pos)
+        assert np.allclose(a[name][0].transform.rot, b[name][0].transform.rot)

@@ -19,7 +19,9 @@ COUNTER = 0.8  # share of the front axle's slide the steering assist steers into
 YAW_DEADBAND = 0.05  # rad/s of yaw error the stability assist lets pass
 YAW_GAIN = 4000.0  # N·m of brake per rad/s of yaw error
 YAW_MAX = 2500.0  # N·m at most on the one wheel it brakes
-RECOVER = 8.0  # per second: how fast a released brake or a cut throttle comes back
+RECOVER = 8.0  # per second: how fast a cut throttle comes back
+ABS_STEP = 0.85  # the anti-lock keeps this share of a locking wheel's brake, each step it locks
+ABS_RECOVER = 3.0  # per second: how fast the anti-lock gives the brake back
 G = 9.81
 
 
@@ -71,7 +73,8 @@ def apply_assists(fleet, controls: np.ndarray, strengths: np.ndarray) -> np.ndar
     # anti-lock: let go of a braked wheel's pedal brake while it slips past its peak
     locking = (fleet.slip[..., 0] < -1.1 * p.kappa_peak) | ((fleet.omega == 0) & (np.abs(vx) > 1.0)[:, None])
     locking &= p.wheel_mask & (out[:, 2] > 0)[:, None]
-    fleet.brake_scale = np.where(locking, 1 - k_abs[:, None], np.minimum(fleet.brake_scale + RECOVER * dt, 1.0))
+    held = fleet.brake_scale * (1 - (1 - ABS_STEP) * k_abs[:, None])
+    fleet.brake_scale = np.where(locking, held, np.minimum(fleet.brake_scale + ABS_RECOVER * dt, 1.0))
     lit[:, 2] = np.any(locking & (k_abs[:, None] > 0), 1)
 
     # stability: brake one wheel when the car yaws more or less than the wheel asks, within the grip

@@ -86,6 +86,14 @@ rules:
       in: "docs/chapters/*.md"
       as: word
 
+  - name: "every class in manifoldx.vehicles is named in the docs"
+    extract:
+      file: "src/manifoldx/vehicles/**/*.py"
+      regex: '^class ([A-Za-z]\w*)'
+    require:
+      in: "docs/chapters/*.md"
+      as: word
+
   - name: "every public function and method is named in the docs"
     severity: warning
     extract:

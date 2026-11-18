@@ -77,6 +77,7 @@ class VehicleSpec:
     rolling: float = 0.015  # rolling resistance per newton of load
     max_steer: float = 0.6  # radians of the outer front wheel at full lock
     brake_torque: float = 3000.0  # N·m over all wheels at full brake
+    model_origin: tuple[float, float, float] = (0.0, 0.0, 0.0)  # the drawn model's origin, in car axes
 
 
 def box_inertia(mass: float, size: tuple[float, float, float]) -> tuple[float, float, float]:

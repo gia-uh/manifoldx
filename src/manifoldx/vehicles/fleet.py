@@ -7,7 +7,8 @@ from typing import Sequence
 import numpy as np
 
 from . import contacts, powertrain, suspension, tyre
-from .body import cross, integrate, matrices, yaw_quaternion
+from .assists import ASSISTS, apply_assists
+from .body import cross, integrate, matrices, slerp, yaw_quaternion
 from .spec import VehicleSpec
 from .state import pack
 
@@ -17,6 +18,7 @@ AIR = 1.2  # kg/m³
 
 class Vehicles:
     DT = 1 / 120
+    MAX_FRAME = 0.05  # seconds: a longer frame runs as this long, as the game did before
 
     def __init__(self, specs: Sequence[VehicleSpec]):
         self.specs = list(specs)
@@ -35,6 +37,8 @@ class Vehicles:
         self.impulse = np.zeros(n)  # N·s of every contact impulse in the last step
         self.brake_scale = np.ones((n, w))  # share of the pedal brake each wheel gets: the anti-lock lowers it
         self.lit = np.zeros((n, 4), bool)  # which assists corrected in the last step
+        self._acc = 0.0
+        self._before = (self.position.copy(), self.rotation.copy())
 
     def place(self, i: int, position, yaw: float, ground) -> None:
         """Put vehicle i at rest at (x, z) facing yaw, its wheels on the ground level nearest position's y."""
@@ -55,6 +59,49 @@ class Vehicles:
         self.load[i] = 0.0
         self.omega[i] = self.slip[i] = 0.0
         self.gear[i], self.shift_timer[i], self.rpm[i] = 1, 0.0, self.p.engine[i, 0]
+        self._before[0][i], self._before[1][i] = self.position[i], self.rotation[i]
+
+    def advance(self, controls: np.ndarray, ground, walls, dt: float, strengths: np.ndarray | None = None) -> int:
+        """Run as many DT steps as dt (cut at MAX_FRAME) and what was left over from the last call add up to,
+        each after the assists of the given strengths; returns how many ran."""
+        self._acc += min(dt, self.MAX_FRAME)
+        n = 0
+        while self._acc >= self.DT - 1e-12:
+            c = apply_assists(self, controls, strengths) if strengths is not None else controls
+            self._before = (self.position.copy(), self.rotation.copy())
+            self.step(c, ground, walls)
+            self._acc -= self.DT
+            n += 1
+        return n
+
+    def pose(self, alpha: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Position (N, 3) and rotation (N, 4) between the last two steps; alpha defaults to the time left over."""
+        a = min(max(self._acc / self.DT if alpha is None else alpha, 0.0), 1.0)
+        p0, q0 = self._before
+        return p0 + (self.position - p0) * a, slerp(q0, self.rotation, a)
+
+    def telemetry(self, i: int) -> dict:
+        """Vehicle i's numbers for a HUD, a sound or an agent: speeds in m/s, loads in N, slips, spins, travel."""
+        R = matrices(self.rotation[i : i + 1])[0]
+        v = R.T @ self.velocity[i]
+        w = self.p.wheel_mask[i]
+        return {
+            "speed": float(v[0]), "lateral": float(v[2]), "gear": int(self.gear[i]), "rpm": float(self.rpm[i]),
+            "load": self.load[i, w].tolist(), "slip": self.slip[i, w].tolist(), "omega": self.omega[i, w].tolist(),
+            "travel": (self.compression[i, w]).tolist(), "steer": self.steer_angle[i, w].tolist(),
+            "impulse": float(self.impulse[i]), "lit": {a: bool(self.lit[i, k]) for k, a in enumerate(ASSISTS)},
+        }
+
+    def model_transform(self, i: int, alpha: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Where vehicle i's drawn model goes: its origin's position and the rotation, between the last steps."""
+        pos, rot = self.pose(alpha)
+        R = matrices(rot[i : i + 1])[0]
+        return pos[i] + R @ self.p.model_origin[i], rot[i]
+
+    def travel(self, i: int) -> np.ndarray:
+        """How far each of vehicle i's wheels has risen from its rest height, metres."""
+        w = self.p.wheel_mask[i]
+        return self.compression[i, w] - self.p.rest[i, w]
 
     def angular_body(self) -> np.ndarray:
         """Angular velocity in the car's own axes, (N, 3)."""

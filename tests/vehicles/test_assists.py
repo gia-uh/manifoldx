@@ -60,7 +60,11 @@ def brake_mid_corner(k):
     fleet, ground = start(80 / 3.6, drive="rear")
     fleet.gear[0] = 3
     worst = [0.0]
-    watch = lambda f: worst.__setitem__(0, max(worst[0], slide_angle(f) if np.linalg.norm(f.velocity[0]) > 3 else 0))
+
+    def watch(f):
+        if np.linalg.norm(f.velocity[0]) > 3:
+            worst[0] = max(worst[0], slide_angle(f))
+
     s = strengths(steer=k, traction=k, abs=k, stability=k)
     drive(fleet, ground, [0.6, 1.0, 0.0, 0.0], s, 1.0, watch)
     drive(fleet, ground, [0.6, 0.0, 1.0, 0.0], s, 1.0, watch)
@@ -88,3 +92,13 @@ def test_strengths_from_realism():
     np.testing.assert_allclose(strengths_for(30), [0.7, 0.7, 0.7, 0.7])
     np.testing.assert_allclose(strengths_for(30, locked=("abs",)), [0.7, 0.7, 0.0, 0.7])
     np.testing.assert_allclose(strengths_for(100), [0, 0, 0, 0])
+
+
+def test_abs_stops_shorter_than_locked_wheels():
+    def stop(k):
+        fleet, ground = start(100 / 3.6)
+        while fleet.velocity[0, 0] > 0.5:
+            drive(fleet, ground, [0.0, 0.0, 1.0, 0.0], strengths(abs=k), 1 / 60)
+        return fleet.position[0, 0]
+
+    assert stop(1.0) < stop(0.0)

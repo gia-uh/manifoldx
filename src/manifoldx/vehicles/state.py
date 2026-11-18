@@ -46,13 +46,17 @@ class Packed:
     rolling: np.ndarray
     max_steer: np.ndarray
     brake_torque: np.ndarray
+    model_origin: np.ndarray  # (N, 3)
+    rest: np.ndarray  # (N, W) the spring's compression under the static load
 
 
 def pack(specs: Sequence[VehicleSpec]) -> Packed:
     """Pack specs into arrays. Raises ValueError when a vehicle's brake shares do not sum to 1."""
     n, w = len(specs), max(len(s.wheels) for s in specs)
     g = max(len(s.gearbox.ratios) for s in specs)
-    f = lambda: np.zeros((n, w))
+    def f():
+        return np.zeros((n, w))
+
     mask, mount = np.zeros((n, w), bool), np.zeros((n, w, 3))
     radius, travel, spring, damper, share, inertia = f(), f(), f(), f(), f(), f()
     kpeak, apeak = np.ones((n, w)), np.ones((n, w))
@@ -77,8 +81,12 @@ def pack(specs: Sequence[VehicleSpec]) -> Packed:
                 if k != j and abs(other.mount[0] - wh.mount[0]) < 1e-6 and other.mount[2] * wh.mount[2] < 0:
                     pair[i, j] = k
         ratios[i, : len(s.gearbox.ratios)] = s.gearbox.ratios
-    col = lambda get: np.array([get(s) for s in specs], float)
-    e = lambda s: s.engine
+    def col(get):
+        return np.array([get(s) for s in specs], float)
+
+    def e(s):
+        return s.engine
+
     return Packed(
         mass=col(lambda s: s.mass), inertia=np.array([s.inertia for s in specs], float),
         size=np.array([s.size for s in specs], float), wheel_mask=mask, mount=mount, radius=radius, travel=travel,
@@ -90,4 +98,19 @@ def pack(specs: Sequence[VehicleSpec]) -> Packed:
         final=col(lambda s: s.gearbox.final), reverse=col(lambda s: s.gearbox.reverse),
         shift_time=col(lambda s: s.gearbox.shift_time), cd=col(lambda s: s.cd), area=col(lambda s: s.area),
         rolling=col(lambda s: s.rolling), max_steer=col(lambda s: s.max_steer),
-        brake_torque=col(lambda s: s.brake_torque))
+        brake_torque=col(lambda s: s.brake_torque), model_origin=np.array([s.model_origin for s in specs], float),
+        rest=_rest(specs, mount, spring, mask))
+
+
+def _rest(specs, mount, spring, mask) -> np.ndarray:
+    """Each wheel's compression under the static load, the axles sharing the weight by the CG's place."""
+    out = np.zeros(mask.shape)
+    for i, s in enumerate(specs):
+        x = mount[i, mask[i], 0]
+        front, rear = x.max(), x.min()
+        base = max(front - rear, 1e-6)
+        n_front, n_rear = (x == front).sum(), (x == rear).sum()
+        for j in np.flatnonzero(mask[i]):
+            share = (-rear / base / n_front) if mount[i, j, 0] == front else (front / base / n_rear)
+            out[i, j] = min(s.mass * 9.81 * share / max(spring[i, j], 1.0), s.wheels[j].travel)
+    return out
