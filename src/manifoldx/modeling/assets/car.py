@@ -19,18 +19,24 @@ console take a shape: a dict of outlines traced from a flat drawing of the real 
 boxes and ellipses. `examples/models/car_shapes.py` traces one of each and says how each kind is drawn.
 
 Doors, hood and hatch are separate parts with a hinge; wheels spin and the front ones steer. `Car.pose` gives
-each part's transform for an opening, a wheel turn and a steering angle.
+each part's transform for an opening, a wheel turn and a steering angle. A car is a `Vehicle` (see `vehicle.py`), the
+shape every builder returns: `Vehicle.merged` poses every part and merges the outside pieces into one mesh with
+per-vertex colours, for drawing a crowd as one entity each.
+
+Paint areas (`livery`) are polygons in the side view, projected onto both flanks; a roof lamp (`lightbar`) is a bar of
+two colours or a single dome over the roof's peak.
 
 Axes: metres, Y up, the car's front at +X, its right side at +Z, its centre on the ground at the origin.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
 from manifoldx.modeling._poly import _triangulate
+from manifoldx.modeling.assets.vehicle import PALETTE, Part, Vehicle, _rotate
 from manifoldx.modeling.mesh import Mesh
 
 
@@ -92,6 +98,12 @@ class CarParams:
     fin_width: float = 0.22  # the outer fraction of the half-width the fin takes
     windscreen_wrap: float = 0.0  # 0-1: how far the glass bends round onto the sides at the A-pillar
     side_trim: tuple = ()  # (height, u_start, u_end, "chrome" or "black") strips along both flanks
+    # Paint areas on both flanks, each a material name or an sRGB hex colour, and a polygon in the side view:
+    # (u along the car, 0 at the front to 1 at the rear, height in metres).
+    livery: tuple = ()
+    # A roof lamp over the peak: None, "bar" (two halves, one colour each) or "dome" (a single small lamp).
+    lightbar: str | None = None
+    lightbar_colours: tuple = ("#1f4fff", "#e01b1b")
     # Greenhouse.
     a_pillar_foot: float = 0.40  # how far up the windscreen the side glass starts, 0 at the cowl to 1 at the roof
     b_pillar_u: float = 0.565
@@ -146,25 +158,27 @@ class CarParams:
 
 
 @dataclass
-class Part:
-    """A rigid piece of the car: meshes per material in car coordinates, and how it moves."""
+class Car(Vehicle):
+    """A built car: its measurements and its rigid parts. Vehicle is its shared shape, so a client treating every
+    vehicle alike (posing it, merging it for a crowd) can take a Car without knowing the car's own options."""
 
-    name: str
-    kind: str  # "body", "door", "hood", "hatch", "wheel"
-    pieces: dict = field(default_factory=dict)  # material name -> Mesh
-    pivot: np.ndarray = field(default_factory=lambda: np.zeros(3))
-    axis: np.ndarray = field(default_factory=lambda: np.array([0.0, 1.0, 0.0]))
-    open_angle: float = 0.0  # degrees at pose value 1, signed
-    steer: bool = False
-
-
-@dataclass
-class Car:
     params: CarParams
-    parts: list
 
     def part(self, name: str) -> Part:
         return next(p for p in self.parts if p.name == name)
+
+    @property
+    def palette(self) -> dict:
+        """The shared palette, plus a material for each hex livery and the two beacon colours."""
+        extra = {}
+        for k, (mat, _) in enumerate(self.params.livery):
+            if _is_colour(mat):
+                extra[f"livery{k}"] = (mat, 0.35, 0.0)
+        if self.params.lightbar:
+            first, second = self.params.lightbar_colours
+            extra["beacon_a"] = (first, 0.25, 0.0)
+            extra["beacon_b"] = (second, 0.25, 0.0)
+        return {**PALETTE, **extra}
 
     @property
     def landmarks(self) -> dict:
@@ -287,13 +301,13 @@ def _quat_mul(a, b) -> np.ndarray:
                      aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz])
 
 
-def _rotate(q, v) -> np.ndarray:
-    u, w = q[:3], q[3]
-    return v + 2 * np.cross(u, np.cross(u, v) + w * v)
-
-
 def _mesh(verts, tris) -> Mesh:
     return Mesh(positions=np.asarray(verts, np.float32), faces=np.asarray(tris, np.uint32)).recompute_normals()
+
+
+def _is_colour(value) -> bool:
+    """Whether a livery entry names an sRGB hex colour rather than a material of the palette."""
+    return isinstance(value, str) and value.startswith("#")
 
 
 def _box(center, size, yaw=0.0, pitch=0.0):
@@ -746,11 +760,13 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     W, L = p.width, p.length
     out = []
 
-    def add(mat, view, outline, lift=0.006, close=None, frame=None, least=4, what="decal", step=0.04):
+    def add(mat, view, outline, lift=0.006, close=None, frame=None, least=4, what="decal", step=0.04, partial=False):
         # The outline is split into small triangles, so the decal bends with the skin it lands on instead of
         # cutting through it. A frame (anchor on the skin, view direction, the
         # outline's own right axis, half-size, the outline's anchor, island) places an outline drawn in units of
-        # its half-size as seen along that direction, and maps it whole into the island.
+        # its half-size as seen along that direction, and maps it whole into the island. With `partial`, the parts
+        # of the outline that miss the skin are dropped instead of dropping the whole decal: a paint area that runs
+        # the length of the car passes under the wheel arches and over the ends.
         outline, tri = _split(outline, np.array(frame[3:5]) if frame else 1.0, step=step,
                               least=1 if frame else least)
         if frame:
@@ -781,7 +797,16 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
             if not on_face.any():
                 raise ValueError(f"{what} misses the {view} face")
         if not np.isfinite(t).all():
-            return
+            if not partial:
+                return
+            tri = tri[np.isfinite(t[tri]).all(axis=1)]
+            if not len(tri):
+                return
+            used = np.unique(tri)
+            index = np.full(len(o), -1, dtype=np.intp)
+            index[used] = np.arange(len(used))
+            o, t, k, outline = o[used], t[used], k[used], outline[used]
+            tri = index[tri]
         pts = o + (t - lift)[:, None] * d
         owner = parts[k]
         names, counts = np.unique(owner, return_counts=True)
@@ -947,6 +972,12 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
             x0, x1 = L / 2 - u1 * L, L / 2 - u0 * L
             mat = style if style in ("chrome", "black") else "chrome"
             add(mat, view, [(x0, height - 0.0125), (x1, height - 0.0125), (x1, height + 0.0125), (x0, height + 0.0125)])
+    for view in ("left", "right"):
+        for k, (mat, outline) in enumerate(p.livery):
+            # A paint area on both flanks: (u from the front, height) is a side-view polygon, drawn as the skin under
+            # it is seen from that side, lifted just over the paint.
+            name = f"livery{k}" if _is_colour(mat) else str(mat)
+            add(name, view, [(L / 2 - u * L, y) for u, y in outline], 0.008, partial=True, step=0.18, what="livery")
     return out
 
 
@@ -1382,6 +1413,21 @@ def build_car(p: CarParams | None = None) -> Car:
                     (0.16, 0.03, 2 * 0.62 * ring[:, 2].max() * (1 - p.tumblehome)), pitch=np.radians(-12))
         piece("hatch", "paint", v, t, cell=(4, 5))
 
+    if p.lightbar:
+        # A roof lamp over the highest point of the roof: a bar across it, one colour each side of the middle, or a
+        # single low dome. Both colours are lit like the lamps.
+        x = xu(p.roof_peak_u)
+        roof = (1 - p.tumblehome) * p.width / 2
+        if p.lightbar == "dome":
+            ball = Mesh.icosphere(2, 0.09)
+            v = np.asarray(ball.positions, float) * np.array([1.0, 0.65, 1.0]) + np.array([x, p.height + 0.005, 0.0])
+            piece("body", "beacon_a", v, np.asarray(ball.faces))
+        else:  # a bar: two boxes meeting on the centreline, across the roof
+            half = 0.75 * roof
+            for sign, mat in ((-1.0, "beacon_a"), (1.0, "beacon_b")):
+                v, t = _box([x, p.height - 0.01, sign * half / 2], (0.16, 0.07, half))
+                piece("body", mat, v, t, cell=(2, 5))
+
     _cabin(p, parts, piece, xu)
 
     for xa, front in ((axles[0], True), (axles[1], False)):
@@ -1562,40 +1608,32 @@ def _cabin(p: CarParams, parts, piece, xu):
         facing=1, y=dash_y)
 
 
-# The materials a car uses, as (sRGB colour, roughness, metallic); "lamp" is drawn unlit when the lights are on.
-PALETTE = {
-    "interior": ("#2a2c30", 0.85, 0.0), "carpet": ("#1a1b1d", 0.95, 0.0), "dash": ("#1f2023", 0.6, 0.0),
-    "seat": ("#3a3c41", 0.8, 0.0),
-    "paint": ("#8fbccc", 0.32, 0.15), "roof": ("#8fbccc", 0.32, 0.15),
-    "black": ("#0b0c0e", 0.15, 0.0), "glass": ("#1d262c", 0.05, 0.0),
-    "trim": ("#17181a", 0.75, 0.0), "underbody": ("#101010", 0.9, 0.0), "liner": ("#0e0e0e", 0.95, 0.0),
-    "lamp": ("#eef3ff", 0.2, 0.0), "tail": ("#c41a12", 0.25, 0.0), "plate": ("#e3e8ea", 0.6, 0.0),
-    "chrome": ("#d6dbe0", 0.1, 1.0), "tyre": ("#141414", 0.9, 0.0), "rim": ("#2a2c30", 0.45, 0.3),
-    "spoke": ("#c8cdd2", 0.2, 1.0), "alloy": ("#33363b", 0.3, 0.8), "whitewall": ("#f2f0ea", 0.55, 0.0),
-}
+# The materials a car uses are the shared vehicle palette (see vehicle.py), re-exported here for the car's own code
+# and for callers that import PALETTE from this module.
 
 
 # --- in an engine --------------------------------------------------------------------------------------------
 
 
-def spawn_car(engine, car: Car, at=(0.0, 0.0, 0.0), yaw=0.0, palette=None, lights=True, texture=None) -> dict:
-    """Spawn every piece of the car; returns {part name: [entity handles]}. With lights, lamps draw unlit.
+def spawn_car(engine, car: Vehicle, at=(0.0, 0.0, 0.0), yaw=0.0, palette=None, lights=True, texture=None) -> dict:
+    """Spawn every piece of the car; returns {part name: [entity handles]}. With lights, lamps and beacons draw unlit.
 
     texture: the path of an albedo image laid out as ATLAS; it replaces the palette's colours on everything but
-    the glass and the lit lamps.
+    the glass and the lit lamps. The car's own palette adds a colour for each hex livery it wears.
     """
     from manifoldx.components import Material, Mesh as MeshComponent, Transform
     from manifoldx.resources import BasicMaterial, StandardMaterial
     from manifoldx.textures import load_texture
 
-    pal = {**PALETTE, **(palette or {})}
+    pal = {**car.palette, **(palette or {})}
+    lit = ("lamp", "tail", "beacon_a", "beacon_b")
     albedo = load_texture(engine, texture) if texture else None
     handles = {}
     for part in car.parts:
         handles[part.name] = []
         for mat, mesh in part.pieces.items():
             colour, rough, metal = pal[mat]
-            if lights and mat in ("lamp", "tail"):
+            if lights and mat in lit:
                 m = BasicMaterial(color=colour)
             elif mat == "glass":
                 m = StandardMaterial(color=colour, roughness=rough, metallic=metal, opacity=0.55)
@@ -1606,7 +1644,7 @@ def spawn_car(engine, car: Car, at=(0.0, 0.0, 0.0), yaw=0.0, palette=None, light
     return handles
 
 
-def place_car(handles: dict, car: Car, at=(0.0, 0.0, 0.0), yaw=0.0, pitch=0.0, roll=0.0, **pose) -> None:
+def place_car(handles: dict, car: Vehicle, at=(0.0, 0.0, 0.0), yaw=0.0, pitch=0.0, roll=0.0, **pose) -> None:
     """Move a spawned car to `at`, turned by `yaw` radians about Y, posed as in Car.pose.
 
     `pitch` then tilts it about its own Z axis (positive raises the nose, the +x end) and `roll` about its own
