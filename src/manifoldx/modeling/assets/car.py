@@ -817,9 +817,58 @@ def _grille_box(p: CarParams):
     return gw, g0, g1
 
 
-def _decals(p: CarParams, verts, tris, parts, corner_uv):
+def _grille_rect(p: CarParams, verts, tris, front_cap):
+    """The grille's (half-width, bottom, top), fitted to the nose when its size is derived.
+
+    A full-width unit is as wide as the body, which is wider than the rounded nose of a
+    narrow car: its corners then miss the front face and the whole grille is dropped (or
+    ``_decals`` raises "grille misses the front face"). Fit the layout to the faces that
+    look forward, so every point of the rectangle lands on one, whatever ``nose_half`` is.
+    """
+    gw, g0, g1 = _grille_box(p)
+    if p.grille is not None:
+        return gw, g0, g1  # the caller sized it: use it as given
+    # The bar style lays a trapezoid 6% wider at its top edge.
+    reach = 1.06 if not isinstance(p.grille_style, dict) and p.grille_style != "mesh" else 1.0
+    gw = _fit_front_width(p, verts, tris, front_cap, gw * reach, g0, g1) / reach
+    return gw, g0, g1
+
+
+def _fit_front_width(p: CarParams, verts, tris, front_cap, half, g0, g1):
+    """The widest half-width up to `half` whose rectangle of heights g0..g1 lies on the
+    nose's end cap (front_cap, one flag per triangle), found by bisection with the same
+    raycast `_decals` uses. A rounded flank also has a forward-tilted normal further back,
+    so the cap membership, not the normal, says the point is on the face that looks ahead."""
+    zs = np.linspace(-1.0, 1.0, 5)
+    ys = np.linspace(g0, g1, 7)
+
+    def fits(width):
+        zz, yy = np.meshgrid(zs * width, ys)
+        origins = np.column_stack([np.full(zz.size, p.length / 2 + 1), yy.ravel(), zz.ravel()])
+        t, k = _raycast(origins, np.array([-1.0, 0.0, 0.0]), verts, tris)
+        if not np.isfinite(t).all() or not front_cap[k].all():
+            return False
+        a, b, c = verts[tris[k, 0]], verts[tris[k, 1]], verts[tris[k, 2]]
+        n = np.cross(b - a, c - a)
+        n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
+        return bool((n[:, 0] > 0.5).all())
+
+    if not fits(0.0):
+        return 0.0
+    lo, hi = 0.0, half
+    if fits(hi):
+        return hi
+    for _ in range(16):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if fits(mid) else (lo, mid)
+    return lo
+
+
+def _decals(p: CarParams, verts, tris, parts, corner_uv, bands):
     """Flat outlines projected onto the skin: (material, view, outline) -> (material, part, vertices, triangles)."""
     W, L = p.width, p.length
+    # The faces of the nose's end cap: the only surface a grille or an end decal may land on.
+    front_cap = (np.asarray(bands) < 0) & (verts[tris].mean(1)[:, 0] > 0)
     out = []
 
     def add(mat, view, outline, lift=0.006, close=None, frame=None, least=4, what="decal", step=0.04, partial=False):
@@ -963,7 +1012,7 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     if p.drl_bar:
         h, w = p.drl_height, p.drl_half_length
         add("lamp", "front", [(-w, h - 0.009), (w, h - 0.009), (w, h + 0.009), (-w, h + 0.009)], 0.010, what="drl")
-    gw, g0, g1 = _grille_box(p)
+    gw, g0, g1 = _grille_rect(p, verts, tris, front_cap)
     grille = p.grille_style if isinstance(p.grille_style, dict) else None
     if grille:
         # The shape is as tall as the grille. Its ends keep their proportions and its middle takes up the length.
@@ -1413,13 +1462,17 @@ def build_car(p: CarParams | None = None) -> Car:
                 outside = ((bands[sel] == -1) & (xmid > 0)) | \
                           ((bands[sel] == 6) & (xmid > L / 2 - p.cowl_u * L))
             if outside.any():
-                piece(name, str(mat), verts[t[outside]].reshape(-1, 3), k[outside][:, ::-1],
+                # A subset gets its own vertex numbering: its vertices are the ones gathered
+                # here, not positions in `t`'s full triangle list.
+                ko = np.arange(3 * int(outside.sum())).reshape(-1, 3)
+                piece(name, str(mat), verts[t[outside]].reshape(-1, 3), ko[:, ::-1],
                       inner_uv[sel][outside].reshape(-1, 2), -smooth[sel][outside].reshape(-1, 3))
             inside = ~outside
             if inside.any():
+                ki = np.arange(3 * int(inside.sum())).reshape(-1, 3)
                 piece(name, "glass" if mat == "glass" else "interior", verts[t[inside]].reshape(-1, 3),
-                      k[inside][:, ::-1], inner_uv[sel][inside].reshape(-1, 2), -smooth[sel][inside].reshape(-1, 3))
-    for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv):
+                      ki[:, ::-1], inner_uv[sel][inside].reshape(-1, 2), -smooth[sel][inside].reshape(-1, 3))
+    for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv, bands):
         piece(owner, mat, v, t, uv)
     for mat, bv, bt in _bumper_parts(p, verts):
         piece("body", mat, bv, bt, cell=(2, 5))

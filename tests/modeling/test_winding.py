@@ -21,7 +21,8 @@ VEHICLES = {
     **{n: (lambda n=n: truck.build_truck(getattr(truck, n)()))
        for n in ("cargo_truck_1980s", "box_truck", "tanker", "dump_truck", "fire_engine", "passenger_truck")},
     **{n: (lambda n=n: cycle.build_cycle(getattr(cycle, n)()))
-       for n in ("bicycle", "cycle_rickshaw", "cargo_tricycle", "motorcycle", "electric_moto")},
+       for n in ("bicycle", "cycle_rickshaw", "cargo_tricycle", "motorcycle", "electric_moto",
+                 "passenger_tricycle")},
 }
 
 
