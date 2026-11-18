@@ -17,8 +17,9 @@ VEHICLES = {
     "car": lambda: car.build_car(car.CarParams()),
     "car_hubcap": lambda: car.build_car(car.CarParams(wheel="hubcap", whitewall=0.04)),
     "bus": lambda: bus.build_bus(bus.BusParams()),
+    "coach": lambda: bus.build_bus(bus.coach()),
     **{n: (lambda n=n: truck.build_truck(getattr(truck, n)()))
-       for n in ("cargo_truck_1980s", "box_truck", "tanker", "dump_truck", "fire_engine")},
+       for n in ("cargo_truck_1980s", "box_truck", "tanker", "dump_truck", "fire_engine", "passenger_truck")},
     **{n: (lambda n=n: cycle.build_cycle(getattr(cycle, n)()))
        for n in ("bicycle", "cycle_rickshaw", "cargo_tricycle", "motorcycle", "electric_moto",
                  "passenger_tricycle")},
