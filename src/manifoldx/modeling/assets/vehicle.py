@@ -11,11 +11,118 @@ at the origin.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import types
+from dataclasses import MISSING, dataclass, field, fields
+from typing import get_args, get_origin, get_type_hints
 
 import numpy as np
 
 from manifoldx.modeling.mesh import Mesh
+
+
+def rng(default, lo, hi, step=None, unit: str = "m", **extra):
+    """A dataclass field carrying the range an editor should offer for it.
+
+    `default` is kept exactly as given; `lo` and `hi` are inclusive. A `None` default marks a nullable number.
+    `extra` carries a builder's own bound, such as `min_when_set`/`min_then` for a value that may go lower when
+    another field is set (a pickup's bed rail against a closed car's hatch).
+    """
+    metadata = {"min": lo, "max": hi, "step": step, "unit": unit, **extra}
+    if default is None:
+        metadata["nullable"] = True
+    return field(default=default, metadata=metadata)
+
+
+def choice(default, *choices):
+    """A dataclass field whose value must be one of `choices` (which may include `None`)."""
+    return field(default=default, metadata={"choices": tuple(choices)})
+
+
+def _bases(annotation) -> tuple:
+    """The non-`None` members of a union annotation, or the annotation itself."""
+    origin = get_origin(annotation)
+    if origin is types.UnionType or origin is getattr(types, "UnionType", None):
+        return tuple(a for a in get_args(annotation) if a is not type(None))
+    return (annotation,)
+
+
+def _kind_of(annotation) -> str:
+    """How an editor should treat a field that has neither a range nor choices."""
+    bases = _bases(annotation)
+    if tuple in bases:
+        return "tuple"
+    if dict in bases:
+        return "shape"
+    if list in bases:
+        return "list"
+    if str in bases:
+        return "string"
+    return "other"
+
+
+class ParamsRanges:
+    """Mixin for a vehicle's measurements: every field publishes its range, and :meth:`validate` enforces it."""
+
+    @classmethod
+    def ranges(cls) -> dict:
+        """Every field's editor description: its default and its `min`/`max`/`step`/`unit`, its `choices`, or a `kind`.
+
+        Bools come back as a two-way choice; tuples, dicts and lists carry a `kind` so an editor can skip them or
+        special-case them.
+        """
+        hints = get_type_hints(cls)
+        out = {}
+        for f in fields(cls):
+            default = f.default if f.default is not MISSING else f.default_factory()
+            meta = f.metadata
+            if "choices" in meta:
+                out[f.name] = {"default": default, "choices": tuple(meta["choices"])}
+            elif "min" in meta:
+                spec = {
+                    "default": default,
+                    "min": meta["min"],
+                    "max": meta["max"],
+                    "step": meta.get("step"),
+                    "unit": meta.get("unit", "m"),
+                }
+                if meta.get("nullable"):
+                    spec["nullable"] = True
+                out[f.name] = spec
+            else:
+                annotation = hints.get(f.name, f.type)
+                bases = _bases(annotation)
+                if bool in bases:
+                    out[f.name] = {"default": default, "choices": (False, True)}
+                else:
+                    out[f.name] = {"default": default, "kind": _kind_of(annotation)}
+        return out
+
+    def validate(self) -> None:
+        """Raise `ValueError`, naming the field, when a value is out of range, unknown or contradicts another."""
+        cls = type(self)
+        hints = get_type_hints(cls)
+        for f in fields(cls):
+            value = getattr(self, f.name)
+            meta = f.metadata
+            if "choices" in meta:
+                choices = tuple(meta["choices"])
+                if value not in choices and not (isinstance(value, dict) and dict in _bases(hints.get(f.name, f.type))):
+                    raise ValueError(f"{cls.__name__}.{f.name}: {value!r} is not one of {choices!r}")
+            elif "min" in meta:
+                if value is None and meta.get("nullable"):
+                    continue
+                lo, hi = meta["min"], meta["max"]
+                if meta.get("min_when_set") and getattr(self, meta["min_when_set"], None) is not None:
+                    lo = meta["min_then"]
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or not lo <= value <= hi:
+                    raise ValueError(f"{cls.__name__}.{f.name}: {value!r} is outside [{lo}, {hi}]")
+            elif bool in _bases(hints.get(f.name, f.type)):
+                if not isinstance(value, bool):
+                    raise ValueError(f"{cls.__name__}.{f.name}: {value!r} is not a bool")
+        self._validate_extra()
+
+    def _validate_extra(self) -> None:
+        """A builder's own contradictions; the base has none."""
 
 # The materials a vehicle uses, as (sRGB colour, roughness, metallic); "lamp" and the beacons are drawn unlit when the
 # lights are on. A builder may add to them, and a caller overrides any entry per vehicle.

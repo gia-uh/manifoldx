@@ -17,7 +17,7 @@ Axes are the shared ones: metres, Y up, the front at +X, the right side at +Z, t
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -31,7 +31,7 @@ from manifoldx.modeling.assets.car import (
     _quat_mul,
     _wheel,
 )
-from manifoldx.modeling.assets.vehicle import PALETTE, Part, Vehicle, _rotate
+from manifoldx.modeling.assets.vehicle import PALETTE, ParamsRanges, Part, Vehicle, _rotate, choice, rng
 from manifoldx.modeling.mesh import Mesh
 
 # Materials every truck may use, beyond the shared vehicle palette: a body paint of its own, a wooden deck, a tank's
@@ -47,67 +47,76 @@ TRUCK_MATERIALS = {
 
 
 @dataclass
-class TruckParams:
+class TruckParams(ParamsRanges):
     """Every measurement of the truck. Heights are metres from the ground; lengths are metres along the truck,
     the front at +X."""
 
     # Package: the spec sheet.
-    length: float = 7.8
-    width: float = 2.45
-    height: float = 3.5  # overall, over the body or the beacons
-    axles: int = 2  # 2 or 3
-    wheelbase: float = 4.35  # the front axle to the first rear one
-    rear_axle_spacing: float = 1.35  # between the rear axles of a three-axle truck
-    front_overhang: float = 1.25
-    track: float = 2.02
-    wheel_radius: float = 0.52
-    tyre_width: float = 0.28
-    rim_ratio: float = 0.62
-    arch_gap: float = 0.06
+    length: float = rng(7.8, 5.7, 16.0, step=0.01, unit='m')
+    width: float = rng(2.45, 1.9, 3.0, step=0.01, unit='m')
+    height: float = rng(3.5, 2.2, 4.5, step=0.01, unit='m')  # overall, over the body or the beacons
+    axles: int = choice(2, 2, 3)  # 2 or 3
+    wheelbase: float = rng(4.35, 2.0, 6.4, step=0.01, unit='m')  # the front axle to the first rear one
+    rear_axle_spacing: float = rng(1.35, 0.5, 3.0, step=0.01, unit='m')  # between the rear axles of a three-axle truck
+    front_overhang: float = rng(1.25, 0.5, 3.4, step=0.01, unit='m')
+    track: float = rng(2.02, 1.4, 2.8, step=0.01, unit='m')
+    wheel_radius: float = rng(0.52, 0.3, 0.8, step=0.005, unit='m')
+    tyre_width: float = rng(0.28, 0.15, 0.45, step=0.005, unit='m')
+    rim_ratio: float = rng(0.62, 0.35, 0.95, step=0.01, unit='')
+    arch_gap: float = rng(0.06, 0.0, 0.2, step=0.005, unit='m')
     twin_rear: bool = True  # two wheels on each side of every rear axle
     # Cab.
-    cab: str = "over"  # "over" (flat-faced over the engine) or "forward" (a bonnet ahead of the cab)
-    cab_length: float = 1.85
-    cab_height: float = 2.65
-    cab_inset: float = 0.10  # the cab is this much narrower than the body
-    cab_bottom: float = 0.80
-    bonnet_length: float = 1.35  # forward cab only
-    bonnet_height: float = 1.35
-    nose_height: float = 1.10
-    windscreen_rake: float = 0.22  # how far the screen leans back at the top
+    cab: str = choice("over", 'over', 'forward')  # "over" (flat-faced over the engine) or "forward" (a bonnet ahead of the cab)
+    cab_length: float = rng(1.85, 1.0, 7.5, step=0.01, unit='m')
+    cab_height: float = rng(2.65, 1.5, 4.0, step=0.01, unit='m')
+    cab_inset: float = rng(0.10, 0.0, 0.5, step=0.005, unit='m')  # the cab is this much narrower than the body
+    cab_bottom: float = rng(0.80, 0.3, 1.5, step=0.01, unit='m')
+    bonnet_length: float = rng(1.35, 0.5, 3.0, step=0.01, unit='m')  # forward cab only
+    bonnet_height: float = rng(1.35, 0.6, 2.5, step=0.01, unit='m')
+    nose_height: float = rng(1.10, 0.4, 2.0, step=0.01, unit='m')
+    windscreen_rake: float = rng(0.22, 0.0, 0.6, step=0.005, unit='m')  # how far the screen leans back at the top
     mirrors: bool = True
     # Chassis and fittings.
-    chassis_top: float = 0.82
+    chassis_top: float = rng(0.82, 0.4, 1.5, step=0.01, unit='m')
     exhaust: bool = False
     fuel_tank: bool = True
     steps: bool = True
     mudguards: bool = True
     # Body.
-    body: str = "box"  # "box", "flatbed", "tanker", "dump" or "fire"
-    body_gap: float = 0.08  # between the cab and the body
-    body_height: float = 3.5  # the roof of a box or fire body
-    body_floor: float = 1.10  # the underside of a box, fire body or bin
-    deck_height: float = 1.15  # the top of a flatbed's deck
-    side_height: float = 0.42  # a flatbed's side boards, above the deck
-    tank_radius: float = 1.0
-    tank_center: float = 2.02
+    body: str = choice("box", 'box', 'flatbed', 'tanker', 'dump', 'fire')  # "box", "flatbed", "tanker", "dump" or "fire"
+    body_gap: float = rng(0.08, 0.0, 1.0, step=0.01, unit='m')  # between the cab and the body
+    body_height: float = rng(3.5, 2.0, 4.5, step=0.01, unit='m')  # the roof of a box or fire body
+    body_floor: float = rng(1.10, 0.5, 2.0, step=0.01, unit='m')  # the underside of a box, fire body or bin
+    deck_height: float = rng(1.15, 0.5, 2.0, step=0.01, unit='m')  # the top of a flatbed's deck
+    side_height: float = rng(0.42, 0.0, 1.0, step=0.01, unit='m')  # a flatbed's side boards, above the deck
+    tank_radius: float = rng(1.0, 0.3, 1.6, step=0.01, unit='m')
+    tank_center: float = rng(2.02, 0.5, 2.8, step=0.01, unit='m')
     tank_walkway: bool = True
-    bin_height: float = 1.35  # the dump bin's sides, above its floor
-    dump_angle: float = 50.0  # degrees the bin tips at dump = 1
-    lockers: int = 3  # roller-door lockers on each flank of a fire body
+    bin_height: float = rng(1.35, 0.3, 3.0, step=0.01, unit='m')  # the dump bin's sides, above its floor
+    dump_angle: float = rng(50.0, 0.0, 80.0, step=1.0, unit='deg')  # degrees the bin tips at dump = 1
+    lockers: int = rng(3, 0, 8, step=1, unit='')  # roller-door lockers on each flank of a fire body
     ladder: bool = False
     hose_reel: bool = False
     beacons: bool = False
     # Colour slots and paint areas: (material name or sRGB hex, polygon in the side view as (u, height)).
-    cab_paint: str = "#8fbccc"
-    body_paint: str = "#e8eaec"
+    cab_paint: str = field(default="#8fbccc", metadata={"kind": "colour"})
+    body_paint: str = field(default="#e8eaec", metadata={"kind": "colour"})
     livery: tuple = ()
     # Resolution and small parts.
-    detail: float = 1.0  # scales the stations, wheel segments, slats and rungs; 1 is the default
-    crease: float = 38.0  # degrees: an edge that turns more than this is shaded sharp
-    wheel: str | dict = "hubcap"  # a shape, or "spokes" or "hubcap"
-    spokes: int = 8
-    whitewall: float = 0.0
+    detail: float = rng(1.0, 0.25, 2.0, step=0.05, unit='x')  # scales the stations, wheel segments, slats and rungs; 1 is the default
+    crease: float = rng(38.0, 0.0, 180.0, step=1.0, unit='deg')  # degrees: an edge that turns more than this is shaded sharp
+    wheel: str | dict = choice("hubcap", 'spokes', 'hubcap')  # a shape, or "spokes" or "hubcap"
+    spokes: int = rng(8, 0, 32, step=1, unit='')
+    whitewall: float = rng(0.0, 0.0, 0.2, step=0.005, unit='m')
+
+    def _validate_extra(self) -> None:
+        if self.cab_length >= self.length:
+            raise ValueError(f"TruckParams.cab_length: {self.cab_length} is not shorter than length {self.length}")
+        if self.wheelbase + self.front_overhang >= self.length:
+            raise ValueError(
+                f"TruckParams.wheelbase: {self.wheelbase} plus front_overhang {self.front_overhang} "
+                f"do not fit inside length {self.length}"
+            )
 
 
 @dataclass
@@ -742,12 +751,7 @@ def build_truck(p: TruckParams | None = None) -> Truck:
     """A truck from its measurements: a cab, a chassis and one of five bodies. The default is a cab-over box
     truck, about 7.8 m long and 3.5 m tall."""
     p = p or TruckParams()
-    if p.axles not in (2, 3):
-        raise ValueError("a truck has two or three axles")
-    if p.body not in ("box", "flatbed", "tanker", "dump", "fire"):
-        raise ValueError(f"unknown truck body: {p.body!r}")
-    if p.cab not in ("forward", "over"):
-        raise ValueError(f"unknown cab: {p.cab!r}")
+    p.validate()
     parts: dict[str, Part] = {"body": Part("body", "body")}
 
     def piece(part_name, mat, v, t, n=None):
