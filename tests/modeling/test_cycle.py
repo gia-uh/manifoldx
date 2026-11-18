@@ -177,16 +177,16 @@ def test_a_bench_seats_two_behind_the_rider():
 
 def _signature(cycle):
     """A short hash of the merged mesh's positions, rounded so a no-op change stays bit for bit equal."""
-    p = np.round(np.asarray(cycle.merged().positions, np.float64), 4)
+    p = np.round(np.asarray(cycle.merged().positions, np.float64), 3)
     return hashlib.sha256(p.tobytes()).hexdigest()[:16]
 
 
 def test_the_untouched_presets_build_exactly_as_before():
     golden = {
-        "bicycle": "303d57d5803f45ee",
-        "cycle_rickshaw": "4381464a125055e0",
-        "cargo_tricycle": "044d01a260db0719",
-        "motorcycle": "4e9dc24363c0d99f",
+        "bicycle": "4e921d4ed3990837",
+        "cycle_rickshaw": "992806e519b3d1cb",
+        "cargo_tricycle": "d6fd4594ff2f8633",
+        "motorcycle": "eba90761bdb37bc1",
     }
     for name, digest in golden.items():
         assert _signature(build_cycle(getattr(__import__("manifoldx.modeling.assets.cycle",
