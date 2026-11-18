@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `build_car` no longer raises `IndexError` when `fender_crown > 0` and the solved hood leaves some faces with their outside paint and others with interior trim: each subset now gets its own vertex numbering instead of reusing the full triangle list's (#293).
 - `manifoldx run` no longer drops `__main__` on a save when the launcher is a console script in the project's `.venv` (`uv run manifoldx run -m pkg.mod`). Files under `sys.prefix` are never the app's, so `multiprocessing` with spawn keeps working after a reload (#268).
 
 ### Changed

@@ -530,3 +530,52 @@ def test_car_is_a_vehicle_and_still_the_car_builder():
     assert issubclass(Car, Vehicle)
     assert isinstance(build_car(), Car)
     assert isinstance(build_car(), Vehicle)
+
+
+# A classic 1950s sedan reference, copied so this test needs no other package.
+_SEDAN = dict(
+    length=5.10, width=1.92, height=1.52, wheelbase=3.00, front_overhang=0.92, track=1.50,
+    wheel_radius=0.34, tyre_width=0.20, rim_ratio=0.70, arch_gap=0.05,
+    nose_top=0.88, hood_front=1.02, nose_blunt=0.85, cowl_u=0.28, cowl_height=1.12,
+    windscreen_u=0.35, roof_peak_u=0.53, roof_end_u=0.73, roof_end_drop=0.04,
+    hatch_u=0.83, hatch_height=1.00, tail_top=0.94, belt_front=0.96, belt_rear=0.96,
+    sill=0.21, bumper_bottom_front=0.30, bumper_bottom_rear=0.30,
+    bumper="chrome_bar", bumper_height=0.42, bumper_proud=0.10, overriders=True,
+    hood_crown=0.13, nose_half=0.92, tail_half=0.92, round_front=0.14, round_rear=0.14,
+    round_power=2.2, nose_bulge=0.03, tail_bulge=0.03, tumblehome=0.18, shoulder=0.96,
+    fender_crown=0.0, fender_crown_u=0.30, fin_height=0.0, fin_start_u=0.62, fin_width=0.26,
+    windscreen_wrap=0.35, side_trim=((0.72, 0.16, 0.95, "chrome"),),
+    a_pillar_foot=0.10, b_pillar_u=0.56, b_pillar_width=0.05, c_pillar_u=0.66,
+    black_pillars=False, roof="paint", roof_paint=False, roof_pillars=True,
+    headlamp="round_pod", headlamp_size=(0.20, 0.20), headlamp_center=None, headlamp_yaw=20.0,
+    grille=None, grille_style="mesh", grille_span="full_width",
+    taillamp="pill", taillamp_center=None, taillamp_size=(0.20, 0.16), taillamp_yaw=25.0,
+    wheel="hubcap", whitewall=0.05, mirrors=True, handles=True, crease=32.0, sections=28, detail=1.0,
+)
+
+
+def test_fender_crown_sweep_builds_meshes_with_valid_indices():
+    """#293: with fender_crown > 0 the reversed faces were renumbered as if none had
+    been split off, so a subset of triangles indexed past its own vertices.
+
+    The grid spans each parameter's published range (0-0.4 m, 0.05-0.45, 0-1) and
+    includes the two reported combinations. detail=0.25 keeps the sweep quick; it
+    reproduces the same IndexError.
+    """
+    from dataclasses import replace
+
+    for fender_crown in (0.03, 0.4):
+        for cowl_u in (0.05, 0.262, 0.45):
+            for windscreen_wrap in (0.0, 0.2, 1.0):
+                p = replace(CarParams(**_SEDAN), detail=0.25, fender_crown=fender_crown,
+                            cowl_u=cowl_u, windscreen_u=max(0.35, cowl_u + 0.05),
+                            windscreen_wrap=windscreen_wrap)
+                p.validate()
+                car = build_car(p)
+                for part in car.parts:
+                    for material, mesh in part.pieces.items():
+                        assert len(mesh.faces), (part.name, material)
+                        assert mesh.faces.max() < len(mesh.positions), (part.name, material, fender_crown,
+                                                                        cowl_u, windscreen_wrap)
+                        assert mesh.faces.min() >= 0, (part.name, material)
+                car.merged()  # the whole car, with every part merged and posed
