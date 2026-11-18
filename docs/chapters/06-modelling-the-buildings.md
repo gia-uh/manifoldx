@@ -563,6 +563,9 @@ Image.fromarray(engine.render_frame(supersample=1))
 Every number in `CarParams` is a dial: a longer wheelbase moves the rear axle and
 its arch, a lower `tail_top` rakes the hatch, `headlamp="round"` swaps the lamp
 outline. Detail comes later, from smoothing and subdivision on the same parts.
+All four parameter sets share `ParamsRanges`: a `CarParams` editor reads
+`CarParams.ranges()` to set its sliders, and every builder calls `validate()`
+first, which names the field that is out of range or contradicts another.
 
 A `Car` is a `Vehicle`, the shape every vehicle builder returns: its parts, its
 `pose` and its `landmarks`. For a street with hundreds of cars, one entity per
