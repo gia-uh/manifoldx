@@ -595,6 +595,17 @@ decals)` projects each one onto the texels of its allowed materials that face th
 view, so a badge or a stripe stays sharp where a whole-view bake would smear it.
 `know-how/making-an-asset.md` has the drawing workflow.
 
+The same machinery builds the light end of the same streets. `CycleParams` holds the measurements of a bicycle,
+tricycle or motorcycle — the wheelbase, the wheel radius and tyre width, the rear track, the named joints of the frame
+in metres, the saddle and the canopy — and `build_cycle` returns a `Cycle`, a `Vehicle` like the car, so `pose`,
+`merged` and `spawn_car` treat it the same way. The frame is tubes between its joints, the handlebars and fork are one
+part that turns about the head tube, and two or three wheels roll about their axles. A payload sits over the rear
+axle: a cargo box, or a bench for two under a hood on two bows; the power is pedals, a two-stroke engine or a hub
+motor. Five presets cover the family: `bicycle`, `cycle_rickshaw` (a pedalled delta with a bench and a canopy),
+`cargo_tricycle` (a delta with a box and a hub motor), `motorcycle` (a 1970s two-stroke with a tank, a long seat and a
+round headlamp) and `electric_moto` (a step-through scooter with a footboard). Each is a `CycleParams`, so a client
+changes one number and gets a different machine.
+
 ## Assets from an image model
 
 Not every part wants a builder with twenty dials. A wheel face, a grille, a
