@@ -135,7 +135,8 @@ class Vehicle:
     """A built vehicle: its measurements and its rigid parts. Every builder returns one of these.
 
     Every closed piece is wound outward on construction (:func:`orient_outward`), so no builder can leave a face the
-    renderer would cull from outside.
+    renderer would cull from outside. The materials in :data:`INSIDE` are left as built: the cabin lining is a shell
+    seen from within, and turned outward it would show through the roof.
     """
 
     params: object
@@ -146,6 +147,8 @@ class Vehicle:
 
         for part in self.parts:
             for mat, mesh in list(part.pieces.items()):
+                if mat in INSIDE:  # the cabin is seen from inside: its lining faces in on purpose
+                    continue
                 faces = orient_outward(mesh.positions, mesh.faces)
                 if not np.array_equal(faces, mesh.faces):
                     fixed = replace(mesh, faces=faces)
