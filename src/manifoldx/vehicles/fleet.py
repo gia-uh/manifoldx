@@ -169,6 +169,7 @@ class Vehicles:
 
         engine = powertrain.torque(p.engine, self.rpm, pedal) * (1 - self.drive_cut)
         engine = np.where((self.shift_timer > 0) | neutral, np.where(neutral, 0.0, np.minimum(engine, 0.0)), engine)
+        engine = np.where(engine > 0, engine * p.efficiency, engine)  # losses on drive, not on engine braking
         drive = np.where(driven, (engine * ratio / n_driven)[:, None], 0.0)
         n_hand = np.maximum((p.handbrake & p.wheel_mask).sum(1), 1)
         brakes = (stop * p.brake_torque)[:, None] * p.brake_share * self.brake_scale

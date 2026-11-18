@@ -59,6 +59,7 @@ class Gearbox:
     final: float
     reverse: float = 3.5
     shift_time: float = 0.3
+    efficiency: float = 0.85  # share of the engine's torque that reaches the wheels
 
 
 @dataclass(frozen=True)

@@ -41,6 +41,7 @@ class Packed:
     final: np.ndarray
     reverse: np.ndarray
     shift_time: np.ndarray
+    efficiency: np.ndarray
     cd: np.ndarray
     area: np.ndarray
     rolling: np.ndarray
@@ -96,7 +97,7 @@ def pack(specs: Sequence[VehicleSpec]) -> Packed:
                           e(s).peak_torque, e(s).power_torque, e(s).engine_brake] for s in specs], float),
         ratios=ratios, n_gears=np.array([len(s.gearbox.ratios) for s in specs]),
         final=col(lambda s: s.gearbox.final), reverse=col(lambda s: s.gearbox.reverse),
-        shift_time=col(lambda s: s.gearbox.shift_time), cd=col(lambda s: s.cd), area=col(lambda s: s.area),
+        shift_time=col(lambda s: s.gearbox.shift_time), efficiency=col(lambda s: s.gearbox.efficiency), cd=col(lambda s: s.cd), area=col(lambda s: s.area),
         rolling=col(lambda s: s.rolling), max_steer=col(lambda s: s.max_steer),
         brake_torque=col(lambda s: s.brake_torque), model_origin=np.array([s.model_origin for s in specs], float),
         rest=_rest(specs, mount, spring, mask))

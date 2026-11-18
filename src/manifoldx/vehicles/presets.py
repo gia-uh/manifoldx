@@ -12,7 +12,8 @@ G = 9.81
 def car_spec(*, length, width, height, wheelbase, front_overhang, track, wheel_radius, mass, power_kw,
              drive="rear", ratios=(3.6, 2.1, 1.4, 1.0), final=3.9, spring_hz=(1.4, 1.4), damping=0.35,
              arb=(9000.0, 4000.0), tyre_mu=1.0, brake_torque=5000.0, brake_front=0.6, cg_height=0.38,
-             cg_back=0.45, cd=0.35, max_steer=0.6, travel=0.2, peak_power_rpm=5500.0) -> VehicleSpec:
+             cg_back=0.45, cd=0.35, max_steer=0.6, travel=0.2, peak_power_rpm=5500.0, shift_time=0.3,
+             efficiency=0.85) -> VehicleSpec:
     """Four wheels on two axles. The CG sits cg_back of the wheelbase behind the front axle and cg_height of
     the height over the ground at rest; model_origin is the drawn model's origin (the ground under the middle of
     its length) in car axes, so a model built from the same measurements lands on the physics."""
@@ -38,6 +39,7 @@ def car_spec(*, length, width, height, wheelbase, front_overhang, track, wheel_r
                     idle_torque=0.6 * t_power, peak_torque=1.3 * t_power, power_torque=t_power)
     middle = length / 2 - front_overhang - a  # the model's middle, ahead of the CG
     return VehicleSpec(mass=mass, inertia=box_inertia(mass, (length, height, width)), size=(length, height, width),
-                       wheels=tuple(wheels), engine=engine, gearbox=Gearbox(ratios=tuple(ratios), final=final),
+                       wheels=tuple(wheels), engine=engine, gearbox=Gearbox(ratios=tuple(ratios), final=final, shift_time=shift_time,
+                                                                       efficiency=efficiency),
                        arb=arb, cd=cd, area=0.85 * width * height, max_steer=max_steer, brake_torque=brake_torque,
                        model_origin=(-middle, -cg_y, 0.0))

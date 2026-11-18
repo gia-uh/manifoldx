@@ -39,12 +39,12 @@ def forward_speed(fleet):
 
 
 def test_top_speed_balances_power_and_drag():
-    v = 50.0
-    for _ in range(50):  # 0.42 v³ + rolling·m·g·v = 85 kW
-        v -= (0.5 * 1.2 * 0.35 * 2.0 * v**3 + 0.015 * 1200 * 9.81 * v - 85000) / (3 * 0.42 * v**2 + 176.6)
+    v, wheel_power = 50.0, 85000 * 0.85  # the drivetrain loses 15 %
+    for _ in range(50):  # 0.42 v³ + rolling·m·g·v = power at the wheels
+        v -= (0.5 * 1.2 * 0.35 * 2.0 * v**3 + 0.015 * 1200 * 9.81 * v - wheel_power) / (3 * 0.42 * v**2 + 176.6)
     fleet, ground = launched(0.9 * v, gear=5)
     drive(fleet, ground, controls(gas=1.0), 40.0)
-    assert forward_speed(fleet) == pytest.approx(v, rel=0.05)
+    assert forward_speed(fleet) == pytest.approx(v, rel=0.03)
 
 
 def test_shifts_up_through_every_gear_in_order():
