@@ -25,6 +25,7 @@ from manifoldx.resources import GeometryRegistry, MaterialRegistry, VolumeRegist
 from manifoldx.renderer import RenderPipeline
 from manifoldx.components import Component, Transform, Mesh, Material
 from manifoldx.camera import Camera
+from manifoldx.frame_clock import SmoothClock
 from manifoldx.input import InputState, _InputBridge
 
 
@@ -363,6 +364,7 @@ class Engine:
         max_entities: int = 100_000,
         check_numerics: bool = True,
         pipelined: bool | None = None,
+        smooth_dt: bool = True,
     ):
         self.title = title
         self.h = height
@@ -383,6 +385,9 @@ class Engine:
         # None: pipelined in run() on the free-threaded build, serial with the GIL
         # (silently). True asks for it and warns when the GIL makes it serial.
         self.pipelined = pipelined
+        # Wall-clock dt is smoothed over recent frames (manifoldx.frame_clock); False hands systems the raw
+        # start-to-start interval.
+        self.smooth_dt = smooth_dt
         self._pipeline_on = False  # set by run(); `_draw_frame` obeys it
         self._pipeline_frames = 0  # frames drawn; the first one is serial
         self._pipeline_executor: ThreadPoolExecutor | None = None
@@ -487,6 +492,7 @@ class Engine:
         self._fixed_dt_value = 1 / 60
         self._last_time = None
         self._start_time = None
+        self._smooth_clock = SmoothClock()
         self.elapsed: float = 0.0
         self._background_color = (0.1, 0.1, 0.2)  # RGB clear color; set for e.g. fog horizon
         self._executor = None
@@ -1269,7 +1275,7 @@ class Engine:
         dt = (current_time - self._last_time) / 1_000_000_000
         self._last_time = current_time
         self.elapsed = (current_time - self._start_time) / 1_000_000_000
-        return dt
+        return self._smooth_clock.step(dt) if self.smooth_dt else dt
 
     # === Spawn & Destroy ===
     def _spawn_data(self, n: int, args: tuple, kwargs: dict):
