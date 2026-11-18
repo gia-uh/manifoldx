@@ -346,10 +346,15 @@ def _section(top, bottom, half, belt, roof, crown=0.0, fin=0.0, fin_width=0.22):
     r = np.clip(s / max(half, 1e-9), 0.0, 1.0)
     lift = np.zeros(len(pts))
     if crown:
-        # The wing top is the outer quarter of the half-section below the belt; the hood's centre keeps today's line.
-        w = np.clip((r - 0.75) / 0.25, 0.0, 1.0)
+        # The wing is the outer shoulder: it rises to the hood's top line plus the crown, and the raise falls
+        # away inboard so a step is left between the ridge and the hood, whose centre keeps its own line.
+        w = np.clip((r - 0.72) / 0.20, 0.0, 1.0)
         w = w * w * (3.0 - 2.0 * w)
-        lift += crown * w * (y <= belt)
+        below = y <= belt
+        lift += crown * w * below
+        crest = top + crown
+        shoulder = np.clip((y - (belt - 0.145 * body)) / (0.005 * body), 0.0, 1.0)
+        lift += np.maximum(crest - (y + lift), 0.0) * shoulder * below
     if fin:
         # A thin ridge along the outer edge: its crest, at the shoulder, takes the full height and the slope inboard is steep.
         width = max(fin_width, 1e-3)
@@ -697,9 +702,19 @@ def _lamp_centers(p: CarParams):
     if p.headlamp_center is not None:
         head = tuple(p.headlamp_center)
     elif p.headlamp == "round_pod":
-        # The pod sits on the wing's raised tip: its top reaches the wing's edge, about 0.6 of the crown over the hood.
-        edge = p.hood_front - p.hood_crown + 0.6 * p.fender_crown
-        head = (0.875 * half, edge - 1.18 * (p.headlamp_size[1] / 2) - 0.01)
+        # The pod sits on the front of each wing's tip. Take the nose section and keep the whole chrome ring
+        # inside the face that looks forward, just under the wing's crest and within the nose's width: a ring
+        # that runs past that face would miss the skin and the decal would be dropped.
+        top, bottom, halfw, belt, roof = _profiles(p, np.array([0.0]))
+        nose = _section(top[0], bottom[0], halfw[0], belt[0], roof[0], p.fender_crown, 0.0, p.fin_width)
+        z = np.abs(np.array([q[0] for q in nose], float))
+        h = np.array([q[1] for q in nose], float)
+        ring = 1.18 * p.headlamp_size[1] / 2  # the chrome ring, the widest layer of the pod
+        cy = max(0.0, 0.985 * halfw[0] - ring)  # its outer edge at the shoulder that carries the wing
+        span = np.arange(5, HALF)  # the shoulder and the face's top, not the underside
+        span = span[(z[span] >= cy - ring) & (z[span] <= cy + ring)]
+        ceiling = h[span].min() if len(span) else top[0]
+        head = (cy, ceiling - ring - 0.01)
     else:
         head = (0.63 * half, p.hood_front - 0.07)
     if p.taillamp_center is not None:
@@ -731,12 +746,13 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
     W, L = p.width, p.length
     out = []
 
-    def add(mat, view, outline, lift=0.006, close=None, frame=None, least=4, what="decal"):
+    def add(mat, view, outline, lift=0.006, close=None, frame=None, least=4, what="decal", step=0.04):
         # The outline is split into small triangles, so the decal bends with the skin it lands on instead of
         # cutting through it. A frame (anchor on the skin, view direction, the
         # outline's own right axis, half-size, the outline's anchor, island) places an outline drawn in units of
         # its half-size as seen along that direction, and maps it whole into the island.
-        outline, tri = _split(outline, np.array(frame[3:5]) if frame else 1.0, least=1 if frame else least)
+        outline, tri = _split(outline, np.array(frame[3:5]) if frame else 1.0, step=step,
+                              least=1 if frame else least)
         if frame:
             anchor, d, right, a, bh, au, av, island = frame
             o = anchor + np.outer((outline[:, 0] - au) * a, right) - 1.5 * d
@@ -874,7 +890,8 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
                 add({"lit": "lamp", "chrome": "chrome"}.get(m, "trim"), "front", slab, 0.006 + 0.003 * k, least=1,
                     what="grille")
     elif p.grille_style == "mesh":
-        # A chrome frame round a dark panel set back behind it, with a few thin bars across the recess.
+        # A chrome frame round a dark recess, crossed by an egg-crate of thin chrome bars: about four across
+        # and ten down, both counts following detail.
         t = max(0.02, 0.14 * (g1 - g0))
         add("chrome", "front", [(-gw, g0), (gw, g0), (gw, g0 + t), (-gw, g0 + t)], 0.009, what="grille")
         add("chrome", "front", [(-gw, g1 - t), (gw, g1 - t), (gw, g1), (-gw, g1)], 0.009, what="grille")
@@ -882,10 +899,15 @@ def _decals(p: CarParams, verts, tris, parts, corner_uv):
         add("chrome", "front", [(gw - t, g0 + t), (gw, g0 + t), (gw, g1 - t), (gw - t, g1 - t)], 0.009, what="grille")
         add("trim", "front", [(-gw + t, g0 + t), (gw - t, g0 + t), (gw - t, g1 - t), (-gw + t, g1 - t)],
             0.002, what="grille")
-        for k in range(1, 4):
-            z = -gw + 2 * gw * k / 4
-            add("chrome", "front", [(z - 0.005, g0 + t), (z + 0.005, g0 + t), (z + 0.005, g1 - t), (z - 0.005, g1 - t)],
-                0.004, least=1, what="grille")
+        across, down, bar = max(2, int(round(4 * p.detail))), max(3, int(round(10 * p.detail))), 0.004
+        for k in range(1, down):
+            z = -gw + t + (2 * gw - 2 * t) * k / down
+            add("chrome", "front", [(z - bar, g0 + t), (z + bar, g0 + t), (z + bar, g1 - t), (z - bar, g1 - t)],
+                0.005, least=1, what="grille", step=0.12)
+        for k in range(1, across):
+            y = g0 + t + (g1 - g0 - 2 * t) * k / across
+            add("chrome", "front", [(-gw + t, y - bar), (gw - t, y - bar), (gw - t, y + bar), (-gw + t, y + bar)],
+                0.005, least=1, what="grille", step=0.12)
     else:
         add("trim", "front", [(-gw, g0), (gw, g0), (gw * 1.06, g1), (-gw * 1.06, g1)], 0.003, what="grille")
         if p.fog_rings:
@@ -1289,8 +1311,20 @@ def build_car(p: CarParams | None = None) -> Car:
             piece(name, str(mat), verts[t].reshape(-1, 3), k, corner_uv[sel].reshape(-1, 2), smooth[sel].reshape(-1, 3))
             # The inside: the same triangles reversed, so every panel shows from both sides and an open door
             # shows its inner card. Glass stays glass; the rest is interior trim, in its own atlas island.
-            piece(name, "glass" if mat == "glass" else "interior", verts[t].reshape(-1, 3), k[:, ::-1],
-                  inner_uv[sel].reshape(-1, 2), -smooth[sel].reshape(-1, 3))
+            # A raised wing, though, leaves a step and a notched nose whose reverse is seen from outside: there
+            # the reverse keeps the panel's own paint rather than showing interior trim.
+            outside = np.zeros(len(t), bool)
+            if p.fender_crown:
+                xmid = verts[t].mean(1)[:, 0]
+                outside = ((bands[sel] == -1) & (xmid > 0)) | \
+                          ((bands[sel] == 6) & (xmid > L / 2 - p.cowl_u * L))
+            if outside.any():
+                piece(name, str(mat), verts[t[outside]].reshape(-1, 3), k[outside][:, ::-1],
+                      inner_uv[sel][outside].reshape(-1, 2), -smooth[sel][outside].reshape(-1, 3))
+            inside = ~outside
+            if inside.any():
+                piece(name, "glass" if mat == "glass" else "interior", verts[t[inside]].reshape(-1, 3),
+                      k[inside][:, ::-1], inner_uv[sel][inside].reshape(-1, 2), -smooth[sel][inside].reshape(-1, 3))
     for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv):
         piece(owner, mat, v, t, uv)
     for mat, bv, bt in _bumper_parts(p, verts):
