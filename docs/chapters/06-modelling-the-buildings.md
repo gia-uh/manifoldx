@@ -564,6 +564,16 @@ Every number in `CarParams` is a dial: a longer wheelbase moves the rear axle an
 its arch, a lower `tail_top` rakes the hatch, `headlamp="round"` swaps the lamp
 outline. Detail comes later, from smoothing and subdivision on the same parts.
 
+A `Car` is a `Vehicle`, the shape every vehicle builder returns: its parts, its
+`pose` and its `landmarks`. For a street with hundreds of cars, one entity per
+piece is too many draws; `car.merged(palette=..., grid=28)` poses every outside
+piece, colours each vertex from the palette, decimates the whole on a grid and
+returns one `Mesh` with its nose at +x and its wheels on the ground, ready to be
+drawn many times. Paint areas and roof lamps are parameters too: `livery` takes
+colours and outlines drawn in the side view, projected onto both flanks, and
+`lightbar="bar"` puts a two-colour bar of lamps on the roof, so a police car or a
+taxi is a sedan with two more entries in its `CarParams`.
+
 A car's texture can be a flat base paint with crisp details on top. Bake the base
 with `bake_projection(car, {}, size=..., materials={"paint"}, fallback=...)`, then
 place each detail as a `Decal`: an RGBA image, a view, and a centre that is a 3D
