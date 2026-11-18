@@ -65,6 +65,38 @@ def test_color_and_albedo_map_of_the_same_value_render_the_same(tmp_path):
     assert np.abs(left - right).max() <= 3, (left, right)
 
 
+def test_vertex_colours_are_srgb_like_material_colours():
+    """#c62828 as color= and as per-vertex colours must render the same.
+
+    Vertex colours were uploaded as if they were linear light, so the same sRGB
+    hex painted per vertex came out pale: (201, 97, 98) against (211, 151, 153).
+    """
+    try:
+        from manifoldx.backends import get_offscreen_canvas
+        get_offscreen_canvas(width=8, height=8)
+    except Exception as e:
+        pytest.skip(f"offscreen canvas unavailable: {e}")
+    from manifoldx.modeling.mesh import Mesh as ModelMesh
+    from manifoldx.resources import DirectionalLight
+
+    hex_colour = "#c62828"
+    rgb = np.array([int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5)], np.float32)
+    out = []
+    for per_vertex in (False, True):
+        box = ModelMesh.box(2, 2, 2).recompute_normals()
+        e = mx.Engine("cs", width=64, height=64)
+        if per_vertex:
+            box = box.with_colors(np.tile(rgb, (len(box.positions), 1)))
+            mat = StandardMaterial("#ffffff", roughness=0.6, vertex_colors=True)
+        else:
+            mat = StandardMaterial(hex_colour, roughness=0.6)
+        e.spawn(Mesh(box.to_geometry()), Material(mat), Transform())
+        e.camera.set_pose(position=(0, 0, -6), target=(0, 0, 0))
+        e.set_sun(DirectionalLight(color="#ffffff", intensity=3.2, direction=(0, 0, 1)))
+        out.append(e.render_frame(supersample=1)[32, 32, :3].astype(int))
+    assert np.abs(out[0] - out[1]).max() <= 4, out
+
+
 def _textured_vs_plain(tmp_path, light):
     """Centre pixel of a color="#cc2222" plane and of a #cc2222 albedo_map plane, each
     rendered alone at the same spot under `light` (the spot does not light the two

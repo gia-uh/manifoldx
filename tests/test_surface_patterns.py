@@ -5,7 +5,7 @@ import pytest
 
 import manifoldx as mx
 from manifoldx.components import Material, Mesh, Transform
-from manifoldx.resources import SURFACE_PATTERNS, DirectionalLight, StandardMaterial, material_rgb
+from manifoldx.resources import SURFACE_PATTERNS, DirectionalLight, StandardMaterial
 
 
 def _ground(sid, size=12.0, with_key=True):
@@ -13,7 +13,7 @@ def _ground(sid, size=12.0, with_key=True):
     geo = {
         "positions": np.array([[-h, 0, -h], [h, 0, -h], [h, 0, h], [-h, 0, h]], np.float32),
         "normals": np.tile([0, 1, 0], (4, 1)).astype(np.float32),
-        "colors": np.tile(material_rgb("#7fb653"), (4, 1)).astype(np.float32),
+        "colors": np.tile(np.array([0x7F, 0xB6, 0x53]) / 255.0, (4, 1)).astype(np.float32),
         "indices": np.array([0, 2, 1, 0, 3, 2], np.uint32),
     }
     if with_key:

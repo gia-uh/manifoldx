@@ -175,7 +175,9 @@ Walking is the one job that is genuinely per-frame, so the key handlers only
 record which keys are held and a `frame` handler moves the camera while one of
 them is in the set. The camera keeps its height and looks where it looked; the
 step is four metres per second of `dt`. `render_frame` gives every call the same
-fixed `dt` of `1/30 s`, so the walk is the same in every run.
+fixed `dt` of `1/30 s`, so the walk is the same in every run. In a window,
+`engine.run()` measures the wall-clock interval between frames and hands systems
+a `SmoothClock`'s running mean of it, so motion does not judder under vsync.
 
 ```python {run continue export=examples/visitor.py}
 

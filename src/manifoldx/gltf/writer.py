@@ -213,7 +213,12 @@ class _Writer:
         if "uvs" in geo:
             attrs["TEXCOORD_0"] = self.b.accessor(np.asarray(geo["uvs"], np.float32), target=ARRAY_BUFFER)
         if colors and "colors" in geo:
-            attrs["COLOR_0"] = self.b.accessor(np.asarray(geo["colors"], np.float32), target=ARRAY_BUFFER)
+            # glTF's COLOR_0 is linear light; manifoldx's per-vertex colours are sRGB,
+            # like material colours, so decode them on the way out.
+            from manifoldx.resources import srgb_to_linear
+
+            attrs["COLOR_0"] = self.b.accessor(srgb_to_linear(np.asarray(geo["colors"], np.float32)),
+                                               target=ARRAY_BUFFER)
         if "joints" in geo:  # rigid skinning: one joint per vertex, weight 1
             joints = np.zeros((len(pos), 4), np.uint8)
             joints[:, 0] = np.asarray(geo["joints"])

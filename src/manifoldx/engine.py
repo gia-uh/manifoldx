@@ -184,7 +184,9 @@ class EntityHandle:
         if stride >= 6:
             inter[:, 3:6] = geo["normals"]
         if bufs.get("has_colors"):
-            inter[:, 6:9] = geo["colors"]
+            from manifoldx.resources import srgb_to_linear
+
+            inter[:, 6:9] = srgb_to_linear(geo["colors"])  # sRGB in, linear light in the buffer
             if "surfaces" in geo:
                 inter[:, 9] = np.asarray(geo["surfaces"], dtype=np.float32)
             if bufs.get("has_facade") and "facade" in geo:
