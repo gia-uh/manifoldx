@@ -75,12 +75,81 @@ def _nearest_colours(points, source, colours, chunk: int = 512) -> np.ndarray:
     return out
 
 
+def orient_outward(positions, faces) -> np.ndarray:
+    """The faces of every closed component wound alike and turned so they point out.
+
+    The renderer culls back faces, so a closed shell must be wound counter-clockwise seen from outside: a face flipped
+    against its neighbours, or a whole shell inside out, lets the camera see into the vehicle. Within each connected
+    component whose every edge is shared by exactly two faces, the winding is carried from one face to the next
+    across shared edges, and the component is then turned round if its signed volume is negative. Open components,
+    such as glass drawn from both sides, are returned as they are.
+    """
+    F = np.array(faces, dtype=np.int64, copy=True)
+    P = np.asarray(positions, float)
+    edges = {}
+    for i, (a, b, c) in enumerate(F):
+        for u, v in ((a, b), (b, c), (c, a)):
+            edges.setdefault((min(u, v), max(u, v)), []).append(i)
+    neighbours = [[] for _ in range(len(F))]
+    open_faces = set()
+    for (u, v), fs in edges.items():
+        if len(fs) == 2:
+            neighbours[fs[0]].append((fs[1], u, v))
+            neighbours[fs[1]].append((fs[0], u, v))
+        else:
+            open_faces.update(fs)
+    seen = np.zeros(len(F), bool)
+    for start in range(len(F)):
+        if seen[start]:
+            continue
+        seen[start] = True
+        component, stack = [start], [start]
+        while stack:
+            i = stack.pop()
+            for j, u, v in neighbours[i]:
+                if seen[j]:
+                    continue
+                seen[j] = True
+                # Wound alike, two faces cross their shared edge in opposite directions.
+                if _crosses(F[i], u, v) == _crosses(F[j], u, v):
+                    F[j] = F[j][::-1]
+                component.append(j)
+                stack.append(j)
+        if open_faces.intersection(component):
+            F[component] = np.asarray(faces, dtype=np.int64)[component]
+            continue
+        a, b, c = P[F[component, 0]], P[F[component, 1]], P[F[component, 2]]
+        if np.einsum("ij,ij->i", a, np.cross(b, c)).sum() < 0:
+            F[component] = F[component][:, ::-1]
+    return F.astype(np.asarray(faces).dtype, copy=False)
+
+
+def _crosses(face, u, v) -> bool:
+    """Whether the face's winding runs from u to v along their shared edge."""
+    a, b, c = face
+    return (a, b) == (u, v) or (b, c) == (u, v) or (c, a) == (u, v)
+
+
 @dataclass
 class Vehicle:
-    """A built vehicle: its measurements and its rigid parts. Every builder returns one of these."""
+    """A built vehicle: its measurements and its rigid parts. Every builder returns one of these.
+
+    Every closed piece is wound outward on construction (:func:`orient_outward`), so no builder can leave a face the
+    renderer would cull from outside.
+    """
 
     params: object
     parts: list
+
+    def __post_init__(self):
+        from dataclasses import replace
+
+        for part in self.parts:
+            for mat, mesh in list(part.pieces.items()):
+                faces = orient_outward(mesh.positions, mesh.faces)
+                if not np.array_equal(faces, mesh.faces):
+                    fixed = replace(mesh, faces=faces)
+                    part.pieces[mat] = fixed if mesh.normals is None else fixed.recompute_normals()
 
     def part(self, name: str) -> Part:
         return next(p for p in self.parts if p.name == name)
