@@ -554,6 +554,43 @@ _SEDAN = dict(
 )
 
 
+@pytest.mark.parametrize("nose_half", [0.88, 0.9])
+@pytest.mark.parametrize("grille_style", ["mesh", "bar"])
+def test_full_width_grille_builds_when_the_nose_is_narrow(nose_half, grille_style):
+    """#294: a full-width grille was as wide as the body, so at nose_half < 0.94 its
+    corners ran off the nose and the decal was dropped, or raised 'grille misses the
+    front face' when not one point landed on it."""
+    from dataclasses import replace
+
+    p = replace(CarParams(**_SEDAN), nose_half=nose_half, grille_style=grille_style,
+                grille=None, grille_span="full_width", detail=0.5)
+    p.validate()
+    build_car(p)
+
+
+@pytest.mark.parametrize("grille_style", ["mesh", "bar"])
+def test_grille_points_lie_on_the_front_face_across_the_nose_width(grille_style):
+    from dataclasses import replace
+
+    from manifoldx.modeling.assets.car import _body_faces, _body_grid, _grille_rect, _raycast
+
+    for nose_half in (0.4, 0.6, 0.8, 0.88, 0.9, 0.92, 0.94, 1.0, 1.1):
+        for span in ("full_width", "between_lamps"):
+            p = replace(CarParams(**_SEDAN), nose_half=nose_half, grille=None, grille_style=grille_style,
+                        grille_span=span, detail=0.5)
+            axles = (p.length / 2 - p.front_overhang, p.length / 2 - p.front_overhang - p.wheelbase)
+            u, P, raised, halfw = _body_grid(p, axles)
+            verts, tris, mats, parts, bands, _ = _body_faces(p, u, P, raised)
+            cap = (bands < 0) & (verts[tris].mean(1)[:, 0] > 0)  # the nose's end cap
+            gw, g0, g1 = _grille_rect(p, verts, tris, cap)
+            assert gw > 0.25, (nose_half, span, gw)
+            zz, yy = np.meshgrid(np.linspace(-gw, gw, 9), np.linspace(g0, g1, 9))
+            origins = np.column_stack([np.full(zz.size, p.length / 2 + 1), yy.ravel(), zz.ravel()])
+            t, k = _raycast(origins, np.array([-1.0, 0.0, 0.0]), verts, tris)
+            assert np.isfinite(t).all(), (nose_half, span)
+            assert cap[k].all(), (nose_half, span, gw)
+
+
 def test_fender_crown_sweep_builds_meshes_with_valid_indices():
     """#293: with fender_crown > 0 the reversed faces were renumbered as if none had
     been split off, so a subset of triangles indexed past its own vertices.
