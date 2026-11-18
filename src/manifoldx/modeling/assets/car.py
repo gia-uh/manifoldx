@@ -1462,12 +1462,16 @@ def build_car(p: CarParams | None = None) -> Car:
                 outside = ((bands[sel] == -1) & (xmid > 0)) | \
                           ((bands[sel] == 6) & (xmid > L / 2 - p.cowl_u * L))
             if outside.any():
-                piece(name, str(mat), verts[t[outside]].reshape(-1, 3), k[outside][:, ::-1],
+                # A subset gets its own vertex numbering: its vertices are the ones gathered
+                # here, not positions in `t`'s full triangle list.
+                ko = np.arange(3 * int(outside.sum())).reshape(-1, 3)
+                piece(name, str(mat), verts[t[outside]].reshape(-1, 3), ko[:, ::-1],
                       inner_uv[sel][outside].reshape(-1, 2), -smooth[sel][outside].reshape(-1, 3))
             inside = ~outside
             if inside.any():
+                ki = np.arange(3 * int(inside.sum())).reshape(-1, 3)
                 piece(name, "glass" if mat == "glass" else "interior", verts[t[inside]].reshape(-1, 3),
-                      k[inside][:, ::-1], inner_uv[sel][inside].reshape(-1, 2), -smooth[sel][inside].reshape(-1, 3))
+                      ki[:, ::-1], inner_uv[sel][inside].reshape(-1, 2), -smooth[sel][inside].reshape(-1, 3))
     for mat, owner, v, t, uv in _decals(p, verts, tris, owners, corner_uv, bands):
         piece(owner, mat, v, t, uv)
     for mat, bv, bt in _bumper_parts(p, verts):

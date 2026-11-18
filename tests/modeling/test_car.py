@@ -589,3 +589,30 @@ def test_grille_points_lie_on_the_front_face_across_the_nose_width(grille_style)
             t, k = _raycast(origins, np.array([-1.0, 0.0, 0.0]), verts, tris)
             assert np.isfinite(t).all(), (nose_half, span)
             assert cap[k].all(), (nose_half, span, gw)
+
+
+def test_fender_crown_sweep_builds_meshes_with_valid_indices():
+    """#293: with fender_crown > 0 the reversed faces were renumbered as if none had
+    been split off, so a subset of triangles indexed past its own vertices.
+
+    The grid spans each parameter's published range (0-0.4 m, 0.05-0.45, 0-1) and
+    includes the two reported combinations. detail=0.25 keeps the sweep quick; it
+    reproduces the same IndexError.
+    """
+    from dataclasses import replace
+
+    for fender_crown in (0.03, 0.4):
+        for cowl_u in (0.05, 0.262, 0.45):
+            for windscreen_wrap in (0.0, 0.2, 1.0):
+                p = replace(CarParams(**_SEDAN), detail=0.25, fender_crown=fender_crown,
+                            cowl_u=cowl_u, windscreen_u=max(0.35, cowl_u + 0.05),
+                            windscreen_wrap=windscreen_wrap)
+                p.validate()
+                car = build_car(p)
+                for part in car.parts:
+                    for material, mesh in part.pieces.items():
+                        assert len(mesh.faces), (part.name, material)
+                        assert mesh.faces.max() < len(mesh.positions), (part.name, material, fender_crown,
+                                                                        cowl_u, windscreen_wrap)
+                        assert mesh.faces.min() >= 0, (part.name, material)
+                car.merged()  # the whole car, with every part merged and posed
