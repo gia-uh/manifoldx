@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from manifoldx.modeling.assets import bus, car, cycle, truck
-from manifoldx.modeling.assets.vehicle import orient_outward
+from manifoldx.modeling.assets.vehicle import INSIDE, orient_outward
 
 VEHICLES = {
     "car": lambda: car.build_car(car.CarParams()),
@@ -68,7 +68,8 @@ def _problems(mesh):
 @pytest.mark.parametrize("name", list(VEHICLES))
 def test_every_closed_piece_faces_out(name):
     v = VEHICLES[name]()
-    bad = [f"{part.name}/{mat}: {p}" for part in v.parts for mat, m in part.pieces.items() for p in _problems(m)]
+    bad = [f"{part.name}/{mat}: {p}" for part in v.parts for mat, m in part.pieces.items() if mat not in INSIDE
+           for p in _problems(m)]
     assert not bad, bad
 
 
@@ -89,3 +90,19 @@ def test_orient_outward_leaves_an_open_sheet_alone():
     v = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]])
     f = np.array([[0, 1, 2], [0, 2, 3]])
     assert np.array_equal(orient_outward(v, f[:, ::-1]), f[:, ::-1])
+
+
+def test_the_cabin_lining_keeps_facing_in():
+    """The interior shell is seen from inside the car; turned outward its dark faces would show through the roof."""
+    import manifoldx.modeling.assets.vehicle as vm
+
+    built = car.build_car(car.CarParams())
+    original = vm.Vehicle.__post_init__
+    vm.Vehicle.__post_init__ = lambda self: None
+    try:
+        raw = car.build_car(car.CarParams())
+    finally:
+        vm.Vehicle.__post_init__ = original
+    for part, part_raw in zip(built.parts, raw.parts):
+        for mat in INSIDE & set(part.pieces):
+            assert np.array_equal(part.pieces[mat].faces, part_raw.pieces[mat].faces), (part.name, mat)
