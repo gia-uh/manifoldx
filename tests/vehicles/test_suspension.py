@@ -19,6 +19,7 @@ def run(fleet, ground, seconds, controls=STILL, each=None):
 def test_settles_with_the_static_loads():
     fleet, ground = Vehicles([car()]), FlatGround()
     fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
+    fleet.gear[0] = 0  # neutral: no engine braking
     fleet.position[0, 1] += 0.5
     run(fleet, ground, 2.0)
     assert abs(fleet.velocity[0, 1]) < 0.02  # settled after one bounce
@@ -41,6 +42,7 @@ def test_no_energy_gain_over_ramps():
     ground = ShapeGround(profile=[(-100, 0.0), (10, 0.0), (30, -3.0), (50, -3.0), (70, 0.0), (300, 0.0)])
     fleet = Vehicles([spec])
     fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
+    fleet.gear[0] = 0  # neutral: no engine braking
     run(fleet, ground, 1.0)  # settle
     fleet.velocity[0] = (10.0, 0.0, 0.0)
     fleet.omega[0] = 10.0 / fleet.p.radius[0]
@@ -54,6 +56,7 @@ def test_climbs_a_kerb_without_taking_off():
     ground = ShapeGround(profile=[(-100, 0.0), (100, 0.0)], kerbs=[5.0], kerb_height=0.15)
     fleet = Vehicles([car()])
     fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
+    fleet.gear[0] = 0  # neutral: no engine braking
     run(fleet, ground, 1.0)
     fleet.velocity[0] = (10 / 3.6, 0.0, 0.0)
     fleet.omega[0] = 10 / 3.6 / fleet.p.radius[0]
@@ -72,10 +75,11 @@ def test_stays_under_a_bridge():
     ground = ShapeGround(profile=[(-100, 0.0), (100, 0.0)], bridge=(5.0, 15.0, 6.0))
     fleet = Vehicles([car()])
     fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
+    fleet.gear[0] = 0  # neutral: no engine braking
     run(fleet, ground, 0.5)
     y0 = fleet.position[0, 1]
     fleet.velocity[0] = (5.0, 0.0, 0.0)
     fleet.omega[0] = 5.0 / fleet.p.radius[0]
-    run(fleet, ground, 4.0)
+    run(fleet, ground, 5.0)
     assert fleet.position[0, 0] > 20
     assert fleet.position[0, 1] == pytest.approx(y0, abs=0.05)

@@ -6,12 +6,13 @@ from typing import Sequence
 
 import numpy as np
 
-from . import suspension, tyre
+from . import powertrain, suspension, tyre
 from .body import cross, integrate, matrices, yaw_quaternion
 from .spec import VehicleSpec
 from .state import pack
 
 G = 9.81
+AIR = 1.2  # kg/m³
 
 
 class Vehicles:
@@ -29,6 +30,8 @@ class Vehicles:
         self.slip = np.zeros((n, w, 2))  # relaxed slip ratio and slip-angle tangent
         self.steer_angle = np.zeros((n, w))
         self.extra_brake = np.zeros((n, w))  # N·m the assists add
+        self.gear, self.shift_timer, self.rpm = np.ones(n, int), np.zeros(n), np.zeros(n)
+        self.drive_cut = np.zeros(n)  # share of the drive the assists take away, 0..1
 
     def place(self, i: int, position, yaw: float, ground) -> None:
         """Put vehicle i at rest at (x, z) facing yaw, its wheels on the ground level nearest position's y."""
@@ -48,6 +51,7 @@ class Vehicles:
         self.compression[i] = 0.0
         self.load[i] = 0.0
         self.omega[i] = self.slip[i] = 0.0
+        self.gear[i], self.shift_timer[i], self.rpm[i] = 1, 0.0, self.p.engine[i, 0]
 
     def angular_body(self) -> np.ndarray:
         """Angular velocity in the car's own axes, (N, 3)."""
@@ -58,6 +62,7 @@ class Vehicles:
         p, dt = self.p, self.DT
         R = matrices(self.rotation)
         down, forward = -R[:, :, 1], R[:, :, 0]
+        self._forward = forward
         mounts = self.position[:, None, :] + np.einsum("nij,nwj->nwi", R, p.mount)
         dist, self.ground_y, normal = suspension.contact(ground, mounts, down, forward, p.radius, p.travel,
                                                          self.ground_y)
@@ -71,18 +76,58 @@ class Vehicles:
         contact_point = wheel_centre - normal * p.radius[..., None]
         force = force + self._tyres(controls, ground, R, normal, contact_point, load)
         lever = contact_point - self.position[:, None, :]
-        total = force.sum(1) + p.mass[:, None] * np.array([0.0, -G, 0.0])
+        speed = np.linalg.norm(self.velocity, axis=1, keepdims=True)
+        drag = -0.5 * AIR * (p.cd * p.area)[:, None] * speed * self.velocity
+        total = force.sum(1) + drag + p.mass[:, None] * np.array([0.0, -G, 0.0])
         torque = cross(lever, force).sum(1)
         self._integrate(R, total, torque)
 
     def _torques(self, controls):
-        """Drive and brake torque on each wheel, N·m: the powertrain fills these in."""
-        z = np.zeros_like(self.omega)
-        return z, z + self.extra_brake
+        """Drive and brake torque on each wheel, N·m, after the gearbox picks its gear."""
+        p, dt = self.p, self.DT
+        throttle, brake, hand = controls[:, 1], controls[:, 2], controls[:, 3]
+        v = np.einsum("ni,ni->n", self.velocity, self._forward)
+        slow = np.abs(v) < powertrain.REVERSE_BELOW
+        back = self.gear < 0
+        self.gear = np.where(~back & slow & (brake > 0) & (throttle == 0), -1, self.gear)
+        self.gear = np.where((back & slow | (self.gear == 0)) & (throttle > 0) & (brake == 0), 1, self.gear)
+        neutral = self.gear == 0
+        back = self.gear < 0
+        # in reverse the pedals swap: the brake drives backward and the throttle brakes
+        pedal, stop = np.where(back, brake, throttle), np.where(back, throttle, brake)
+
+        driven = p.driven & p.wheel_mask
+        n_driven = np.maximum(driven.sum(1), 1)
+        g = np.clip(self.gear, 1, None) - 1
+        ratio = np.where(back, -p.reverse, p.ratios[np.arange(len(g)), g]) * p.final
+        wheel_rpm = np.abs((self.omega * driven).sum(1) / n_driven * ratio) * powertrain.RPM
+        self.rpm = np.maximum(wheel_rpm, np.where(pedal > 0, powertrain.CLUTCH_RPM, p.engine[:, 0]))
+        # the box shifts on road speed, as an automatic reads its output shaft: a spinning wheel does not shift it
+        road_rpm = np.abs(v / np.maximum((p.radius * driven).sum(1) / n_driven, 1e-3) * ratio) * powertrain.RPM
+
+        # the automatic box, with a gap between up and down so it does not hunt
+        self.shift_timer = np.maximum(self.shift_timer - dt, 0.0)
+        up_rpm = powertrain.UP_AT * p.engine[:, 2]
+        ready = (self.shift_timer == 0) & ~back
+        up = ready & ~neutral & (road_rpm > up_rpm) & (self.gear < p.n_gears)
+        lower = p.ratios[np.arange(len(g)), np.maximum(g - 1, 0)]
+        down_rpm = road_rpm * lower / np.maximum(p.ratios[np.arange(len(g)), g], 1e-9)
+        down = ready & ~up & (self.gear > 1) & (down_rpm < powertrain.DOWN_AT * up_rpm)
+        self.gear = self.gear + up - down
+        self.shift_timer = np.where(up | down, p.shift_time, self.shift_timer)
+
+        engine = powertrain.torque(p.engine, self.rpm, pedal) * (1 - self.drive_cut)
+        engine = np.where((self.shift_timer > 0) | neutral, np.where(neutral, 0.0, np.minimum(engine, 0.0)), engine)
+        drive = np.where(driven, (engine * ratio / n_driven)[:, None], 0.0)
+        n_hand = np.maximum((p.handbrake & p.wheel_mask).sum(1), 1)
+        brakes = (stop * p.brake_torque)[:, None] * p.brake_share
+        brakes = brakes + np.where(p.handbrake, (hand * p.brake_torque / n_hand)[:, None], 0.0)
+        brakes = brakes + p.rolling[:, None] * self.load * p.radius + self.extra_brake
+        return drive, brakes
 
     def _steer(self, controls):
-        """Each wheel's steering angle, positive to the right (toward the car's +z)."""
-        return np.where(self.p.steered, controls[:, :1] * self.p.max_steer[:, None], 0.0)
+        """Each wheel's steering angle, positive to the right (toward the car's +z), with Ackermann geometry."""
+        return powertrain.ackermann(controls[:, 0], self.p.mount, self.p.steered, self.p.max_steer)
 
     def _tyres(self, controls, ground, R, normal, contact_point, load):
         """The tyre forces (N, W, 3) at each contact; updates each wheel's spin and slips."""
