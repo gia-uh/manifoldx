@@ -6,7 +6,7 @@ from typing import Sequence
 
 import numpy as np
 
-from . import powertrain, suspension, tyre
+from . import contacts, powertrain, suspension, tyre
 from .body import cross, integrate, matrices, yaw_quaternion
 from .spec import VehicleSpec
 from .state import pack
@@ -32,6 +32,7 @@ class Vehicles:
         self.extra_brake = np.zeros((n, w))  # N·m the assists add
         self.gear, self.shift_timer, self.rpm = np.ones(n, int), np.zeros(n), np.zeros(n)
         self.drive_cut = np.zeros(n)  # share of the drive the assists take away, 0..1
+        self.impulse = np.zeros(n)  # N·s of every contact impulse in the last step
 
     def place(self, i: int, position, yaw: float, ground) -> None:
         """Put vehicle i at rest at (x, z) facing yaw, its wheels on the ground level nearest position's y."""
@@ -67,7 +68,8 @@ class Vehicles:
         dist, self.ground_y, normal = suspension.contact(ground, mounts, down, forward, p.radius, p.travel,
                                                          self.ground_y)
         comp = np.where(p.wheel_mask, p.travel - dist, 0.0)
-        comp = np.maximum(comp, 0.0)
+        upright = (-down[:, 1] > 0.3)[:, None]  # past about 72° of tilt the rays point away from the ground
+        comp = np.where(upright, np.maximum(comp, 0.0), 0.0)
         load = suspension.spring_force(comp, self.compression, dt, p.spring, p.damper, p.travel, p.arb, p.pair)
         self.compression, self.load = comp, load
 
@@ -80,7 +82,7 @@ class Vehicles:
         drag = -0.5 * AIR * (p.cd * p.area)[:, None] * speed * self.velocity
         total = force.sum(1) + drag + p.mass[:, None] * np.array([0.0, -G, 0.0])
         torque = cross(lever, force).sum(1)
-        self._integrate(R, total, torque)
+        self._integrate(R, total, torque, ground, walls)
 
     def _torques(self, controls):
         """Drive and brake torque on each wheel, N·m, after the gearbox picks its gear."""
@@ -173,12 +175,63 @@ class Vehicles:
         fx, fy = np.where(on, fx * cap, 0.0), np.where(on, fy * cap, 0.0)
         return fx[..., None] * heading + fy[..., None] * side
 
-    def _integrate(self, R, force, torque):
+    def _integrate(self, R, force, torque, ground, walls):
         p, dt = self.p, self.DT
         self.velocity = self.velocity + force / p.mass[:, None] * dt
         wb = np.einsum("nji,nj->ni", R, self.angular)
         tb = np.einsum("nji,nj->ni", R, torque)
         wb = wb + dt * (tb - cross(wb, p.inertia * wb)) / p.inertia
         self.angular = np.einsum("nij,nj->ni", R, wb)
-        self.position = self.position + self.velocity * dt
         self.rotation = integrate(self.rotation, self.angular, dt)
+        self.impulse = np.zeros(len(p.mass))
+        R = matrices(self.rotation)
+        inv_inertia = np.einsum("nij,nj,nkj->nik", R, 1 / p.inertia, R)
+        speed = np.linalg.norm(self.velocity, axis=1).max(initial=0.0)
+        n_sub = max(1, int(np.ceil(speed * dt / contacts.STEP)))
+        for _ in range(n_sub):
+            self.position = self.position + self.velocity * dt / n_sub
+            if walls is not None and len(walls):
+                self._walls(R, inv_inertia, np.asarray(walls, float))
+            self._body_on_ground(R, inv_inertia, ground)
+
+    def _apply(self, inv_inertia, lever, normal, depth):
+        """One contact per vehicle: impulse at lever along normal where depth > 0, then push the overlap out."""
+        p = self.p
+        active = depth > 0
+        j = contacts.impulse(self.velocity, self.angular, 1 / p.mass, inv_inertia, lever, normal, active)
+        self.velocity = self.velocity + j / p.mass[:, None]
+        self.angular = self.angular + np.einsum("nij,nj->ni", inv_inertia, cross(lever, j))
+        push = np.maximum(depth - contacts.SLOP, 0.0) * contacts.PUSH
+        self.position = self.position + normal * np.where(active, push, 0.0)[:, None]
+        self.impulse = self.impulse + np.linalg.norm(j, axis=1)
+
+    def _walls(self, R, inv_inertia, walls):
+        p = self.p
+        heading = R[:, [0, 2], 0]
+        heading = heading / np.maximum(np.linalg.norm(heading, axis=1, keepdims=True), 1e-9)
+        half = p.size[:, [0, 2]] / 2
+        for _ in range(contacts.ROUNDS):
+            depth, normal, point = contacts.footprint_hit(walls, self.position[:, [0, 2]], heading, half)
+            if not np.any(depth > 0):
+                return
+            n3 = np.stack([normal[:, 0], np.zeros(len(normal)), normal[:, 1]], -1)
+            lever = np.stack([point[:, 0] - self.position[:, 0], np.zeros(len(point)),
+                              point[:, 1] - self.position[:, 2]], -1)
+            self._apply(inv_inertia, lever, n3, depth)
+
+    def _body_on_ground(self, R, inv_inertia, ground):
+        """The body box's eight corners against the ground: a car on its side or roof rests on them."""
+        p = self.p
+        lo = np.min(np.where(p.wheel_mask, p.mount[..., 1], np.inf), 1)
+        hx, hz = p.size[:, 0] / 2, p.size[:, 2] / 2
+        corners = np.stack([np.stack([sx * hx, y, sz * hz], -1) for sx in (-1, 1) for sz in (-1, 1)
+                            for y in (lo, lo + p.size[:, 1])], 1)  # (N, 8, 3) car axes
+        world = self.position[:, None, :] + np.einsum("nij,nkj->nki", R, corners)
+        h = ground.height(world[..., 0].ravel(), world[..., 2].ravel(), world[..., 1].ravel()).reshape(world.shape[:2])
+        if not np.any(h > world[..., 1]):
+            return
+        up = np.tile([0.0, 1.0, 0.0], (len(h), 1))
+        for _ in range(2):  # sequential impulses: every corner, twice, so resting corners share the weight
+            for k in range(corners.shape[1]):
+                point = self.position + np.einsum("nij,nj->ni", R, corners[:, k])
+                self._apply(inv_inertia, point - self.position, up, h[:, k] - point[:, 1])
