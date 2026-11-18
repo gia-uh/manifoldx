@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Interactive `dt` is smoothed (#299): systems in `run()` get a running mean of the recent frame intervals, kept in step with the wall clock (`manifoldx.frame_clock`), instead of the raw start-to-start interval, which under vsync disagrees with the time each image stays on screen and made motion judder. An interval over four times the mean passes through as it is. `Engine(smooth_dt=False)` restores the raw interval; `engine.elapsed` stays on the wall clock.
 - A derived `grille` (`grille=None`) is fitted to the nose's end cap instead of using 94% of the body's half-width: a full-width unit on a narrow nose no longer runs off the face, where the decal was dropped or `_decals` raised "grille misses the front face" (#294).
 - `build_car` no longer raises `IndexError` when `fender_crown > 0` and the solved hood leaves some faces with their outside paint and others with interior trim: each subset now gets its own vertex numbering instead of reusing the full triangle list's (#293).
 - `manifoldx run` no longer drops `__main__` on a save when the launcher is a console script in the project's `.venv` (`uv run manifoldx run -m pkg.mod`). Files under `sys.prefix` are never the app's, so `multiprocessing` with spawn keeps working after a reload (#268).
