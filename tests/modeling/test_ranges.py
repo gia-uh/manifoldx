@@ -5,7 +5,7 @@ from dataclasses import MISSING, fields
 
 import pytest
 
-from manifoldx.modeling.assets.bus import BusParams, build_bus
+from manifoldx.modeling.assets.bus import BusParams, build_bus, coach
 from manifoldx.modeling.assets.car import CarParams, build_car
 from manifoldx.modeling.assets.cycle import (
     CycleParams,
@@ -23,17 +23,18 @@ from manifoldx.modeling.assets.truck import (
     cargo_truck_1980s,
     dump_truck,
     fire_engine,
+    passenger_truck,
     tanker,
 )
 from manifoldx.modeling.assets.vehicle import ParamsRanges
 
 CASES = [
     (CarParams, build_car, ()),
-    (BusParams, build_bus, ()),
+    (BusParams, build_bus, (coach,)),
     (
         TruckParams,
         build_truck,
-        (cargo_truck_1980s, box_truck, tanker, dump_truck, fire_engine),
+        (cargo_truck_1980s, box_truck, tanker, dump_truck, fire_engine, passenger_truck),
     ),
     (
         CycleParams,

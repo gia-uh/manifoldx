@@ -1,8 +1,11 @@
 """A parametric city bus: measurements, parts, glass, livery, detail and the merged mesh."""
 
-import numpy as np
+import hashlib
 
-from manifoldx.modeling.assets.bus import Bus, BusParams, build_bus
+import numpy as np
+import pytest
+
+from manifoldx.modeling.assets.bus import Bus, BusParams, build_bus, coach
 from manifoldx.modeling.assets.vehicle import Vehicle
 
 
@@ -124,3 +127,39 @@ def test_the_merged_mesh_sits_on_the_ground_and_works_on_a_grid():
 
 def test_detail_scales_the_resolution():
     assert _triangles(build_bus(BusParams(detail=0.5))) < _triangles(build_bus())
+
+
+def test_the_city_bus_builds_exactly_as_before():
+    p = np.round(np.asarray(build_bus().merged().positions, np.float64), 4)
+    assert hashlib.sha256(p.tobytes()).hexdigest()[:16] == "31a7f9a26a74097a"
+
+
+def test_a_coach_has_one_front_door_small_tinted_windows_and_luggage_bays():
+    p = coach()
+    bus = build_bus(p)
+    doors = [part for part in bus.parts if part.kind == "door"]
+    assert len(doors) == 1
+    tinted = np.concatenate([mesh.positions for mesh in _pieces(bus, "tinted")]).astype(float)
+    assert tinted[:, 2].min() < -0.9 and tinted[:, 2].max() > 0.9  # a band down each flank
+    assert np.ptp(tinted[:, 1]) < 0.9  # a shallow band, not the city bus's tall windows
+    bays = np.concatenate([mesh.positions for mesh in _pieces(bus, "bay")]).astype(float)
+    assert bays[:, 1].max() < p.floor  # below the passenger floor
+    assert bays[:, 2].min() < -0.9 and bays[:, 2].max() > 0.9
+    assert {"bay", "tinted"} <= set(bus.palette)
+    assert p.windscreen_rake > BusParams().windscreen_rake
+    assert p.window_top - p.window_bottom < BusParams().window_top - BusParams().window_bottom
+
+
+def test_a_coach_measures_its_package():
+    p = coach()
+    bus = build_bus(p)
+    body = _verts(bus.part("body"))
+    lo, hi = body.min(0), body.max(0)
+    assert abs((hi[0] - lo[0]) - p.length) <= 0.02 * p.length
+    assert abs((hi[2] - lo[2]) - p.width) <= 0.03 * p.width
+    assert abs(hi[1] - p.height) <= 0.02 * p.height
+
+
+def test_a_luggage_bay_at_or_above_the_floor_is_refused():
+    with pytest.raises(ValueError, match="floor"):
+        BusParams(luggage_bays=4, floor=0.8, bay_top=0.9).validate()
