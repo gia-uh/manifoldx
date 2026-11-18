@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from manifoldx.modeling.assets.vehicle import PALETTE, Part, Vehicle, _rotate
+from manifoldx.modeling.assets.vehicle import PALETTE, ParamsRanges, Part, Vehicle, _rotate, choice, rng
 from manifoldx.modeling.mesh import Mesh
 
 _FRONT = np.array([1.0, 0.0, 0.0])
@@ -32,43 +32,60 @@ _AXLE = np.array([0.0, 0.0, 1.0])
 
 
 @dataclass
-class CycleParams:
+class CycleParams(ParamsRanges):
     """Every measurement of a cycle, in metres. Joints are vehicle coordinates: X forward, Y up, Z to the right."""
 
-    wheels: int = 2  # 2 for a bicycle or a motorcycle, 3 for a tricycle
-    layout: str = "inline"  # "inline", "delta" (one front, two rear) or "tadpole" (two front, one rear)
-    wheel_radius: float = 0.34
-    tyre_width: float = 0.045
-    rim_ratio: float = 0.86  # rim radius over wheel radius
-    spokes: int = 16  # 0 draws a disc wheel
-    wheelbase: float = 1.12
-    rear_track: float = 0.86  # between the rear wheels of a delta, or the front wheels of a tadpole
+    wheels: int = choice(2, 2, 3)  # 2 for a bicycle or a motorcycle, 3 for a tricycle
+    layout: str = choice("inline", 'inline', 'delta', 'tadpole')  # "inline", "delta" (one front, two rear) or "tadpole" (two front, one rear)
+    wheel_radius: float = rng(0.34, 0.15, 0.6, step=0.005, unit='m')
+    tyre_width: float = rng(0.045, 0.02, 0.15, step=0.001, unit='m')
+    rim_ratio: float = rng(0.86, 0.3, 0.95, step=0.01, unit='')  # rim radius over wheel radius
+    spokes: int = rng(16, 0, 48, step=1, unit='')  # 0 draws a disc wheel
+    wheelbase: float = rng(1.12, 0.6, 2.5, step=0.01, unit='m')
+    rear_track: float = rng(0.86, 0.3, 1.5, step=0.01, unit='m')  # between the rear wheels of a delta, or the front wheels of a tadpole
     # The frame, as named joints. Empty means the defaults below; a preset names only the joints it moves.
     joints: dict = field(default_factory=dict)
-    tube_radius: float = 0.021
+    tube_radius: float = rng(0.021, 0.008, 0.08, step=0.001, unit='m')
     # The rider's seat and the bars.
-    seat_style: str = "saddle"  # "saddle" for a bicycle, "long" for a motorcycle, "bench" for a wide saddle
-    seat_width: float = 0.19
-    handlebar_width: float = 0.58
+    seat_style: str = choice("saddle", 'saddle', 'long', 'bench')  # "saddle" for a bicycle, "long" for a motorcycle, "bench" for a wide saddle
+    seat_width: float = rng(0.19, 0.1, 0.6, step=0.01, unit='m')
+    handlebar_width: float = rng(0.58, 0.3, 1.0, step=0.01, unit='m')
     # The payload over the rear axle.
-    payload: str = "none"  # "none", "cargo_box" or "bench"
+    payload: str = choice("none", 'none', 'cargo_box', 'bench')  # "none", "cargo_box" or "bench"
     cargo_size: tuple = (1.05, 0.78, 0.55)  # length, width, height of the box
-    bench_length: float = 0.82
-    bench_width: float = 0.86
+    bench_length: float = rng(0.82, 0.3, 1.5, step=0.01, unit='m')
+    bench_width: float = rng(0.86, 0.3, 1.5, step=0.01, unit='m')
     canopy: bool = False
-    canopy_height: float = 2.0  # the top of the hood, from the ground
+    canopy_height: float = rng(2.0, 1.0, 3.0, step=0.01, unit='m')  # the top of the hood, from the ground
     # How it is driven.
-    power: str = "pedal"  # "pedal", "engine" or "hub"
+    power: str = choice("pedal", 'pedal', 'engine', 'hub')  # "pedal", "engine" or "hub"
     step_through: bool = False  # a scooter-like frame of panels instead of a diamond
     footboard: bool = False  # a flat board between the leg shield and the seat
-    headlamp: str | None = None  # None, "round" or "rect"
+    headlamp: str | None = choice(None, None, 'round', 'rect')  # None, "round" or "rect"
     tail_lamp: bool = False
     mudguards: bool = False
     # Paint: the frame, the box or bench, and the canopy.
-    frame_paint: str = "#b9c0c4"
-    box_paint: str = "#6fc2b8"
-    canopy_paint: str = "#efe4c6"
-    detail: float = 1.0  # scales the segments round wheels, tubes and the hood; 1 is today
+    frame_paint: str = field(default="#b9c0c4", metadata={"kind": "colour"})
+    box_paint: str = field(default="#6fc2b8", metadata={"kind": "colour"})
+    canopy_paint: str = field(default="#efe4c6", metadata={"kind": "colour"})
+    detail: float = rng(1.0, 0.25, 2.0, step=0.05, unit='x')  # scales the segments round wheels, tubes and the hood; 1 is today
+
+    def _validate_extra(self) -> None:
+        expected = 2 if self.layout == "inline" else 3
+        if self.wheels != expected:
+            raise ValueError(f"CycleParams.layout: {self.layout!r} needs {expected} wheels, not {self.wheels}")
+        if self.wheelbase <= 0:
+            raise ValueError(f"CycleParams.wheelbase: {self.wheelbase} must be positive")
+        if self.wheelbase <= 2 * self.wheel_radius:
+            raise ValueError(
+                f"CycleParams.wheelbase: {self.wheelbase} does not clear two wheels of radius {self.wheel_radius}"
+            )
+        if self.wheels == 3 and self.rear_track <= self.tyre_width:
+            raise ValueError(
+                f"CycleParams.rear_track: {self.rear_track} does not clear a tyre width of {self.tyre_width}"
+            )
+        if self.canopy and self.payload == "none":
+            raise ValueError("CycleParams.canopy: a canopy needs a bench or a box to stand on")
 
 
 @dataclass
@@ -607,27 +624,10 @@ def _weld(meshes) -> Mesh:
 # --- the builder ---------------------------------------------------------------------------------------------
 
 
-def _check(p: CycleParams) -> None:
-    if p.layout not in ("inline", "delta", "tadpole"):
-        raise ValueError(f"unknown layout {p.layout!r}")
-    if p.wheels not in (2, 3):
-        raise ValueError("a cycle has two or three wheels")
-    if (p.wheels == 2) != (p.layout == "inline"):
-        raise ValueError("an inline cycle has two wheels; a delta or tadpole has three")
-    if p.payload not in ("none", "cargo_box", "bench"):
-        raise ValueError(f"unknown payload {p.payload!r}")
-    if p.power not in ("pedal", "engine", "hub"):
-        raise ValueError(f"unknown power {p.power!r}")
-    if p.wheel_radius <= 0 or p.tyre_width <= 0 or p.wheelbase <= 0:
-        raise ValueError("wheels and wheelbase must be positive")
-    if p.canopy and p.payload == "none":
-        raise ValueError("a canopy needs a bench or a box to stand on")
-
-
 def build_cycle(p: CycleParams | None = None) -> Cycle:
     """Build a cycle from its measurements: a frame, a steering part, 2 or 3 wheels, a payload and its power."""
     p = CycleParams() if p is None else p
-    _check(p)
+    p.validate()
     j = _joints(p)
     body, steer = {}, {}
     _frame(p, j, body)

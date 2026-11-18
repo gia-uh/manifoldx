@@ -36,111 +36,111 @@ from dataclasses import dataclass
 import numpy as np
 
 from manifoldx.modeling._poly import _triangulate
-from manifoldx.modeling.assets.vehicle import PALETTE, Part, Vehicle, _rotate
+from manifoldx.modeling.assets.vehicle import PALETTE, ParamsRanges, Part, Vehicle, _rotate, choice, rng
 from manifoldx.modeling.mesh import Mesh
 
 
 @dataclass
-class CarParams:
+class CarParams(ParamsRanges):
     """Every measurement of the car. Heights are from the ground; `_u` values are fractions of the length from
     the front (0) to the rear (1)."""
 
     # Package: the spec sheet.
-    length: float = 4.25
-    width: float = 1.78
-    height: float = 1.48
-    wheelbase: float = 2.62
-    front_overhang: float = 0.86
-    track: float = 1.53
-    wheel_radius: float = 0.315
-    tyre_width: float = 0.205
-    rim_ratio: float = 0.70  # rim radius over wheel radius
-    arch_gap: float = 0.045  # between the tyre and the arch
+    length: float = rng(4.25, 2.5, 5.8, step=0.01, unit='m')
+    width: float = rng(1.78, 1.4, 2.2, step=0.01, unit='m')
+    height: float = rng(1.48, 1.0, 2.2, step=0.01, unit='m')
+    wheelbase: float = rng(2.62, 1.5, 3.5, step=0.01, unit='m')
+    front_overhang: float = rng(0.86, 0.2, 1.8, step=0.01, unit='m')
+    track: float = rng(1.53, 1.1, 2.0, step=0.01, unit='m')
+    wheel_radius: float = rng(0.315, 0.2, 0.55, step=0.005, unit='m')
+    tyre_width: float = rng(0.205, 0.1, 0.4, step=0.005, unit='m')
+    rim_ratio: float = rng(0.70, 0.35, 0.95, step=0.01, unit='')  # rim radius over wheel radius
+    arch_gap: float = rng(0.045, 0.0, 0.2, step=0.005, unit='m')  # between the tyre and the arch
     # Side profile.
-    nose_top: float = 0.70  # top of the nose at the very front
-    hood_front: float = 0.87  # the hood just behind the nose
-    nose_blunt: float = 0.4  # how much of the rise from nose to hood the face makes in its first 4 cm: 0 is a wedge
-    cowl_u: float = 0.29  # where the hood meets the windscreen
-    cowl_height: float = 1.13
-    windscreen_u: float = 0.46  # where the windscreen meets the roof
-    roof_peak_u: float = 0.56  # where the roof is highest
-    roof_end_u: float = 0.78  # where the roof meets the rear glass
-    roof_end_drop: float = 0.08
-    hatch_u: float = 0.92  # where the rear glass ends
-    hatch_height: float = 1.10
-    tail_top: float = 0.86  # top of the tail at the rear end
-    belt_front: float = 0.97  # belt (bottom of the side glass) at the cowl
-    belt_rear: float = 1.05  # and at the end of the roof
-    sill: float = 0.20  # underside between the wheels
-    bumper_bottom_front: float = 0.36
-    bumper_bottom_rear: float = 0.35
+    nose_top: float = rng(0.70, 0.3, 1.1, step=0.01, unit='m')  # top of the nose at the very front
+    hood_front: float = rng(0.87, 0.4, 1.4, step=0.01, unit='m')  # the hood just behind the nose
+    nose_blunt: float = rng(0.4, 0.0, 1.0, step=0.01, unit='')  # how much of the rise from nose to hood the face makes in its first 4 cm: 0 is a wedge
+    cowl_u: float = rng(0.29, 0.05, 0.45, step=0.01, unit='')  # where the hood meets the windscreen
+    cowl_height: float = rng(1.13, 0.6, 1.7, step=0.01, unit='m')
+    windscreen_u: float = rng(0.46, 0.3, 0.55, step=0.01, unit='')  # where the windscreen meets the roof
+    roof_peak_u: float = rng(0.56, 0.47, 0.77, step=0.01, unit='')  # where the roof is highest
+    roof_end_u: float = rng(0.78, 0.57, 0.91, step=0.01, unit='')  # where the roof meets the rear glass
+    roof_end_drop: float = rng(0.08, 0.0, 0.5, step=0.01, unit='m')
+    hatch_u: float = rng(0.92, 0.6, 0.99, step=0.01, unit='')  # where the rear glass ends
+    hatch_height: float = rng(1.10, 0.5, 1.7, step=0.01, unit='m')
+    tail_top: float = rng(0.86, 0.4, 1.5, step=0.01, unit='m')  # top of the tail at the rear end
+    belt_front: float = rng(0.97, 0.25, 1.45, step=0.01, unit='m')  # belt (bottom of the side glass) at the cowl
+    belt_rear: float = rng(1.05, 0.25, 1.45, step=0.01, unit='m')  # and at the end of the roof
+    sill: float = rng(0.20, 0.05, 0.95, step=0.01, unit='m')  # underside between the wheels
+    bumper_bottom_front: float = rng(0.36, 0.1, 0.8, step=0.01, unit='m')
+    bumper_bottom_rear: float = rng(0.35, 0.1, 0.8, step=0.01, unit='m')
     # A bumper of its own: a bar across each end, standing out of the body and wrapping a little round its corners.
-    bumper: str = "skin"  # "skin" (part of the body), "chrome_bar", "blade" or "rubber"
-    bumper_height: float = 0.42  # centre of the bar, from the ground
-    bumper_proud: float = 0.05  # how far the bar stands out of the body (m)
+    bumper: str = choice("skin", 'skin', 'chrome_bar', 'blade', 'rubber')  # "skin" (part of the body), "chrome_bar", "blade" or "rubber"
+    bumper_height: float = rng(0.42, 0.15, 0.8, step=0.01, unit='m')  # centre of the bar, from the ground
+    bumper_proud: float = rng(0.05, 0.0, 0.2, step=0.005, unit='m')  # how far the bar stands out of the body (m)
     overriders: bool = False  # two vertical guards on each bumper
-    hood_crown: float = 0.13  # how far the hood's edge sits below its crown
+    hood_crown: float = rng(0.13, 0.0, 0.4, step=0.01, unit='m')  # how far the hood's edge sits below its crown
     # Plan and section.
-    nose_half: float = 0.76  # half-width at the front end, over the half-width
-    tail_half: float = 0.80
-    round_front: float = 0.18  # how far the front corners are pulled back (m)
-    round_rear: float = 0.19
-    round_power: float = 2.1
-    nose_bulge: float = 0.02  # how far the middle of the nose stands proud of its edge (m)
-    tail_bulge: float = 0.03
-    tumblehome: float = 0.31  # how much narrower the roof is than the body
-    shoulder: float = 0.95  # belt half-width over the half-width
+    nose_half: float = rng(0.76, 0.4, 1.1, step=0.01, unit='')  # half-width at the front end, over the half-width
+    tail_half: float = rng(0.80, 0.4, 1.1, step=0.01, unit='')
+    round_front: float = rng(0.18, 0.0, 0.6, step=0.01, unit='m')  # how far the front corners are pulled back (m)
+    round_rear: float = rng(0.19, 0.0, 0.6, step=0.01, unit='m')
+    round_power: float = rng(2.1, 1.0, 4.0, step=0.1, unit='')
+    nose_bulge: float = rng(0.02, -0.1, 0.2, step=0.005, unit='m')  # how far the middle of the nose stands proud of its edge (m)
+    tail_bulge: float = rng(0.03, -0.1, 0.2, step=0.005, unit='m')
+    tumblehome: float = rng(0.31, 0.0, 0.8, step=0.01, unit='')  # how much narrower the roof is than the body
+    shoulder: float = rng(0.95, 0.5, 1.1, step=0.01, unit='')  # belt half-width over the half-width
     # Wings and fins: the outer part of the section rises above the hood and the deck, so the middle sits sunk.
-    fender_crown: float = 0.0  # how far each front wing rises above the hood's edge at the nose (m)
-    fender_crown_u: float = 0.25  # where the crown has faded out toward the cowl
-    fin_height: float = 0.0  # how far each rear wing rises above the deck at the tail (m)
-    fin_start_u: float = 0.7  # where the fin starts growing toward the tail
-    fin_width: float = 0.22  # the outer fraction of the half-width the fin takes
-    windscreen_wrap: float = 0.0  # 0-1: how far the glass bends round onto the sides at the A-pillar
+    fender_crown: float = rng(0.0, 0.0, 0.4, step=0.01, unit='m')  # how far each front wing rises above the hood's edge at the nose (m)
+    fender_crown_u: float = rng(0.25, 0.0, 0.8, step=0.01, unit='')  # where the crown has faded out toward the cowl
+    fin_height: float = rng(0.0, 0.0, 0.4, step=0.01, unit='m')  # how far each rear wing rises above the deck at the tail (m)
+    fin_start_u: float = rng(0.7, 0.3, 0.95, step=0.01, unit='')  # where the fin starts growing toward the tail
+    fin_width: float = rng(0.22, 0.0, 0.5, step=0.01, unit='')  # the outer fraction of the half-width the fin takes
+    windscreen_wrap: float = rng(0.0, 0.0, 1.0, step=0.01, unit='')  # 0-1: how far the glass bends round onto the sides at the A-pillar
     side_trim: tuple = ()  # (height, u_start, u_end, "chrome" or "black") strips along both flanks
     # Paint areas on both flanks, each a material name or an sRGB hex colour, and a polygon in the side view:
     # (u along the car, 0 at the front to 1 at the rear, height in metres).
     livery: tuple = ()
     # A roof lamp over the peak: None, "bar" (two halves, one colour each) or "dome" (a single small lamp).
-    lightbar: str | None = None
+    lightbar: str | None = choice(None, None, 'bar', 'dome')
     lightbar_colours: tuple = ("#1f4fff", "#e01b1b")
     # Greenhouse.
-    a_pillar_foot: float = 0.40  # how far up the windscreen the side glass starts, 0 at the cowl to 1 at the roof
-    b_pillar_u: float = 0.565
-    b_pillar_width: float = 0.10
-    c_pillar_u: float = 0.69  # end of the rear door glass; behind it the quarter is black
+    a_pillar_foot: float = rng(0.40, 0.0, 1.0, step=0.01, unit='')  # how far up the windscreen the side glass starts, 0 at the cowl to 1 at the roof
+    b_pillar_u: float = rng(0.565, 0.3, 0.9, step=0.01, unit='')
+    b_pillar_width: float = rng(0.10, 0.02, 0.3, step=0.005, unit='m')
+    c_pillar_u: float = rng(0.69, 0.4, 0.95, step=0.01, unit='')  # end of the rear door glass; behind it the quarter is black
     black_pillars: bool = True
-    roof: str = "paint"  # or "black"
+    roof: str = choice("paint", 'paint', 'black')  # or "black"
     roof_paint: bool = False  # the roof skin takes the "roof" material, for a two-tone car
     roof_pillars: bool = True  # the pillars take it too
     # Parts.
     # A lamp is a shape (a dict, see the module's docstring) or one of the plain outlines. A shape
     # is placed by its anchor, sized in its own plane and turned `yaw` degrees from straight ahead toward its side
     # of the car, so a lamp on a corner is drawn as it is seen straight on.
-    headlamp: str | dict = "almond"  # a shape, or "almond", "round", "bar", "round_pod" or "rect"
+    headlamp: str | dict = choice("almond", 'almond', 'round', 'bar', 'round_pod', 'rect')  # a shape, or "almond", "round", "bar", "round_pod" or "rect"
     headlamp_center: tuple | None = (0.56, 0.78)  # (lateral, height); None derives it from the profile
     headlamp_size: tuple = (0.30, 0.14)
-    headlamp_yaw: float = 20.0
+    headlamp_yaw: float = rng(20.0, 0.0, 60.0, step=1.0, unit='deg')
     drl_bar: bool = False
-    drl_height: float = 0.78
-    drl_half_length: float = 0.505  # to the inner edge of the headlamps, whose own strip carries it on
+    drl_height: float = rng(0.78, 0.3, 1.4, step=0.01, unit='m')
+    drl_half_length: float = rng(0.505, 0.1, 1.0, step=0.01, unit='m')  # to the inner edge of the headlamps, whose own strip carries it on
     grille: tuple | None = (0.60, 0.27, 0.43)  # half-width, bottom, top; None derives it from the profile
-    grille_style: str | dict = "bar"  # a shape, or "bar" or "mesh"
-    grille_span: str = "between_lamps"  # or "full_width": the grille unit spans the nose round the lamps
-    taillamp: str | dict = "pill"  # a shape, or "pill", "fin" or "block"
+    grille_style: str | dict = choice("bar", 'bar', 'mesh')  # a shape, or "bar" or "mesh"
+    grille_span: str = choice("between_lamps", 'between_lamps', 'full_width')  # or "full_width": the grille unit spans the nose round the lamps
+    taillamp: str | dict = choice("pill", 'pill', 'fin', 'block')  # a shape, or "pill", "fin" or "block"
     taillamp_center: tuple | None = (0.66, 0.97)  # None derives it from the profile
     taillamp_size: tuple = (0.26, 0.16)
-    taillamp_yaw: float = 25.0
+    taillamp_yaw: float = rng(25.0, 0.0, 60.0, step=1.0, unit='deg')
     spoiler: bool = False
     mirrors: bool = True
-    mirror: str | dict = "box"  # a shape, or "box"
+    mirror: str | dict = choice("box", 'box')  # a shape, or "box"
     mirror_size: tuple = (0.20, 0.165)  # across and up, stalk included, as seen from ahead of the car
-    mirror_yaw: float = 22.0  # degrees its outer end is swept back
-    wheel: str | dict = "spokes"  # a shape, or "spokes" or "hubcap"
-    spokes: int = 5  # of the plain wheel
-    whitewall: float = 0.0  # width (m) of a white band on the tyre's side; 0 for none
-    dash: str | dict = "box"  # a shape, or "box"
-    steering: str | dict = "ring"  # a shape, or "ring"
+    mirror_yaw: float = rng(22.0, 0.0, 60.0, step=1.0, unit='deg')  # degrees its outer end is swept back
+    wheel: str | dict = choice("spokes", 'spokes', 'hubcap')  # a shape, or "spokes" or "hubcap"
+    spokes: int = rng(5, 0, 32, step=1, unit='')  # of the plain wheel
+    whitewall: float = rng(0.0, 0.0, 0.2, step=0.005, unit='m')  # width (m) of a white band on the tyre's side; 0 for none
+    dash: str | dict = choice("box", 'box')  # a shape, or "box"
+    steering: str | dict = choice("ring", 'ring')  # a shape, or "ring"
     door_card: dict | None = None  # a shape, or None for bare doors
     console: dict | None = None  # a shape, or None for no console
     cladding: bool = False  # black lower body
@@ -149,12 +149,73 @@ class CarParams:
     fog_rings: bool = False  # a lit ring at each end of the grille
     # A pickup: behind the cab the body is an open bed. Its sides rise to rails a little above the belt; give the
     # profile its rail height from `hatch_u` on (`hatch_height`, `tail_top`). The rear end is the tailgate.
-    bed_u: float | None = None  # where the bed starts, behind the cab; None for a closed body
-    bed_floor: float = 0.9  # height of the bed's floor, above the rear wheel arches
+    bed_u: float | None = rng(None, 0.3, 0.9, step=0.01, unit='')  # where the bed starts, behind the cab; None for a closed body
+    bed_floor: float = rng(0.9, 0.4, 1.4, step=0.01, unit='m')  # height of the bed's floor, above the rear wheel arches
     # Resolution and shading.
-    sections: int = 28
-    detail: float = 1.0  # scales the sections along the body and the segments round wheels and lamps; 1 is today
-    crease: float = 40.0  # degrees: an edge that turns more than this is shaded sharp
+    sections: int = rng(28, 4, 80, step=1, unit='')
+    detail: float = rng(1.0, 0.25, 2.0, step=0.05, unit='x')  # scales the sections along the body and the segments round wheels and lamps; 1 is today
+    crease: float = rng(40.0, 0.0, 180.0, step=1.0, unit='deg')  # degrees: an edge that turns more than this is shaded sharp
+
+    def _validate_extra(self) -> None:
+        if self.wheelbase + self.front_overhang >= self.length:
+            raise ValueError(
+                f"CarParams.wheelbase + front_overhang ({self.wheelbase + self.front_overhang:.2f}) "
+                f"must be below length ({self.length:.2f})"
+            )
+        if self.wheelbase <= 2 * self.wheel_radius:
+            raise ValueError(
+                f"CarParams.wheelbase ({self.wheelbase}) overlaps two wheel_radius ({self.wheel_radius}) wheels"
+            )
+        if not (self.sill < self.belt_front and self.sill < self.belt_rear):
+            raise ValueError(
+                f"CarParams.sill: {self.sill} is not below belt_front {self.belt_front} and belt_rear {self.belt_rear}"
+            )
+        if not (self.belt_front < self.height and self.belt_rear < self.height):
+            raise ValueError(
+                f"CarParams.belt_front: {self.belt_front} and belt_rear {self.belt_rear} are not below height {self.height}"
+            )
+        if not (self.belt_front > self.bumper_bottom_front and self.belt_rear > self.bumper_bottom_rear):
+            raise ValueError(
+                f"CarParams.belt_front ({self.belt_front}) and belt_rear ({self.belt_rear}) must be above "
+                f"bumper_bottom_front ({self.bumper_bottom_front}) and bumper_bottom_rear ({self.bumper_bottom_rear})"
+            )
+        order = (self.cowl_u, self.windscreen_u, self.roof_peak_u, self.roof_end_u, self.hatch_u)
+        if not all(a < b for a, b in zip(order, order[1:])):
+            raise ValueError(
+                f"CarParams.cowl_u: {self.cowl_u}, windscreen_u {self.windscreen_u}, roof_peak_u "
+                f"{self.roof_peak_u}, roof_end_u {self.roof_end_u} and hatch_u {self.hatch_u} are not in increasing order"
+            )
+        if self.bed_u is not None and self.hatch_u >= self.bed_u:
+            raise ValueError(
+                f"CarParams.hatch_u ({self.hatch_u}) must be below bed_u ({self.bed_u}) for a pickup"
+            )
+        self._validate_lamps()
+
+    def _validate_lamps(self) -> None:
+        """An explicit lamp centre must land on the face it is drawn on; None derives a centre that does."""
+        half = self.width / 2
+        faces = (
+            ("headlamp_center", self.headlamp_center, "front", self.nose_half, max(self.nose_top, self.hood_front),
+             self.bumper_bottom_front),
+            ("taillamp_center", self.taillamp_center, "rear", self.tail_half, max(self.hatch_height, self.tail_top),
+             self.bumper_bottom_rear),
+        )
+        for name, centre, face, half_ratio, top, bottom in faces:
+            if centre is None:
+                continue
+            lateral, height = centre
+            if height >= top:
+                other = "hatch_height" if face == "rear" else "hood_front"
+            elif height <= bottom:
+                other = f"bumper_bottom_{face}"
+            elif lateral <= 0 or lateral > 0.98 * half * half_ratio:
+                other = "tail_half" if face == "rear" else "nose_half"
+            else:
+                continue
+            raise ValueError(
+                f"CarParams.{name} ({lateral}, {height}) misses the {face} face that {other} leaves; "
+                f"set {name} to None to derive it from the profile"
+            )
 
 
 @dataclass
@@ -586,7 +647,8 @@ def _region(p: CarParams, u, b, ut, v):
         t = (ut - p.cowl_u) / (p.windscreen_u - p.cowl_u)
         if b == 5 and p.windscreen_wrap > 0 and t < 0.5 * p.windscreen_wrap:
             return "glass"  # the screen bends onto the upper side at its lower corner
-        edge = 6 + 2 * (t - p.a_pillar_foot) / (1 - p.a_pillar_foot) - 0.25
+        # At the roof the side glass starts at the roof itself; the limit keeps the line from dividing by zero.
+        edge = 6 + 2 * (t - p.a_pillar_foot) / max(1 - p.a_pillar_foot, 1e-9) - 0.25
         # A wrapping screen bends the line down at its foot, onto the upper side near the lower corners.
         edge -= 1.5 * p.windscreen_wrap * max(0.0, 1.0 - t) ** 2
         return "glass" if b >= 8 or v < edge else pillar
@@ -1289,6 +1351,7 @@ def _facing(v, t, facing):
 
 def build_car(p: CarParams | None = None) -> Car:
     p = p or CarParams()
+    p.validate()
     x_front_axle = p.length / 2 - p.front_overhang
     axles = (x_front_axle, x_front_axle - p.wheelbase)
     u, P, raised, halfw = _body_grid(p, axles)

@@ -34,64 +34,97 @@ from manifoldx.modeling.assets.car import (
     _quat_mul,
     _wheel,
 )
-from manifoldx.modeling.assets.vehicle import PALETTE, Part, Vehicle, _rotate
+from manifoldx.modeling.assets.vehicle import PALETTE, ParamsRanges, Part, Vehicle, _rotate, choice, rng
 from manifoldx.modeling.mesh import Mesh
 
 
 @dataclass
-class BusParams:
+class BusParams(ParamsRanges):
     """Every measurement of the bus. Heights are metres from the ground; `_u` values are fractions of the
     length from the front (0) to the rear (1)."""
 
     # Package: the spec sheet.
-    length: float = 12.0
-    width: float = 2.55
-    height: float = 3.1
-    corner_radius: float = 0.25  # of the vertical corners, in plan
-    floor: float = 0.35  # the low floor, from the ground
-    front_overhang: float = 2.6
-    wheelbase: float = 6.0
-    wheel_radius: float = 0.5
-    tyre_width: float = 0.3
-    track: float = 2.1
-    rim_ratio: float = 0.64
-    arch_gap: float = 0.05
+    length: float = rng(12.0, 6.0, 18.0, step=0.01, unit='m')
+    width: float = rng(2.55, 2.0, 3.0, step=0.01, unit='m')
+    height: float = rng(3.1, 2.5, 4.5, step=0.01, unit='m')
+    corner_radius: float = rng(0.25, 0.0, 0.8, step=0.01, unit='m')  # of the vertical corners, in plan
+    floor: float = rng(0.35, 0.1, 1.2, step=0.01, unit='m')  # the low floor, from the ground
+    front_overhang: float = rng(2.6, 0.5, 5.5, step=0.01, unit='m')
+    wheelbase: float = rng(6.0, 2.0, 9.0, step=0.01, unit='m')
+    wheel_radius: float = rng(0.5, 0.25, 0.8, step=0.005, unit='m')
+    tyre_width: float = rng(0.3, 0.15, 0.45, step=0.005, unit='m')
+    track: float = rng(2.1, 1.2, 2.8, step=0.01, unit='m')
+    rim_ratio: float = rng(0.64, 0.35, 0.95, step=0.01, unit='')
+    arch_gap: float = rng(0.05, 0.0, 0.2, step=0.005, unit='m')
     # Front face.
-    windscreen_bottom: float = 0.9
-    windscreen_top: float = 2.75
-    windscreen_rake: float = 0.08  # how far the screen's top sits back
-    sign_bottom: float = 2.75  # the route sign band, over the screen
-    sign_top: float = 3.0
-    headlamp: str = "twin"  # "twin", "rect" or "round"
+    windscreen_bottom: float = rng(0.9, 0.4, 2.7, step=0.01, unit='m')
+    windscreen_top: float = rng(2.75, 1.0, 3.2, step=0.01, unit='m')
+    windscreen_rake: float = rng(0.08, 0.0, 0.5, step=0.005, unit='m')  # how far the screen's top sits back
+    sign_bottom: float = rng(2.75, 2.0, 2.95, step=0.01, unit='m')  # the route sign band, over the screen
+    sign_top: float = rng(3.0, 2.8, 3.8, step=0.01, unit='m')
+    headlamp: str = choice("twin", 'twin', 'rect', 'round')  # "twin", "rect" or "round"
     headlamp_center: tuple | None = None  # (lateral, height); None uses the default position
     headlamp_size: tuple = (0.48, 0.22)
     # Rear face.
-    rear_window_bottom: float = 1.25
-    rear_window_top: float = 2.55
-    taillamp: str = "bar"  # "bar" or "round"
+    rear_window_bottom: float = rng(1.25, 0.5, 2.5, step=0.01, unit='m')
+    rear_window_top: float = rng(2.55, 1.3, 3.2, step=0.01, unit='m')
+    taillamp: str = choice("bar", 'bar', 'round')  # "bar" or "round"
     taillamp_center: tuple | None = None  # (lateral, height); None uses the default position
     taillamp_size: tuple = (0.42, 0.18)
     # Sides.
-    window_bottom: float = 1.25
-    window_top: float = 2.6
+    window_bottom: float = rng(1.25, 0.5, 2.55, step=0.01, unit='m')
+    window_top: float = rng(2.6, 1.3, 3.2, step=0.01, unit='m')
     pillar_u: tuple | None = None  # where the pillars stand; None spaces them `pillar_spacing` apart
-    pillar_spacing: float = 1.3
-    pillar_width: float = 0.10
+    pillar_spacing: float = rng(1.3, 0.5, 3.0, step=0.01, unit='m')
+    pillar_width: float = rng(0.10, 0.02, 0.3, step=0.005, unit='m')
     doors: tuple = ((0.04, 1.2, 2), (0.47, 1.2, 2), (0.86, 1.2, 2))  # (u of the front edge, width, leaves)
-    door_bottom: float = 0.30
+    door_bottom: float = rng(0.30, 0.0, 1.0, step=0.01, unit='m')
     # Paint areas: (material or hex colour, polygon) in the side, front, rear and plan views.
     livery: tuple = ()
     front_livery: tuple = ()
     rear_livery: tuple = ()
     roof_livery: tuple = ()
     # Resolution and small parts.
-    sections: int = 24
-    detail: float = 1.0  # scales the stations, the wheel's segments and the decals
-    crease: float = 38.0  # degrees: an edge that turns more than this is shaded sharp
-    wheel: str | dict = "spokes"
-    spokes: int = 8
-    whitewall: float = 0.0
+    sections: int = rng(24, 4, 80, step=1, unit='')
+    detail: float = rng(1.0, 0.25, 2.0, step=0.05, unit='x')  # scales the stations, the wheel's segments and the decals
+    crease: float = rng(38.0, 0.0, 180.0, step=1.0, unit='deg')  # degrees: an edge that turns more than this is shaded sharp
+    wheel: str | dict = choice("spokes", 'spokes', 'hubcap')
+    spokes: int = rng(8, 0, 32, step=1, unit='')
+    whitewall: float = rng(0.0, 0.0, 0.2, step=0.005, unit='m')
     mirrors: bool = True
+
+    def _validate_extra(self) -> None:
+        if self.wheelbase + self.front_overhang >= self.length:
+            raise ValueError(
+                f"BusParams.wheelbase + front_overhang ({self.wheelbase + self.front_overhang:.2f}) "
+                f"must be below length ({self.length:.2f})"
+            )
+        if self.wheelbase <= 2 * self.wheel_radius:
+            raise ValueError(
+                f"BusParams.wheelbase ({self.wheelbase}) overlaps two wheel_radius ({self.wheel_radius}) wheels"
+            )
+        spans = []
+        for door in self.doors:
+            try:
+                u, width, _leaves = door
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"BusParams.doors: {door!r} is not (u, width, leaves)") from exc
+            start, end = u * self.length, u * self.length + width
+            if width <= 0 or u < 0 or end > self.length:
+                raise ValueError(f"BusParams.doors: door at u={u} with width {width} does not fit in length {self.length}")
+            spans.append((start, end))
+        spans.sort()
+        for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+            if b0 < a1:
+                raise ValueError(f"BusParams.doors: doors at {a0}..{a1} and {b0}..{b1} overlap")
+        for lo, hi, name in (
+            (self.windscreen_bottom, self.windscreen_top, "windscreen"),
+            (self.rear_window_bottom, self.rear_window_top, "rear_window"),
+            (self.window_bottom, self.window_top, "window"),
+            (self.sign_bottom, self.sign_top, "sign"),
+        ):
+            if not lo < hi:
+                raise ValueError(f"BusParams.{name}_bottom: {lo} is not below its top {hi}")
 
 
 @dataclass
@@ -547,6 +580,7 @@ def build_bus(p: BusParams | None = None) -> Bus:
     """A bus from its measurements: a lofted body with rounded plan corners and windows, its doors, wheels and
     lamps. The default is a 12 m low-floor city bus."""
     p = p or BusParams()
+    p.validate()
     parts: dict[str, Part] = {"body": Part("body", "body")}
 
     def piece(part_name, mat, v, t, n=None):
