@@ -372,3 +372,57 @@ def test_shadows_fade_out_before_the_edge_of_the_map():
     centre, rim, out = (lum[int(round(y)), int(round(x))] for x, y in px)
     assert out > centre + 30           # outside the map: unshadowed
     assert rim > centre + 0.5 * (out - centre)   # 95% of the way out: mostly faded
+
+
+# --------------------------------------------------------------------------
+# A still scene keeps its casters and the bundle of shadow draws
+# --------------------------------------------------------------------------
+
+
+def _fixed_box_scene():
+    """The plane and sphere with a fixed caster box (auto_fit off, so the casters are culled to it)."""
+    eng = _make_offscreen_engine(w=192, h=192)
+    eng.set_sun(DirectionalLight(color="#ffffff", intensity=3.0, direction=(-0.3, -1.0, -0.3)))
+    eng.enable_shadows(target=(0, 0, 0), extent=6.0, resolution=1024, bias=0.004, auto_fit=False)
+    eng.spawn(Mesh(plane(12, 12)), Material(StandardMaterial(color="#ffffff", roughness=0.9)),
+              Transform(pos=(0, 0, 0), rot=_FLOOR_ROT))
+    mat = StandardMaterial(color="#ffffff", roughness=0.5)
+    ball = eng.spawn(Mesh(sphere(1.0, 32)), Material(mat), Transform(pos=(0, 2, 0)))
+    eng.camera.fit(radius=6.0, center=(0, 0, 0), azimuth=25, elevation=55)
+    return eng, mat, ball
+
+
+def _floor(frame):
+    return frame[..., :3].mean(axis=2).astype(np.float64)
+
+
+def test_a_still_scene_replays_its_shadow_draws():
+    eng, _, _ = _fixed_box_scene()
+    first = _floor(_render_array(eng))
+    rp = eng._render_pipeline
+    casters, bundle = rp._shadow_casters, rp._shadow_casters.bundle
+    again = _floor(_render_array(eng))
+    assert rp._shadow_casters is casters and casters.bundle is bundle
+    assert np.abs(first - again).max() < 2
+
+
+def _shadow_depth(eng):
+    """How much the shadows darken this frame: the frame against the same frame with shadows off."""
+    shadowed = _floor(_render_array(eng))
+    cfg, eng._shadow_config = eng._shadow_config, None
+    lit = _floor(_render_array(eng))
+    eng._shadow_config = cfg
+    return (lit - shadowed).max()
+
+
+def test_a_caster_leaving_the_box_or_turning_translucent_stops_casting():
+    eng, mat, ball = _fixed_box_scene()
+    assert _shadow_depth(eng) > 20  # the ball's shadow
+    bundle = eng._render_pipeline._shadow_casters.bundle
+    ball.transform.pos = (0, 2, 200)  # out of the caster box
+    assert _shadow_depth(eng) < 20
+    assert eng._render_pipeline._shadow_casters.bundle is bundle  # only the draws' counts changed
+    ball.transform.pos = (0, 2, 0)
+    assert _shadow_depth(eng) > 20
+    mat.opacity = 0.5  # a translucent material casts no shadow
+    assert _shadow_depth(eng) < 20
