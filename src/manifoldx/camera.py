@@ -21,6 +21,8 @@ class Camera(_deferred._DeferredWrites):
         self.up = np.array(up, dtype=np.float32)
         self.near = near
         self.far = far
+        # Heights on screen are world heights times this, around y = 0: a relief map's exaggeration.
+        self.vertical_scale = 1.0
         # Render layers this camera draws: a set of Layer indices, or None for all.
         self.layers: set[int] | None = None
         self._compute_spherical()
@@ -35,6 +37,14 @@ class Camera(_deferred._DeferredWrites):
         self._elevation = float(np.degrees(np.arcsin(direction_normalized[1])))
 
     def get_view_matrix(self):
+        """The view matrix: the look-at matrix, after scaling world heights by vertical_scale
+        around y = 0, so everything drawn (and project) shows the stretched heights."""
+        view = self._look_at()
+        if self.vertical_scale != 1.0:
+            view[:, 1] *= self.vertical_scale  # view @ diag(1, k, 1, 1)
+        return view
+
+    def _look_at(self):
         """Compute view matrix using look-at formula.
 
         Convention: camera looks down -Z in view space (standard OpenGL/WebGPU).
@@ -69,10 +79,10 @@ class Camera(_deferred._DeferredWrites):
         return direction / np.linalg.norm(direction)
 
     def get_right(self):
-        return self.get_view_matrix()[0, :3]  # the view's first row, top views included
+        return self._look_at()[0, :3]  # the view's first row, top views included
 
     def get_up(self):
-        return self.get_view_matrix()[1, :3]
+        return self._look_at()[1, :3]
 
     def get_view_projection_matrix(self, aspect):
         view = self.get_view_matrix()
