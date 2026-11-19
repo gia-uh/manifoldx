@@ -36,6 +36,9 @@ def strengths_for(realism: float, locked: Sequence[str] = ()) -> np.ndarray:
 def apply_assists(fleet, controls: np.ndarray, strengths: np.ndarray) -> np.ndarray:
     """The controls (N, 4) after the assists of the given strengths (N, 4) or (4,). Writes fleet.extra_brake,
     fleet.brake_scale, fleet.drive_cut and fleet.lit (N, 4) for the step that follows."""
+    if getattr(fleet, "SINGLE", False) and len(controls) == 1:
+        from .single import assists
+        return assists(fleet, controls, strengths)
     p, dt = fleet.p, fleet.DT
     k = np.broadcast_to(np.asarray(strengths, float), (len(controls), len(ASSISTS)))
     k_steer, k_trac, k_abs, k_stab = k.T

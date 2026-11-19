@@ -6,7 +6,7 @@ from typing import Sequence
 
 import numpy as np
 
-from . import contacts, powertrain, suspension, tyre
+from . import contacts, powertrain, single, suspension, tyre
 from .assists import ASSISTS, apply_assists
 from .body import cross, integrate, matrices, slerp, yaw_quaternion
 from .spec import VehicleSpec
@@ -18,6 +18,7 @@ AIR = 1.2  # kg/m³
 
 class Vehicles:
     DT = 1 / 120
+    SINGLE = True  # step a fleet of one in plain Python (single.py): numpy's cost per call dominates at N == 1
     MAX_FRAME = 0.05  # seconds: a longer frame runs as this long, as the game did before
 
     def __init__(self, specs: Sequence[VehicleSpec]):
@@ -124,6 +125,8 @@ class Vehicles:
 
     def step(self, controls: np.ndarray, ground, walls: np.ndarray | None = None) -> None:
         """Advance every vehicle by DT under controls (N, 4): steer, throttle, brake, handbrake."""
+        if self.SINGLE and len(self.position) == 1:
+            return single.step(self, controls, ground, walls)
         p, dt = self.p, self.DT
         R = matrices(self.rotation)
         down, forward = -R[:, :, 1], R[:, :, 0]

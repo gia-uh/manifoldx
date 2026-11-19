@@ -123,13 +123,17 @@ def test_an_upright_car_reads_the_ground_once_per_step():
     assert ground.calls == 10
 
 
-def test_far_walls_do_not_reach_the_contact_test(monkeypatch):
+@pytest.mark.parametrize("single", [True, False])
+def test_far_walls_do_not_reach_the_contact_test(monkeypatch, single):
     from manifoldx.vehicles import contacts
+    from manifoldx.vehicles import single as one
 
     seen = []
-    real = contacts.footprint_hit
-    monkeypatch.setattr(contacts, "footprint_hit", lambda w, *a: seen.append(len(w.reshape(-1, 2, 2))) or real(w, *a))
+    module, name = (one, "_footprint_hit") if single else (contacts, "footprint_hit")
+    real = getattr(module, name)
+    monkeypatch.setattr(module, name, lambda w, *a: seen.append(len(np.reshape(w, (-1, 2, 2)))) or real(w, *a))
     fleet, ground = fresh()
+    fleet.SINGLE = single
     far = np.array([[[100.0 + i, -5.0], [100.0 + i, 5.0]] for i in range(2000)])
     near = np.array([[[2.6, -5.0], [2.6, 5.0]]])  # 0.4 m before the nose
     for _ in range(5):
