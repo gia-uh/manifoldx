@@ -17,6 +17,17 @@ SLOP = 0.01  # metres of overlap left alone so resting contacts do not jitter
 PUSH = 0.8  # share of the rest of the overlap pushed out each time
 
 
+def within(walls: np.ndarray, centres: np.ndarray, reach: np.ndarray) -> np.ndarray:
+    """The walls (M, 2, 2), or (N, M, 2, 2) per vehicle, that come within reach of any vehicle's centre, as one
+    shared (K, 2, 2) array: a car only ever touches the few segments around it."""
+    w = walls.reshape(-1, 2, 2)
+    a, ab = w[:, 0], w[:, 1] - w[:, 0]
+    rel = centres[:, None, :] - a[None]  # (N, M, 2)
+    t = np.clip(np.sum(rel * ab, -1) / np.maximum(np.sum(ab * ab, -1), 1e-12), 0.0, 1.0)
+    gap = np.linalg.norm(rel - ab * t[..., None], axis=-1)
+    return w[np.any(gap <= reach[:, None], 0)]
+
+
 def footprint_hit(walls, centre, heading, half):
     """The deepest overlap of each footprint with any wall, by separating axes.
 

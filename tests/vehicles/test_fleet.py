@@ -99,3 +99,39 @@ def test_buses_and_trucks_lift_a_wheel_by_its_travel(builder):
     rest, lifted = model.pose(), model.pose(travel=[0.05] + [0.0] * (len(wheels) - 1))
     assert lifted[wheels[0]][0][1] == pytest.approx(rest[wheels[0]][0][1] + 0.05)
     assert np.allclose(lifted[wheels[1]][0], rest[wheels[1]][0])
+
+
+class Counting(FlatGround):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def height(self, x, z, near=None):
+        self.calls += 1
+        return super().height(x, z, near)
+
+
+def test_an_upright_car_reads_the_ground_once_per_step():
+    ground = Counting()
+    fleet = Vehicles([car()])
+    fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
+    for _ in range(60):
+        fleet.step(np.zeros((1, 4)), ground)
+    ground.calls = 0
+    for _ in range(10):
+        fleet.step(np.array([[0.2, 0.5, 0.0, 0.0]]), ground)
+    assert ground.calls == 10
+
+
+def test_far_walls_do_not_reach_the_contact_test(monkeypatch):
+    from manifoldx.vehicles import contacts
+
+    seen = []
+    real = contacts.footprint_hit
+    monkeypatch.setattr(contacts, "footprint_hit", lambda w, *a: seen.append(len(w.reshape(-1, 2, 2))) or real(w, *a))
+    fleet, ground = fresh()
+    far = np.array([[[100.0 + i, -5.0], [100.0 + i, 5.0]] for i in range(2000)])
+    near = np.array([[[2.6, -5.0], [2.6, 5.0]]])  # 0.4 m before the nose
+    for _ in range(5):
+        fleet.step(np.zeros((1, 4)), ground, np.concatenate([far, near]))
+    assert seen and max(seen) <= 10

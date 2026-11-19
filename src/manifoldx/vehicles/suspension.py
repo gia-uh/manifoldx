@@ -21,20 +21,21 @@ def contact(ground, mounts, down, forward, radius, travel, near):
     """
     n, w, _ = mounts.shape
     fwd = forward[:, None, :] * radius[..., None]
-    best, heights = np.full((n, w), -np.inf), np.zeros((n, w))
-    for s in SAMPLES:
-        p = mounts + fwd * s
-        h = ground.height(p[..., 0].ravel(), p[..., 2].ravel(), near.ravel()).reshape(n, w)
-        centre = h + radius * np.sqrt(1 - s * s)  # the wheel's centre height that touches the ground at p
-        better = centre > best
-        best, heights = np.where(better, centre, best), np.where(better, h, heights)
+    k = len(SAMPLES)
+    # every read in one call: the samples along each wheel, then two steps off its middle for the normal
+    pts = [mounts + fwd * s for s in SAMPLES]
+    pts += [mounts + np.array([NORMAL_STEP, 0.0, 0.0]), mounts + np.array([0.0, 0.0, NORMAL_STEP])]
+    p = np.stack(pts)  # (k + 2, N, W, 3)
+    h = ground.height(p[..., 0].ravel(), p[..., 2].ravel(), np.broadcast_to(near, p.shape[:3]).ravel())
+    h = np.asarray(h, float).reshape(p.shape[:3])
+    centre = h[:k] + radius[None] * np.sqrt(1 - np.array(SAMPLES) ** 2)[:, None, None]
+    best_k = np.argmax(centre, 0)
+    best = np.take_along_axis(centre, best_k[None], 0)[0]
+    heights = np.take_along_axis(h[:k], best_k[None], 0)[0]
     # distance down the ray from the mount to that wheel centre, through the car's tilt
     dist = (mounts[..., 1] - best) / np.maximum(-down[:, None, 1], 0.2)
-    x, z = mounts[..., 0], mounts[..., 2]
-    hx = ground.height((x + NORMAL_STEP).ravel(), z.ravel(), heights.ravel()).reshape(n, w)
-    hz = ground.height(x.ravel(), (z + NORMAL_STEP).ravel(), heights.ravel()).reshape(n, w)
-    h0 = ground.height(x.ravel(), z.ravel(), heights.ravel()).reshape(n, w)
-    normal = np.stack([-(hx - h0) / NORMAL_STEP, np.ones_like(h0), -(hz - h0) / NORMAL_STEP], -1)
+    h0 = h[SAMPLES.index(0.0)]
+    normal = np.stack([-(h[k] - h0) / NORMAL_STEP, np.ones_like(h0), -(h[k + 1] - h0) / NORMAL_STEP], -1)
     normal /= np.linalg.norm(normal, axis=-1, keepdims=True)
     return dist, heights, normal
 

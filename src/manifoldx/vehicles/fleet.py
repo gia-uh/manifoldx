@@ -253,11 +253,17 @@ class Vehicles:
         inv_inertia = np.einsum("nij,nj,nkj->nik", R, 1 / p.inertia, R)
         speed = np.linalg.norm(self.velocity, axis=1).max(initial=0.0)
         n_sub = max(1, int(np.ceil(speed * dt / contacts.STEP)))
+        if walls is not None and len(walls):
+            walls = contacts.within(np.asarray(walls, float), self.position[:, [0, 2]],
+                                    np.hypot(p.size[:, 0], p.size[:, 2]) / 2 + speed * dt + 0.5)
+        # the body's corners only matter tilted past 30°, or with a wheel in the air or on its bump stop
+        loose = (R[:, 1, 1] < 0.87) | np.any(p.wheel_mask & ((self.load <= 0) | (self.compression >= p.travel)), 1)
         for _ in range(n_sub):
             self.position = self.position + self.velocity * dt / n_sub
             if walls is not None and len(walls):
-                self._walls(R, inv_inertia, np.asarray(walls, float))
-            self._body_on_ground(R, inv_inertia, ground)
+                self._walls(R, inv_inertia, walls)
+            if np.any(loose):
+                self._body_on_ground(R, inv_inertia, ground)
 
     def _apply(self, inv_inertia, lever, normal, depth):
         """One contact per vehicle: impulse at lever along normal where depth > 0, then push the overlap out."""
