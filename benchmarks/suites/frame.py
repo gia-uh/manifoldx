@@ -55,6 +55,12 @@ def meshes_moving(n):
     return _frame(scenes.meshes(n, moving=True))
 
 
+@case("frame", "static_city", sizes=[1_000, 5_000, 20_000], smoke=20)
+def static_city(n):
+    """n static mesh instances over many batches (a streamed city) and 32 moving ones."""
+    return _frame(scenes.city(n))
+
+
 @case("frame", "parallel_systems", sizes=[1, 4, 8], smoke=1)
 def parallel_systems(k):
     """k independent systems of 2,000 entities each, registered as one parallel group when the

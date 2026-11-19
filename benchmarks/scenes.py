@@ -158,3 +158,32 @@ def independent_systems(k: int, *, parallel: bool = True):
             engine.system(step)
 
     return engine
+
+
+def city(n: int, moving: int = 32):
+    """A streamed city: n static mesh instances (a tenth of them cells with a geometry each, the rest
+    props of 4 shared geometries) over 8 materials, and `moving` cars driven by a system every frame."""
+    from manifoldx.components import Material, Mesh, Transform
+    from manifoldx.resources import StandardMaterial, cube, sphere
+
+    engine = headless_engine(n + moving)
+    engine.camera.fit(60)
+    mats = [StandardMaterial(f"#{0x404040 + 0x101010 * k:06x}") for k in range(8)]
+    pos = _positions(n)
+    cells = max(1, n // 10)
+    for i in range(cells):
+        engine.spawn(Mesh(cube(1.0, 0.2 + 0.01 * (i % 50), 1.0)), Material(mats[i % 8]),
+                     Transform(pos=tuple(pos[i])), n=1)
+    props = [cube(0.3, 0.3, 0.3), sphere(0.3), cube(0.1, 1.0, 0.1), sphere(0.5)]
+    for k, start in enumerate(range(cells, n, -(-(n - cells) // 4))):
+        stop = min(n, start - (-(n - cells) // 4))
+        engine.spawn(Mesh(props[k]), Material(mats[k]), Transform(pos=pos[start:stop]), n=stop - start)
+    first = engine.store._high_water
+    engine.spawn(Mesh(cube(0.4, 0.3, 0.8)), Material(mats[7]), Transform(pos=_positions(moving, 40.0)), n=moving)
+    cars = slice(first, first + moving)
+
+    @engine.system
+    def drive(q, dt: float):  # writes the store's rows: a Query would match every entity
+        engine.store._components["Transform"][cars, 0] += np.float32(0.05)
+
+    return engine
