@@ -61,6 +61,12 @@ def static_city(n):
     return _frame(scenes.city(n))
 
 
+@case("frame", "streaming_city", sizes=[1_000, 5_000, 20_000], smoke=20)
+def streaming_city(n):
+    """static_city where every frame one cell goes and one of a new geometry comes, as a streamer does."""
+    return _frame(scenes.city(n, stream=True))
+
+
 @case("frame", "parallel_systems", sizes=[1, 4, 8], smoke=1)
 def parallel_systems(k):
     """k independent systems of 2,000 entities each, registered as one parallel group when the
