@@ -65,6 +65,10 @@ class _Cell:
         self.geo, self.info, self.vbytes, self.ibytes = geo, info, vbytes, ibytes
 
 
+def _started() -> None:
+    """A no-op job: submitted when a streamer is made, so its workers start (and warm up) before any cell."""
+
+
 def _pack(build, *key):
     """The worker's job: build cell (i, j), or node (L, a, b), and pack it for its GPU buffers."""
     data = build(*key)
@@ -101,15 +105,18 @@ class _Uploads:
     the key's mesh at world position pos.
     """
 
-    def _start(self, engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material, builders=1):
+    def _start(self, engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material, builders=1,
+               warm=None):
         if workers == "thread":
-            self._pool = ThreadPoolExecutor(max_workers=builders)
+            self._pool = ThreadPoolExecutor(max_workers=builders, initializer=warm)
         elif workers == "process":
             self._pool = ProcessPoolExecutor(
-                max_workers=builders, mp_context=multiprocessing.get_context("spawn")
+                max_workers=builders, mp_context=multiprocessing.get_context("spawn"), initializer=warm
             )
         else:
             raise ValueError(f'workers must be "thread" or "process", got {workers!r}')
+        for _ in range(builders):  # start the workers now: they warm up while the app loads, not at the first cell
+            self._pool.submit(_started)
         if material is None:
             from manifoldx.resources import StandardMaterial
 
@@ -246,7 +253,10 @@ class _Uploads:
 
 
 class Streamer(_Uploads):
-    """Builds, uploads and frees cell meshes around a focus point."""
+    """Builds, uploads and frees cell meshes around a focus point.
+
+    Its workers start when it is made, and each runs `warm()` first when given: what a build needs loaded once
+    per worker (the app's data) loads while the app is still starting, not when the first cell is asked for."""
 
     def __init__(
         self,
@@ -260,10 +270,11 @@ class Streamer(_Uploads):
         workers: str = "thread",
         material=None,
         turn: tuple[int, int] = (0, 1),
+        warm: Callable[[], None] | None = None,
     ):
         if ready_radius < radius:
             raise ValueError(f"ready_radius ({ready_radius}) must be at least radius ({radius})")
-        self._start(engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material)
+        self._start(engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material, warm=warm)
         self.cell = float(cell)
         self.radius, self.ready_radius = radius, ready_radius
         self.turn = turn
@@ -345,7 +356,9 @@ class QuadStreamer(_Uploads):
     pass settles, the next starts only after the camera moves `move` metres (cell / 8 by default) or its fov,
     far plane or viewport changes, or tau does, and the nodes keep their order till then. A game may
     change `tau` while it runs, to trade detail for frame time. The nodes picked are built
-    nearest first, by `builders` workers at once, and uploaded within `upload_bytes_per_frame`. One not
+    nearest first, by `builders` workers at once, and uploaded within `upload_bytes_per_frame`. The workers
+    start when the streamer is made, each running `warm()` first when given, so what a build loads once per
+    worker loads while the app starts. One not
     built yet leaves its nearest drawn ancestor drawn, and a drawn node hides everything under it, so
     each spot is drawn once. A frame where the selection, the builds and the uploads did not change only
     carries on the uploads in flight.
@@ -372,8 +385,9 @@ class QuadStreamer(_Uploads):
         builders: int = 1,
         refine_ms: float | None = 2.0,
         move: float | None = None,
+        warm: Callable[[], None] | None = None,
     ):
-        self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders)
+        self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders, warm)
         self.cell, self.origin, self.levels = float(cell), (int(origin[0]), int(origin[1])), int(levels)
         self.exists, self.error, self.tau, self.merge = exists, error, float(tau), float(merge)
         self.refine_ms = refine_ms

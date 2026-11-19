@@ -336,6 +336,45 @@ class _View:
     fog: bool = False
 
 
+_types_warmed = False
+_types_stop = threading.Event()  # set when the first canvas starts: the frame resolves what is left itself
+
+
+def _warm_wgpu_types() -> None:
+    """Resolve the C type strings wgpu's native backend asks cffi for, once per process, on a background thread.
+
+    cffi parses each type string the first time it is used, re-reading every typedef it knows, about 28 ms a type;
+    a first frame asks for some 75 of them, two seconds before anything shows. Started when an Engine is made, the
+    parsing overlaps what the app loads before its first frame. The thread stops once the first canvas starts,
+    since from then on it would only take cffi's lock from the frame that needs the types. A name wgpu no longer
+    has is skipped."""
+    global _types_warmed
+    if _types_warmed:
+        return
+    _types_warmed = True
+
+    def run():
+        import re
+
+        try:
+            from wgpu.backends.wgpu_native import _api
+            from wgpu.backends.wgpu_native._ffi import ffi
+
+            # In the order the backend's source names them, which is close to the order a first frame asks.
+            names = dict.fromkeys(re.findall(r'"(WGPU\w+(?: \*|\[\])?)"', Path(_api.__file__).read_text()))
+        except (ImportError, OSError):
+            return
+        for name in names:
+            if _types_stop.is_set():
+                return
+            try:
+                ffi.typeof(name)
+            except Exception:  # cffi raises its own CDefError or FFIError for a type it does not know
+                pass
+
+    threading.Thread(target=run, name="wgpu-types", daemon=True).start()
+
+
 def _clear_color(color):
     """An sRGB hex or RGB/RGBA tuple as the linear RGBA a clear colour takes."""
     if color is None:
@@ -366,6 +405,7 @@ class Engine:
         pipelined: bool | None = None,
         smooth_dt: bool = True,
     ):
+        _warm_wgpu_types()
         self.title = title
         self.h = height
         self.w = width
@@ -1434,6 +1474,7 @@ class Engine:
         w, h = canvas.get_logical_size()
         self.input._viewport_size = (int(round(w)), int(round(h)))
 
+        _types_stop.set()
         # Get the wgpu context from the canvas
         self._wgpu_context = canvas.get_wgpu_context()
 

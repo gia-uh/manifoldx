@@ -262,3 +262,50 @@ def test_a_cell_brings_its_bounds_from_the_worker():
         assert engine._render_pipeline._bounds(engine, gid) is geo["bounds"]  # read, not recomputed
     finally:
         s.close()
+
+
+_WARMED = []
+
+
+def warm_up():
+    """Top-level, so a worker process can import it: what an app loads once per worker."""
+    _WARMED.append(time.perf_counter())
+
+
+def build_if_warmed(i, j):
+    """A cell only from a worker that ran warm_up first; None means it did not."""
+    return build_cell(i, j) if _WARMED else None
+
+
+@pytest.mark.parametrize("workers", ["thread", "process"])
+def test_workers_start_and_warm_up_when_the_streamer_is_made(workers):
+    engine = _offscreen_engine()
+    s = Streamer(engine, cell=8.0, build=build_if_warmed, radius=0, ready_radius=0, workers=workers, warm=warm_up)
+    try:
+        assert s._pool._processes if workers == "process" else s._pool._threads  # started before any focus
+        for _ in range(400):
+            s.focus(4.0, 4.0)
+            engine._draw_frame()
+            if (0, 0) in s.drawn() and not s._pending:
+                break
+            time.sleep(0.005)
+        assert s._drawn[(0, 0)] is not None  # built by a warmed worker, so not an empty cell
+    finally:
+        s.close()
+
+
+def test_a_new_engine_resolves_wgpu_types_in_the_background():
+    import subprocess
+    import sys
+
+    script = (
+        "import time, manifoldx as mx\n"
+        "from wgpu.backends.wgpu_native._ffi import ffi\n"
+        "before = len(ffi._parsed_types)\n"
+        "mx.Engine('t', width=8, height=8)\n"
+        "t = time.time()\n"
+        "while len(ffi._parsed_types) < before + 40 and time.time() - t < 30: time.sleep(0.05)\n"
+        "print(len(ffi._parsed_types) - before)\n"
+    )
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+    assert int(out.stdout.strip().splitlines()[-1]) >= 40

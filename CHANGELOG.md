@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A streamer's workers start when it is made, and `Streamer(..., warm=)` and `QuadStreamer(..., warm=)` take a callable each worker runs first: what an app loads once per worker (its data) loads while the app starts, not when the first cell is asked for (#306).
+- An `Engine` resolves the C type strings wgpu's native backend asks cffi for on a background thread from its constructor, until its first canvas starts: cffi spends about 28 ms parsing each the first time, two seconds of a first frame. `python -m benchmarks startup` times the first frame and the first streamed cell after an app's loading time (#306).
+
 ### Fixed
 
 - Per-vertex colours are sRGB, the same convention as a material's `color=`, and the renderer, glTF writer and path tracer decode them to linear light on the way in: a `#c62828` box drawn with `Mesh.with_colors(..., vertex_colors=True)` now matches the same hex as `color=` instead of rendering pale (#292).
