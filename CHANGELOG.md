@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The GUI pass lays out again only the root panels whose widgets changed since the last frame (`layout_gui` compares each panel's fields, children and the theme's `style.version`), and its image runs reuse one bind group instead of making one per draw: a still HUD of 40 panels costs a quarter of what it did, one with a changing number about a third (`benchmarks` `frame` `gui_still`, `gui_one_text`). A field holding an object, such as an array, is compared by identity: assign it again for a change inside it to show.
 - A streamer's workers start when it is made, and `Streamer(..., warm=)` and `QuadStreamer(..., warm=)` take a callable each worker runs first: what an app loads once per worker (its data) loads while the app starts, not when the first cell is asked for (#306).
 - An `Engine` resolves the C type strings wgpu's native backend asks cffi for on a background thread from its constructor, until its first canvas starts: cffi spends about 28 ms parsing each the first time, two seconds of a first frame. `python -m benchmarks startup` times the first frame and the first streamed cell after an app's loading time (#306).
 

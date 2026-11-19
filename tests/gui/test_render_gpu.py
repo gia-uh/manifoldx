@@ -109,3 +109,28 @@ def test_gui_pass_drives_value_display_each_frame():
     engine._draw_frame()
     engine._draw_frame()
     assert len(calls) == 3
+
+
+def test_a_still_gui_makes_no_bind_group_after_its_first_frames():
+    """Image runs reuse their bind group: making one per draw cost a HUD about 2 ms a frame."""
+    pytest.importorskip("PIL")
+    from importlib.resources import files
+
+    from manifoldx.gui import Text
+
+    font = str(files("manifoldx.viz.assets").joinpath("DejaVuSansMono.ttf"))
+    engine, _ = _make_offscreen_engine()
+    for corner in ("top-left", "bottom-right"):
+        engine.gui.append(Panel([Text("12", style_overrides={"font": font, "font_size": 16})],
+                                anchor=corner, style_overrides={"bg": "#202020"}))
+    engine.render_frame(supersample=1)
+    engine.render_frame(supersample=1)
+    device = engine._device
+    made = []
+    real = device.create_bind_group
+    device.create_bind_group = lambda **kw: made.append(1) or real(**kw)
+    try:
+        engine.render_frame(supersample=1)
+    finally:
+        del device.create_bind_group
+    assert made == []

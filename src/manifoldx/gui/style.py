@@ -33,26 +33,32 @@ DEFAULT_THEME: dict[str, Any] = {
 
 _theme: dict[str, Any] = deepcopy(DEFAULT_THEME)
 _classes: dict[str, dict[str, Any]] = {}
+version = 0  # grows at every change of the theme or a class, so a cached layout knows it is stale
 
 
 def reset() -> None:
     """Reset theme to defaults and clear named classes. For tests."""
-    global _theme, _classes
+    global _theme, _classes, version
     _theme = deepcopy(DEFAULT_THEME)
     _classes = {}
+    version += 1
 
 
 @_deferred.deferred_in_pipeline
 def set_theme(theme: dict[str, Any]) -> None:
     """Merge `theme` over the current theme. Keys absent from `theme`
     keep their previous values."""
+    global version
     _theme.update(theme)
+    version += 1
 
 
 @_deferred.deferred_in_pipeline
 def define(class_name: str, props: dict[str, Any]) -> None:
     """Register or replace a named style class."""
+    global version
     _classes[class_name] = dict(props)
+    version += 1
 
 
 def resolve(
