@@ -90,3 +90,18 @@ def test_a_stretched_camera_keeps_what_its_scale_brings_into_view():
     _cube(e, (0.0, 0.0, 0.0))
     e.render_frame(supersample=1)
     assert e._render_pipeline.drawn == 1
+
+
+def test_meshes_all_moved_at_once_are_culled_where_they_are_now():
+    e = _engine()
+    a, b = _cube(e, (0.0, 0.0, 0.0)), _cube(e, (40.0, 0.0, 0.0))
+    for _ in range(2):
+        e.render_frame(supersample=1)
+    drawn = [e._render_pipeline.drawn]
+    e.store._components["Transform"][[a.index, b.index], 0] = (40.0, 1.5)   # swap: every sphere is stale
+    e.render_frame(supersample=1)
+    drawn.append(e._render_pipeline.drawn)
+    e.store._components["Transform"][[a.index, b.index], 0] = (0.0, -1.5)
+    e.render_frame(supersample=1)
+    drawn.append(e._render_pipeline.drawn)
+    assert drawn == [1, 1, 2]

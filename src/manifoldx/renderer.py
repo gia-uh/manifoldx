@@ -1502,8 +1502,12 @@ class RenderPipeline:
                                     np.zeros(size, np.int64))
         centre, radius, version, geom = kept
         geom_ids = np.asarray(geom_ids).astype(np.int64)
-        stale = np.flatnonzero((version[entities] != self._transform_cache._row_version[entities])
-                               | (geom[entities] != geom_ids))
+        row_version = self._transform_cache._row_version[entities]
+        stale = np.flatnonzero((version[entities] != row_version) | (geom[entities] != geom_ids))
+        if len(stale) == len(entities):  # everything moved: compute once, keep, return without a gather
+            c, r = self._world_spheres(engine, geom_ids, models[slice(None)])
+            centre[entities], radius[entities], version[entities], geom[entities] = c, r, row_version, geom_ids
+            return c, r
         if len(stale):
             rows = entities[stale]
             centre[rows], radius[rows] = self._world_spheres(engine, geom_ids[stale], models[stale])
