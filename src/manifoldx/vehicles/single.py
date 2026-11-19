@@ -20,7 +20,7 @@ G = 9.81
 AIR = 1.2
 
 
-class Constants:
+class _Constants:
     """Vehicle 0's spec as Python floats and lists, one entry per real wheel."""
 
     def __init__(self, p):
@@ -104,10 +104,10 @@ def _dot(a, b):
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
-def _constants(fleet) -> Constants:
+def _constants(fleet) -> _Constants:
     k = fleet.__dict__.get("_single")
     if k is None or k[0] is not fleet.p:
-        k = (fleet.p, Constants(fleet.p))
+        k = (fleet.p, _Constants(fleet.p))
         fleet._single = k
     return k[1]
 
@@ -441,11 +441,11 @@ def _integrate(fleet, k, R, force, torque, ground, walls, pos, vel, ang, load, c
     ax, ay, az = R
     m = k.mass
     vel = [vel[0] + force[0] / m * dt, vel[1] + force[1] / m * dt, vel[2] + force[2] / m * dt]
-    I = k.inertia
+    inertia = k.inertia
     wb = (_dot(ax, ang), _dot(ay, ang), _dot(az, ang))
     tb = (_dot(ax, torque), _dot(ay, torque), _dot(az, torque))
-    gyro = _cross(wb, (I[0] * wb[0], I[1] * wb[1], I[2] * wb[2]))
-    wb = [wb[i] + dt * (tb[i] - gyro[i]) / I[i] for i in range(3)]
+    gyro = _cross(wb, (inertia[0] * wb[0], inertia[1] * wb[1], inertia[2] * wb[2]))
+    wb = [wb[i] + dt * (tb[i] - gyro[i]) / inertia[i] for i in range(3)]
     ang = [ax[i] * wb[0] + ay[i] * wb[1] + az[i] * wb[2] for i in range(3)]
     # body.integrate
     x, y, z, w = fleet.rotation[0].tolist()
@@ -458,7 +458,7 @@ def _integrate(fleet, k, R, force, torque, ground, walls, pos, vel, ang, load, c
     R = _rotation(q)
     ax, ay, az = R
     # R · diag(1/I) · Rᵀ, row by row
-    inv = tuple(tuple(ax[i] * ax[j] / I[0] + ay[i] * ay[j] / I[1] + az[i] * az[j] / I[2] for j in range(3))
+    inv = tuple(tuple(ax[i] * ax[j] / inertia[0] + ay[i] * ay[j] / inertia[1] + az[i] * az[j] / inertia[2] for j in range(3))
                 for i in range(3))
     body = _Body(pos, vel, ang, m, inv)
     speed = sqrt(_dot(vel, vel))
