@@ -242,3 +242,24 @@ def quadstream_moving(levels):
     out = {"ms": ms, "nodes": len(s.drawn())}
     s.close()
     return out
+
+
+@case("frame", "gui_still", sizes=[10, 40, 160], smoke=2)
+def gui_still(n):
+    """n HUD panels over an empty scene, none of them changing: the GUI pass alone."""
+    engine, _texts = scenes.gui_hud(n)
+    return _frame(engine)
+
+
+@case("frame", "gui_one_text", sizes=[10, 40, 160], smoke=2)
+def gui_one_text(n):
+    """n HUD panels over an empty scene with one panel's number changing every frame, like a speedometer."""
+    engine, texts = scenes.gui_hud(n)
+    k = [0]
+
+    @engine.system
+    def tick(q, dt):
+        k[0] += 1
+        texts[0].text = f"{k[0] % 200:03d}"
+
+    return _frame(engine)

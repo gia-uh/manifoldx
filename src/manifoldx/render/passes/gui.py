@@ -25,10 +25,12 @@ from dataclasses import replace
 import numpy as np
 import wgpu
 
+from manifoldx.gui import style
 from manifoldx.gui.layout import LayoutBox, anchored_slot, compute_layout
 from manifoldx.gui.material import RectMaterial
 from manifoldx.gui.painter import Painter, paint
-from manifoldx.gui.widgets import Panel, _measure_text
+from manifoldx.gui.value_display import ValueDisplay
+from manifoldx.gui.widgets import Panel, Widget, _measure_text
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +226,6 @@ _UNIT_QUAD_INDICES = np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32)
 
 
 def _refresh_value_displays(widget) -> None:
-    from manifoldx.gui.value_display import ValueDisplay
     if isinstance(widget, ValueDisplay):
         widget.refresh()
     for child in getattr(widget, "children", []) or []:
@@ -295,20 +296,88 @@ def layout_gui(engine) -> Painter:
     of (w / scale, h / scale); the ops are then scaled to the screen. The
     scale is applied here rather than through the globals' viewport_size,
     which the sprite and label passes share within the frame.
+
+    A root panel whose widgets did not change since the last call (see
+    `_fingerprint`) is not laid out again: its ops from then are reused.
     """
     scale = engine.gui.effective_scale(engine.h)
+    exact = getattr(engine.gui, "exact_colors", True)
     viewport = LayoutBox(0.0, 0.0, engine.w / scale, engine.h / scale)
+    last = engine.gui.__dict__.get("_layout_cache", {})
+    cache = {}
     painter = Painter()
     for panel in engine.gui:
-        spec = panel.build_layout_spec()
-        slot = anchored_slot(panel.anchor, panel.offset, spec, viewport)
-        boxes = compute_layout(spec, viewport=slot)
-        paint(panel, spec, boxes, painter)
-    if scale != 1.0:
-        _scale_ops(painter, scale)
-    if getattr(engine.gui, "exact_colors", True):
-        _decode_colors(painter)
+        key = (engine.w, engine.h, scale, exact, style.version, _fingerprint(panel))
+        hit = last.get(id(panel))
+        if hit is not None and hit[0] is panel and hit[1] == key:
+            ops = hit[2]
+        else:
+            ops = Painter()
+            spec = panel.build_layout_spec()
+            slot = anchored_slot(panel.anchor, panel.offset, spec, viewport)
+            boxes = compute_layout(spec, viewport=slot)
+            paint(panel, spec, boxes, ops)
+            if scale != 1.0:
+                _scale_ops(ops, scale)
+            if exact:
+                _decode_colors(ops)
+        cache[id(panel)] = (panel, key, ops)
+        _merge(painter, ops)
+    engine.gui.__dict__["_layout_cache"] = cache
     return painter
+
+
+_DERIVED = frozenset({"_cached_intrinsic", "_gui_attached"})  # fields that follow from the others
+
+
+class _Same:
+    """A value the fingerprint compares by identity (and keeps alive, so its id is not reused)."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, _Same) and other.value is self.value
+
+    __hash__ = None
+
+
+_PLAIN = (str, int, float, bool, bytes, type(None))
+
+
+def _frozen(value):
+    """A comparable copy of a widget field: plain values as they are, containers and widgets
+    walked, anything else by identity."""
+    if isinstance(value, _PLAIN):
+        return value
+    if isinstance(value, Widget):
+        return _fingerprint(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(v if isinstance(v, _PLAIN) else _frozen(v) for v in value)
+    if isinstance(value, dict):
+        return tuple((k, v if isinstance(v, _PLAIN) else _frozen(v)) for k, v in value.items())
+    return _Same(value)
+
+
+def _fingerprint(widget) -> tuple:
+    """Everything paint and layout read from a widget and its children: its fields, its style
+    class and overrides among them, with the theme's version. A field holding an object (a
+    texture, an array) is compared by identity, so a change inside it shows only once the field
+    is assigned again."""
+    fields = tuple((k, v if isinstance(v, _PLAIN) else _frozen(v))
+                   for k, v in widget.__dict__.items() if k not in _DERIVED)
+    return (type(widget), fields)
+
+
+def _merge(painter: Painter, ops: Painter) -> None:
+    """Append one panel's ops to the frame's painter, shifting its paint order's indexes."""
+    base = {"rect": len(painter.rect_ops), "text": len(painter.text_ops), "image": len(painter.image_ops)}
+    painter.rect_ops.extend(ops.rect_ops)
+    painter.text_ops.extend(ops.text_ops)
+    painter.image_ops.extend(ops.image_ops)
+    painter.order.extend((kind, base[kind] + i) for kind, i in ops.order)
 
 
 def _linear(c: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
@@ -944,7 +1013,8 @@ def _prepare_images(rp, engine, image_ops) -> list:
 
 
 def _draw_images(rp, render_pass, groups: list, first: int, count: int) -> None:
-    bind_group0 = rp._device.create_bind_group(
+    key = ("images", rp._globals_buffer, rp._gui_image_instance_buf, rp._gui_image_instance_capacity)
+    bind_group0 = _bind_group(rp, key, lambda: rp._device.create_bind_group(
         layout=rp._gui_image_bgl0,
         entries=[
             {"binding": 0, "resource": {"buffer": rp._globals_buffer, "offset": 0, "size": 240}},
@@ -957,7 +1027,7 @@ def _draw_images(rp, render_pass, groups: list, first: int, count: int) -> None:
                 },
             },
         ],
-    )
+    ))
     render_pass.set_pipeline(rp._gui_image_pipeline)
     render_pass.set_bind_group(0, bind_group0, [], 0, 0)
     render_pass.set_vertex_buffer(0, rp._gui_quad_vbuf)
