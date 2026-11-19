@@ -78,3 +78,16 @@ def test_a_tinted_batch_after_an_untinted_one_reads_its_own_rows():
     left, right = _halves(np.asarray(canvas.draw()).astype(int))
     assert (right[:, 0] > right[:, 1] + 20).any()  # red
     assert not (left[:, 0] > left[:, 1] + 20).any()
+
+
+def test_a_changed_tint_shows_through_the_recorded_bundle():
+    eng, canvas = _offscreen()
+    h = eng.spawn(Mesh(_quad()), Material(_white()), Transform(pos=(1.2, 0, 0)), Tint(rgb=(1, 0, 0)))
+    eng._draw_frame()
+    canvas.draw()
+    chunks = [c.bundle for c in eng._render_pipeline._mesh_draw.chunks]
+    eng.store._components["Tint"][h.index] = (0, 0, 1)
+    eng._draw_frame()
+    _, right = _halves(np.asarray(canvas.draw()).astype(int))
+    assert (right[:, 2] > right[:, 0] + 20).any()  # blue now
+    assert [c.bundle for c in eng._render_pipeline._mesh_draw.chunks] == chunks  # not recorded again

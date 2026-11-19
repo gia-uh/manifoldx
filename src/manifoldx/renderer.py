@@ -1,5 +1,7 @@
 """Render pipeline that executes after command buffer."""
 
+from collections.abc import Mapping
+
 import numpy as np
 import wgpu
 
@@ -191,11 +193,13 @@ class _BatchBuffers:
     def upload_transforms(self, data: "np.ndarray"):
         n_bytes = data.nbytes
         if self.transforms_buf is None or self.transforms_capacity < n_bytes:
+            # Grown by half at least, in whole matrices: a new buffer re-records the mesh pass's bundles
+            size = max(n_bytes, -(-(self.transforms_capacity * 3 // 2) // 64) * 64)
             self.transforms_buf = self._device.create_buffer(
-                size=n_bytes,
+                size=size,
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
-            self.transforms_capacity = n_bytes
+            self.transforms_capacity = size
         self._device.queue.write_buffer(self.transforms_buf, 0, data.tobytes())
         self._transforms_key = None
 
@@ -203,6 +207,8 @@ class _BatchBuffers:
         """Upload (N, 4) float32 tints, one per instance in the transforms' order."""
         n_bytes = data.nbytes
         if self.tints_buf is None or self.tints_capacity < n_bytes:
+            # Grown by half at least, like the transforms: a new buffer re-records the mesh pass's bundles
+            n_bytes = max(n_bytes, -(-(self.tints_capacity * 3 // 2) // 16) * 16)
             self.tints_buf = self._device.create_buffer(
                 size=n_bytes,
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
@@ -464,6 +470,46 @@ class _Routing:
         self.mesh_groups: list = []  # [((geom_id, mat_type, mat_subtype, mat_id), local indices)]
 
 
+class _MeshLayout:
+    """Every mesh batch of one routing in draw order, visible or not: `keys[b]` and its instances
+    `order[starts[b]:starts[b + 1]]` (local indices), `ranks[b]` its material's (translucent, mirrored)
+    flags, which order the batches (RenderPipeline._mesh_layout). Kept while the routing and the materials' pipeline
+    states stay, so a still scene and a moving camera reuse it."""
+
+    def __init__(self, keys, groups, ranks):
+        self.keys, self.ranks = keys, ranks
+        self.order = np.concatenate(groups) if groups else np.zeros(0, np.int64)
+        self.starts = np.cumsum([0] + [len(v) for v in groups[:-1]], dtype=np.int64)
+        self.index = {k: b for b, k in enumerate(keys)}
+        self.mat_ids = sorted({k[3] for k in keys})
+
+
+class _MeshBatches(Mapping):
+    """The mesh batches one frame draws: key -> visible local indices, in draw order, empty ones left
+    out. The mesh pass reads the vectorized form (`layout`, `counts`, `first`, `local`) and never
+    builds the per-batch arrays; iterating builds them."""
+
+    def __init__(self, layout, visible):
+        self.layout = layout
+        vis = visible[layout.order]
+        self.local = layout.order[vis]  # visible instances, batch after batch
+        self.counts = np.add.reduceat(vis.astype(np.int64), layout.starts) if len(vis) else np.zeros(0, np.int64)
+        self.first = np.cumsum(self.counts) - self.counts  # each batch's first row in `local`
+        self.drawn = len(self.local)
+
+    def __getitem__(self, key):
+        b = self.layout.index[key]
+        if not self.counts[b]:
+            raise KeyError(key)
+        return self.local[self.first[b]:self.first[b] + self.counts[b]]
+
+    def __iter__(self):
+        return (self.layout.keys[b] for b in np.flatnonzero(self.counts))
+
+    def __len__(self):
+        return int(np.count_nonzero(self.counts))
+
+
 class RenderPipeline:
     """
     Instanced render pipeline.
@@ -479,6 +525,8 @@ class RenderPipeline:
         self._device = device
         self._transform_cache = TransformCache(store.max_entities)
         self._routing_cache = None  # _Routing for the last live set, see _routing
+        self._mesh_layout_cache = None  # (routing, _MeshLayout, materials' pipeline states), see _mesh_layout
+        self._use_bundles = False  # set by _ensure_pipeline from the device's features
         # Between run() and end_frame() the store does not change: matrices and shadow bounds
         # are computed once there and reused by every pass.
         self._in_frame = False
@@ -499,6 +547,7 @@ class RenderPipeline:
         self._mesh_bind_groups = {}
         self._shadow_bind_group = None  # (view, bind group) for group(2)
         self._geom_bounds = {}  # geom_id -> (centre (3,), radius): a sphere around its rest vertices
+        self._spheres = None  # per entity: world centre, radius, the matrix version and geometry they are of
         self.drawn = 0  # mesh instances the last frame drew, after frustum culling
         self._globals_buffer = None  # VP matrix + view matrix + camera_pos
         self._batch_buffers = None  # _BatchBuffers instance for per-batch storage
@@ -518,6 +567,8 @@ class RenderPipeline:
             return
 
         self._device = device
+        # The mesh pass records its draws once into a render bundle of indirect draws (render/passes/mesh.py)
+        self._use_bundles = "indirect-first-instance" in device.features
 
         # Create globals uniform buffer:
         #   vp(64) + view(64) + proj(64) + camera_pos(12) + pad(4)
@@ -1454,13 +1505,10 @@ class RenderPipeline:
             self._geom_bounds[geom_id] = b
         return b
 
-    def _in_frustum(self, engine, geom_ids, models, mat_ids, clip):
-        """Bool per instance: its bounding sphere touches the frustum of `clip`, the matrix taking
-        world points to clip space (column vectors). A mirrored instance is tested where its
-        reflection shows. `models` are (N, 16) row-major model matrices."""
+    def _world_spheres(self, engine, geom_ids, models):
+        """World bounding spheres (centre (N, 3), radius (N,)) of instances of `geom_ids` placed by
+        `models`, (N, 16) row-major model matrices."""
         n = len(geom_ids)
-        if n == 0:
-            return np.zeros(0, dtype=bool)
         uniq, inv = np.unique(np.asarray(geom_ids).astype(np.int64), return_inverse=True)
         c = np.empty((len(uniq), 3))
         r = np.empty(len(uniq))
@@ -1470,7 +1518,44 @@ class RenderPipeline:
         m = np.asarray(models, dtype=np.float64).reshape(n, 4, 4)
         centre = np.einsum("nij,nj->ni", m[:, :3, :3], c) + m[:, :3, 3]
         a = m[:, :3, :3]  # largest column norm: the scale; summing rows beats norm on (N,3,3)
-        radius = r * np.sqrt((a[:, 0] ** 2 + a[:, 1] ** 2 + a[:, 2] ** 2).max(axis=1))
+        return centre, r * np.sqrt((a[:, 0] ** 2 + a[:, 1] ** 2 + a[:, 2] ** 2).max(axis=1))
+
+    def _entity_spheres(self, engine, entities, geom_ids, models):
+        """_world_spheres for these entities' rows of the transform cache, kept per entity and
+        recomputed only for rows whose matrix or geometry changed since: a still city costs a compare.
+        `models[k]` gathers the matrices of local rows k, only those."""
+        kept = self._spheres
+        if kept is None:
+            size = self._store.max_entities
+            kept = self._spheres = (np.zeros((size, 3)), np.zeros(size), np.full(size, -1, np.int64),
+                                    np.zeros(size, np.int64))
+        centre, radius, version, geom = kept
+        geom_ids = np.asarray(geom_ids).astype(np.int64)
+        row_version = self._transform_cache._row_version[entities]
+        stale = np.flatnonzero((version[entities] != row_version) | (geom[entities] != geom_ids))
+        if len(stale) == len(entities):  # everything moved: compute once, keep, return without a gather
+            c, r = self._world_spheres(engine, geom_ids, models[slice(None)])
+            centre[entities], radius[entities], version[entities], geom[entities] = c, r, row_version, geom_ids
+            return c, r
+        if len(stale):
+            rows = entities[stale]
+            centre[rows], radius[rows] = self._world_spheres(engine, geom_ids[stale], models[stale])
+            version[rows] = self._transform_cache._row_version[rows]
+            geom[rows] = geom_ids[stale]
+        return centre[entities], radius[entities]
+
+    def _in_frustum(self, engine, geom_ids, models, mat_ids, clip, entities=None):
+        """Bool per instance: its bounding sphere touches the frustum of `clip`, the matrix taking
+        world points to clip space (column vectors). A mirrored instance is tested where its
+        reflection shows. `models` are (N, 16) row-major model matrices; with `entities`, the rows of
+        the transform cache they are, whose spheres are kept between frames (_entity_spheres)."""
+        n = len(geom_ids)
+        if n == 0:
+            return np.zeros(0, dtype=bool)
+        if entities is None:
+            centre, radius = self._world_spheres(engine, geom_ids, models)
+        else:
+            centre, radius = self._entity_spheres(engine, entities, geom_ids, models)
         mat_ids = np.asarray(mat_ids).astype(np.int64)
         for mid in np.unique(mat_ids):
             mirror = getattr(engine._material_registry.get(int(mid)), "mirror", None)
@@ -1666,13 +1751,14 @@ class RenderPipeline:
 
         # Frustum culling: a mesh whose bounding sphere is out of view is not drawn. Only
         # entities with geometry are tested: sprites and labels would never be culled.
-        mesh_batches = {}  # (geom_id, mat_type, mat_subtype, mat_id) -> local indices
+        mesh_batches = None  # _MeshBatches: (geom_id, mat_type, mat_subtype, mat_id) -> local indices
         cand = routing.mesh_candidates
         if has_mesh and len(cand):
             visible = np.zeros(n, dtype=bool)
-            visible[cand[self._in_frustum(engine, geoms[cand], model_matrices[cand], mats[cand], vp.T)]] = True
-            shown = [(key, v[visible[v]]) for key, v in routing.mesh_groups]
-            mesh_batches = dict(sorted(((k, v) for k, v in shown if len(v)), key=lambda kv: kv[1][0]))
+            ents = alive_indices[cand]
+            visible[cand[self._in_frustum(engine, geoms[cand], _Rows(cache._matrix_cache, ents), mats[cand], vp.T,
+                                          ents)]] = True
+            mesh_batches = _MeshBatches(self._mesh_layout(engine, routing), visible)
 
         # Get camera position for globals
         camera_pos = np.array([0.0, 0.0, 5.0], dtype=np.float32)
@@ -1814,15 +1900,8 @@ class RenderPipeline:
         # ---------------------------------------------------------------
         # Draw mesh batches (if any)
         # ---------------------------------------------------------------
-        self.drawn = sum(len(v) for v in mesh_batches.values())
-        if mesh_batches:
-            # Opaque meshes first, then mirrored ones, which the depth test then rejects cheaply
-            # wherever the ground hides them, then translucent ones over everything.
-            def _order(key):
-                state = getattr(engine._material_registry.get(key[3]), "pipeline_state", None)
-                return (bool(state and state[0]), bool(state and state[1]))
-
-            mesh_batches = dict(sorted(mesh_batches.items(), key=lambda kv: _order(kv[0])))
+        self.drawn = mesh_batches.drawn if mesh_batches is not None else 0
+        if self.drawn:
             _mesh_pass.render_mesh_batches(
                 self, engine, render_pass, mesh_batches, model_matrices, material_data, alive_indices
             )
@@ -1856,6 +1935,27 @@ class RenderPipeline:
             _axis_pass.render_axis_pass(
                 self, engine, render_pass, axis_batches, model_matrices, material_data
             )
+
+    def _mesh_layout(self, engine, routing) -> "_MeshLayout":
+        """The routing's mesh batches in draw order: opaque meshes first, then mirrored ones, which the
+        depth test then rejects cheaply wherever the ground hides them, then translucent ones over
+        everything; in order of each batch's first entity within each. Kept until the routing or a
+        material's pipeline state changes."""
+        registry = engine._material_registry
+        cached = self._mesh_layout_cache
+        if cached is not None and cached[0] is routing:
+            layout, states = cached[1], cached[2]
+            if states == [getattr(registry.get(m), "pipeline_state", None) for m in layout.mat_ids]:
+                return layout
+        rank = {}
+        for mid in {k[3] for k, _ in routing.mesh_groups}:
+            state = getattr(registry.get(mid), "pipeline_state", None)
+            rank[mid] = (bool(state and state[0]), bool(state and state[1]))
+        groups = sorted(routing.mesh_groups, key=lambda kv: rank[kv[0][3]])  # stable: first-entity order kept
+        layout = _MeshLayout([k for k, _ in groups], [v for _, v in groups], [rank[k[3]] for k, _ in groups])
+        self._mesh_layout_cache = (routing, layout,
+                                   [getattr(registry.get(m), "pipeline_state", None) for m in layout.mat_ids])
+        return layout
 
     def _model_matrices(self, indices):
         """(N,16) row-major model matrices: as of the frame's start in one, as the store is now outside one."""

@@ -67,6 +67,22 @@ def test_a_mesh_outside_the_shadow_box_casts_nothing():
     assert sum(len(m) for m, _ in e._render_pipeline._collect_mesh_instances(e, with_entities=True, cull=True).values()) == 1
 
 
+def test_a_mesh_moved_into_and_out_of_view_is_culled_where_it_is_now():
+    e = _engine()
+    _cube(e, (0.0, 0.0, 0.0))
+    far = _cube(e, (40.0, 0.0, 0.0))
+    for _ in range(2):
+        e.render_frame(supersample=1)
+    drawn = [e._render_pipeline.drawn]
+    e.store._components["Transform"][far.index, 0] = 1.5   # into view, its sphere follows
+    shown = e.render_frame(supersample=1)
+    drawn.append(e._render_pipeline.drawn)
+    e.store._components["Transform"][far.index, 0] = 40.0
+    e.render_frame(supersample=1)
+    drawn.append(e._render_pipeline.drawn)
+    assert drawn == [1, 2, 1] and (shown[:, 40:, 0] > 100).any()
+
+
 def test_a_stretched_camera_keeps_what_its_scale_brings_into_view():
     e = _engine()
     e.camera.set_pose(position=(0.0, 4.5, 6.0), target=(0.0, 4.5, 0.0))   # the view starts about 1 m up
@@ -74,3 +90,18 @@ def test_a_stretched_camera_keeps_what_its_scale_brings_into_view():
     _cube(e, (0.0, 0.0, 0.0))
     e.render_frame(supersample=1)
     assert e._render_pipeline.drawn == 1
+
+
+def test_meshes_all_moved_at_once_are_culled_where_they_are_now():
+    e = _engine()
+    a, b = _cube(e, (0.0, 0.0, 0.0)), _cube(e, (40.0, 0.0, 0.0))
+    for _ in range(2):
+        e.render_frame(supersample=1)
+    drawn = [e._render_pipeline.drawn]
+    e.store._components["Transform"][[a.index, b.index], 0] = (40.0, 1.5)   # swap: every sphere is stale
+    e.render_frame(supersample=1)
+    drawn.append(e._render_pipeline.drawn)
+    e.store._components["Transform"][[a.index, b.index], 0] = (0.0, -1.5)
+    e.render_frame(supersample=1)
+    drawn.append(e._render_pipeline.drawn)
+    assert drawn == [1, 1, 2]

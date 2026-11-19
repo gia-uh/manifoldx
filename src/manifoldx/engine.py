@@ -1488,7 +1488,9 @@ class Engine:
         else:
             # Request adapter and device (use sync API to avoid deprecation warnings)
             self._adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
-            self._device = self._adapter.request_device_sync()
+            # indirect-first-instance lets the mesh pass replay one render bundle (render/passes/mesh.py)
+            features = [f for f in ("indirect-first-instance",) if f in self._adapter.features]
+            self._device = self._adapter.request_device_sync(required_features=features)
             self._owns_device = True
 
             # Get preferred texture format from canvas context
