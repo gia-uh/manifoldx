@@ -124,6 +124,7 @@ class _Casters:
         self.uniq = geoms_s[self.starts]
         self.bundle, self.recorded, self.index_counts = None, None, np.zeros(len(self.uniq), np.uint32)
         self.gpu_version, self.gpus, self.skinned, self.entries, self.groups = None, [], False, None, None
+        self.culled = None
 
 
 def _casters(rp, engine):
@@ -180,11 +181,17 @@ def render_shadow_map(rp, engine, command_encoder):
         # Only what the shadow caster's box holds casts; its box is fixed, not fitted to these. The spheres
         # are kept per entity, so a still city costs a compare.
         clip = rp._caster_light_view_proj(engine, 2 if spot is not None else 1)
-        from manifoldx.renderer import _Rows
+        box = np.asarray(clip, np.float64).tobytes()
+        kept = casters.culled  # (box, transform cache version, drawn casters, counts per geometry)
+        if kept is not None and kept[0] == box and not cache.changed_since(kept[1], ents):
+            local, counts = kept[2], kept[3]  # a box that stays put over still casters culls the same
+        else:
+            from manifoldx.renderer import _Rows
 
-        vis = rp._in_frustum(engine, casters.geoms, _Rows(cache._matrix_cache, ents), casters.mats, clip, ents)
-        local = ents[vis]
-        counts = np.add.reduceat(vis.astype(np.int64), casters.starts)
+            vis = rp._in_frustum(engine, casters.geoms, _Rows(cache._matrix_cache, ents), casters.mats, clip, ents)
+            local = ents[vis]
+            counts = np.add.reduceat(vis.astype(np.int64), casters.starts)
+            casters.culled = (box, cache.version, local, counts)
     else:
         local = ents
         counts = np.diff(np.r_[casters.starts, len(ents)])

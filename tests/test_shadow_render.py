@@ -400,9 +400,9 @@ def test_a_still_scene_replays_its_shadow_draws():
     eng, _, _ = _fixed_box_scene()
     first = _floor(_render_array(eng))
     rp = eng._render_pipeline
-    casters, bundle = rp._shadow_casters, rp._shadow_casters.bundle
+    casters, bundle, culled = rp._shadow_casters, rp._shadow_casters.bundle, rp._shadow_casters.culled
     again = _floor(_render_array(eng))
-    assert rp._shadow_casters is casters and casters.bundle is bundle
+    assert rp._shadow_casters is casters and casters.bundle is bundle and casters.culled is culled
     assert np.abs(first - again).max() < 2
 
 
