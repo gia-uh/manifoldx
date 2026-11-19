@@ -102,3 +102,17 @@ def test_abs_stops_shorter_than_locked_wheels():
         return fleet.position[0, 0]
 
     assert stop(1.0) < stop(0.0)
+
+
+def test_steering_assist_leaves_reverse_alone():
+    def yaw_turned(k):
+        fleet, ground = start(0.0)
+        fleet.gear[0] = -1
+        fleet.velocity[0] = (-5.0, 0.0, 0.0)
+        fleet.omega[0] = -5.0 / fleet.p.radius[0]
+        h0 = matrices(fleet.rotation)[0][:, 0].copy()
+        drive(fleet, ground, [1.0, 0.0, 0.3, 0.0], strengths(steer=k, stability=k), 1.5)  # brake = reverse throttle
+        h1 = matrices(fleet.rotation)[0][:, 0]
+        return np.degrees(abs(np.arctan2(h0[0] * h1[2] - h0[2] * h1[0], h0 @ h1)))
+
+    assert yaw_turned(1.0) >= 0.7 * yaw_turned(0.0)

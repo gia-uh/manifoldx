@@ -171,13 +171,14 @@ class Bus(Vehicle):
         out["windscreen_top"] = np.array([p.length / 2 - p.windscreen_rake, p.windscreen_top, 0.0])
         return out
 
-    def pose(self, doors=0.0, wheel_turn=0.0, steer=0.0) -> dict:
+    def pose(self, doors=0.0, wheel_turn=0.0, steer=0.0, travel=None) -> dict:
         """Each part's (position, quaternion xyzw) so that bus-space vertices land in their posed place.
 
         doors: 0 shut to 1 fully open (or a dict by leaf name). wheel_turn: radians the wheels have rolled.
         steer: radians the front wheels turn, positive to the left.
         """
         out = {}
+        lift = iter(travel if travel is not None else ())  # metres each wheel rises, in parts order
         for p in self.parts:
             if p.kind == "door":
                 angle = doors.get(p.name, 0.0) if isinstance(doors, dict) else doors
@@ -188,7 +189,10 @@ class Bus(Vehicle):
                     q = _quat_mul(_axis_angle(np.array([0.0, 1.0, 0.0]), steer), q)
             else:
                 q = np.array([0.0, 0.0, 0.0, 1.0])
-            out[p.name] = (p.pivot - _rotate(q, p.pivot), q)
+            offset = p.pivot - _rotate(q, p.pivot)
+            if p.kind == "wheel" and travel is not None:
+                offset = offset + np.array([0.0, float(next(lift, 0.0)), 0.0])
+            out[p.name] = (offset, q)
         return out
 
 

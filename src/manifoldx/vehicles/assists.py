@@ -58,7 +58,7 @@ def apply_assists(fleet, controls: np.ndarray, strengths: np.ndarray) -> np.ndar
     narrow = 1 - (1 - NARROW) * np.clip(speed / NARROW_AT, 0, 1)
     want = wheel * narrow + COUNTER * beta * (1 - np.abs(steer))
     want = np.clip(want, beta - alpha_peak, beta + alpha_peak)
-    want = np.where(speed > 3.0, want, wheel)
+    want = np.where(vx > 3.0, want, wheel)  # forward only: backing up, the driver keeps the whole lock
     new = wheel + (want - wheel) * k_steer
     lit[:, 0] = np.abs(new - wheel) > 0.02
     out[:, 0] = np.clip(new / p.max_steer, -1, 1)

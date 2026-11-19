@@ -61,6 +61,21 @@ class Vehicles:
         self.gear[i], self.shift_timer[i], self.rpm[i] = 1, 0.0, self.p.engine[i, 0]
         self._before[0][i], self._before[1][i] = self.position[i], self.rotation[i]
 
+    def pick_gear(self, i: int) -> int:
+        """Put vehicle i in the gear an automatic would hold at its road speed, as after a launch; returns it."""
+        p = self.p
+        v = abs(float(self.velocity[i] @ matrices(self.rotation[i : i + 1])[0][:, 0]))
+        driven = p.driven[i] & p.wheel_mask[i]
+        radius = float(p.radius[i, driven].mean()) if driven.any() else 0.3
+        gear = 1
+        for g in range(1, int(p.n_gears[i]) + 1):
+            gear = g
+            rpm = v / radius * p.ratios[i, g - 1] * p.final[i] * powertrain.RPM
+            if rpm < powertrain.UP_AT * p.engine[i, 2]:
+                break
+        self.gear[i] = gear
+        return gear
+
     def advance(self, controls: np.ndarray, ground, walls, dt: float, strengths: np.ndarray | None = None) -> int:
         """Run as many DT steps as dt (cut at MAX_FRAME) and what was left over from the last call add up to,
         each after the assists of the given strengths; returns how many ran."""

@@ -85,3 +85,17 @@ def test_the_drawn_model_sits_on_the_ground_at_rest():
     at, rot = fleet.model_transform(0)
     assert at[1] == pytest.approx(0.0, abs=0.02)
     assert np.allclose(fleet.travel(0), 0.0, atol=0.01)
+
+
+@pytest.mark.parametrize("builder", ["bus", "truck"])
+def test_buses_and_trucks_lift_a_wheel_by_its_travel(builder):
+    if builder == "bus":
+        from manifoldx.modeling.assets.bus import BusParams, build_bus as build
+        model = build(BusParams())
+    else:
+        from manifoldx.modeling.assets.truck import TruckParams, build_truck as build
+        model = build(TruckParams())
+    wheels = [p.name for p in model.parts if p.kind == "wheel"]
+    rest, lifted = model.pose(), model.pose(travel=[0.05] + [0.0] * (len(wheels) - 1))
+    assert lifted[wheels[0]][0][1] == pytest.approx(rest[wheels[0]][0][1] + 0.05)
+    assert np.allclose(lifted[wheels[1]][0], rest[wheels[1]][0])
