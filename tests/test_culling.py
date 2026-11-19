@@ -65,3 +65,12 @@ def test_a_mesh_outside_the_shadow_box_casts_nothing():
     _cube(e, (0.0, -1000.0, 0.0))
     e.render_frame(supersample=1)
     assert sum(len(m) for m, _ in e._render_pipeline._collect_mesh_instances(e, with_entities=True, cull=True).values()) == 1
+
+
+def test_a_stretched_camera_keeps_what_its_scale_brings_into_view():
+    e = _engine()
+    e.camera.set_pose(position=(0.0, 4.5, 6.0), target=(0.0, 4.5, 0.0))   # the view starts about 1 m up
+    e.camera.vertical_scale = 3.0     # the cube's top, at 0.5 m, shows at 1.5 m
+    _cube(e, (0.0, 0.0, 0.0))
+    e.render_frame(supersample=1)
+    assert e._render_pipeline.drawn == 1

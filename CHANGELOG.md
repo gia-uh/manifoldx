@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Camera.vertical_scale` stretches heights on screen around y = 0, for relief maps; `project` and frustum culling follow it, `get_right` and `get_up` stay unscaled.
+
 ### Changed
 
 - A streamer's workers start when it is made, and `Streamer(..., warm=)` and `QuadStreamer(..., warm=)` take a callable each worker runs first: what an app loads once per worker (its data) loads while the app starts, not when the first cell is asked for (#306).
