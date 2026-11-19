@@ -95,6 +95,33 @@ def test_still_and_turning_views_replay_one_bundle(monkeypatch):
     assert calls == {"execute_bundles": 4}
 
 
+
+def test_a_spawn_or_destroy_records_one_bundle_again(monkeypatch):
+    """A streamed cell that comes or goes re-records the one bundle it lands in, not all of them."""
+    import wgpu.backends.wgpu_native as native
+    from manifoldx.resources import StandardMaterial
+
+    e = _engine()
+    cells = _unique_cubes(e, 200, [StandardMaterial("#88aaff"), StandardMaterial("#ffaa44")])
+    e.render_frame(supersample=1)
+    if not e._render_pipeline._use_bundles:
+        pytest.skip("device lacks indirect-first-instance")
+    _unique_cubes(e, 1, [StandardMaterial("#88aaff")])  # grows the transforms buffer: every bundle once
+    for _ in range(2):
+        e.render_frame(supersample=1)
+    calls = {}
+    for cls, name in [(native.GPUDevice, "create_render_bundle_encoder"),
+                      (native.GPURenderBundleEncoder, "draw_indexed_indirect")]:
+        real, spy = _count(cls, name, calls)
+        monkeypatch.setattr(cls, name, spy)
+    recorded = []
+    for change in (lambda: _unique_cubes(e, 1, [StandardMaterial("#88aaff")]), lambda: None,
+                   lambda: e.destroy([cells[50].index]), lambda: None):
+        change()
+        e.render_frame(supersample=1)
+        recorded.append((calls.pop("create_render_bundle_encoder", 0), calls.pop("draw_indexed_indirect", 0)))
+    assert [n for n, _ in recorded] == [1, 0, 1, 0] and max(d for _, d in recorded) <= 32  # one chunk, not 202
+
 def test_colour_change_shows():
     from manifoldx.resources import BasicMaterial
 
@@ -196,7 +223,7 @@ def test_bundles_draw_what_direct_draws():
     """Two engines, one drawing through the bundle and one directly, agree on every frame while the
     camera turns, instances move, and batches come and go."""
     from manifoldx.components import Material, Mesh, Transform
-    from manifoldx.resources import BasicMaterial, cube
+    from manifoldx.resources import BasicMaterial, StandardMaterial, cube
 
     def scene():
         e = _engine()
@@ -204,6 +231,8 @@ def test_bundles_draw_what_direct_draws():
         cells = _unique_cubes(e, 120, mats, size=0.6)
         props = e.spawn(Mesh(cube(0.5, 0.5, 0.5)), Material(mats[3]),
                         Transform(pos=np.random.default_rng(1).uniform(-8, 8, (60, 3)) * (1, 1, 0)), n=60)
+        glass = [StandardMaterial(c, opacity=0.5) for c in ("#00ffff", "#ff8800")]  # blended: order shows
+        _unique_cubes(e, 6, glass, size=4.0)
         e.render_frame(supersample=1)
         return e, cells, props
 
@@ -227,4 +256,5 @@ def test_bundles_draw_what_direct_draws():
     step(lambda e: e.store._components["Transform"].__setitem__((rows, 1), 0.0))
     step(lambda e: e.destroy([cells[k].index for k in (0, 5, 7)]))
     step(lambda e: _unique_cubes(e, 3, [BasicMaterial("#ff00ff")], size=1.0))
+    step(lambda e: _unique_cubes(e, 2, [StandardMaterial("#00ff00", opacity=0.5)], size=3.0))
     step(lambda e: e.camera.set_pose(position=(0, 0, 30), target=(-6, 2, 0)))

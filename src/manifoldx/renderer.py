@@ -190,11 +190,13 @@ class _BatchBuffers:
     def upload_transforms(self, data: "np.ndarray"):
         n_bytes = data.nbytes
         if self.transforms_buf is None or self.transforms_capacity < n_bytes:
+            # Grown by half at least, in whole matrices: a new buffer re-records the mesh pass's bundles
+            size = max(n_bytes, -(-(self.transforms_capacity * 3 // 2) // 64) * 64)
             self.transforms_buf = self._device.create_buffer(
-                size=n_bytes,
+                size=size,
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
-            self.transforms_capacity = n_bytes
+            self.transforms_capacity = size
         self._device.queue.write_buffer(self.transforms_buf, 0, data.tobytes())
         self._transforms_key = None
 
@@ -454,11 +456,12 @@ class _Routing:
 
 class _MeshLayout:
     """Every mesh batch of one routing in draw order, visible or not: `keys[b]` and its instances
-    `order[starts[b]:starts[b + 1]]` (local indices). Kept while the routing and the materials'
-    pipeline states stay, so a still scene and a moving camera reuse it."""
+    `order[starts[b]:starts[b + 1]]` (local indices), `ranks[b]` its material's (translucent, mirrored)
+    flags, which order the batches (RenderPipeline._mesh_layout). Kept while the routing and the materials' pipeline
+    states stay, so a still scene and a moving camera reuse it."""
 
-    def __init__(self, keys, groups):
-        self.keys = keys
+    def __init__(self, keys, groups, ranks):
+        self.keys, self.ranks = keys, ranks
         self.order = np.concatenate(groups) if groups else np.zeros(0, np.int64)
         self.starts = np.cumsum([0] + [len(v) for v in groups[:-1]], dtype=np.int64)
         self.index = {k: b for b, k in enumerate(keys)}
@@ -1923,7 +1926,7 @@ class RenderPipeline:
             state = getattr(registry.get(mid), "pipeline_state", None)
             rank[mid] = (bool(state and state[0]), bool(state and state[1]))
         groups = sorted(routing.mesh_groups, key=lambda kv: rank[kv[0][3]])  # stable: first-entity order kept
-        layout = _MeshLayout([k for k, _ in groups], [v for _, v in groups])
+        layout = _MeshLayout([k for k, _ in groups], [v for _, v in groups], [rank[k[3]] for k, _ in groups])
         self._mesh_layout_cache = (routing, layout,
                                    [getattr(registry.get(m), "pipeline_state", None) for m in layout.mat_ids])
         return layout

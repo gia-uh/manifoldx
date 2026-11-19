@@ -15,13 +15,89 @@ from manifoldx.skinning import BLOCKS_BINDING, JOINTS_BINDING
 _ARGS = 5  # draw_indexed_indirect's u32s: index count, instance count, first index, base vertex, first instance
 
 
-class _Draw:
-    """A resolved draw list: `entries` are (batch, pipeline, group 0, group 1, group 2, vertex buffer,
-    index buffer) in the layout's order, `index_counts[batch]` (0 for a batch that cannot draw)."""
+_CHUNK = 32  # opaque batches per render bundle: a batch that comes or goes re-records one bundle
 
-    def __init__(self, sig, entries, index_counts, skinned, bundle):
-        self.sig, self.entries, self.index_counts, self.skinned, self.bundle = (
-            sig, entries, index_counts, skinned, bundle)
+
+class _Chunk:
+    """Batches recorded together: `keys`, their indirect-args `slots`, the geometry buffers they were
+    resolved with (`bufs`), their materials (`mids`), the resolved `entries` (slot, pipeline, group 0,
+    group 1, group 2, vertex buffer, index buffer) and the `bundle` replaying them."""
+
+    def __init__(self, rank):
+        self.rank, self.keys, self.dirty = rank, [], True
+        self.slots, self.bufs, self.mids, self.entries, self.bundle, self.skinned = [], [], set(), [], None, False
+
+
+class _Draw:
+    """The mesh pass's kept draws: every batch has a slot in the indirect-args buffer and sits in one
+    chunk. Opaque batches fill chunks of _CHUNK in the order they come, since the depth test makes their
+    order free; every other rank keeps the layout's order in one chunk. Valid while `glob` (the transform,
+    joint and light buffers) stays the same."""
+
+    def __init__(self, glob):
+        self.glob, self.geom_version, self.layout, self.args_buf = glob, None, None, None
+        self.slot, self.free, self.chunk_of = {}, [], {}  # key -> slot; free slots; key -> _Chunk
+        self.index_counts = np.zeros(0, np.uint32)  # per slot
+        self.chunks: list[_Chunk] = []
+        self.mat_sigs = {}  # mat_id -> what its bind group and pipeline were made of
+        self.batch_slots = np.zeros(0, np.int64)  # layout batch -> slot
+
+    def take_slot(self, key):
+        s = self.free.pop() if self.free else len(self.slot) + len(self.free)
+        if s >= len(self.index_counts):  # capacity doubles, so the args buffer grows rarely
+            self.index_counts = np.concatenate([self.index_counts, np.zeros(max(64, len(self.index_counts)),
+                                                                            np.uint32)])
+        self.slot[key] = s
+        return s
+
+    def drop(self, key):
+        chunk = self.chunk_of.pop(key)
+        i = chunk.keys.index(key)
+        del chunk.keys[i]
+        chunk.dirty = True
+        s = self.slot.pop(key)
+        self.free.append(s)
+        self.index_counts[s] = 0
+
+    def place(self, key, rank):
+        """Put a new opaque batch in a chunk recorded again anyway (one a batch left), else the last with
+        room, else a new one."""
+        self.take_slot(key)
+        room = [c for c in self.chunks if c.rank == rank and len(c.keys) < _CHUNK]
+        chunk = next((c for c in room if c.dirty), room[-1] if room else None)
+        if chunk is None:
+            chunk = _Chunk(rank)
+            self.chunks.append(chunk)
+        chunk.keys.append(key)
+        chunk.dirty = True
+        self.chunk_of[key] = chunk
+
+    def update(self, layout):
+        """Follow the layout's batches: drop the gone ones, place the new ones, re-order other ranks."""
+        ranks = dict(zip(layout.keys, layout.ranks))
+        for key in [k for k in self.slot if ranks.get(k) != self.chunk_of[k].rank]:
+            self.drop(key)
+        opaque = (False, False)
+        for key, rank in zip(layout.keys, layout.ranks):
+            if key not in self.slot and rank == opaque:
+                self.place(key, rank)
+        for rank in sorted(set(layout.ranks) - {opaque}):
+            keys = [k for k, r in zip(layout.keys, layout.ranks) if r == rank]
+            chunk = next((c for c in self.chunks if c.rank == rank), None)
+            if chunk is None:
+                chunk = _Chunk(rank)
+                self.chunks.append(chunk)
+            if chunk.keys != keys:
+                for key in keys:
+                    if key not in self.slot:
+                        self.take_slot(key)
+                        self.chunk_of[key] = chunk
+                chunk.keys, chunk.dirty = keys, True
+        self.chunks = sorted((c for c in self.chunks if c.keys), key=lambda c: c.rank)  # stable: opaque first
+        for c in self.chunks:
+            c.slots = [self.slot[k] for k in c.keys]
+        self.batch_slots = np.array([self.slot[k] for k in layout.keys], np.int64)
+        self.layout = layout
 
 
 def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, material_data,
@@ -82,45 +158,67 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
         return joints["bufs"]
 
     draw = rp.__dict__.get("_mesh_draw")
-    if draw is not None and draw.skinned:
+    if draw is not None and any(c.skinned for c in draw.chunks):
         joint_buffers()
     bundles = rp._use_bundles
+    geometry = engine._geometry_registry
+    glob = (rp._batch_buffers.transforms_buf, joints.get("bufs"), lit, bundles)
+    if draw is None or draw.glob != glob:
+        draw = rp._mesh_draw = _Draw(glob)
+    if draw.layout is not layout:
+        draw.update(layout)
+        live = draw.slot
+        draw_list = rp.__dict__.setdefault("_draw_list", {})
+        for key in [k for k in draw_list if k not in live][: max(0, len(draw_list) - 2 * len(live))]:
+            del draw_list[key]  # batches gone for a while: keep at most twice the live count
+    args_buf = _args_buffer(rp, len(draw.index_counts)) if bundles else None
+    if args_buf is not draw.args_buf:  # the bundles read the old one
+        draw.args_buf = args_buf
+        for c in draw.chunks:
+            c.dirty = True
+
+    # A chunk is recorded again when a geometry it draws got new buffers or a material it binds changed.
+    if draw.geom_version != geometry._version_value:
+        for c in draw.chunks:
+            if not c.dirty and any(geometry.get_gpu_buffers(k[0]) is not b for k, b in zip(c.keys, c.bufs)):
+                c.dirty = True
+        draw.geom_version = geometry._version_value
+    sigs = {mid: (m[0], getattr(m[0], "pipeline_state", None), m[2],
+                  tuple((b, h.sampler, h.view) for b, h in m[0].get_texture_bindings().items()))
+            for mid, m in mats.items()}
+    changed = {mid for mid in layout.mat_ids if sigs.get(mid) != draw.mat_sigs.get(mid)}
+    draw.mat_sigs = sigs
+    for c in draw.chunks:
+        if c.dirty or (changed and not changed.isdisjoint(c.mids)):
+            c.entries, c.skinned = _resolve(rp, engine, c.keys, c.slots, mats, lit, joint_buffers,
+                                            draw.index_counts)
+            c.bufs = [geometry.get_gpu_buffers(k[0]) for k in c.keys]
+            c.mids = {k[3] for k in c.keys}
+            c.bundle = None
+            if bundles:
+                encoder = rp._device.create_render_bundle_encoder(
+                    color_formats=[engine._texture_format],
+                    depth_stencil_format=wgpu.TextureFormat.depth32float,
+                )
+                _encode(encoder, c.entries, lambda e, s: e.draw_indexed_indirect(args_buf, 4 * _ARGS * s))
+                c.bundle = encoder.finish()
+            c.dirty = False
+
+    counts = np.zeros(len(draw.index_counts), np.int64)  # per slot: gone and hidden batches draw none
+    first = np.zeros(len(draw.index_counts), np.int64)
+    counts[draw.batch_slots], first[draw.batch_slots] = mesh_batches.counts, mesh_batches.first
     if bundles:
-        args_buf = _args_buffer(rp, len(layout.keys))
-
-    def signature():
-        return (layout, engine._geometry_registry._version_value, engine._material_registry._version_value,
-                tuple((mid, m[0], getattr(m[0], "pipeline_state", None), m[2],
-                       tuple((b, h.sampler, h.view) for b, h in m[0].get_texture_bindings().items()))
-                      for mid, m in mats.items()),
-                rp._batch_buffers.transforms_buf, joints.get("bufs"), lit, bundles and args_buf)
-
-    sig = signature()
-    if draw is None or draw.sig != sig:
-        entries, index_counts, skinned = _resolve(rp, engine, layout, mats, lit, joint_buffers)
-        bundle = None
-        if bundles:
-            encoder = rp._device.create_render_bundle_encoder(
-                color_formats=[engine._texture_format],
-                depth_stencil_format=wgpu.TextureFormat.depth32float,
-            )
-            _encode(encoder, entries, lambda e, b: e.draw_indexed_indirect(args_buf, 4 * _ARGS * b))
-            bundle = encoder.finish()
-        draw = rp._mesh_draw = _Draw(signature(), entries, index_counts, skinned, bundle)
-
-    counts, first = mesh_batches.counts, mesh_batches.first
-    if bundles:
-        args = np.zeros((len(layout.keys), _ARGS), np.uint32)
+        args = np.zeros((len(draw.index_counts), _ARGS), np.uint32)
         args[:, 0], args[:, 1], args[:, 4] = draw.index_counts, counts, first
         data = args.tobytes()
         if rp.__dict__.get("_mesh_args_bytes") != data:  # a still view writes nothing
             rp._device.queue.write_buffer(args_buf, 0, data)
             rp._mesh_args_bytes = data
-        render_pass.execute_bundles([draw.bundle])
+        render_pass.execute_bundles([c.bundle for c in draw.chunks if c.entries])
     else:
-        _encode(render_pass, [e for e in draw.entries if counts[e[0]]],
-                lambda p, b: p.draw_indexed(int(draw.index_counts[b]), int(counts[b]), first_index=0,
-                                            base_vertex=0, first_instance=int(first[b])))
+        _encode(render_pass, [e for c in draw.chunks for e in c.entries if counts[e[0]]],
+                lambda p, s: p.draw_indexed(int(draw.index_counts[s]), int(counts[s]), first_index=0,
+                                            base_vertex=0, first_instance=int(first[s])))
 
 
 def _args_buffer(rp, batches):
@@ -166,13 +264,14 @@ def _lit_groups(rp, engine):
     return ibl_bg, rp._shadow_bind_group[1]
 
 
-def _resolve(rp, engine, layout, mats, lit, joint_buffers):
-    """Each batch's pipeline, bind groups and buffers: ([entries], index counts, any skinned)."""
+def _resolve(rp, engine, keys, slots, mats, lit, joint_buffers, index_counts):
+    """Each batch's pipeline, bind groups and buffers: ([entries], any skinned). Writes each slot's
+    index count into `index_counts` (0 for a batch that cannot draw)."""
     draw_list = rp.__dict__.setdefault("_draw_list", {})  # batch key -> (buffers, material, state, pipeline, layout)
     entries = []
-    index_counts = np.zeros(len(layout.keys), np.uint32)
     skinned = False
-    for b, key in enumerate(layout.keys):
+    for b, key in zip(slots, keys):
+        index_counts[b] = 0
         geom_id, mat_type, mat_subtype, mat_id = key
 
         # Get GPU buffers for geometry
@@ -312,10 +411,7 @@ def _resolve(rp, engine, layout, mats, lit, joint_buffers):
         entries.append((b, pipeline, bind_group, ibl_bg, shadow_bg,
                         gpu_buffers["vertex_buffer"], gpu_buffers["index_buffer"]))
         index_counts[b] = gpu_buffers["index_count"]
-    live = {layout.keys[e[0]] for e in entries}
-    for key in [k for k in draw_list if k not in live][: max(0, len(draw_list) - 2 * len(live))]:
-        del draw_list[key]  # batches gone for a while: keep at most twice the live count
-    return entries, index_counts, skinned
+    return entries, skinned
 
 
 def _encode(target, entries, draw):
