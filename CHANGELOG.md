@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Camera.vertical_scale` stretches heights on screen around y = 0, for relief maps; `project` and frustum culling follow it, `get_right` and `get_up` stay unscaled.
+
 ### Changed
 
 - The main mesh pass records its batches once into a render bundle of indirect draws and replays it while the batches, registries, materials and bound buffers stay the same: a frame writes each batch's instance count and first row into one buffer, so a still city, a moving camera or a few moving instances encode no draw. Frustum culling keeps each entity's world bounding sphere and recomputes it only when its matrix or geometry changed. The engine asks for the `indirect-first-instance` feature when the adapter has it; without it the pass encodes the same cached draw list directly. `benchmarks` `frame static_city` (n static instances over n/10 batches plus 32 moving ones): 2.8x at 1k, 5.6x at 20k.
+- The GUI pass lays out again only the root panels whose widgets changed since the last frame (`layout_gui` compares each panel's fields, children and the theme's `style.version`), and its image runs reuse one bind group instead of making one per draw: a still HUD of 40 panels costs a quarter of what it did, one with a changing number about a third (`benchmarks` `frame` `gui_still`, `gui_one_text`). A field holding an object, such as an array, is compared by identity: assign it again for a change inside it to show.
 - A streamer's workers start when it is made, and `Streamer(..., warm=)` and `QuadStreamer(..., warm=)` take a callable each worker runs first: what an app loads once per worker (its data) loads while the app starts, not when the first cell is asked for (#306).
 - An `Engine` resolves the C type strings wgpu's native backend asks cffi for on a background thread from its constructor, until its first canvas starts: cffi spends about 28 ms parsing each the first time, two seconds of a first frame. `python -m benchmarks startup` times the first frame and the first streamed cell after an app's loading time (#306).
 
