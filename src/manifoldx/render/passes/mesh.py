@@ -3,6 +3,7 @@
 import numpy as np
 import wgpu
 
+from manifoldx.resources import TINTS_BINDING
 from manifoldx.skinning import BLOCKS_BINDING, JOINTS_BINDING
 
 
@@ -42,6 +43,7 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
         .astype(np.float32),
     )
     joint_blocks_uploaded = False
+    tints_uploaded = False
     draw_list = rp.__dict__.setdefault("_draw_list", {})  # batch key -> (buffers, material, state, pipeline, layout)
     seen = set()
     bound = [None] * 6  # pipeline, groups 0-2, vertex buffer, index buffer: what the pass holds now
@@ -113,6 +115,16 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
             mat_state = mat_states[mat_id] = (needs_lights, mat_buffer, mat_buffer_size)
         needs_lights, mat_buffer, mat_buffer_size = mat_state
 
+        tinted = mat_subtype == "vcolor-tint"
+        if tinted and not tints_uploaded:
+            # One tint per instance, in the same order as the transforms, uploaded once per frame on the
+            # first tinted batch; an entity without a Tint keeps its colours.
+            rows = np.concatenate([np.arange(f, f + c) for k, (f, c) in batch_draw_info.items()
+                                   if k[2] == "vcolor-tint"])
+            rp._batch_buffers.upload_tints(
+                _tints(rp._store, instance_offset, rows, np.asarray(entity_indices)[all_local_indices[rows]]))
+            tints_uploaded = True
+
         has_joints = bool(gpu_buffers.get("has_joints"))
         if has_joints:
             # Block index per instance, in the same order as the transforms,
@@ -134,6 +146,7 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
             joints_buf if has_joints else None,
             rp._batch_buffers.joint_blocks_buf if has_joints else None,
             rp._lights_buffer if needs_lights else None,
+            rp._batch_buffers.tints_buf if tinted else None,
             *((b, h.sampler, h.view) for b, h in texture_bindings.items()),
         )
         cached = rp._mesh_bind_groups.get((mat_id, has_joints))
@@ -181,6 +194,18 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
                             "buffer": rp._batch_buffers.joint_blocks_buf,
                             "offset": 0,
                             "size": rp._batch_buffers.joint_blocks_capacity,
+                        },
+                    }
+                )
+
+            if tinted:
+                bind_group_entries.append(
+                    {
+                        "binding": TINTS_BINDING,
+                        "resource": {
+                            "buffer": rp._batch_buffers.tints_buf,
+                            "offset": 0,
+                            "size": rp._batch_buffers.tints_capacity,
                         },
                     }
                 )
@@ -279,3 +304,14 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
         )
     for key in [k for k in draw_list if k not in seen][: max(0, len(draw_list) - 2 * len(seen))]:
         del draw_list[key]  # batches gone for a while: keep at most twice the live count
+
+
+def _tints(store, n, rows, entities) -> np.ndarray:
+    """(n, 4) float32 tints, one per drawn instance: at `rows`, the Tint of `entities` (white for one
+    without a Tint); every other row, which only an untinted pipeline draws, white."""
+    out = np.ones((n, 4), np.float32)
+    tint = store._components.get("Tint")
+    if tint is not None:
+        has = store._members["Tint"][entities]
+        out[rows[has], :3] = tint[entities[has]] if not has.all() else tint[entities]
+    return out

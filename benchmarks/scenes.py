@@ -50,8 +50,9 @@ def sprites_mixed(n: int):
     return engine
 
 
-def meshes(n: int, *, shadows: bool = False, moving: bool = False, vertex_colors: bool = False):
-    """n instances of one cube geometry with one StandardMaterial."""
+def meshes(n: int, *, shadows: bool = False, moving: bool = False, vertex_colors: bool = False,
+           tinted: bool = False):
+    """n instances of one cube geometry with one StandardMaterial; tinted gives each its own Tint."""
     import manifoldx as mx
     from manifoldx.components import Material, Mesh, Transform
     from manifoldx.resources import DirectionalLight, StandardMaterial, cube
@@ -59,10 +60,16 @@ def meshes(n: int, *, shadows: bool = False, moving: bool = False, vertex_colors
     engine = headless_engine(n)
     engine.camera.fit(60)
     geo = cube(0.5, 0.5, 0.5)
-    if vertex_colors:
+    if vertex_colors or tinted:
         geo["colors"] = np.ones((len(geo["positions"]), 3), np.float32)
-    mat = StandardMaterial("#88aaff", vertex_colors=vertex_colors)
-    engine.spawn(Mesh(geo), Material(mat), Transform(pos=_positions(n)), n=n)
+    mat = StandardMaterial("#88aaff", vertex_colors=vertex_colors or tinted, tinted=tinted)
+    if tinted:
+        from manifoldx.components import Tint
+
+        rgb = np.random.default_rng(1).uniform(0.2, 1.0, (n, 3))
+        engine.spawn(Mesh(geo), Material(mat), Transform(pos=_positions(n)), Tint(rgb=rgb), n=n)
+    else:
+        engine.spawn(Mesh(geo), Material(mat), Transform(pos=_positions(n)), n=n)
     if shadows:
         engine.set_sun(DirectionalLight("#ffffff", 2.0, (-1, -2, -1)))
         engine.enable_shadows()

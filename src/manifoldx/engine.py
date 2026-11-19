@@ -129,6 +129,7 @@ class EntityHandle:
         self._engine = engine
         self.index = index
         self._geometry_id = geometry_id
+        self.indices = np.array([index], np.int32)  # every entity the spawn made (Engine.spawn with n > 1)
         self.transform = _TransformProxy(engine.store, index, engine)
 
     @_deferred.deferred_in_pipeline
@@ -1366,7 +1367,8 @@ class Engine:
         return processed_kwargs, mesh_geo_id
 
     def spawn(self, *args, n: int = 1, **kwargs):
-        """Spawn n entities now, with these components, and return a handle to the first (None for n=0).
+        """Spawn n entities now, with these components, and return a handle to the first (None for n=0);
+        its `indices` holds all n entity indices, which need not be consecutive.
 
         From a parallel system the indices are reserved now (so the handle is
         valid at once) and the rows, the alive bit and the hooks are written
@@ -1379,9 +1381,11 @@ class Engine:
         if self._deferring():
             indices = self.store.reserve(n)
             _deferred.defer(self, self.store.write_reserved, indices, **processed_kwargs)
-            return EntityHandle(self, int(indices[0]), mesh_geo_id)
-        indices = self.store.spawn(n, **processed_kwargs)
-        return EntityHandle(self, int(indices[0]), mesh_geo_id)
+        else:
+            indices = self.store.spawn(n, **processed_kwargs)
+        handle = EntityHandle(self, int(indices[0]), mesh_geo_id)
+        handle.indices = indices
+        return handle
 
     @_deferred.deferred_in_pipeline
     def set_joints(self, indices, matrices):

@@ -17,6 +17,7 @@ from manifoldx.skinning import (
     JointStore,
     skin_shader,
 )
+from manifoldx.resources import TINTS_BINDING, tint_shader
 from manifoldx.viz.materials import ColormapMaterial
 
 
@@ -164,6 +165,8 @@ class _BatchBuffers:
         self.label_indices_capacity = 0
         self.joint_blocks_buf = None
         self.joint_blocks_capacity = 0
+        self.tints_buf = None
+        self.tints_capacity = 0
         self._transforms_key = None  # (entities, cache version) of what transforms_buf holds, if known
 
     def upload_transforms_for(self, entities: "np.ndarray", cache: "TransformCache", build) -> None:
@@ -195,6 +198,17 @@ class _BatchBuffers:
             self.transforms_capacity = n_bytes
         self._device.queue.write_buffer(self.transforms_buf, 0, data.tobytes())
         self._transforms_key = None
+
+    def upload_tints(self, data: "np.ndarray"):
+        """Upload (N, 4) float32 tints, one per instance in the transforms' order."""
+        n_bytes = data.nbytes
+        if self.tints_buf is None or self.tints_capacity < n_bytes:
+            self.tints_buf = self._device.create_buffer(
+                size=n_bytes,
+                usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+            )
+            self.tints_capacity = n_bytes
+        self._device.queue.write_buffer(self.tints_buf, 0, data.tobytes())
 
     def upload_scalar_values(self, data: "np.ndarray"):
         n_bytes = data.nbytes
@@ -985,9 +999,11 @@ class RenderPipeline:
         )
         if is_textured:
             shader_source = material._compile(textured=True)
-        elif material_subtype == "vcolor":
+        elif material_subtype in ("vcolor", "vcolor-tint"):
             shader_source = material._compile(vertex_colors=True,
                                               facade=(geometry_buffers or {}).get("has_facade", False))
+            if material_subtype == "vcolor-tint":
+                shader_source = tint_shader(shader_source)
         else:
             shader_source = material._compile()
         # Skinned geometry gets its own pipeline (the key holds geometry_id) whose
@@ -1165,6 +1181,14 @@ class RenderPipeline:
                             },
                         ]
                     )
+            if material_subtype == "vcolor-tint":
+                bind_group_entries.append(
+                    {
+                        "binding": TINTS_BINDING,
+                        "visibility": wgpu.ShaderStage.VERTEX,
+                        "buffer": {"type": wgpu.BufferBindingType.read_only_storage},
+                    }
+                )
             if skinned:
                 bind_group_entries.extend(
                     {
@@ -1219,7 +1243,7 @@ class RenderPipeline:
                         "shader_location": 2,
                     }
                 )
-            elif material_subtype == "vcolor":
+            elif material_subtype in ("vcolor", "vcolor-tint"):
                 vertex_attributes.append(
                     {
                         "format": wgpu.VertexFormat.float32x4,  # colour + surface id

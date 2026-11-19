@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Tint`, a per-instance colour: a `StandardMaterial(vertex_colors=True, tinted=True)` multiplies each entity's vertex colours by its `Tint(rgb=...)`, so many instances of one geometry stay one instanced draw while each wears its own colour; an entity without a Tint keeps its colours. `Engine.spawn(..., n=)` returns a handle whose `indices` holds every entity it made. Benchmark case `frame meshes_tinted`.
+
 ### Changed
 
 - A streamer's workers start when it is made, and `Streamer(..., warm=)` and `QuadStreamer(..., warm=)` take a callable each worker runs first: what an app loads once per worker (its data) loads while the app starts, not when the first cell is asked for (#306).
