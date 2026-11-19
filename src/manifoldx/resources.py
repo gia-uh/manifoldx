@@ -1281,6 +1281,24 @@ _STANDARDMATERIAL_VCOLOR_SHADER = (
 )
 
 
+TINTS_BINDING = 10  # group(0) storage: array<vec4<f32>>, one Tint per instance, in the transforms' order
+
+
+def tint_shader(source: str) -> str:
+    """A vertex-colour shader whose vertex colours are multiplied by the instance's tint (StandardMaterial
+    with tinted=True): the tints sit in a storage buffer in the same order as the transforms."""
+    return source.replace(
+        "@group(0) @binding(3) var<uniform> light_data: LightData;\n",
+        "@group(0) @binding(3) var<uniform> light_data: LightData;\n"
+        f"@group(0) @binding({TINTS_BINDING}) var<storage, read> tints: array<vec4<f32>>;\n",
+        1,
+    ).replace(
+        "    out.vcolor = in.color;\n",
+        "    out.vcolor = vec4<f32>(in.color.xyz * tints[in.instance].xyz, in.color.w);\n",
+        1,
+    )
+
+
 # Surface patterns (vertex_colors materials): id -> (scale, contrast, tones, ink width,
 # ink darkness). Ids: 1 grass, 2 cobbles, 3 veins, 4 brick, 5 blocks, 6 planks, 7 tiles;
 # 0 draws the flat vertex colour. Tuned values from a game's art direction; blocks
@@ -1460,6 +1478,7 @@ class StandardMaterial(Material):
         opacity=1.0,
         cut=None,
         surface_patterns=None,
+        tinted=False,
     ):
         from manifoldx.textures import TextureHandle
 
@@ -1491,13 +1510,18 @@ class StandardMaterial(Material):
         # draws, such as far land under near water. Set it again any frame to move it.
         self.cut = cut
         self.surface_patterns = {**SURFACE_PATTERNS, **(surface_patterns or {})}
+        # tinted (with vertex_colors): each entity's Tint component multiplies its vertex colours, so
+        # one geometry drawn in one batch can wear a different colour per instance.
+        if tinted and not vertex_colors:
+            raise ValueError("tinted needs vertex_colors=True")
+        self.tinted = bool(tinted)
 
     @property
     def pipeline_subtype(self):
         if self.albedo_map is not None:
             return "textured"
         if self.vertex_colors:
-            return "vcolor"
+            return "vcolor-tint" if self.tinted else "vcolor"
         return None
 
     @property

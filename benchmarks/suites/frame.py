@@ -43,6 +43,12 @@ def meshes_vcolor(n):
     return _frame(scenes.meshes(n, vertex_colors=True))
 
 
+@case("frame", "meshes_tinted", sizes=SIZES, smoke=10)
+def meshes_tinted(n):
+    """n static instances of one vertex-coloured mesh, each with its own Tint (StandardMaterial(tinted=True))."""
+    return _frame(scenes.meshes(n, tinted=True))
+
+
 @case("frame", "meshes_shadow", sizes=SIZES, smoke=10)
 def meshes_shadow(n):
     """n static mesh instances under a sun with shadows (auto-fit)."""

@@ -417,3 +417,21 @@ class Layer(Component):
     """
 
     layer: Float = 0.0
+
+
+from manifoldx.types import Vector3  # noqa: E402
+
+
+class Tint(Component):
+    """A colour this entity's mesh is multiplied by, per instance; entities without one keep their colours.
+
+    Only a StandardMaterial made with tinted=True reads it, so a thousand trees of one geometry and one
+    material stay one instanced draw while each wears its own shade:
+
+        leaf = StandardMaterial("#ffffff", vertex_colors=True, tinted=True)
+        engine.spawn(Mesh(crown), Material(leaf), Transform(pos=spots), Tint(rgb=shades), n=len(spots))
+
+    The colour is linear, like the shader's, and multiplies the vertex colour.
+    """
+
+    rgb: Vector3 = (1.0, 1.0, 1.0)
