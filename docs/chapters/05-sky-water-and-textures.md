@@ -176,6 +176,18 @@ print(len(cache), cache.get("first"), cache.get("third"))
 
 That prints `2 None 3`: the oldest entry was evicted, the newest is still there.
 
+A texture can also come from the scene itself. `engine.render_to_texture(camera,
+(width, height))` renders what a second camera sees into a texture before each
+frame's main pass and returns its handle, which works as an `albedo_map` or as a
+GUI Image's source; with `live=False` it renders once and then only when
+`refresh_texture` asks. To get its pixels back, as a game does to save the
+player's photo as a PNG, `engine.read_texture(handle)` returns a
+`concurrent.futures.Future`. The copy is made on the next frame, after the
+texture renders, and read on the frame after that, so the future holds an
+(height, width, 3) RGB array once one or two more frames have been drawn, by the
+window's loop or by `render_frame` calls. Reading a `live=False` texture that
+has not rendered yet waits for its first render.
+
 ## Water
 
 A fountain that is a stone box is a plinth. The water is its own material,

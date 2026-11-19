@@ -536,15 +536,18 @@ def server_url(root="."):
 
 
 class Readback:
-    """A presented frame on its way to PNG bytes for the looks waiting, kept off the frames.
+    """A texture on its way back to the CPU for the futures waiting on it, kept off the frames.
 
-    The frame only queues a copy of its texture into a buffer. The next frame maps the buffer,
-    which the GPU has filled by then, and a thread encodes the PNG and answers the looks."""
+    The frame only queues a copy of the texture into a buffer. The next frame calls finish,
+    which maps the buffer (the GPU has filled it by then) and answers the futures. With
+    `encode` (the dev server's look turns pixels into PNG bytes) a thread does that work
+    and answers them; without it they get the (h, w, 3) uint8 RGB pixels at once."""
 
-    def __init__(self, device, texture, texture_format, looks):
+    def __init__(self, device, texture, texture_format, futures, encode=None):
         import wgpu
 
-        self.looks, self.bgra = looks, str(texture_format).startswith("bgra")
+        self.futures, self.encode = futures, encode
+        self.bgra = str(texture_format).startswith("bgra")
         self.w, self.h = texture.size[0], texture.size[1]
         self.row = (self.w * 4 + 255) // 256 * 256  # a buffer copy's rows are 256-byte aligned
         try:
@@ -555,16 +558,16 @@ class Readback:
                                            {"buffer": self.buffer, "offset": 0, "bytes_per_row": self.row,
                                             "rows_per_image": self.h}, (self.w, self.h, 1))
             device.queue.submit([encoder.finish()])
-        except Exception as e:  # noqa: BLE001  a surface without COPY_SRC: the looks say so, drawing goes on
+        except Exception as e:  # noqa: BLE001  a texture without COPY_SRC: the futures say so, drawing goes on
             self.fail(e)
 
     def fail(self, e):
-        for look in self.looks:
-            look.set_exception(e)
-        self.looks = []
+        for future in self.futures:
+            future.set_exception(e)
+        self.futures = []
 
     def finish(self):
-        if not self.looks:
+        if not self.futures:
             return
         import wgpu
 
@@ -574,16 +577,19 @@ class Readback:
             self.buffer.unmap()
         except Exception as e:  # noqa: BLE001
             return self.fail(e)
-        threading.Thread(target=self._encode, args=(data,), name="manifoldx-look", daemon=True).start()
+        if self.encode is None:
+            return self._answer(data, lambda rgb: rgb)
+        threading.Thread(target=self._answer, args=(data, self.encode), name="manifoldx-look",
+                         daemon=True).start()
 
-    def _encode(self, data):
+    def _answer(self, data, encode):
         try:
             pixels = np.frombuffer(data, np.uint8).reshape(self.h, self.row)[:, :self.w * 4].reshape(self.h, self.w, 4)
-            shot = png(pixels[..., [2, 1, 0]] if self.bgra else pixels[..., :3])
+            result = encode(np.ascontiguousarray(pixels[..., [2, 1, 0]] if self.bgra else pixels[..., :3]))
         except Exception as e:  # noqa: BLE001
             return self.fail(e)
-        for look in self.looks:
-            look.set_result(shot)
+        for future in self.futures:
+            future.set_result(result)
 
 
 def png(rgb):
