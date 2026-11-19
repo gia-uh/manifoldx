@@ -60,6 +60,8 @@ def test_one_material_sets_its_state_once(monkeypatch):
 
     e = _engine()
     _unique_cubes(e, 200, [StandardMaterial("#88aaff")])
+    e.render_frame(supersample=1)
+    e._render_pipeline._use_bundles = False  # direct draws: a bundle would hold them
     for _ in range(2):
         e.render_frame(supersample=1)
     calls = {}
@@ -69,6 +71,28 @@ def test_one_material_sets_its_state_once(monkeypatch):
     e.render_frame(supersample=1)
     assert calls["draw_indexed"] >= 200
     assert calls["set_pipeline"] <= 5  # skybox, sprites and the one mesh pipeline at most
+
+
+def test_still_and_turning_views_replay_one_bundle(monkeypatch):
+    import wgpu.backends.wgpu_native as native
+    from manifoldx.resources import StandardMaterial
+
+    e = _engine()
+    _unique_cubes(e, 200, [StandardMaterial("#88aaff"), StandardMaterial("#ffaa44")])
+    for _ in range(2):
+        e.render_frame(supersample=1)
+    if not e._render_pipeline._use_bundles:
+        pytest.skip("device lacks indirect-first-instance")
+    calls = {}
+    for cls, name in [(native.GPUDevice, "create_render_bundle_encoder"),
+                      (native.GPURenderPassEncoder, "execute_bundles"),
+                      (native.GPURenderPassEncoder, "draw_indexed")]:
+        real, spy = _count(cls, name, calls)
+        monkeypatch.setattr(cls, name, spy)
+    for x in (0.0, 0.0, 6.0, 12.0):  # still, then turning: other cubes culled
+        e.camera.set_pose(position=(0, 0, 30), target=(x, 0, 0))
+        e.render_frame(supersample=1)
+    assert calls == {"execute_bundles": 4}
 
 
 def test_colour_change_shows():
@@ -104,3 +128,103 @@ def test_two_materials_render_as_before():
     _unique_cubes(e, 300, [StandardMaterial("#88aaff"), StandardMaterial("#ffaa44")])
     frames = [e.render_frame(supersample=1) for _ in range(3)]
     assert np.array_equal(frames[1], frames[2]) and frames[2].sum() > 0
+
+
+@pytest.fixture(params=["bundles", "direct"])
+def city(request):
+    """A still scene of many batches (unique cubes over two materials), drawn through a render
+    bundle or with direct draws; the tests then change one thing and look for it on screen."""
+    from manifoldx.resources import BasicMaterial
+
+    e = _engine()
+    _unique_cubes(e, 300, [BasicMaterial("#202020"), BasicMaterial("#303030")], size=0.2)
+    e.render_frame(supersample=1)
+    if request.param == "direct":
+        e._render_pipeline._use_bundles = False
+    elif not getattr(e._render_pipeline, "_use_bundles", True):
+        pytest.skip("device lacks indirect-first-instance")
+    for _ in range(2):
+        e.render_frame(supersample=1)
+    return e
+
+
+def _red(img):
+    return int(((img[..., 0] > 200) & (img[..., 1] < 50)).sum())
+
+
+def _red_cube(e, at):
+    from manifoldx.components import Material, Mesh, Transform
+    from manifoldx.resources import BasicMaterial, cube
+
+    return e.spawn(Mesh(cube(3, 3, 3)), Material(BasicMaterial("#ff0000")), Transform(pos=at))
+
+
+def test_spawn_into_a_still_scene_shows(city):
+    assert _red(city.render_frame(supersample=1)) == 0
+    _red_cube(city, (0, 0, 5))
+    assert _red(city.render_frame(supersample=1)) > 20
+
+
+def test_destroy_from_a_still_scene_shows(city):
+    h = _red_cube(city, (0, 0, 5))
+    for _ in range(2):
+        assert _red(city.render_frame(supersample=1)) > 20
+    city.destroy([h.index])
+    assert _red(city.render_frame(supersample=1)) == 0
+
+
+def test_moved_transform_in_a_still_scene_shows(city):
+    h = _red_cube(city, (-6, 0, 5))
+    for _ in range(2):
+        left = city.render_frame(supersample=1)
+    city.store._components["Transform"][h.index, 0] = 6.0
+    right = city.render_frame(supersample=1)
+    cols = lambda img: np.flatnonzero(((img[..., 0] > 200) & (img[..., 1] < 50)).any(axis=0))  # noqa: E731
+    assert cols(left).mean() < 32 < cols(right).mean()
+
+
+def test_a_culled_mesh_shows_again_when_the_camera_turns_back(city):
+    _red_cube(city, (0, 0, 5))
+    seen = _red(city.render_frame(supersample=1))
+    city.camera.set_pose(position=(0, 0, 30), target=(0, 200, 0))  # looking up: the cube is culled
+    city.render_frame(supersample=1)
+    city.camera.set_pose(position=(0, 0, 30), target=(0, 0, 0))
+    assert seen > 20 and _red(city.render_frame(supersample=1)) == seen
+
+
+def test_bundles_draw_what_direct_draws():
+    """Two engines, one drawing through the bundle and one directly, agree on every frame while the
+    camera turns, instances move, and batches come and go."""
+    from manifoldx.components import Material, Mesh, Transform
+    from manifoldx.resources import BasicMaterial, cube
+
+    def scene():
+        e = _engine()
+        mats = [BasicMaterial(c) for c in ("#ff0000", "#00ff00", "#0000ff", "#ffff00")]
+        cells = _unique_cubes(e, 120, mats, size=0.6)
+        props = e.spawn(Mesh(cube(0.5, 0.5, 0.5)), Material(mats[3]),
+                        Transform(pos=np.random.default_rng(1).uniform(-8, 8, (60, 3)) * (1, 1, 0)), n=60)
+        e.render_frame(supersample=1)
+        return e, cells, props
+
+    a, cells, props_a = scene()
+    b, _, props_b = scene()
+    if not a._render_pipeline._use_bundles:
+        pytest.skip("device lacks indirect-first-instance")
+    b._render_pipeline._use_bundles = False
+    rows = np.arange(props_a.index, props_a.index + 20)  # spawned in one block
+    assert props_a.index == props_b.index
+
+    def step(fn):
+        for e in (a, b):
+            fn(e)
+        ia, ib = a.render_frame(supersample=1), b.render_frame(supersample=1)
+        assert ia.sum() > 0 and np.array_equal(ia, ib)
+
+    for x in (0.0, 4.0, 9.0, 3.0):
+        step(lambda e, x=x: e.camera.set_pose(position=(0, 0, 30), target=(x, 0, 0)))
+    step(lambda e: e.store._components["Transform"].__setitem__((rows, 1), 40.0))  # props leave the view
+    step(lambda e: e.store._components["Transform"].__setitem__((rows, 1), 0.0))
+    step(lambda e: e.destroy([cells[k].index for k in (0, 5, 7)]))
+    step(lambda e: _unique_cubes(e, 3, [BasicMaterial("#ff00ff")], size=1.0))
+    step(lambda e: e.camera.set_pose(position=(0, 0, 30), target=(-6, 2, 0)))
