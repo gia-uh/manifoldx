@@ -466,7 +466,8 @@ class Engine:
 
         self.state = hot._state if hot._state is not None else hot.State()
         self._looks = []  # futures waiting for the next presented frame as PNG bytes (the dev server's look)
-        self._look_copy = None  # a frame copied for them, read back on the frame after
+        self._texture_reads = {}  # read_texture futures by texture id, copied on the next frame
+        self._readbacks = []  # textures copied this frame for looks and reads, read back on the frame after
         # Seconds the last frame spent: updating (events, async, systems), acquiring
         # the window's next image (vsync, or the GPU behind), rendering the rest, and
         # (in a pipelined frame) how much of the update overlapped the render.
@@ -1598,6 +1599,7 @@ class Engine:
         # can render. A dev-channel look also takes the serial path, so the
         # frame it captures is the one its systems made.
         pipeline = self._pipeline_on and self._pipeline_frames > 0 and not self._looks
+        pipeline = pipeline and not self._texture_reads
         if not pipeline:
             # Step 5: run user systems (may emit commands).
             self.systems.run_all(self, dt)
@@ -1703,9 +1705,9 @@ class Engine:
         # Ensure render pipeline is initialized
         self._render_pipeline._ensure_pipeline(self._device, self._texture_format)
 
-        if self._look_copy is not None:  # the GPU finished last frame's copy by now
-            copy, self._look_copy = self._look_copy, None
-            copy.finish()
+        readbacks, self._readbacks = self._readbacks, []
+        for readback in readbacks:  # the GPU finished last frame's copies by now
+            readback.finish()
 
         # Get the next frame's texture and create view; waiting here is vsync or the GPU behind
         acquiring = time.perf_counter()
@@ -1768,7 +1770,8 @@ class Engine:
             looks, self._looks = self._looks, []
             from manifoldx import devchannel
 
-            self._look_copy = devchannel.Readback(self._device, texture, self._texture_format, looks)
+            self._readbacks.append(devchannel.Readback(self._device, texture, self._texture_format,
+                                                       looks, encode=devchannel.png))
 
     def log(self, message: str) -> None:
         """A line for the dev log under `manifoldx run` (its page, /api/log, .manifoldx/log.txt); nothing otherwise.
@@ -1789,7 +1792,8 @@ class Engine:
         `background` is the clear colour in sRGB, like GUI colours: a hex string or an
         RGB or RGBA tuple in [0, 1] (default: the engine's background, opaque). The
         world's fog applies only with fog=True: fog grows with distance from the
-        camera, and a minimap camera high above the ground would come out pale."""
+        camera, and a minimap camera high above the ground would come out pale.
+        read_texture(handle) reads the texture's pixels back as a numpy array."""
         from manifoldx.textures import TextureHandle
 
         if self._device is None:
@@ -1839,8 +1843,43 @@ class Engine:
         """Stop rendering a render_to_texture view; its texture keeps the last image."""
         self._views.pop(handle.id, None)
 
+    def read_texture(self, handle):
+        """Read a texture's pixels back from the GPU, without stalling the frame.
+
+        `handle` is the TextureHandle that render_to_texture returns. The method returns a
+        concurrent.futures.Future that resolves to a numpy array of shape (height, width, 3),
+        dtype uint8, holding the texture's RGB pixels in sRGB, the way they would appear on
+        screen. The copy is queued on the next frame, after the texture renders, and read
+        on the frame after that, so the future is done after one or two more frames, from
+        the window's loop or from render_frame calls alike; nothing resolves it while no
+        frames are drawn. A texture made with live=False that has not rendered yet is read
+        after its first render, not before; one that already rendered is read as it stands,
+        and refresh_texture before read_texture reads it after it renders again. The future
+        holds an exception instead when the copy fails, for a texture that cannot be copied."""
+        from concurrent.futures import Future
+
+        future = Future()
+        self._texture_reads.setdefault(handle.id, (handle, []))[1].append(future)
+        return future
+
+    def _copy_reads(self, rendering) -> None:
+        """Queue the copies read_texture asked for, of textures that will not render this
+        frame (now) or of those in `rendering`, the ids just rendered."""
+        from manifoldx import devchannel
+
+        reads = self._texture_reads
+        for tid in list(reads):
+            view = self._views.get(tid)
+            if (view is not None and (view.live or view.pending)) and tid not in rendering:
+                continue
+            handle, futures = reads.pop(tid)
+            self._readbacks.append(devchannel.Readback(self._device, handle.texture,
+                                                       handle.texture.format, futures))
+
     def _render_views(self) -> None:
         views = [v for v in self._views.values() if v.live or v.pending]
+        if self._texture_reads:
+            self._copy_reads(())  # textures that do not render this frame hold their last image
         if not views:
             return
         saved = (self._camera, self.w, self.h, self.fog_enabled)
@@ -1870,6 +1909,8 @@ class Engine:
                 self._render_pipeline._render_scene_passes(self, render_pass)
                 render_pass.end()
                 self._device.queue.submit([encoder.finish()])
+                if view.handle.id in self._texture_reads:
+                    self._copy_reads((view.handle.id,))
         finally:
             self._camera, self.w, self.h, self.fog_enabled = saved
 
