@@ -1556,11 +1556,11 @@ class RenderPipeline:
             centre, radius = self._world_spheres(engine, geom_ids, models)
         else:
             centre, radius = self._entity_spheres(engine, entities, geom_ids, models)
-        mat_ids = np.asarray(mat_ids).astype(np.int64)
-        for mid in np.unique(mat_ids):
-            mirror = getattr(engine._material_registry.get(int(mid)), "mirror", None)
+        # The registry holds a few materials and the frame many instances: ask each material, not each instance
+        for mid, mat in list(engine._material_registry._materials.items()):
+            mirror = getattr(mat, "mirror", None)
             if mirror is not None:
-                sel = mat_ids == mid
+                sel = np.asarray(mat_ids) == mid
                 centre[sel, 1] = 2.0 * mirror - centre[sel, 1]
         k = np.asarray(clip, dtype=np.float64)
         planes = np.stack([k[3] + k[0], k[3] - k[0], k[3] + k[1], k[3] - k[1], k[2], k[3] - k[2]])
