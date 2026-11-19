@@ -91,3 +91,17 @@ def test_a_changed_tint_shows_through_the_recorded_bundle():
     _, right = _halves(np.asarray(canvas.draw()).astype(int))
     assert (right[:, 2] > right[:, 0] + 20).any()  # blue now
     assert [c.bundle for c in eng._render_pipeline._mesh_draw.chunks] == chunks  # not recorded again
+
+
+def test_a_tinted_batch_out_of_view_beside_one_in_view():
+    eng, canvas = _offscreen()
+    plain = StandardMaterial("#ffffff", roughness=1.0, vertex_colors=True)
+    eng.spawn(Mesh(_quad()), Material(plain), Transform(pos=(-1.2, 0, 0)))
+    h = eng.spawn(Mesh(_quad()), Material(_white()), Transform(pos=(0, 0, 50)), Tint(rgb=(1, 0, 0)))  # behind
+    eng._draw_frame()
+    canvas.draw()
+    assert eng._render_pipeline.drawn == 1
+    eng.store._components["Transform"][h.index, :3] = (1.2, 0, 0)
+    eng._draw_frame()
+    _, right = _halves(np.asarray(canvas.draw()).astype(int))
+    assert (right[:, 0] > right[:, 1] + 20).any()  # red, once in view

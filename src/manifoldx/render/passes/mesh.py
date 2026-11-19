@@ -425,14 +425,20 @@ def _resolve(rp, engine, keys, slots, mats, lit, joint_buffers, tints, index_cou
 
 def _upload_tints(rp, mesh_batches, entities):
     """The tints buffer, one (4,) tint per drawn instance in the transforms' order, written when its
-    bytes changed; None when no tinted batch draws this frame. Only the tinted batches' rows are
-    gathered (an entity without a Tint keeps its colours); every other row is white."""
+    bytes changed; None when the layout holds no tinted batch. Only the tinted batches' rows are
+    gathered (an entity without a Tint keeps its colours); every other row is white. A tinted batch
+    culled this frame still binds the buffer, so it is kept, unwritten."""
     layout = mesh_batches.layout
     flags = layout.__dict__.get("_tinted")
     if flags is None:
         flags = layout._tinted = np.array([k[2] == "vcolor-tint" for k in layout.keys], bool)
-    if not mesh_batches.counts[flags].any():
+    if not flags.any():
         return None
+    bufs = rp._batch_buffers
+    if not mesh_batches.counts[flags].any():
+        if bufs.tints_buf is None:
+            bufs.upload_tints(np.ones((1, 4), np.float32))
+        return bufs.tints_buf
     rows = np.flatnonzero(np.repeat(flags, mesh_batches.counts))
     out = np.ones((len(entities), 4), np.float32)
     tint = rp._store._components.get("Tint")
@@ -441,7 +447,6 @@ def _upload_tints(rp, mesh_batches, entities):
         has = rp._store._members["Tint"][ents]
         out[rows[has], :3] = tint[ents[has]]
     data = out.tobytes()
-    bufs = rp._batch_buffers
     if bufs.tints_buf is None or bufs.tints_capacity < len(data):
         bufs.upload_tints(out)
     elif rp.__dict__.get("_mesh_tint_bytes") != data:  # a still view writes nothing
