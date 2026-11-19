@@ -158,3 +158,28 @@ def independent_systems(k: int, *, parallel: bool = True):
             engine.system(step)
 
     return engine
+
+
+def gui_hud(n: int, size: int = 640):
+    """An empty scene under n HUD panels, each a background, two font lines (drawn through the image path,
+    like SVG icons) and an atlas line, laid out at the four corners and scaled from a 360-pixel design
+    height. Returns (engine, texts)."""
+    from importlib.resources import files
+
+    import manifoldx as mx
+    from manifoldx.gui import Panel, Text
+
+    font = str(files("manifoldx.viz.assets").joinpath("DejaVuSansMono.ttf"))
+    engine = mx.Engine("gui", width=size, height=size)
+    engine.gui.design_height = 360
+    corners = ("top-left", "top-right", "bottom-left", "bottom-right")
+    texts = []
+    for i in range(n):
+        text = Text(f"{i:03d}", style_overrides={"font": font, "font_size": 18, "fg": "#ffffff"})
+        texts.append(text)
+        engine.gui.append(Panel(
+            [Text("N", style_overrides={"font": font, "font_size": 12, "fg": "#f0c020"}), text, Text("km/h", style_overrides={"font_size": 10})],
+            anchor=corners[i % 4], offset=(8 + 40 * (i // 4 % 8), 8 + 30 * (i // 32)),
+            style_overrides={"direction": "h", "gap": 4, "padding": 4, "bg": "#202020c0"},
+        ))
+    return engine, texts
