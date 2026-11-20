@@ -23,7 +23,27 @@ uv run manifoldx bench micro benchmarks.suites.frame --case sprites --profile
 uv run python -m benchmarks frame --case sprites               # the same micro cases by suite name
 ```
 
-Scenarios are in `benchmarks/scenarios.py`, micro suites in `benchmarks/suites/`, both listed under `[tool.manifoldx.bench]` in `pyproject.toml`. Chapter 18 of the book explains steps, phases, loops (`--loop serial|pipelined|check`), `--step 1/30`, `--param`, `--smoke` and the run folder (`run.json`, `frames.npz`, `events.jsonl`, `shots/`). A run that fails still writes its folder and exits 1; progress goes to stderr once a second, so a monitor can count it.
+Scenarios are in `benchmarks/scenarios.py`, micro suites in `benchmarks/suites/`, both listed under `[tool.manifoldx.bench]` in `pyproject.toml`. Chapter 18 of the book explains steps, phases, loops (`--loop serial|pipelined|check`), `--step 1/30`, `--param`, `--smoke` and the run folder (`run.json`, `frames.npz`, `events.jsonl`, `shots/`). A run that fails still writes its folder and exits 1; progress goes to stderr once a second with the step it is on (`step 3/5`), so a monitor can count it.
+
+`--sizes` replaces every selected case's sizes, so select cases of one kind with it: a modeling size is an icosphere subdivision level, and 1000 there runs out of memory.
+
+## Which probe answers which question
+
+Every run records all of them; `manifoldx bench show <folder> --probe P [--phase NAME]` prints one.
+
+| Question | Probe | Where to look |
+|---|---|---|
+| Where does the frame go: systems, render, waiting for the GPU? | `split`, `systems` | `split_ms`, `systems_ms` per phase |
+| Which part of one system is slow? | `spans` | wrap the part in `bench.span("name")`; `spans_ms` shows `system/name` |
+| How many draws, material reads, bundles re-recorded or bytes uploaded a frame? | `counters` | mean and max per phase; `counters` in `frames.npz` per frame |
+| When did the streamer draw the first detail, and when did it settle? | `streamer` | `first_drawn_s`, `settled_s`, node events by level |
+| How long does a build take inside the worker? | `workers` | jobs, p50 and max ms by kind; an app's own pools use `bench.worker_span` |
+| How much memory, and how much time in garbage collection? | `memory` | `rss_mb`, `gpu_mb`, `gc`, `folders_mb`; per phase `rss_max_mb`, `gc_ms` |
+| Is anything drawn far from the floating origin? | `origin` | `origin_max_m` per phase |
+| A number only the app knows (cars, traffic ms)? | `app` | `bench.metric(name, value)`; the summary's `app` dict |
+| Was the machine loaded, is this a software rasterizer, a free-threaded build? | `host` | `load_*`, `software`, `free_threaded` |
+
+`cpu_ms` is the process's CPU time over a frame, every thread included; `draw_ms` is the engine's frame on the main thread. A `cpu` well above `draw` is work beside the frame, such as a worker thread's builds.
 
 ## Comparing with another copy
 
@@ -47,7 +67,7 @@ The cases run twice in fresh processes, on the other copy's `src/` and on this o
 ## Reading the numbers
 
 - `measure` reports the best of 5 runs; `frame_ms` the median of 5 frames after 2 warm-up frames, at a 64×64 target so the rasterizer adds little. Both are CPU time.
-- On a shared or GPU-less machine, run-to-run noise is about ±10 %; a speed-up under 1.3× needs a second run before it counts.
+- On a shared or GPU-less machine, run-to-run noise is about ±10 %; a speed-up under 1.3× needs a second run before it counts. `--against` runs one copy after the other, so a load that changes between them lands on one side: with a load average near the CPU count, single cases swing from 0.4× to 1.7× either way. Wait for a quiet machine or look at the median over cases.
 - Without a GPU, wgpu runs on a software Vulkan driver: CPU-side costs are real, GPU-side costs (raster, uploads, readbacks) are not those of a real GPU. Say so when a fix is about GPU transfers.
 - `matrix_recomputes` on frame cases counts `TransformCache._recompute_matrices` calls in one frame.
 - `web web-crowd` exports an app of `n` boxes in one batch with a query system moving all of them, opens it in headless Chromium (SwiftShader) and reports the median of 60 ticks' `__mx.frameMs.work`: the transpiled systems, the flush and the batches' sync, not the render. `calls` is the last frame's draw calls (1, the one batch). It needs `uv sync --group browser` and a Chromium Playwright can launch; without them the case reports `RuntimeError: playwright not installed` or `chromium not installed`. It reports and gates nothing.
