@@ -1299,6 +1299,56 @@ def tint_shader(source: str) -> str:
     )
 
 
+# A 4x4 Bayer matrix and the screen-door test of a Fade (StandardMaterial with faded=True, and the shadow
+# pass): a fade f in 0..1 keeps the pixels whose threshold is under f, so f of them draw; a negative fade
+# keeps the complementary pixels, so one entity at -(1 - t) and another at t cover every pixel once.
+FADE_WGSL = """
+var<private> FADE_BAYER: array<u32, 16> = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u,
+                                                         3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+fn fade_dropped(pixel: vec2<f32>, fade: f32) -> bool {
+    let p = vec2<u32>(pixel) % vec2<u32>(4u);
+    let t = (f32(FADE_BAYER[p.y * 4u + p.x]) + 0.5) / 16.0;
+    return select(t >= fade, t < 1.0 + fade, fade < 0.0);
+}
+"""
+
+
+def fade_shader(source: str) -> str:
+    """A StandardMaterial shader that drops pixels of an instance by its fade (StandardMaterial with
+    faded=True): the fade is the w of the instance's row in the tints buffer, passed flat to the fragment."""
+    if f"@binding({TINTS_BINDING})" not in source:
+        source = source.replace(
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n",
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n"
+            f"@group(0) @binding({TINTS_BINDING}) var<storage, read> tints: array<vec4<f32>>;\n",
+            1,
+        )
+    return (
+        source.replace(
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n",
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n" + FADE_WGSL,
+            1,
+        )
+        .replace(
+            "    @location(1) world_pos:    vec3<f32>,\n",
+            "    @location(1) world_pos:    vec3<f32>,\n    @location(7) @interpolate(flat) fade: f32,\n",
+            1,
+        )
+        .replace(
+            "    out.world_normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);\n",
+            "    out.world_normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);\n"
+            "    out.fade = tints[in.instance].w;\n",
+            1,
+        )
+        .replace(
+            "    let N = normalize(in.world_normal);\n",
+            "    if (fade_dropped(in.position.xy, in.fade)) {\n        discard;\n    }\n"
+            "    let N = normalize(in.world_normal);\n",
+            1,
+        )
+    )
+
+
 # Surface patterns (vertex_colors materials): id -> (scale, contrast, tones, ink width,
 # ink darkness). Ids: 1 grass, 2 cobbles, 3 veins, 4 brick, 5 blocks, 6 planks, 7 tiles;
 # 0 draws the flat vertex colour. Tuned values from a game's art direction; blocks
@@ -1479,6 +1529,7 @@ class StandardMaterial(Material):
         cut=None,
         surface_patterns=None,
         tinted=False,
+        faded=False,
     ):
         from manifoldx.textures import TextureHandle
 
@@ -1515,14 +1566,21 @@ class StandardMaterial(Material):
         if tinted and not vertex_colors:
             raise ValueError("tinted needs vertex_colors=True")
         self.tinted = bool(tinted)
+        # faded: each entity's Fade component (1 drawn, 0 gone) drops that share of its pixels against a
+        # 4x4 pattern, in its shadow too, so a level of detail can give way to another without a pop.
+        self.faded = bool(faded)
 
     @property
     def pipeline_subtype(self):
         if self.albedo_map is not None:
-            return "textured"
-        if self.vertex_colors:
-            return "vcolor-tint" if self.tinted else "vcolor"
-        return None
+            base = "textured"
+        elif self.vertex_colors:
+            base = "vcolor-tint" if self.tinted else "vcolor"
+        else:
+            base = None
+        if self.faded:
+            return "fade" if base is None else base + "-fade"
+        return base
 
     @property
     def pipeline_state(self):

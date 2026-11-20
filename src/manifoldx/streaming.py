@@ -228,12 +228,13 @@ class _Uploads:
         if cell is None:
             self._drawn[c] = None
             return
-        from manifoldx.components import Material, Mesh, Transform
+        from manifoldx.components import Fade, Material, Mesh, Transform
 
         self._drawn[c] = self.engine.spawn(
             Mesh(cell.geo),
             Material(self.material),
             Transform(pos=pos),
+            *([Fade(value=0.0)] if getattr(self, "crossfade", None) else []),
         )
         # Drawn before any device: its buffers come from the render pass, and are still ours to free.
         self._gpu.setdefault(c, {"id": self._drawn[c]._geometry_id, "done": True})
@@ -373,6 +374,11 @@ class QuadStreamer(_Uploads):
     A frame where the selection, the builds and the uploads did not change only carries on the uploads
     in flight.
 
+    With `crossfade` seconds (about 0.3), a node that gives way stays drawn that long, fading out while
+    the nodes that replace it fade in, over the complementary pixels of a 4x4 pattern (see Fade), so a
+    level of detail never pops. It needs a StandardMaterial made with faded=True; without a material the
+    streamer makes one.
+
         streamer = QuadStreamer(engine, cell=200.0, origin=(-2048, -1024), levels=13,
                                 exists=tree.exists, build=build_node, error=lambda L: 200.0 * 2**L / 16)
         streamer.focus(cam_x, cam_z, height=cam_y)   # world float64, once a frame
@@ -397,10 +403,19 @@ class QuadStreamer(_Uploads):
         move: float | None = None,
         warm: Callable[[], None] | None = None,
         cache: int = 256,
+        crossfade: float | None = None,
     ):
+        if crossfade and material is None:
+            from manifoldx.resources import StandardMaterial
+
+            material = StandardMaterial("#ffffff", roughness=0.9, vertex_colors=True, faded=True)
+        if crossfade and not getattr(material, "faded", False):
+            raise ValueError("crossfade needs a StandardMaterial made with faded=True")
         self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders, warm)
         self.in_flight, self.cache = 2 * builders, int(cache)
         self._todo: list = []  # the nodes to build next, most error on screen last
+        self.crossfade = float(crossfade) if crossfade else None
+        self._fading: dict = {}  # node -> (handle, started, out): drawn while it fades in, or out once undrawn
         self.cell, self.origin, self.levels = float(cell), (int(origin[0]), int(origin[1])), int(levels)
         self.exists, self.error, self.tau, self.merge = exists, error, float(tau), float(merge)
         self.refine_ms = refine_ms
@@ -544,10 +559,12 @@ class QuadStreamer(_Uploads):
         A camera that has not moved, with every selected node drawn and nothing building, costs
         nothing: the last frame's answer stands."""
         got = self._tick()
+        if self._fading:
+            self._fade()
         cam = self.engine.camera
         still = (float(x), float(z), float(height), cam.fov, cam.far, self.engine.h, self.tau)
         last = self._still
-        if (self._quiet and not got and last is not None and last[3:] == still[3:]
+        if (self._quiet and not got and not self._fading and last is not None and last[3:] == still[3:]
                 and max(abs(last[0] - still[0]), abs(last[1] - still[1]), abs(last[2] - still[2])) < self.cell * 1e-3):
             return
         self._still = still
@@ -573,7 +590,7 @@ class QuadStreamer(_Uploads):
         # Build what is wanted, by its error on screen, `in_flight` jobs at a time: each job that finishes
         # submits the next (_next), so no backlog of jobs picked for an old camera builds first, and the
         # workers never wait for a frame.
-        keep = self._selected | show | set(wanted) | set(parked)
+        keep = self._selected | show | set(wanted) | set(parked) | self._fading.keys()
         with self._lock:
             for n in [n for n in self._pending if n not in keep]:
                 if self._pending[n].cancel():  # one already building lands in the cache instead
@@ -631,6 +648,10 @@ class QuadStreamer(_Uploads):
     def close(self) -> None:
         with self._lock:
             self._todo = []  # no done callback submits to a pool shut down
+        for c, (handle, _, out) in list(self._fading.items()):
+            if out:
+                handle.destroy(free_geometry=False)
+        self._fading.clear()
         super().close()
 
     def _plan(self, selected, x, z, height) -> tuple[set, list, list]:
@@ -699,8 +720,51 @@ class QuadStreamer(_Uploads):
             wanted = [wanted[k] for k in np.argsort(-err, kind="stable")]
         return show, wanted, parked
 
+    @_deferred.deferred_in_pipeline(find=_streamer_engine)
+    def _draw(self, c, pos):
+        if not self.crossfade:
+            return super()._draw(c, pos)
+        old = self._fading.pop(c, None)
+        if old is not None and old[2]:  # given way and back before it faded out: it fades in from what shows
+            handle, started, _ = old
+            self._drawn[c] = handle
+            self._fading[c] = (handle, 2 * perf_counter() - started - self.crossfade, False)
+            return
+        super()._draw(c, pos)
+        if self._drawn[c] is not None:
+            self._fading[c] = (self._drawn[c], perf_counter(), False)
+
+    def _undraw(self, c):
+        if not self.crossfade or self._drawn.get(c) is None:
+            self._fading.pop(c, None)
+            return super()._undraw(c)
+        handle = self._drawn.pop(c)
+        old = self._fading.get(c)
+        now = perf_counter()
+        # Fading out from what shows now: a node still fading in starts out where its fade in stands.
+        started = now if old is None else 2 * now - old[1] - self.crossfade
+        self._fading[c] = (handle, started, True)
+
+    @_deferred.deferred_in_pipeline(find=_streamer_engine)
+    def _set_fade(self, handle, value):
+        self.engine.store._components["Fade"][handle.index] = value
+
+    def _fade(self):
+        """Step every fade; a node faded out is destroyed and stays built, for the cache to keep or free."""
+        now = perf_counter()
+        for c, (handle, started, out) in list(self._fading.items()):
+            t = min((now - started) / self.crossfade, 1.0)
+            if t < 1.0:
+                self._set_fade(handle, -(1.0 - t) if out else t)
+                continue
+            del self._fading[c]
+            if not out:
+                self._set_fade(handle, 1.0)
+                continue
+            handle.destroy(free_geometry=False)  # still built: the cache frees it when it must
+
     def drawn(self) -> set[tuple[int, int, int]]:
-        """The nodes drawn now, empty ones (build returned None) included."""
+        """The nodes drawn now, empty ones (build returned None) included; not those fading out."""
         return set(self._drawn)
 
     def stats(self) -> dict:
