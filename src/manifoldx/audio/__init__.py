@@ -66,6 +66,8 @@ class Audio:
         ctx = mp.get_context("spawn")
         self.controls = Controls.create(list(dict.fromkeys([*controls, *LISTENER])))
         self._st = Controls.create(state_names(streams))
+        for b in BUSES:  # silence until the sound process renders
+            self._st.set(f"level.{b}", -120.0)
         self._error = ctx.RawArray("c", 256)
         self._msgs = ctx.Queue(maxsize=4096)
         qs = {name: (bus, ctx.Queue(maxsize=64)) for name, bus in streams.items()}
