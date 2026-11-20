@@ -309,3 +309,19 @@ def test_a_new_engine_resolves_wgpu_types_in_the_background():
     )
     out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
     assert int(out.stdout.strip().splitlines()[-1]) >= 40
+
+
+def test_settled_once_the_ring_is_drawn_and_again_after_a_move():
+    engine = _offscreen_engine()
+    s = Streamer(engine, cell=8.0, build=build_cell)
+    try:
+        assert not s.settled  # never focused
+        s.focus(4.0, 4.0)
+        assert not s.settled  # builds pending
+        _settle(engine, s, 4.0, 4.0)
+        s.focus(4.0, 4.0)
+        assert s.settled
+        s.focus(84.0, 84.0)  # ten cells away: a new ring
+        assert not s.settled
+    finally:
+        s.close()

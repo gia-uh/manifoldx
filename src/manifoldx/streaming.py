@@ -307,6 +307,7 @@ class Streamer(_Uploads):
             ((fi + di, fj + dj) for di in range(-r, r + 1) for dj in range(-r, r + 1)),
             key=lambda c: (c[0] - fi) ** 2 + (c[1] - fj) ** 2,
         )
+        self._want = {c for c in wanted if ring(c) <= self.radius}
         for c in wanted:
             if c not in self._ready and c not in self._pending:
                 self._pending[c] = self._pool.submit(_pack, self.build, *c)
@@ -337,6 +338,12 @@ class Streamer(_Uploads):
     def drawn(self) -> set[tuple[int, int]]:
         """The cells drawn now, empty cells (build returned None) included."""
         return set(self._drawn)
+
+    @property
+    def settled(self) -> bool:
+        """Nothing building or uploading, and every cell the camera needs is drawn."""
+        want = getattr(self, "_want", None)
+        return want is not None and not self._pending and want <= self._drawn.keys()
 
     def stats(self) -> dict:
         """built, uploaded and dropped cell counts, and the longest gap between
@@ -768,6 +775,11 @@ class QuadStreamer(_Uploads):
     def drawn(self) -> set[tuple[int, int, int]]:
         """The nodes drawn now, empty ones (build returned None) included; not those fading out."""
         return set(self._drawn)
+
+    @property
+    def settled(self) -> bool:
+        """Nothing building or uploading, and every node the camera needs is drawn."""
+        return self._quiet and not self._fading
 
     def stats(self) -> dict:
         """held (built or building), drawn nodes by level, built, dropped, and the longest frame in ms."""

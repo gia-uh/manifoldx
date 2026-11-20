@@ -514,3 +514,17 @@ def test_with_a_device_every_picked_node_is_uploaded_and_drawn():
     assert s._quiet and s.drawn() == set(s._selected)
     assert all(s._gpu[n]["done"] for n in s.drawn())
     s.close()
+
+
+def test_settled_only_when_every_picked_node_is_drawn():
+    s = faked(3)
+    s.in_flight = 1000
+    s.focus(100.0, 100.0, 1.0)
+    assert not s.settled  # builds in flight
+    for _ in range(20):
+        s._pool.finish()
+        s.focus(100.0, 100.0, 1.0)
+    assert s.settled and s.drawn() == set(s._selected)
+    s.focus(100.0, 100.0, 1e4)  # zoomed out: the root is wanted, not built yet
+    assert not s.settled
+    s.close()
