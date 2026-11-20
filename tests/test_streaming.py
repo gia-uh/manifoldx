@@ -1,5 +1,6 @@
 """manifoldx.streaming: the Streamer builds, draws and frees cells around a focus."""
 
+import os
 import time
 
 import numpy as np
@@ -325,3 +326,47 @@ def test_settled_once_the_ring_is_drawn_and_again_after_a_move():
         assert not s.settled
     finally:
         s.close()
+
+
+def test_cells_report_their_life():
+    from manifoldx import counters
+
+    engine = _offscreen_engine()
+    counters.start(None)
+    try:
+        s = Streamer(engine, cell=8.0, build=build_cell)
+        _settle(engine, s, 4.0, 4.0)
+        _settle(engine, s, 4.0 + 8 * 40, 4.0)
+        evs = [e for e in counters.events() if e["kind"] == "node"]
+        kinds = {e["ev"] for e in evs}
+        assert {"submitted", "built", "landed", "drawn", "undrawn", "dropped"} <= kinds
+        assert all(e["level"] == 0 and len(e["key"]) == 2 for e in evs)
+        s.close()
+    finally:
+        counters.stop()
+
+
+def test_live_lists_open_cell_streamers_only():
+    from manifoldx import streaming
+
+    engine = _offscreen_engine()
+    s = Streamer(engine, cell=8.0, build=build_cell)
+    assert s in streaming.live()
+    s.close()
+    assert s not in streaming.live()
+
+
+def test_a_build_reports_its_job_from_a_process(tmp_path):
+    from manifoldx import counters
+
+    engine = _offscreen_engine()
+    counters.start(tmp_path / "jobs")
+    try:
+        s = Streamer(engine, cell=8.0, build=build_cell, workers="process")
+        _settle(engine, s, 4.0, 4.0)
+        s.close()
+        jobs = [j for j in counters.jobs() if j["kind"] == "stream"]
+        assert len(jobs) >= 25 and len({j["pid"] for j in jobs}) == 1 and jobs[0]["pid"] != os.getpid()
+        assert sorted(tuple(j["key"]) for j in jobs)[0] == (-2, -2)
+    finally:
+        counters.stop()

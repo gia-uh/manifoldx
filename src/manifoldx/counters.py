@@ -46,6 +46,11 @@ class Frame:
     metrics: dict = field(default_factory=dict)
 
 
+def now() -> float:
+    """Seconds since start(), on the clock events carry."""
+    return time.perf_counter() - _t0
+
+
 def recording() -> bool:
     """Whether a run is recording."""
     return _on

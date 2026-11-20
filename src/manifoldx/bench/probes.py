@@ -168,3 +168,39 @@ def last_metrics(probe: Columns) -> dict:
     for r in probe.rows:
         out.update(r)
     return out
+
+
+def _inside(t: float, intervals) -> bool:
+    return any(a <= t < b for a, b in intervals)
+
+
+def stream_summary(nodes: list, intervals, ends: list, settled: list, rows: np.ndarray) -> dict:
+    """What the streamers did in one phase: node events by kind and level, the time from the phase's start
+    to the first node drawn and to the first frame where every streamer had settled (None if never)."""
+    start = intervals[0][0]
+    counts: dict = {}
+    first_drawn = None
+    for e in nodes:
+        if not _inside(e["t"], intervals):
+            continue
+        by_level = counts.setdefault(e["ev"], {})
+        by_level[e["level"]] = by_level.get(e["level"], 0) + 1
+        if e["ev"] == "drawn" and first_drawn is None:
+            first_drawn = round(e["t"] - start, 4)
+    done = next((ends[i] for i in np.flatnonzero(rows) if settled[i]), None)
+    return {**counts, "first_drawn_s": first_drawn,
+            "settled_s": None if done is None else round(done - start, 4)}
+
+
+def jobs_summary(jobs: list, intervals) -> dict:
+    """Worker jobs that started in one phase, by kind: how many, their p50 and max ms, how many processes."""
+    out = {}
+    by_kind: dict = {}
+    for j in jobs:
+        if _inside(j["t"], intervals):
+            by_kind.setdefault(j["job"], []).append(j)
+    for kind, js in by_kind.items():
+        ms = np.array([j["ms"] for j in js])
+        out[kind] = {"jobs": len(js), "p50_ms": round(float(np.median(ms)), 3), "max_ms": round(float(ms.max()), 3),
+                     "processes": len({j["pid"] for j in js})}
+    return out

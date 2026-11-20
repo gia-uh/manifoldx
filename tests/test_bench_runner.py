@@ -260,3 +260,58 @@ def test_counters_are_off_after_a_run():
     sc, _ = make([bench.hold(frames=1)])
     run = run_scenario(sc, size=(64, 48))
     assert not counters.recording() and run.summary["counters_exact"] is True
+
+
+# --- step 2: streamers and workers ---------------------------------------------------------------
+
+
+def _walk_scenario(workers="thread", far=None):
+    """A Streamer only a system's closure holds; the app is None. With `far`, a second phase elsewhere."""
+    from manifoldx.streaming import Streamer
+    from test_streaming import build_cell
+
+    def fn(engine, p):
+        s = Streamer(engine, cell=8.0, build=build_cell, workers=workers)
+        at = {"x": 4.0}
+
+        @engine.system
+        def walk(q: mx.Query[Transform], dt: float):
+            s.focus(at["x"], 4.0)
+
+        def go(app):
+            at["x"] = far
+
+        steps = [bench.mark("a"), bench.hold(until=bench.settled(s), max_s=30)]
+        if far is not None:
+            steps += [bench.mark("b"), bench.each_frame(go, frames=1), bench.hold(until=bench.settled(s), max_s=30)]
+        return None, steps
+
+    return Scenario("walk", fn, {}, {"smoke": 400, "full": None})
+
+
+def test_a_streamer_in_a_closure_is_found_and_closed():
+    from manifoldx import streaming
+
+    before = set(map(id, streaming.live()))
+    run = run_scenario(_walk_scenario(), size=(64, 48))
+    assert run.error is None
+    assert not [s for s in streaming.live() if id(s) not in before]
+    assert run.summary["phases"]["a"]["streamer"]["drawn"]
+
+
+def test_process_workers_report_their_jobs():
+    import glob
+    import tempfile
+
+    run = run_scenario(_walk_scenario("process"), size=(64, 48))
+    w = run.summary["phases"]["a"]["workers"]["stream"]
+    assert run.error is None and w["jobs"] >= 1 and w["processes"] == 1 and w["max_ms"] >= w["p50_ms"]
+    assert any(e["kind"] == "job" for e in run.events)
+    assert not glob.glob(f"{tempfile.gettempdir()}/manifoldx-bench-*")
+
+
+def test_settle_time_is_per_phase():
+    run = run_scenario(_walk_scenario(far=4.0 + 8 * 40), size=(64, 48))
+    a, b = run.summary["phases"]["a"]["streamer"], run.summary["phases"]["b"]["streamer"]
+    assert a["settled_s"] is not None and b["settled_s"] is not None
+    assert a["first_drawn_s"] <= a["settled_s"] and b["first_drawn_s"] <= b["settled_s"]

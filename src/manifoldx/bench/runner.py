@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import os
+import tempfile
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from datetime import UTC, datetime
 import numpy as np
 
 from manifoldx import counters
-from manifoldx.bench.probes import Columns, Frames, Host, last_metrics, phase_summary
+from manifoldx.bench.probes import Columns, Frames, Host, jobs_summary, last_metrics, phase_summary, stream_summary
 from manifoldx.bench.scenario import Ctx, Params, Scenario, iterate
 
 LOOPS = ("serial", "pipelined", "check")
@@ -42,16 +43,24 @@ class _Recorder:
     def __init__(self, frame):
         self.phases, self.phase = ["main"], 0
         self.events, self.shots, self._frame = [], {}, frame
-        self._t0 = time.monotonic()
+        self.spans = [(0, 0.0)]  # (phase index, start time): the run's stretches, one per mark
 
     def event(self, kind, **kw):
-        self.events.append({"t": round(time.monotonic() - self._t0, 4), "kind": kind, **kw})
+        self.events.append({"t": round(counters.now(), 5), "kind": kind, **kw})
 
     def mark(self, name):
         if name not in self.phases:
             self.phases.append(name)
         self.phase = self.phases.index(name)
+        self.spans.append((self.phase, counters.now()))
         self.event("mark", name=name)
+
+    def intervals(self, end: float) -> dict:
+        """Phase index -> the [start, end) times it ran over."""
+        out: dict = {}
+        for (k, t0), nxt in zip(self.spans, [*self.spans[1:], (None, end)]):
+            out.setdefault(k, []).append((t0, nxt[1]))
+        return out
 
     def shot(self, name):
         self.shots[name] = self._frame(keep=True)
@@ -78,6 +87,8 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
     params = Params(sc.params, overrides)
     w, h = size
     host, frames = Host(), Frames()
+    settled, ends = [], []  # per frame: every streamer of the run settled; the frame's end time
+    streamers = []  # the streamers made during this run
     probes = {"split": Columns(scale=1000.0), "systems": Columns(scale=1000.0), "counters": Columns(),
               "spans": Columns(), "metrics": Columns(fill=None)}
     started, t_start = datetime.now(UTC), time.monotonic()
@@ -99,6 +110,8 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         state["last"] = end
         ctx.dt = step_dt or wall
         took = counters.take()
+        ready = all(s.settled for s in streamers) if streamers else False
+        t_end = counters.now()
         # Everything is measured before anything is stored; a Ctrl-C between two stores is cut at the end.
         frames.add(1000.0 * wall, 1000.0 * draw, 1000.0 * cpu, rec.phase)
         probes["split"].add(engine.frame_split)
@@ -106,6 +119,8 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         probes["counters"].add(took.counts)
         probes["spans"].add(took.spans)
         probes["metrics"].add(took.metrics)
+        settled.append(ready)
+        ends.append(t_end)
         host.tick()
         if progress:
             progress(len(frames.wall_ms), rec.phases[rec.phase])
@@ -117,10 +132,14 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
 
     rec = _Recorder(frame)
     ctx = None
-    counters.start(None)
+    from manifoldx import streaming
+
+    old = {id(s) for s in streaming.live()}
+    counters.start(tempfile.mkdtemp(prefix="manifoldx-bench-"))  # worker processes inherit its path
     try:
         engine = mx.Engine(sc.name, width=w, height=h)
         app, steps = sc.fn(engine, params)
+        streamers[:] = [s for s in streaming.live() if id(s) not in old]
         engine._ensure_offscreen(1)
         host.read_adapter(engine)
         if step_dt:
@@ -149,8 +168,11 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         error = f"{type(e).__name__}: {e}"
         rec.event("error", name=error, traceback=traceback.format_exc(limit=8))
     finally:
+        _close(app, [s for s in streaming.live() if id(s) not in old])
+        ended = counters.now()
+        nodes = [e for e in counters.events() if e["kind"] == "node"]
+        jobs = [{"kind": "job", **{("job" if k == "kind" else k): v for k, v in j.items()}} for j in counters.jobs()]
         counters.stop()
-        _close(app)
         if engine is not None:
             engine.close()  # fires 'shutdown' and frees the engine's pools and GPU device
         if loop == "check":
@@ -161,16 +183,23 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
     if error == "interrupted":
         rec.event("error", name=error)
 
-    n = min(len(frames), *(len(pr) for pr in probes.values()))
+    n = min(len(frames), len(settled), len(ends), *(len(pr) for pr in probes.values()))
     frames.cut(n)
     for pr in probes.values():
         pr.cut(n)
+    del settled[n:], ends[n:]
     arrays = frames.arrays()
+    intervals = rec.intervals(ended)
     phases = {}
     for k, name in enumerate(rec.phases):
         rows = arrays["phase"] == k
         if rows.any():
             phases[name] = phase_summary(arrays, probes, rows)
+            if streamers or nodes:
+                phases[name]["streamer"] = stream_summary(nodes, intervals[k], ends, settled, rows)
+            if jobs:
+                phases[name]["workers"] = jobs_summary(jobs, intervals[k])
+    rec.events = sorted([*rec.events, *nodes, *jobs], key=lambda e: e["t"])
     for key, names, array, dtype in (("split", "split_names", "split_ms", float),
                                      ("systems", "systems_names", "systems_ms", float),
                                      ("counters", "counter_names", "counters", np.int64),
@@ -189,14 +218,14 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
     return Run(summary, arrays, rec.events, rec.shots, error)
 
 
-def _close(app):
-    """Close the app and the streamers it holds, so their worker pools end with the run."""
-    from manifoldx.streaming import QuadStreamer, Streamer
+def _close(app, streamers):
+    """Close the app, then every streamer the run made that is still open, so their worker pools end
+    with the run, wherever the app kept them."""
+    from manifoldx.streaming import live
 
-    if app is None:
-        return
-    seen = [app, *(v for v in getattr(app, "__dict__", {}).values() if isinstance(v, (Streamer, QuadStreamer)))]
-    for obj in seen:
+    for k, obj in enumerate([app, *streamers]):
+        if obj is None or (k and obj not in live()):  # closed by the app already
+            continue
         close = getattr(obj, "close", None)
         if callable(close):
             try:
