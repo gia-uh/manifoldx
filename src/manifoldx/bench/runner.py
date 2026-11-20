@@ -21,13 +21,14 @@ from datetime import UTC, datetime
 import numpy as np
 
 from manifoldx import counters
+from manifoldx.bench.checks import evaluate
 from manifoldx.bench.probes import (Columns, Frames, Host, Memory, jobs_summary, last_metrics, origin_distance,
                                    phase_summary, stream_summary)
 from manifoldx.bench.scenario import Ctx, Params, Scenario, iterate
 
 LOOPS = ("serial", "pipelined", "check")
-SCHEMA = 3  # run.json's layout: 2 adds draw_ms (cpu_ms became the process's CPU), counters and the step 2 probes;
-#            3 adds bench_ms (the runner's work between frames) and the streamer's entries
+SCHEMA = 4  # run.json's layout: 2 adds draw_ms (cpu_ms became the process's CPU), counters and the step 2 probes;
+#            3 adds bench_ms (the runner's work between frames) and the streamer's entries; 4 adds checks
 
 
 @dataclass
@@ -82,8 +83,10 @@ def _version(dist):
 
 def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt: float | None = None,
                  overrides: dict | None = None, smoke: bool = False, label: str | None = None,
-                 app_name: str | None = None, progress=None, folders: dict | None = None) -> Run:
-    """Run one scenario and return what it recorded. `progress(frames, phase, step, steps)` is called once a
+                 app_name: str | None = None, progress=None, folders: dict | None = None,
+                 budgets: list | None = None) -> Run:
+    """Run one scenario and return what it recorded, with the result of its checks and of `budgets` (more
+    checks, from the project's budgets file) in summary["checks"]. `progress(frames, phase, step, steps)` is called once a
     frame, with the step running (from 1) and how many there are.
     `folders` maps names to folders the app fills (caches, exports), sized at the start and the end."""
     import manifoldx as mx
@@ -248,7 +251,10 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         "started": started.isoformat(timespec="seconds"), "seconds": round(time.monotonic() - t_start, 3),
         "app": last_metrics(probes["metrics"]), "counters_exact": loop == "serial", "memory": memory.summary(),
     }
-    return Run(summary, arrays, rec.events, rec.shots, error)
+    run = Run(summary, arrays, rec.events, rec.shots, error)
+    # The engine and the app are closed by now: no check runs inside the timed loop.
+    summary["checks"] = evaluate([*sc.checks, *(budgets or [])], run)
+    return run
 
 
 def _quietly(fn):
