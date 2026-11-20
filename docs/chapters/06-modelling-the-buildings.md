@@ -282,6 +282,12 @@ lies in the x-z plane with its normal up: `displace` along the normal is the
 vertical settling we want. The gradient clamps outside its stops, so a scalar
 below 0.0 or above 0.8 takes the end colour instead of wrapping.
 
+When many entities share one vertex-coloured geometry, a `Tint` component gives
+each its own shade without splitting the batch: a `StandardMaterial` made with
+`tinted=True` multiplies every instance's vertex colours by its `Tint(rgb=...)`,
+a linear colour, so a thousand stones or trees of one mesh stay one instanced
+draw. Entities without a `Tint` keep their colours.
+
 Most sources carry a small symbolic syntax tree beside their callable.
 `field_to_wgsl` walks that tree and emits a WGSL function, so the same field can
 move vertices in a shader. `fbm` transpiles; `worley` does not, because it is
