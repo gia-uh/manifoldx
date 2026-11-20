@@ -108,7 +108,9 @@ Every run records the same probes; nothing has to be turned on.
 
 - **frames**: each frame's wall time, the engine's frame (`draw`) and the
   process's CPU time, with p50, p95, p99, max, and how many frames took more
-  than 1.5 and 3 times the median.
+  than 1.5 and 3 times the median. What the runner itself does between frames
+  (sampling memory and the origin, copying a shot) is timed apart as
+  `bench_ms` in `frames.npz` and left out of the next frame's wall time.
 - **split** and **systems**: the frame's parts (update, acquire, render,
   overlap) and each system's milliseconds.
 - **counters**: what the engine did in the frame, counted where it does it:
@@ -119,7 +121,10 @@ Every run records the same probes; nothing has to be turned on.
   that overlaps the next update counts with whichever frame ends first.
 - **streamer**: each node a `Streamer` or `QuadStreamer` submitted, built,
   landed on the GPU, drew, undrew, cancelled or dropped, by level, with the
-  time to the first node drawn and the time until the streamers settled.
+  time to the first node drawn and the time until the streamers settled. A
+  streamer made by a step counts as well as one made by the scenario. A phase
+  entered twice (the same `mark` again) times each stretch from its own start
+  and lists them under `entries`.
 - **workers**: each build's milliseconds, measured inside the worker, by kind,
   and how many processes ran them.
 - **memory**: resident memory and the GPU memory allocated through wgpu, once
@@ -226,6 +231,63 @@ on the way out, wherever the app kept them. The `Run` that `run_scenario` return
 the per-frame arrays, the events and the shots, for code that drives scenarios
 itself.
 
+## Comparing runs
+
+One run says how long a frame takes; the question is usually whether it got
+faster. `--param` with several values sweeps it, and every combination of the
+swept params is one side:
+
+```bash
+uv run manifoldx bench run meshes_spin --param system_ms=1,6 --repeat 3
+```
+
+A run with more than one side is a set. Each side runs `--repeat` times, every
+run in a fresh process, and the order alternates each round (A B, B A, A B), so
+a load that comes and goes on the machine lands on every side. The set folder
+holds `set.json` (the sides as `Side` records, and the runs in the order they
+ran) and each side's run folders. At the end, the run prints the comparison.
+
+`bench compare` makes the same comparison from any runs: two run folders, a
+side's folder, or a whole set. The first side is the baseline.
+
+```bash
+uv run manifoldx bench compare bench/runs/2026-11-20T16-49-55-meshes_spin-set-1c01
+uv run manifoldx bench compare bench/runs/A bench/runs/B --out /tmp/a-vs-b
+```
+
+It writes `compare.md`, a Markdown table with one row per phase and number:
+each side's value (the median over its runs) with its spread in brackets (the
+lowest and highest run, or, with one run, the 25th to 75th percentile of the
+phase's frame times), and each side's ratio to the baseline. A timing row gets
+the note "needs a quiet re-run" when a ratio is within 1.3x either way, and
+"taken under load" when a run saw a load average above half the CPUs. Counts,
+memory and the app's metrics get no note: they do not depend on the load. Each
+shot that every side took is laid side by side in `sheets/<name>.png`, in the
+order of the sides.
+
+The same scenario runs on another copy of the app with `--against DIR`, or on
+another manifoldx with `--manifoldx SPEC`:
+
+```bash
+uv run manifoldx bench run quad_zoom --against ../myapp-main --repeat 3
+uv run manifoldx bench run quad_zoom --manifoldx ../manifoldx           # a directory: installed editable
+uv run manifoldx bench run quad_zoom --manifoldx manifold-gfx==0.9.0    # anything uv run --with takes
+```
+
+The other copy is the baseline, and manifoldx never makes it: make it with your
+version control, or unpack a release. It must be a project uv can run, with
+manifoldx as a dependency, and its manifoldx must have `bench run --json`. Both
+flags run the other side with `uv run`; without uv they refuse and say so, and
+everything else on this page works without it. The two do not combine in one
+run.
+
+Each (project, spec) pair gets a project environment under one cache folder
+(`~/.cache/manifoldx/bench-envs`, or `MANIFOLDX_BENCH_CACHE`), reused by the
+next run, so nothing is written into the other copy. A set says how much the
+cache grew. Past 2 GB (`MANIFOLDX_BENCH_CACHE_GB`) the environments used least
+recently go, and `manifoldx bench clean` removes them all. The layer that
+`--with` adds lives in uv's own cache, which `uv cache prune` cleans.
+
 ## Micro cases
 
 A frame is the sum of many smaller costs. A micro case times one of them at
@@ -253,5 +315,9 @@ uv run manifoldx bench micro --against ../manifoldx-main --case sprites
 With no modules, `micro` runs the ones listed under `micro` in the project's
 `Config`. `--against DIR` runs the same cases on the manifoldx in another
 directory, such as a copy of the main branch made with your version control,
-and prints a Markdown table of both. manifoldx itself never asks a version
-control system for anything.
+and prints a Markdown table of both. The two copies take turns over
+`--repeat` rounds (3 by default), each in a fresh process; the table gives each
+side's median with its spread over the rounds, and the same notes as `bench
+compare`. `--profile` profiles the last round of each side only, so the timed
+rounds run without the profiler. `micro` exits 1 when a case fails on either
+side. manifoldx itself never asks a version control system for anything.
