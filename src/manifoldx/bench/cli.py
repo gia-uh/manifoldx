@@ -3,7 +3,7 @@
     manifoldx bench list [--json]
     manifoldx bench run NAME|FILE.json [--size WxH] [--loop serial|pipelined|check] [--step 1/30]
                         [--param k=v]... [--smoke] [--label L] [--json]
-    manifoldx bench show RUN [--json]
+    manifoldx bench show RUN [--probe P [--phase NAME]] [--json]
     manifoldx bench micro [MODULE...] [--case C] [--sizes N...] [--profile] [--smoke] [--against DIR] [--json]
 
 The app's pyproject.toml says where its scenarios are:
