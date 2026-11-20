@@ -9,6 +9,7 @@ config (enable_shadows) are present.
 import numpy as np
 import wgpu
 
+from manifoldx.resources import FADE_WGSL, TINTS_BINDING
 from manifoldx.skinning import BLOCKS_BINDING, JOINT_LOCATION, JOINTS_BINDING, skin_shadow_shader
 
 
@@ -52,24 +53,67 @@ def _ensure_vs_layout(rp):
     rp._shadow_pipeline_layout_skinned = rp._device.create_pipeline_layout(
         bind_group_layouts=[skinned]
     )
+    # Faded casters also read each instance's fade, the w of its row in the tints buffer.
+    faded = rp._device.create_bind_group_layout(
+        entries=[globals_entry, _storage_entry(1), _storage_entry(TINTS_BINDING)]
+    )
+    rp._shadow_bind_layout_faded = faded
+    rp._shadow_pipeline_layout_faded = rp._device.create_pipeline_layout(bind_group_layouts=[faded])
 
 
-def _get_pipeline(rp, stride, joints_offset=None):
-    """One depth-only pipeline per (vertex stride, skinned).
+def _fade_shadow_shader(source):
+    """_SHADOW_SHADER with a fragment stage that drops the pixels a caster's Fade drops (the same 4x4
+    pattern, on the shadow map's texels), so a fading caster's shadow fades under PCF."""
+    vs = source[source.index("@vertex"):]
+    out = source.replace(vs, (
+        f"@group(0) @binding({TINTS_BINDING}) var<storage, read> tints: array<vec4<f32>>;\n" + FADE_WGSL + """
+struct FadeOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) fade: f32,
+};
+
+@vertex
+fn vs_main(@location(0) position: vec3<f32>,
+           @builtin(instance_index) instance: u32) -> FadeOut {
+    var out: FadeOut;
+    let model = transforms.models[instance];
+    let world = (model * vec4<f32>(position, 1.0)).xyz;
+    out.position = globals.light_view_proj * vec4<f32>(world, 1.0);
+    out.fade = tints[instance].w;
+    return out;
+}
+
+@fragment
+fn fs_fade(in: FadeOut) {
+    if (fade_dropped(in.position.xy, in.fade)) {
+        discard;
+    }
+}
+"""))
+    assert "fs_fade" in out and "return globals.light_view_proj" not in out
+    return out
+
+
+def _get_pipeline(rp, stride, joints_offset=None, faded=False):
+    """One depth-only pipeline per (vertex stride, skinned), and per stride a faded one.
 
     Skinned geometry (joints_offset set) poses position by the entity's joint
-    block; the unskinned pipeline runs _SHADOW_SHADER as it is.
+    block; the unskinned pipeline runs _SHADOW_SHADER as it is, the faded one
+    drops what each caster's Fade drops.
     """
     cache = getattr(rp, "_shadow_pipelines", None)
     if cache is None:
         cache = {}
         rp._shadow_pipelines = cache
-    key = (stride, joints_offset is not None)
+    key = (stride, False, "fade") if faded else (stride, joints_offset is not None)
     if key in cache:
         return cache[key]
     from manifoldx.renderer import _SHADOW_SHADER
 
-    code = skin_shadow_shader(_SHADOW_SHADER) if key[1] else _SHADOW_SHADER
+    if faded:
+        code = _fade_shadow_shader(_SHADOW_SHADER)
+    else:
+        code = skin_shadow_shader(_SHADOW_SHADER) if key[1] else _SHADOW_SHADER
     rp._shadow_shader_sources[key] = code
     attributes = [{"format": wgpu.VertexFormat.float32x3, "offset": 0, "shader_location": 0}]
     if key[1]:
@@ -79,7 +123,8 @@ def _get_pipeline(rp, stride, joints_offset=None):
         )
     module = rp._device.create_shader_module(code=code)
     pipeline = rp._device.create_render_pipeline(
-        layout=rp._shadow_pipeline_layout_skinned if key[1] else rp._shadow_pipeline_layout,
+        layout=(rp._shadow_pipeline_layout_faded if faded
+                else rp._shadow_pipeline_layout_skinned if key[1] else rp._shadow_pipeline_layout),
         vertex={
             "module": module,
             "entry_point": "vs_main",
@@ -101,7 +146,7 @@ def _get_pipeline(rp, stride, joints_offset=None):
             "depth_write_enabled": True,
             "depth_compare": wgpu.CompareFunction.less,
         },
-        fragment=None,
+        fragment={"module": module, "entry_point": "fs_fade", "targets": []} if faded else None,
     )
     cache[key] = pipeline
     return pipeline
@@ -227,7 +272,9 @@ def render_shadow_map(rp, engine, command_encoder):
             ],
         ))
 
-    groups = (plain[1], skinned)
+    fades = _fades(rp, engine, casters, local)
+    faded = None if fades is None else _faded_bind_group(rp, fades)
+    groups = (plain[1], skinned, faded)
     if casters.entries is None or casters.groups != groups:
         casters.entries, casters.groups = [], groups  # (slot, pipeline, bind group, vertex buffer, index buffer)
         for b, gpu in enumerate(gpus):
@@ -238,6 +285,9 @@ def render_shadow_map(rp, engine, command_encoder):
             if gpu.get("has_joints"):
                 casters.entries.append((b, _get_pipeline(rp, stride, gpu["joints_offset"]), skinned,
                                         gpu["vertex_buffer"], gpu["index_buffer"]))
+            elif faded is not None:
+                casters.entries.append((b, _get_pipeline(rp, stride, faded=True), faded, gpu["vertex_buffer"],
+                                        gpu["index_buffer"]))
             else:
                 casters.entries.append((b, _get_pipeline(rp, stride), plain[1], gpu["vertex_buffer"],
                                         gpu["index_buffer"]))
@@ -302,6 +352,59 @@ def _encode(target, entries, draw):
             target.set_index_buffer(index, wgpu.IndexFormat.uint32)
         bound = state
         draw(target, slot)
+
+
+def _fades(rp, engine, casters, local):
+    """Each drawn caster's row for the tints buffer (w its Fade), or None while no caster of a faded
+    material is partly faded, so the plain pipelines draw and nothing is gathered."""
+    store = rp._store
+    values = store._components.get("Fade")
+    if values is None:
+        return None
+    faded_ids = casters.__dict__.get("faded_ids")
+    if faded_ids is None:
+        registry = engine._material_registry
+        faded_ids = casters.faded_ids = np.array(
+            [m for m in casters.mat_ids if getattr(registry.get(int(m)), "faded", False)], np.int64)
+    if not len(faded_ids):
+        return None
+    has = store._members["Fade"][local]
+    if not has.any():
+        return None
+    has &= np.isin(store.get_component_data("Material", local)[:, 0].astype(np.int64), faded_ids)
+    v = values[local[has]].reshape(-1)
+    if not (np.abs(v) < 1.0).any():
+        return None
+    out = np.ones((len(local), 4), np.float32)
+    out[has, 3] = v
+    return out
+
+
+def _faded_bind_group(rp, fades):
+    """Bindings 0, 1, 10: the shared ones plus the casters' fades, written when they changed."""
+    buffers = rp._shadow_batch_buffers
+    data = fades.tobytes()
+    if buffers.tints_buf is None or buffers.tints_capacity < len(data):
+        buffers.upload_tints(fades)
+    elif rp.__dict__.get("_shadow_fade_bytes") != data:
+        rp._device.queue.write_buffer(buffers.tints_buf, 0, data)
+    rp._shadow_fade_bytes = data
+    key = (buffers.transforms_buf, buffers.tints_buf)
+    kept = rp.__dict__.get("_shadow_faded_group")
+    if kept is not None and kept[0] == key:
+        return kept[1]
+    group = rp._device.create_bind_group(
+        layout=rp._shadow_bind_layout_faded,
+        entries=[
+            {"binding": 0, "resource": {"buffer": rp._globals_buffer, "offset": 0, "size": 416}},
+            {"binding": 1, "resource": {"buffer": buffers.transforms_buf, "offset": 0,
+                                        "size": buffers.transforms_capacity}},
+            {"binding": TINTS_BINDING, "resource": {"buffer": buffers.tints_buf, "offset": 0,
+                                                    "size": buffers.tints_capacity}},
+        ],
+    )
+    rp._shadow_faded_group = (key, group)
+    return group
 
 
 def _skinned_bind_group(rp, entities):

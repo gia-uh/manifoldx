@@ -102,3 +102,37 @@ def test_faded_is_its_own_pipeline_and_unfaded_keeps_its_subtype():
     assert StandardMaterial("#fff", faded=True).pipeline_subtype == "fade"
     assert StandardMaterial("#fff", vertex_colors=True, tinted=True, faded=True).pipeline_subtype == "vcolor-tint-fade"
 
+
+
+_FLOOR_ROT = (-0.70710678, 0.0, 0.0, 0.70710678)  # plane()'s +Z normal turned to +Y
+
+
+def _shadow(fades, pcf=2):
+    """The floor's brightness under spheres of these fades, which cast but are not drawn (layer 1)."""
+    from manifoldx.components import Layer
+    from manifoldx.resources import DirectionalLight, plane, sphere
+
+    eng, canvas = _offscreen(128, 128)
+    eng.set_sun(DirectionalLight(color="#ffffff", intensity=3.0, direction=(-0.3, -1.0, -0.3)))
+    eng.enable_shadows(target=(0, 0, 0), extent=6.0, resolution=1024, bias=0.004, pcf_radius=pcf)
+    eng.spawn(Mesh(plane(12, 12)), Material(StandardMaterial("#ffffff", roughness=0.9)),
+              Transform(rot=_FLOOR_ROT))
+    for v in fades:
+        eng.spawn(Mesh(sphere(1.0, 24)), Material(_faded()), Transform(pos=(0, 2, 0)), Fade(value=v), Layer(layer=1))
+    eng.camera.layers = {0}
+    eng.camera.fit(radius=6.0, center=(0, 0, 0), azimuth=25, elevation=55)
+    eng._draw_frame()
+    srgb = np.asarray(canvas.draw())[..., :3].astype(np.float64) / 255
+    return (((srgb + 0.055) / 1.055) ** 2.4).mean(axis=2)  # linear light, where a shadow's share adds up
+
+
+def test_a_fading_caster_fades_its_shadow():
+    lit = _shadow([0.0])
+    dark = [(lit - _shadow([v])).clip(0).sum() for v in (1.0, 0.75, 0.5, 0.25)]
+    assert dark[0] > 30
+    assert dark[0] > dark[1] > dark[2] > dark[3] > 0
+    assert 0.2 < dark[2] / dark[0] < 0.8
+
+
+def test_two_complementary_fades_cast_one_whole_shadow():
+    assert np.array_equal(_shadow([0.3, -0.7], pcf=0), _shadow([1.0], pcf=0))
