@@ -122,8 +122,11 @@ class Engine:
         if name not in self.kinds:
             return None
         factory, bus, cap, placed = self.kinds[name]
+        pose = None
+        if placed:  # the position places the voice; the factory gets the other values
+            values = dict(values)
+            pose = Pose(values.pop("x", 0.0), values.pop("y", 0.0), values.pop("z", 0.0), 0, 0, 0)
         unit = factory(**values)
-        pose = Pose(values.get("x", 0.0), values.get("y", 0.0), values.get("z", 0.0), 0, 0, 0) if placed else None
         voice = [unit, round(_duration(unit) * RATE), Placed(unit) if placed else None, pose, name]
 
         def start():

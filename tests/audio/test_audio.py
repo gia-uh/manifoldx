@@ -185,3 +185,18 @@ def test_no_underruns_under_a_light_load():
 def test_a_file_backend_needs_a_path():
     with pytest.raises(ValueError):
         Audio(backend="file")
+
+
+def click_with_seed(seed):
+    return Const(0.01, 1.0)
+
+
+def test_a_placed_voice_takes_its_position_apart_from_its_values():
+    a = Audio(backend="null")
+    wait_alive(a)
+    a.voice("hit", click_with_seed, "effects", cap=2, placed=True)
+    a.event("hit", seed=3, x=1.0, y=0.0, z=2.0)
+    time.sleep(0.5)
+    s = a.state()
+    a.close()
+    assert s["voices"]["effects"] == 1 and not s["error"]
