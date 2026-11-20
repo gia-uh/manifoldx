@@ -129,11 +129,30 @@ class Params:
         return dict(self.__dict__)
 
 
+def sweep(defaults: dict, raw: dict) -> list[dict]:
+    """The combinations of a sweep: each `k=a,b` value split on commas, crossed in the order the keys came.
+
+    Each combination is a dict of string overrides. Every one is parsed here, so a bad name or value fails
+    before any run starts. A string param cannot hold a comma: the comma always separates values."""
+    import itertools
+
+    keys = list(raw)
+    values = [[v.strip() for v in str(raw[k]).split(",") if v.strip()] for k in keys]
+    combos = [dict(zip(keys, c)) for c in itertools.product(*values)]
+    for combo in combos:
+        for k, v in combo.items():
+            if k in defaults:
+                try:
+                    _parse(k, v, defaults[k])
+                except ValueError:
+                    raise ValueError(f"param {k}: {v!r} is not a {type(defaults[k]).__name__}") from None
+        Params(defaults, combo)  # names a param the scenario does not take
+    return combos
+
+
 def _parse(key, value, default):
     if not isinstance(value, str):
         return value
-    if "," in value and not isinstance(default, str):
-        raise ValueError(f"param {key}: one value only; sweeps over several values come in a later step")
     if isinstance(default, bool):
         if value.lower() in _TRUE | _FALSE:
             return value.lower() in _TRUE

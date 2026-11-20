@@ -419,3 +419,50 @@ def test_a_cleanup_that_raises_still_stops_recording(monkeypatch):
     run = run_scenario(sc, size=(64, 48))
     assert run.summary["phases"]["main"]["frames"] == 2
     assert not counters.recording() and counters.JOBS_ENV not in os.environ
+
+
+# --- step 3: timing the comparison relies on -----------------------------------------------------
+
+
+def test_bookkeeping_stays_out_of_the_next_frame(monkeypatch):
+    from manifoldx.bench import runner
+
+    def slow(engine):
+        time.sleep(0.08)
+        return 0.0
+
+    monkeypatch.setattr(runner, "origin_distance", slow)  # sampled at frame 0, then every 30
+    sc, _ = make([bench.hold(frames=4)])
+    run = run_scenario(sc, size=(64, 48))
+    assert run.frames["bench_ms"][0] >= 80
+    assert run.frames["wall_ms"][1] < 60
+
+
+def test_a_streamer_made_in_a_step_is_tracked():
+    from manifoldx.streaming import Streamer
+    from test_streaming import build_cell
+
+    def fn(engine, p):
+        made = {}
+
+        def walk(app):  # the streamer is made by the step, after the scenario returned
+            if "s" not in made:
+                made["s"] = Streamer(engine, cell=8.0, build=build_cell, workers="thread")
+            made["s"].focus(4.0, 4.0)
+
+        return None, [bench.mark("a"), bench.each_frame(walk, until=lambda: "s" in made and made["s"].settled)]
+
+    run = run_scenario(Scenario("late", fn, {}, {"smoke": 400, "full": None}), size=(64, 48))
+    assert run.error is None
+    assert run.summary["phases"]["a"]["streamer"]["settled_s"] is not None
+
+
+def test_each_entry_of_a_phase_is_timed_from_its_own_start():
+    from manifoldx.bench.probes import stream_summary
+
+    nodes = [{"t": 5.2, "ev": "drawn", "level": 0}]
+    ends, settled = [0.5, 1.0, 5.5, 6.0], [False, True, False, True]
+    s = stream_summary(nodes, [(0.0, 1.0), (5.0, 6.5)], ends, settled, np.ones(4, bool))
+    assert s["first_drawn_s"] == 0.2
+    assert s["settled_s"] == 1.0  # the last entry's settle, from 5.0
+    assert [e["start_s"] for e in s["entries"]] == [0.0, 5.0]

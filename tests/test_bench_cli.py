@@ -37,6 +37,12 @@ SCENARIOS = textwrap.dedent('''
     @bench.scenario("cli_broken")
     def cli_broken(engine, p):
         return Demo(engine), [bench.hold(frames=1), cli_fail()]
+
+
+    @bench.scenario("cli_fails_on", params={"bad": 0}, sizes={"smoke": 2})
+    def cli_fails_on(engine, p):
+        """Fails in a step when bad is set: one side of a sweep fails, the other runs."""
+        return Demo(engine), [bench.hold(frames=1), *([cli_fail()] if p.bad else [])]
 ''')
 
 
@@ -220,6 +226,46 @@ def test_micro_against_json_is_structured(tmp_path, capsys):
     assert {"base", "head", "table"} <= out.keys() and out["head"]["results"][0]["case"] == "spawn"
 
 
+CASES = textwrap.dedent('''
+    from manifoldx.bench.micro import case
+
+
+    @case("t", "boom", sizes=[1], smoke=1)
+    def boom(n):
+        raise RuntimeError("boom")
+
+
+    @case("t", "fine", sizes=[1], smoke=1)
+    def fine(n):
+        return 0.5
+''')
+
+
+@pytest.fixture
+def micro_project(tmp_path, monkeypatch):
+    import shutil
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    shutil.copytree(root / "src", tmp_path / "other" / "src", ignore=shutil.ignore_patterns("bench", "__pycache__"))
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "cases"\n')
+    (tmp_path / "t_cases.py").write_text(CASES)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_micro_against_fails_when_a_case_errors(micro_project, capsys):
+    other = str(micro_project / "other")
+    assert main(["micro", "t_cases", "--against", other, "--repeat", "1"]) == 1
+    assert main(["micro", "t_cases", "--case", "fine", "--against", other, "--repeat", "1"]) == 0
+
+
+def test_micro_against_profiles(micro_project, capsys):
+    assert main(["micro", "t_cases", "--case", "fine", "--against", str(micro_project / "other"), "--repeat", "1",
+                 "--profile"]) == 0
+    assert capsys.readouterr().err.count("--- profile t.fine") == 2
+
+
 def test_no_doc_compares_against_a_git_ref():
     from pathlib import Path
 
@@ -303,4 +349,4 @@ def test_show_reads_a_step_1_run(project, capsys):
 
 
 def test_the_summary_carries_its_schema(project, capsys):
-    assert _a_run(capsys)["schema"] == 2
+    assert _a_run(capsys)["schema"] == 3

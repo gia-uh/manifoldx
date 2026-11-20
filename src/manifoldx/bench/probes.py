@@ -1,7 +1,8 @@
 """What a run records each frame, and the summaries made from it.
 
-frames: wall time (start of one frame to the next), the engine's frame (`draw`), the process's CPU
-time over the frame (every thread), the phase.
+frames: wall time (from the end of the runner's work after one frame to the end of the next), the engine's
+frame (`draw`), the process's CPU time over the frame (every thread), the phase, and the runner's own work
+after the frame (`bench`: origin, memory, host, progress, a shot's copy), kept out of the wall time.
 split: the engine's frame_split (update, acquire, render, overlap) in ms.
 systems: the engine's system_split, each system's ms.
 counters: what manifoldx.counters counted in the frame (draws, bytes uploaded, ...).
@@ -33,24 +34,26 @@ SOFTWARE = re.compile(r"llvmpipe|lavapipe|swiftshader|softpipe", re.I)
 
 class Frames:
     def __init__(self):
-        self.wall_ms, self.draw_ms, self.cpu_ms, self.phase = [], [], [], []
+        self.wall_ms, self.draw_ms, self.cpu_ms, self.phase, self.bench_ms = [], [], [], [], []
 
     def add(self, wall_ms: float, draw_ms: float, cpu_ms: float, phase: int):
         self.wall_ms.append(wall_ms)
         self.draw_ms.append(draw_ms)
         self.cpu_ms.append(cpu_ms)
         self.phase.append(phase)
+        self.bench_ms.append(0.0)  # the runner sets it once its work after the frame is done
 
     def __len__(self):
-        return min(len(self.wall_ms), len(self.draw_ms), len(self.cpu_ms), len(self.phase))
+        return min(len(self.wall_ms), len(self.draw_ms), len(self.cpu_ms), len(self.phase), len(self.bench_ms))
 
     def cut(self, n: int):
-        for col in (self.wall_ms, self.draw_ms, self.cpu_ms, self.phase):
+        for col in (self.wall_ms, self.draw_ms, self.cpu_ms, self.phase, self.bench_ms):
             del col[n:]
 
     def arrays(self) -> dict:
         return {"wall_ms": np.array(self.wall_ms), "draw_ms": np.array(self.draw_ms),
-                "cpu_ms": np.array(self.cpu_ms), "phase": np.array(self.phase, dtype=np.int32)}
+                "cpu_ms": np.array(self.cpu_ms), "phase": np.array(self.phase, dtype=np.int32),
+                "bench_ms": np.array(self.bench_ms)}
 
 
 class Columns:
@@ -182,25 +185,36 @@ def _inside(t: float, intervals) -> bool:
 
 
 def stream_summary(nodes: list, intervals, ends: list, settled: list, rows: np.ndarray) -> dict:
-    """What the streamers did in one phase: node events by kind and level, the time from the phase's start
-    to the first node drawn, and to the frame where every streamer settled for the last time in the phase:
-    the first settled frame after the last one that was not (None when the phase ends unsettled)."""
-    start = intervals[0][0]
+    """What the streamers did in one phase: node events by kind and level, the time to the first node drawn,
+    and the time to the frame where every streamer settled for the last time: the first settled frame after
+    the last one that was not (None when it ends unsettled).
+
+    A phase entered more than once (a mark repeated) has one entry per stretch, each timed from its own
+    start and listed in `entries`; `first_drawn_s` is the first drawn node's, `settled_s` the last entry's."""
     counts: dict = {}
-    first_drawn = None
+    entries = [{"start_s": round(a, 4), "first_drawn_s": None, "settled_s": None} for a, _ in intervals]
+    first = None  # (t, seconds from its entry's start) of the first node drawn
     for e in nodes:
-        if not _inside(e["t"], intervals):
+        k = next((k for k, (a, b) in enumerate(intervals) if a <= e["t"] < b), None)
+        if k is None:
             continue
         by_level = counts.setdefault(e["ev"], {})
         by_level[e["level"]] = by_level.get(e["level"], 0) + 1
-        if e["ev"] == "drawn" and first_drawn is None:
-            first_drawn = round(e["t"] - start, 4)
+        if e["ev"] == "drawn" and entries[k]["first_drawn_s"] is None:
+            entries[k]["first_drawn_s"] = round(e["t"] - intervals[k][0], 4)
+            if first is None or e["t"] < first[0]:
+                first = (e["t"], entries[k]["first_drawn_s"])
     idx = np.flatnonzero(rows)
-    busy = [i for i in idx if not settled[i]]
-    after = idx[idx > busy[-1]] if busy else idx
-    done = ends[after[0]] if len(after) else None
-    return {**counts, "first_drawn_s": first_drawn,
-            "settled_s": None if done is None else round(done - start, 4)}
+    for k, (a, b) in enumerate(intervals):
+        here = [i for i in idx if a <= ends[i] < b]
+        busy = [i for i in here if not settled[i]]
+        after = [i for i in here if i > busy[-1]] if busy else here
+        if after:
+            entries[k]["settled_s"] = round(ends[after[0]] - a, 4)
+    out = {**counts, "first_drawn_s": None if first is None else first[1], "settled_s": entries[-1]["settled_s"]}
+    if len(entries) > 1:
+        out["entries"] = entries
+    return out
 
 
 def jobs_summary(jobs: list, intervals) -> dict:

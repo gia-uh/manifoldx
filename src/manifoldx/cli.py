@@ -18,7 +18,7 @@ running under `manifoldx run` in this folder (see manifoldx.devchannel).
     manifoldx metrics [-n N]
     manifoldx trace scene.glb -o out.png [--camera ...] [--size WxH] [--spp N] [--sun X,Y,Z]
     manifoldx asset FILE COMMAND [options]
-    manifoldx bench list | run NAME | show RUN | micro [MODULE...]   (manifoldx.bench.cli)
+    manifoldx bench list | run | show | compare | clean | micro   (manifoldx.bench.cli)
 """
 
 import argparse

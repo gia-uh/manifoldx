@@ -182,11 +182,6 @@ def test_an_unknown_param_is_refused():
         Params({"tau": 16}, {"tua": "1"})
 
 
-def test_a_comma_list_param_says_sweeps_come_later():
-    with pytest.raises(ValueError, match="sweep"):
-        Params({"tau": 16}, {"tau": "12,16"})
-
-
 def test_no_engine_step_knows_about_vehicles_or_maps():
     assert not {"drive", "teleport", "latlon", "place"} & STEPS.keys()
 
@@ -227,3 +222,35 @@ def test_zoom_seconds_counts_game_time(engine):
 def test_bad_paths_are_refused(call):
     with pytest.raises(ValueError):
         call()
+
+
+# --- step 3: sweeps ------------------------------------------------------------------------------
+
+
+def test_one_value_each_is_one_combination():
+    from manifoldx.bench.scenario import sweep
+
+    assert sweep({"tau": 16, "grass": "off"}, {"tau": "12"}) == [{"tau": "12"}]
+
+
+def test_several_params_cross_in_order():
+    from manifoldx.bench.scenario import sweep
+
+    combos = sweep({"tau": 16, "grass": "off"}, {"tau": "12,24", "grass": "off,on"})
+    assert combos == [{"tau": "12", "grass": "off"}, {"tau": "12", "grass": "on"},
+                      {"tau": "24", "grass": "off"}, {"tau": "24", "grass": "on"}]
+
+
+def test_a_swept_value_is_checked_before_anything_runs():
+    from manifoldx.bench.scenario import sweep
+
+    with pytest.raises(ValueError, match="tau"):
+        sweep({"tau": 16}, {"tau": "12,x"})
+    with pytest.raises(ValueError, match="no param"):
+        sweep({"tau": 16}, {"tua": "12,16"})
+
+
+def test_a_single_param_value_still_parses_to_its_type():
+    from manifoldx.bench.scenario import Params
+
+    assert Params({"tau": 16}, {"tau": "24"}).tau == 24

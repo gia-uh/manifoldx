@@ -2,9 +2,13 @@
 
     manifoldx bench list [--json]
     manifoldx bench run NAME|FILE.json [--size WxH] [--loop serial|pipelined|check] [--step 1/30]
-                        [--param k=v]... [--smoke] [--label L] [--json]
+                        [--param k=v[,v2...]]... [--repeat N] [--against DIR | --manifoldx SPEC]
+                        [--smoke] [--label L] [--json]
     manifoldx bench show RUN [--probe P [--phase NAME]] [--json]
-    manifoldx bench micro [MODULE...] [--case C] [--sizes N...] [--profile] [--smoke] [--against DIR] [--json]
+    manifoldx bench compare PATH [PATH...] [--out DIR] [--json]
+    manifoldx bench clean [--json]
+    manifoldx bench micro [MODULE...] [--case C] [--sizes N...] [--profile] [--smoke] [--against DIR [--repeat N]]
+                          [--json]
 
 The app's pyproject.toml says where its scenarios are:
 
@@ -115,7 +119,14 @@ def _parser():
     r.add_argument("--size", type=_size, default=(640, 360), help="WxH of the offscreen frame (default 640x360)")
     r.add_argument("--loop", choices=["serial", "pipelined", "check"], default="serial")
     r.add_argument("--step", type=_step, help="fixed dt in seconds, such as 1/30 (default: the wall clock)")
-    r.add_argument("--param", action="append", default=[], metavar="K=V")
+    r.add_argument("--param", action="append", default=[], metavar="K=V",
+                   help="a param's value; K=A,B sweeps it, each value a side run in fresh processes")
+    r.add_argument("--repeat", type=int, default=1, metavar="N",
+                   help="runs of each side, interleaved (with a sweep, --against or --manifoldx)")
+    r.add_argument("--against", type=Path, metavar="DIR",
+                   help="another copy of the app to run the same scenario on, through uv (the baseline)")
+    r.add_argument("--manifoldx", metavar="SPEC",
+                   help="run this copy on another manifoldx as well: anything uv run --with takes, or a directory")
     r.add_argument("--smoke", action="store_true", help="cap each waiting step at the scenario's smoke size")
     r.add_argument("--label", help="a free label kept with the run (default: $MANIFOLDX_BENCH_LABEL)")
     r.add_argument("--json", action="store_true", help="print only the summary, as JSON")
@@ -124,6 +135,14 @@ def _parser():
     s.add_argument("--probe", choices=sorted([*PHASE_PROBES, *RUN_PROBES]), help="print only this probe")
     s.add_argument("--phase", help="only this phase (with --probe)")
     s.add_argument("--json", action="store_true")
+    cmp = sub.add_parser("compare", help="compare runs, sides or a set: a Markdown table and contact sheets")
+    cmp.add_argument("paths", nargs="+", type=Path, help="run folders, side folders or a set folder; the first "
+                     "side is the baseline")
+    cmp.add_argument("--out", type=Path, help="where compare.md and sheets/ go (default: the set folder, or a "
+                     "new folder beside the first path)")
+    cmp.add_argument("--json", action="store_true")
+    c = sub.add_parser("clean", help="remove the environments --against and --manifoldx keep")
+    c.add_argument("--json", action="store_true")
     m = sub.add_parser("micro", help="time micro cases")
     m.add_argument("modules", nargs="*", help="modules of @bench.case functions (default: the config's micro)")
     m.add_argument("--case", action="append")
@@ -131,6 +150,8 @@ def _parser():
     m.add_argument("--profile", action="store_true")
     m.add_argument("--smoke", action="store_true")
     m.add_argument("--against", type=Path, metavar="DIR", help="another manifoldx project to compare with")
+    m.add_argument("--repeat", type=int, default=3, metavar="N",
+                   help="rounds of each side with --against, interleaved (default 3)")
     m.add_argument("--json", action="store_true")
     return p
 
@@ -138,7 +159,8 @@ def _parser():
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        return {"list": _list, "run": _run, "show": _show, "micro": _micro}[args.cmd](args)
+        return {"list": _list, "run": _run, "show": _show, "micro": _micro, "clean": _clean,
+                "compare": _compare}[args.cmd](args)
     except ConfigError as e:
         print(f"manifoldx bench: {e}", file=sys.stderr)
         return 2
@@ -174,7 +196,11 @@ def _run(args) -> int:
     if not config.has_table:
         raise ConfigError(f"{config.root / 'pyproject.toml'} has no [tool.manifoldx.bench]; add one with "
                           "scenarios = \"<module of your @bench.scenario functions>\"")
-    _import_scenarios(config)  # a JSON scenario may call the app steps it registers
+    import contextlib
+
+    with contextlib.redirect_stdout(sys.stderr) if args.json else contextlib.nullcontext():
+        _import_scenarios(config)  # a JSON scenario may call the app steps it registers; with --json, what the
+        # app prints as it loads goes to stderr, so stdout holds only the summary
     if args.scenario.endswith(".json"):
         try:
             sc = load_json(Path(args.scenario))
@@ -190,6 +216,18 @@ def _run(args) -> int:
         if not sep:
             raise ConfigError(f"--param takes k=v, not {kv!r}")
         overrides[k] = v
+    from manifoldx.bench.scenario import sweep
+
+    try:
+        combos = sweep(sc.params, overrides)
+    except ValueError as e:
+        raise ConfigError(str(e)) from None
+    if args.repeat < 1:
+        raise ConfigError(f"--repeat must be 1 or more, not {args.repeat}")
+    if len(combos) > 1 or args.against or args.manifoldx:
+        return _run_set(args, config, combos)
+    if args.repeat > 1:
+        raise ConfigError("--repeat needs more than one side: a swept --param, --against or --manifoldx")
     last = {"t": 0.0}
 
     def progress(n, phase, step, steps):
@@ -218,6 +256,71 @@ def _run(args) -> int:
         print(f"manifoldx bench: the run failed: {run.error}", file=sys.stderr)
         return 1
     return 0
+
+
+def _run_set(args, config: Config, combos: list[dict]) -> int:
+    """Run every side of a sweep in fresh processes, interleaved, into one set folder."""
+    from manifoldx.bench import envs
+    from manifoldx.bench.sides import Side, run_set
+
+    if args.against and args.manifoldx:
+        raise ConfigError("--against and --manifoldx go one at a time: with both, which copy runs which "
+                          "manifoldx has two readings")
+    copies = [("this copy", config.root, None, False)]
+    if args.against or args.manifoldx:
+        try:
+            envs.uv()
+        except envs.UvMissing as e:
+            raise ConfigError(str(e)) from None
+    if args.against:
+        other = args.against.resolve()
+        if not (other / "pyproject.toml").exists():
+            raise ConfigError(f"--against needs another copy of the app, a project with a pyproject.toml; {other} "
+                              "has none. manifoldx makes no copies: make one with your version control or unpack "
+                              "a release")
+        copies.insert(0, (other.name, other, None, True))
+    if args.manifoldx:
+        spec = args.manifoldx  # a path is resolved here: the child runs from the app's root
+        spec = str(Path(spec).resolve()) if Path(spec).exists() else spec
+        copies.append((args.manifoldx, config.root, spec, False))
+    scenario = args.scenario
+    if scenario.endswith(".json"):  # each copy reads its own file, at the same place under its root
+        path = Path(scenario).resolve()
+        scenario = str(path.relative_to(config.root)) if path.is_relative_to(config.root) else str(path)
+    sides = []
+    for name, root, spec, other in copies:
+        for combo in combos:
+            params = " ".join(f"{k}={v}" for k, v in combo.items())
+            label = params if len(copies) == 1 and params else " ".join(x for x in (name, params) if x)
+            sides.append(Side(label, root, combo, spec, other))
+    run_args = ["--size", f"{args.size[0]}x{args.size[1]}", "--loop", args.loop]
+    run_args += (["--step", repr(args.step)] if args.step else []) + (["--smoke"] if args.smoke else [])
+    label = args.label or os.environ.get("MANIFOLDX_BENCH_LABEL")
+    run_args += ["--label", label] if label else []
+    try:
+        result = run_set(scenario, sides, args.repeat, run_args, config.runs)
+    except envs.UvMissing as e:
+        raise ConfigError(str(e)) from None
+    out = {"set": result.folder.name, **{k: v for k, v in result.data.items() if k != "scenario"}}
+    from manifoldx.bench import compare
+
+    sides = compare.load_sides([result.folder])
+    done = sum(1 for s in sides if s.runs) >= 2
+    cmp = compare.write(sides, result.folder) if done else None
+    if args.json:
+        print(json.dumps({**out, **({"table": cmp["table"], "rows": cmp["rows"], "sheets": cmp["sheets"]}
+                                    if cmp else {})}, indent=1))
+    else:
+        for e in result.data["runs"]:
+            if e["error"] or e["exit"]:
+                side = result.data["sides"][e["side"]]["label"]
+                print(f"{side}, round {e['round'] + 1}: {e['error'] or 'exit ' + str(e['exit'])}")
+        if cmp:
+            print(cmp["table"])
+            for name, path in cmp["sheets"].items():
+                print(f"sheet {name}: {path}")
+        print(f"set folder: {result.folder}")
+    return 1 if result.failed else 0
 
 
 FRAME_KEYS = ("frames", "p50_ms", "p95_ms", "p99_ms", "max_ms", "over_1_5x", "over_3x", "draw_p50_ms", "cpu_p50_ms")
@@ -293,6 +396,45 @@ def _show(args) -> int:
     return 0
 
 
+def _compare(args) -> int:
+    import secrets
+    from datetime import UTC, datetime
+
+    from manifoldx.bench import compare
+
+    try:
+        sides = compare.load_sides(args.paths)
+    except (OSError, ValueError) as e:
+        raise ConfigError(str(e)) from None
+    if sum(1 for s in sides if s.runs) < 2:
+        raise ConfigError("compare needs two sides or more: two run folders, or a set folder with two sides")
+    out = args.out
+    if out is None:
+        if len(args.paths) == 1:
+            out = args.paths[0]
+        else:
+            stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
+            out = args.paths[0].resolve().parent / f"{stamp}-compare-{secrets.token_hex(2)}"
+    cmp = compare.write(sides, out)
+    if args.json:
+        print(json.dumps(cmp, indent=1))
+    else:
+        print(cmp["table"])
+        for name, path in cmp["sheets"].items():
+            print(f"sheet {name}: {path}", file=sys.stderr)
+        print(f"written to {cmp['folder']}", file=sys.stderr)
+    return 0
+
+
+def _clean(args) -> int:
+    from manifoldx.bench import envs
+
+    where = envs.cache_dir()
+    mb = envs.clean()
+    print(json.dumps({"removed": str(where), "mb": round(mb, 1)}) if args.json else f"removed {where}: {mb:.1f} MB")
+    return 0
+
+
 def _micro(args) -> int:
     from manifoldx.bench import micro
 
@@ -310,12 +452,13 @@ def _micro(args) -> int:
         rest = [x for c in args.case or [] for x in ("--case", c)]
         rest += (["--sizes", *map(str, args.sizes)] if args.sizes else []) + (["--smoke"] if args.smoke else [])
         try:
-            base, head = micro.against_results(modules, args.against, rest, cwd=cwd)
+            base, head = micro.against_results(modules, args.against, rest, cwd=cwd, repeat=max(1, args.repeat),
+                                               profile=args.profile)
         except micro.AgainstError as e:
             raise ConfigError(str(e)) from None
         table = micro.compare(base, head, Path(args.against).name)
         print(json.dumps({"base": base, "head": head, "table": table}, indent=1) if args.json else table)
-        return 0
+        return 1 if any(r["error"] for side in (base, head) for r in side["results"]) else 0
     cases = [c for c in micro.load(modules) if not args.case or c.name in args.case]
     if args.json:
         import contextlib

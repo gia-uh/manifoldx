@@ -52,10 +52,14 @@ manifoldx never calls a version control system. To compare with main, make a cop
 ```bash
 git worktree add ../manifoldx-main origin/main        # or any copy of another manifoldx project
 uv run manifoldx bench micro benchmarks.suites.frame --case sprites --against ../manifoldx-main
+uv run manifoldx bench run quad_zoom --against ../manifoldx-main --repeat 3
 git worktree remove ../manifoldx-main
+uv run manifoldx bench clean                          # the environments --against left in the cache
 ```
 
-The cases run twice in fresh processes, on the other copy's `src/` and on this one, and a Markdown table of both is printed, ready for a pull request. The other copy needs no `manifoldx.bench`: the harness comes from this one.
+`micro --against` runs the cases in fresh processes, on the other copy's `src/` and on this one, taking turns over `--repeat` rounds (3 by default), and prints a Markdown table of both, ready for a pull request. The other copy needs no `manifoldx.bench`: the harness comes from this one. It exits 1 when a case fails on either side.
+
+`run --against DIR` runs a scenario on another copy of an app (manifoldx is one: its scenarios are in `benchmarks/scenarios.py`) through `uv run --project DIR`, and `run --manifoldx SPEC` runs this copy on another manifoldx through `uv run --with`. The other copy needs uv and a manifoldx with `bench run --json`. Its environment is kept in `~/.cache/manifoldx/bench-envs` (capped at 2 GB, `MANIFOLDX_BENCH_CACHE_GB`) until `bench clean`; check the free disk before the first run on a full machine. `--param k=a,b` sweeps a param the same way, with no uv. Each of these runs every side in fresh processes, alternating the order each round, into one set folder, and ends with `bench compare`'s table; `bench compare A B` makes it from any two runs, sides or a set, with a contact sheet of the shots both took.
 
 ## Proving a change in a pull request
 
@@ -67,7 +71,7 @@ The cases run twice in fresh processes, on the other copy's `src/` and on this o
 ## Reading the numbers
 
 - `measure` reports the best of 5 runs; `frame_ms` the median of 5 frames after 2 warm-up frames, at a 64×64 target so the rasterizer adds little. Both are CPU time.
-- On a shared or GPU-less machine, run-to-run noise is about ±10 %; a speed-up under 1.3× needs a second run before it counts. `--against` runs one copy after the other, so a load that changes between them lands on one side: with a load average near the CPU count, single cases swing from 0.4× to 1.7× either way. Wait for a quiet machine or look at the median over cases.
+- On a shared or GPU-less machine, run-to-run noise is about ±10 %; a speed-up under 1.3× needs a second run before it counts. With a load average near the CPU count, single cases swing from 0.4× to 1.7× either way. `--against`, sweeps and `compare` alternate the sides over rounds so the load lands on both, report each side's spread, and mark a timing row "needs a quiet re-run" when its ratio is within 1.3× either way and "taken under load" when a run saw a load above half the CPUs. Re-run those rows on a quiet machine before quoting them.
 - Without a GPU, wgpu runs on a software Vulkan driver: CPU-side costs are real, GPU-side costs (raster, uploads, readbacks) are not those of a real GPU. Say so when a fix is about GPU transfers.
 - `matrix_recomputes` on frame cases counts `TransformCache._recompute_matrices` calls in one frame.
 - `web web-crowd` exports an app of `n` boxes in one batch with a query system moving all of them, opens it in headless Chromium (SwiftShader) and reports the median of 60 ticks' `__mx.frameMs.work`: the transpiled systems, the flush and the batches' sync, not the render. `calls` is the last frame's draw calls (1, the one batch). It needs `uv sync --group browser` and a Chromium Playwright can launch; without them the case reports `RuntimeError: playwright not installed` or `chromium not installed`. It reports and gates nothing.

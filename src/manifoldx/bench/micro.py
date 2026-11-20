@@ -180,22 +180,44 @@ def _fmt(ms):
     return "error" if ms is None else (f"{ms:.3f}" if ms < 1 else f"{ms:.1f}")
 
 
+CLOSE = 1.3  # a speed-up within this, either way, is within a shared host's noise
+
+
+def _with_spread(r) -> str:
+    sp = r.get("spread")
+    if sp and r["ms"] is not None and sp[0] != sp[1]:
+        return f"{_fmt(r['ms'])} ({_fmt(sp[0])}–{_fmt(sp[1])})"
+    return _fmt(r["ms"])
+
+
+def _loaded(*sides) -> str:
+    worst = max(((s.get("load_max"), s.get("cpus")) for s in sides if s.get("load_max") is not None
+                 and s.get("cpus") and s["load_max"] > s["cpus"] / 2), default=None)
+    return f"taken under load ({worst[0]:.1f} of {worst[1]} cpus)" if worst else ""
+
+
 def compare(base, head, label):
-    """Markdown table of base vs head results, matched on (suite, case, n)."""
+    """Markdown table of base vs head results, matched on (suite, case, n): each side's ms with its spread over
+    the rounds, the speed-up (base over head) and a note on the rows not to trust yet."""
     by_key = {(r["suite"], r["case"], r["n"]): r for r in base["results"]}
+    load = _loaded(base, head)
     lines = [
-        f"| case | n | {label} ms | this copy ms | speed-up | |",
-        "|---|---|---|---|---|---|",
+        f"| case | n | {label} ms | this copy ms | speed-up | note | |",
+        "|---|---|---|---|---|---|---|",
     ]
     for r in head["results"]:
         b = by_key.get((r["suite"], r["case"], r["n"]))
         b_ms = b["ms"] if b else None
-        ratio = f"{b_ms / r['ms']:.1f}×" if b_ms and r["ms"] else "–"
+        speed = b_ms / r["ms"] if b_ms and r["ms"] else None
+        ratio = f"{speed:.1f}×" if speed else "–"
+        notes = ["needs a quiet re-run"] if speed and 1 / CLOSE < speed < CLOSE else []
+        notes += [load] if speed and load else []
         extra = ", ".join(f"{k} {v}" for k, v in r["extra"].items())
         if b and b["extra"] != r["extra"] and b["extra"]:
             extra += " (was " + ", ".join(f"{k} {v}" for k, v in b["extra"].items()) + ")"
         lines.append(
-            f"| {r['suite']}.{r['case']} | {r['n']} | {_fmt(b_ms) if b else 'n/a'} | {_fmt(r['ms'])} | {ratio} | {extra} |"
+            f"| {r['suite']}.{r['case']} | {r['n']} | {_with_spread(b) if b else 'n/a'} | {_with_spread(r)} | "
+            f"{ratio} | {'; '.join(notes)} | {extra} |"
         )
     return "\n".join(lines)
 
@@ -210,6 +232,7 @@ def _parse(argv):
     p.add_argument("--case", action="append")
     p.add_argument("--sizes", nargs="+", type=int)
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--profile", action="store_true")
     return p.parse_args(argv)
 
 
@@ -236,9 +259,45 @@ class AgainstError(Exception):
     """--against was given something that is not another manifoldx project."""
 
 
-def against_results(modules: list[str], other, argv: list[str], cwd=None) -> tuple[dict, dict]:
+def _load():
+    import os
+
+    try:
+        return round(os.getloadavg()[0], 2)
+    except OSError:  # not on this platform
+        return None
+
+
+def _merge(rounds: list[dict], loads: list) -> dict:
+    """One side's rounds as one result per case: the median ms and its [min, max]; an error in any round
+    makes the case an error."""
+    import os
+    import statistics
+
+    rows: dict = {}
+    for data in rounds:
+        for r in data["results"]:
+            rows.setdefault((r["suite"], r["case"], r["n"]), []).append(r)
+    results = []
+    for rs in rows.values():
+        last = rs[-1]
+        errors = [r["error"] for r in rs if r["error"]]
+        ms = [r["ms"] for r in rs if r["ms"] is not None]
+        if errors or not ms:
+            results.append({**last, "ms": None, "spread": None, "error": errors[0] if errors else "no time"})
+        else:
+            results.append({**last, "ms": statistics.median(ms), "spread": [min(ms), max(ms)]})
+    loads = [x for x in loads if x is not None]
+    return {"manifoldx": rounds[0]["manifoldx"], "machine": rounds[0]["machine"], "results": results,
+            "rounds": rounds, "load_max": max(loads, default=None), "cpus": os.cpu_count()}
+
+
+def against_results(modules: list[str], other, argv: list[str], cwd=None, repeat: int = 3,
+                    profile: bool = False) -> tuple[dict, dict]:
     """Run the cases on the manifoldx in `other` (a project directory holding src/manifoldx) and on this
-    one, each in a fresh process; return both results (base, head). Progress goes to stderr."""
+    one, `repeat` rounds each, interleaved (other, this; this, other; ...), every one in a fresh process;
+    return both sides merged (base, head). With `profile`, the last round of each side profiles its cases,
+    so the timed rounds before it run without the profiler. Progress goes to stderr."""
     import sys
     import tempfile
     from pathlib import Path
@@ -253,12 +312,19 @@ def against_results(modules: list[str], other, argv: list[str], cwd=None) -> tup
 
     here = Path(manifoldx.__file__).resolve().parent.parent
     cwd = Path(cwd or Path.cwd())
+    from manifoldx.bench.sides import order
+
+    rounds: list[list] = [[], []]
+    loads = [_load()]
     with tempfile.TemporaryDirectory(prefix="mx-micro-") as tmp:
-        print(f"== {other} ==", file=sys.stderr, flush=True)
-        base = _child(modules, other / "src", argv, Path(tmp) / "base.json", cwd)
-        print("== this copy ==", file=sys.stderr, flush=True)
-        head = _child(modules, here, argv, Path(tmp) / "head.json", cwd)
-    return base, head
+        for k, r in order(2, repeat):
+            name = str(other) if k == 0 else "this copy"
+            print(f"== {name}, round {r + 1}/{repeat} ==", file=sys.stderr, flush=True)
+            args = [*argv, "--profile"] if profile and r == repeat - 1 else argv
+            src = other / "src" if k == 0 else here
+            rounds[k].append(_child(modules, src, args, Path(tmp) / f"{k}-{r}.json", cwd))
+            loads.append(_load())
+    return _merge(rounds[0], loads), _merge(rounds[1], loads)
 
 
 def against(modules: list[str], other, argv: list[str], cwd=None) -> str:
@@ -295,7 +361,7 @@ def _child_main(out, modules, argv):
     sys.modules["manifoldx.bench"].micro = me
     a = _parse(argv)
     cases = [c for c in load(modules) if not a.case or c.name in a.case]
-    results = run(cases, a.sizes, smoke=a.smoke)
+    results = run(cases, a.sizes, profile=a.profile, smoke=a.smoke)
     with open(out, "w") as f:
         json.dump({
             "manifoldx": manifoldx.__file__,
