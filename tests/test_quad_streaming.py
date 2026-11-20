@@ -6,6 +6,7 @@ import time
 import numpy as np
 
 import manifoldx as mx
+from manifoldx.commands import CommandType
 from manifoldx.streaming import MeshData, QuadStreamer
 
 CELL = 200.0
@@ -294,3 +295,62 @@ def test_tau_change_while_still_reselects():
         s.focus(500.0, 500.0, 2.0)
     assert len(s._cut) < before
     s.close()
+
+
+def test_crossfade_keeps_the_parent_till_its_children_fade_in():
+    gate = threading.Event()
+
+    def build(L, a, b):
+        if L == 0:
+            gate.wait(5)
+        return tri()
+
+    engine = mx.Engine("quad", width=64, height=600)
+    engine.camera.far = 15000.0
+    s = QuadStreamer(engine, CELL, (0, 0), 1, full(1), build, lambda L: CELL * 2**L / 16, refine_ms=None,
+                     crossfade=0.2)
+    assert s.material.faded
+
+    def fade(n):
+        handle = s._fading[n][0] if n in s._fading else s._drawn[n]
+        return engine.store._components["Fade"][handle.index][0]
+
+    for _ in range(200):
+        s.focus(200.0, 200.0, 10_000.0)
+        if (1, 0, 0) in s.drawn():
+            break
+        time.sleep(0.005)
+    time.sleep(0.25)
+    s.focus(200.0, 200.0, 10_000.0)
+    assert fade((1, 0, 0)) == 1.0 and not s._fading  # faded in, whole
+    gate.set()
+    kids = {(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1)}
+    for _ in range(400):
+        s.focus(200.0, 200.0, 1.0)
+        if s.drawn() == kids:
+            break
+        time.sleep(0.005)
+    assert s.drawn() == kids and (1, 0, 0) in s._fading  # the root still drawn, fading out
+    time.sleep(0.08)
+    s.focus(200.0, 200.0, 1.0)
+    out, ins = fade((1, 0, 0)), [fade(k) for k in kids]
+    assert -1.0 < out < 0.0 and all(0.0 < v < 1.0 for v in ins)
+    assert all(abs(-out - (1.0 - v)) < 0.05 for v in ins)  # complementary: the root's pixels are the kids' gaps
+    root = s._fading[(1, 0, 0)][0]
+    time.sleep(0.2)
+    s.focus(200.0, 200.0, 1.0)
+    assert not s._fading and all(fade(k) == 1.0 for k in kids)
+    assert (1, 0, 0) not in s._ready  # faded out and freed
+    destroyed = [i for c in engine.commands._commands if c.type == CommandType.DESTROY for i in c.data["indices"]]
+    assert root.index in destroyed  # gone at the frame's flush
+    s.close()
+
+
+def test_crossfade_needs_a_faded_material():
+    import pytest
+    from manifoldx.resources import StandardMaterial
+
+    engine = mx.Engine("quad", width=64, height=600)
+    with pytest.raises(ValueError):
+        QuadStreamer(engine, CELL, (0, 0), 1, full(1), tri, lambda L: CELL, crossfade=0.3,
+                     material=StandardMaterial("#fff", vertex_colors=True))
