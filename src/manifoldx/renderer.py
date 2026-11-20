@@ -19,7 +19,7 @@ from manifoldx.skinning import (
     JointStore,
     skin_shader,
 )
-from manifoldx.resources import TINTS_BINDING, tint_shader
+from manifoldx.resources import TINTS_BINDING, fade_shader, tint_shader
 from manifoldx.viz.materials import ColormapMaterial
 
 
@@ -850,6 +850,11 @@ class RenderPipeline:
 
         if key in self._pipelines:
             return self._pipelines[key], self._bind_group_layouts.get(key)
+        # A faded StandardMaterial ("vcolor-fade", "fade", ...) builds the pipeline of its subtype without the
+        # suffix, then drops pixels by each instance's Fade.
+        faded = bool(getattr(material, "faded", False))
+        if faded:
+            material_subtype = material_subtype.removesuffix("fade").removesuffix("-") or None
 
         if line:
             # 3 bindings: globals, transforms, material uniform.
@@ -1057,6 +1062,8 @@ class RenderPipeline:
                 shader_source = tint_shader(shader_source)
         else:
             shader_source = material._compile()
+        if faded:
+            shader_source = fade_shader(shader_source)
         # Skinned geometry gets its own pipeline (the key holds geometry_id) whose
         # vertex shader poses position and normal by the entity's joint block.
         skinned = not sprite and (geometry_buffers or {}).get("has_joints", False)
@@ -1232,7 +1239,7 @@ class RenderPipeline:
                             },
                         ]
                     )
-            if material_subtype == "vcolor-tint":
+            if material_subtype == "vcolor-tint" or faded:
                 bind_group_entries.append(
                     {
                         "binding": TINTS_BINDING,

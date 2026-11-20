@@ -312,7 +312,7 @@ def _resolve(rp, engine, keys, slots, mats, lit, joint_buffers, tints, index_cou
         if has_joints:
             joints_buf, blocks_buf = joint_buffers()
             skinned = True
-        tinted = mat_subtype == "vcolor-tint"
+        tinted = _reads_tints(mat_subtype)
 
         # Every object the bind group points at: it is rebuilt only when one
         # of them changed (a grown buffer, a swapped texture).
@@ -423,15 +423,31 @@ def _resolve(rp, engine, keys, slots, mats, lit, joint_buffers, tints, index_cou
     return entries, skinned
 
 
+def _is_tinted(subtype) -> bool:
+    return isinstance(subtype, str) and subtype.startswith("vcolor-tint")
+
+
+def _is_faded(subtype) -> bool:
+    return isinstance(subtype, str) and (subtype == "fade" or subtype.endswith("-fade"))
+
+
+def _reads_tints(subtype) -> bool:
+    return _is_tinted(subtype) or _is_faded(subtype)
+
+
 def _upload_tints(rp, mesh_batches, entities):
-    """The tints buffer, one (4,) tint per drawn instance in the transforms' order, written when its
-    bytes changed; None when the layout holds no tinted batch. Only the tinted batches' rows are
-    gathered (an entity without a Tint keeps its colours); every other row is white. A tinted batch
-    culled this frame still binds the buffer, so it is kept, unwritten."""
+    """The tints buffer, one (4,) row per drawn instance in the transforms' order (rgb the Tint, w the
+    Fade), written when its bytes changed; None when the layout holds no tinted or faded batch. Only
+    those batches' rows are gathered (an entity without a Tint keeps its colours, one without a Fade is
+    drawn whole); every other row is ones. A batch culled this frame still binds the buffer, so it is
+    kept, unwritten."""
     layout = mesh_batches.layout
-    flags = layout.__dict__.get("_tinted")
-    if flags is None:
-        flags = layout._tinted = np.array([k[2] == "vcolor-tint" for k in layout.keys], bool)
+    kinds = layout.__dict__.get("_tinted")
+    if kinds is None:
+        kinds = layout._tinted = (np.array([_is_tinted(k[2]) for k in layout.keys], bool),
+                                  np.array([_is_faded(k[2]) for k in layout.keys], bool))
+    tinted, faded = kinds
+    flags = tinted | faded
     if not flags.any():
         return None
     bufs = rp._batch_buffers
@@ -439,13 +455,15 @@ def _upload_tints(rp, mesh_batches, entities):
         if bufs.tints_buf is None:
             bufs.upload_tints(np.ones((1, 4), np.float32))
         return bufs.tints_buf
-    rows = np.flatnonzero(np.repeat(flags, mesh_batches.counts))
     out = np.ones((len(entities), 4), np.float32)
-    tint = rp._store._components.get("Tint")
-    if tint is not None:
+    for name, kind, cols in (("Tint", tinted, slice(0, 3)), ("Fade", faded, 3)):
+        values = rp._store._components.get(name)
+        if values is None or not kind.any():
+            continue
+        rows = np.flatnonzero(np.repeat(kind, mesh_batches.counts))
         ents = entities[rows]
-        has = rp._store._members["Tint"][ents]
-        out[rows[has], :3] = tint[ents[has]]
+        has = rp._store._members[name][ents]
+        out[rows[has], cols] = values[ents[has]] if name == "Tint" else values[ents[has]].reshape(-1)
     data = out.tobytes()
     if bufs.tints_buf is None or bufs.tints_capacity < len(data):
         bufs.upload_tints(out)

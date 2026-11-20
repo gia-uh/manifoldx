@@ -435,3 +435,19 @@ class Tint(Component):
     """
 
     rgb: Vector3 = (1.0, 1.0, 1.0)
+
+
+class Fade(Component):
+    """How much of this entity's mesh draws, per instance: 1 all of it (as without a Fade), 0 none.
+
+    Only a StandardMaterial made with faded=True reads it. The mesh drops pixels against a 4x4 pattern
+    rather than blending, so nothing is sorted and the depth stays right; its shadow drops the same
+    share. A negative fade draws the complementary pixels: an entity at -(1 - t) and one at t cover
+    every pixel exactly once, so a coarse level of detail can give way to a fine one without a pop:
+
+        lod = StandardMaterial("#ffffff", vertex_colors=True, faded=True)
+        engine.spawn(Mesh(coarse), Material(lod), Transform(), Fade(value=-0.7))
+        engine.spawn(Mesh(fine), Material(lod), Transform(), Fade(value=0.3))
+    """
+
+    value: Float = 1.0
