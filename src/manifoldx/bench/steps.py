@@ -120,7 +120,7 @@ def _fly(ctx, frm, to, speed):
 
 
 @engine_step("zoom")
-def _zoom(ctx, h0, h1, *, at, seconds, steps, hold, max_s):
+def _zoom(ctx, h0, h1, *, at=(0.0, 0.0), seconds=None, steps=None, hold=None, max_s=30.0):
     if (seconds is None) == (steps is None):
         raise ValueError("zoom takes seconds or steps, one of them")
     x, z = at
@@ -143,7 +143,7 @@ def _zoom(ctx, h0, h1, *, at, seconds, steps, hold, max_s):
 
 
 @engine_step("hold")
-def _hold(ctx, *, seconds, frames, until, max_s):
+def _hold(ctx, *, seconds=None, frames=None, until=None, max_s=60.0):
     if frames is not None:
         for _ in range(frames):
             yield
@@ -158,7 +158,7 @@ def _hold(ctx, *, seconds, frames, until, max_s):
 
 
 @engine_step("each_frame")
-def _each_frame(ctx, fn, *, frames, until, max_s):
+def _each_frame(ctx, fn, *, frames=None, until=None, max_s=60.0):
     t0, n = time.monotonic(), 0
     while (frames is None or n < frames) and not (until is not None and until()):
         if frames is None and time.monotonic() - t0 > max_s:
