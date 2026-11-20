@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import math
 import multiprocessing
+import os
+import time
 import itertools
 import threading
 import weakref
@@ -71,6 +73,23 @@ class _Cell:
 
 def _started() -> None:
     """A no-op job: submitted when a streamer is made, so its workers start (and warm up) before any cell."""
+
+
+def _worker_start(parent: int, warm) -> None:
+    """A process worker's start: exit as soon as the app that made it is gone, then warm up.
+
+    An app killed by a signal (an out-of-memory killer, `timeout`) never shuts its pool down, and its
+    workers, each holding what `warm` loaded, would live on as orphans; a thread here checks the parent
+    once a second and ends the worker when it changed."""
+
+    def watch():
+        while os.getppid() == parent:
+            time.sleep(1.0)
+        os._exit(0)
+
+    threading.Thread(target=watch, daemon=True, name="parent-watch").start()
+    if warm is not None:
+        warm()
 
 
 def _pack(build, *key):
@@ -129,7 +148,8 @@ class _Uploads:
             self._pool = ThreadPoolExecutor(max_workers=builders, initializer=warm)
         elif workers == "process":
             self._pool = ProcessPoolExecutor(
-                max_workers=builders, mp_context=multiprocessing.get_context("spawn"), initializer=warm
+                max_workers=builders, mp_context=multiprocessing.get_context("spawn"),
+                initializer=_worker_start, initargs=(os.getpid(), warm),
             )
         else:
             raise ValueError(f'workers must be "thread" or "process", got {workers!r}')
