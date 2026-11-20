@@ -166,3 +166,15 @@ def test_a_file_hardlinked_from_elsewhere_is_not_counted(tmp_path, monkeypatch):
     shared.write_bytes(b"\0" * 1024 * 1024)
     os.link(shared, tmp_path / "c" / "a" / "venv" / "linked")  # as uv links a package from its own cache
     assert envs.size_mb() == 0.5  # removing the cache would free only its own half megabyte
+
+
+def test_clean_and_trim_touch_only_environments_bench_made(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANIFOLDX_BENCH_CACHE", str(tmp_path))  # pointed at a folder holding other things
+    (tmp_path / "theirs").mkdir()
+    (tmp_path / "theirs" / "data.bin").write_bytes(b"\0" * 2048 * 1024)
+    (tmp_path / "notes.txt").write_text("keep me")
+    _env(tmp_path, "ours", 512, 1)
+    assert envs.trim(cap=0.1) == ["ours"]
+    _env(tmp_path, "ours", 512, 1)
+    envs.clean()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.txt", "theirs"]

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-CLOSE = 1.3  # a timing ratio within this, either way, is not trusted on one run of a shared host
+CLOSE = 1.3  # a timing ratio within this, either way, is within a shared host's noise
 SYSTEMS = 5  # the baseline's slowest systems shown
 GAP = 8  # px between shots on a sheet
 GAP_RGB = (17, 16, 14)

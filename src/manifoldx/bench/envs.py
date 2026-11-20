@@ -90,8 +90,7 @@ def trim(cap: float | None = None, keep: set | frozenset = frozenset()) -> list[
     if not root.exists():
         return []
     cap = cap_mb() if cap is None else cap
-    homes = sorted((d for d in root.iterdir() if d.is_dir()),
-                   key=lambda d: (d / "used").stat().st_mtime if (d / "used").exists() else 0.0)
+    homes = sorted(_homes(), key=lambda d: (d / "used").stat().st_mtime)
     sizes = {d.name: size_mb(d) for d in homes}
     total, dropped = sum(sizes.values()), []
     for d in homes:
@@ -105,8 +104,21 @@ def trim(cap: float | None = None, keep: set | frozenset = frozenset()) -> list[
     return dropped
 
 
+def _homes() -> list[Path]:
+    """The environments bench made: the cache's folders holding the `used` file it writes. Anything else
+    in the cache folder, if it points at a folder shared with other things, is never touched."""
+    root = cache_dir()
+    return [d for d in root.iterdir() if d.is_dir() and (d / "used").is_file()] if root.exists() else []
+
+
 def clean() -> float:
-    """Remove the whole cache; return the MB it held."""
-    held = size_mb()
-    shutil.rmtree(cache_dir(), ignore_errors=True)
+    """Remove every environment bench made, and the cache folder once empty; return the MB they held."""
+    held = 0.0
+    for d in _homes():
+        held += size_mb(d)
+        shutil.rmtree(d, ignore_errors=True)
+    try:
+        cache_dir().rmdir()
+    except OSError:  # missing, or it holds something bench did not make
+        pass
     return held

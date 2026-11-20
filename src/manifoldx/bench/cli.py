@@ -280,7 +280,9 @@ def _run_set(args, config: Config, combos: list[dict]) -> int:
                               "a release")
         copies.insert(0, (other.name, other, None, True))
     if args.manifoldx:
-        copies.append((args.manifoldx, config.root, args.manifoldx, False))
+        spec = args.manifoldx  # a path is resolved here: the child runs from the app's root
+        spec = str(Path(spec).resolve()) if Path(spec).exists() else spec
+        copies.append((args.manifoldx, config.root, spec, False))
     scenario = args.scenario
     if scenario.endswith(".json"):  # each copy reads its own file, at the same place under its root
         path = Path(scenario).resolve()

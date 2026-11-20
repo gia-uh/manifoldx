@@ -274,8 +274,10 @@ uv run manifoldx bench run quad_zoom --manifoldx ../manifoldx           # a dire
 uv run manifoldx bench run quad_zoom --manifoldx manifold-gfx==0.9.0    # anything uv run --with takes
 ```
 
-The other copy is the baseline, and manifoldx never makes it: make it with your
-version control, or unpack a release. It must be a project uv can run, with
+With `--against` the other copy is the baseline; with `--manifoldx` this copy
+on its own manifoldx is, and the ratios are of the other manifoldx to it.
+manifoldx never makes the other copy: make it with your version control, or
+unpack a release. It must be a project uv can run, with
 manifoldx as a dependency, and its manifoldx must have `bench run --json`. Both
 flags run the other side with `uv run`; without uv they refuse and say so, and
 everything else on this page works without it. The two do not combine in one

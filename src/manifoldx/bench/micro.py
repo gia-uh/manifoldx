@@ -180,7 +180,7 @@ def _fmt(ms):
     return "error" if ms is None else (f"{ms:.3f}" if ms < 1 else f"{ms:.1f}")
 
 
-CLOSE = 1.3  # a speed-up within this, either way, is not trusted on one run of a shared host
+CLOSE = 1.3  # a speed-up within this, either way, is within a shared host's noise
 
 
 def _with_spread(r) -> str:

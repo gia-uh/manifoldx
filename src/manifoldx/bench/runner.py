@@ -104,7 +104,7 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
     if loop == "check":
         os.environ["MANIFOLDX_PIPELINE"] = "check"
     engine = app = None
-    state = {"last": None, "live": -1}  # the end of the runner's work after the last frame; live streamers
+    state = {"last": None, "live": None}  # the end of the runner's work after the last frame; live streamers
     error = None
 
     def frame(keep=False):
@@ -119,8 +119,9 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         ctx.t += ctx.dt
         took = counters.take()
         now_live = streaming.live()
-        if len(now_live) != state["live"]:  # a streamer made or closed since: one made in a step counts too
-            state["live"] = len(now_live)
+        ids = [id(s) for s in now_live]
+        if ids != state["live"]:  # a streamer made or closed since: one made in a step counts too
+            state["live"] = ids
             streamers[:] = [s for s in now_live if id(s) not in old]
         ready = all(s.settled for s in streamers) if streamers else False
         t_end = counters.now()
