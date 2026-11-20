@@ -213,6 +213,8 @@ def main(cspec, sspec, error, msgs, streams, config) -> None:
             print(f"manifoldx.audio: {e}; playing silently", file=sys.stderr)
             backend, device = "null", None
     st.set("null", 1.0 if backend == "null" else 0.0)
+    for b in BUSES:  # silence until the first block says otherwise
+        st.set(f"level.{b}", -120.0)
     files = {}
     if backend == "file":
         path = Path(config["path"])
