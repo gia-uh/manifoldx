@@ -96,7 +96,14 @@ depends on it.
 
 The folder holds `run.json` (the summary), `frames.npz` (every frame's numbers,
 one array per probe), `events.jsonl` (steps, marks, streamer nodes and worker
-jobs, with their times) and `shots/street.png`. The summary is also appended as
+jobs, with their times), `shots/street.png` and `report.html`. The report is the
+page to send a person: the run line, the checks, each phase's frame table with
+a chart of every frame's time against the median, the split as one bar per
+phase, the slowest systems, the counters, the streamer's node events by level
+with a dot for each node drawn at its time, the workers, memory, the app's
+metrics and the shots, in one file with no request that reads on a phone.
+`manifoldx bench report <folder> --open` writes it again, also for an older
+run. The summary is also appended as
 one line to `bench/history.jsonl`. `manifoldx bench show <folder>` prints it
 again; `--json` on `run` or `show` prints the summary alone, for an agent.
 Progress goes to stderr, one line a second, with the step it is on
@@ -290,6 +297,124 @@ cache grew, counting only what removing it would free: uv links most files from
 its own cache, so an environment of a few hundred MB holds a few MB of its own. Past 2 GB (`MANIFOLDX_BENCH_CACHE_GB`) the environments used least
 recently go, and `manifoldx bench clean` removes them all. The layer that
 `--with` adds lives in uv's own cache, which `uv cache prune` cleans.
+
+## Checks as tests
+
+A table says how fast a run was; a check says whether it was good enough. A
+scenario declares its checks after its definition, each a `Check`: budgets,
+each an upper bound on one number of a phase, or a function of the run.
+
+```python
+far_walk.check(origin_max_m=250, phase="far")        # nothing drawn more than 250 m from the origin
+meshes_spin.check(counters_draws=1, phase="spin")    # every cube in one instanced draw
+quad_zoom.check(frames_p95_ms=40, on="gpu")          # a timing budget, skipped on a software adapter
+
+
+@far_walk.check
+def every_node_settles(run):                         # any function of a RunView: true when it holds
+    return run.phases["far"]["streamer"]["settled_s"] is not None
+```
+
+A budget name is a number of the phase summary (`p95_ms`, `max_ms`,
+`over_3x`, `origin_max_m`, `rss_max_mb`, `gc_ms`), or a probe and a key:
+`frames_p95_ms`, `counters_draws` (its mean), `streamer_settled_s`,
+`systems_<name>`, `spans_<name>`, `split_<name>`, `app_<metric>` (its mean)
+and `workers_<kind>` (its p50). A name the phase does not have fails the check
+and lists the names it has. A phase keeps only its ten slowest systems, so a
+`systems_<name>` budget also fails when that system got fast enough to leave
+them; a span (`bench.span`) is always kept. Without `phase`, a budget holds in every phase. A
+function gets a `RunView`: the summary, the per-frame arrays and the events.
+Checks run after the run has closed the app and the engine, never inside the
+timed loop, and their results go to `checks` in `run.json`. The same functions
+serve a script: `manifoldx.bench.checks.lookup(phase, name)` reads a budget's
+number, `evaluate(checks, run)` returns the results, and `read_budgets(path)`
+reads a budgets file; `manifoldx.bench.report.write_report(folder)` writes a
+folder's page.
+
+A project can keep budgets apart from its scenarios, in the file named by
+`budgets` under `[tool.manifoldx.bench]`, one table per scenario:
+
+```toml
+[quad_zoom]
+frames_p95_ms = 40
+phase = "zoom"
+on = "gpu"
+```
+
+`bench check` runs every scenario with checks at smoke size, 160x90 unless
+`--size` says otherwise, writes their run folders, prints one line per check
+and exits 1 when any fails. `bench run` evaluates the same checks and exits 1
+on a failed one too; `bench run --all` runs every scenario, one after another.
+
+```bash
+uv run manifoldx bench check
+```
+
+```text
+PASS meshes_spin: check counters_draws: counters_draws 1 <= 1 in phase spin
+PASS far_walk: check origin_max_m: origin_max_m 71.55 <= 250 in phase far (frame 189)
+```
+
+A failed check names the check, the number, its budget, the phase and the
+frame that set it: the slowest frame for a frame budget, the farthest origin
+sample for `origin_max_m`. Here the walk's floating origin was broken on
+purpose, so the terrain was drawn 900 km away:
+
+```text
+check origin_max_m: origin_max_m 900160 > 250 in phase far (frame 30)
+```
+
+A pytest plugin turns each scenario into a test. It is never loaded by
+installing manifoldx; a project turns it on and adds its scenarios file to the
+paths pytest collects:
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests", "benchmarks/scenarios.py"]
+addopts = "-p manifoldx.bench.plugin"
+```
+
+Every scenario defined in the module that `[tool.manifoldx.bench] scenarios`
+names becomes `benchmarks/scenarios.py::test_bench[far_walk]`, run at smoke
+size and 160x90 with its checks and the budgets file's. The file collects as a
+`ScenarioFile` and each scenario as a `ScenarioItem`; a failure is a
+`BenchFailure` that prints the failed checks and the run folder, kept in the
+test's temporary folder. Because the id is a real path, a tool that picks the
+tests a change can break selects one scenario like any other test. manifoldx's
+four scenarios add about four seconds to its suite.
+
+A timing budget on a shared machine or a software rasterizer fails for reasons
+that have nothing to do with the change. Put timing budgets on `on="gpu"`, or
+in a release job on known hardware; a counter or an origin budget holds
+anywhere.
+
+## In CI
+
+manifoldx's release runs its own checks as a gate. The `bench` job in
+`.github/workflows/release.yml` runs `manifoldx bench check` before anything
+publishes, then checks out the last release beside the tag (the workflow does
+that; manifoldx never calls version control) and runs every scenario on both:
+
+```bash
+uv run manifoldx bench run --all --smoke --against base --label "$GITHUB_REF_NAME"
+```
+
+The tables go to the job's summary, and that step never fails the release:
+on the runner's software Vulkan driver, a timing compares nothing a player
+sees. A release older than `manifoldx bench` cannot run the scenarios, so
+until one release has it, the summary lists that side's errors and no table.
+
+An app that runs its CI through fastci adds the same run as a stage of its
+release tier:
+
+```toml
+[tool.fastci.stages]
+bench = { run = "uv run manifoldx bench check", tiers = ["release"] }
+```
+
+fastci runs its stages before the tests, and `after` places a stage after
+another stage, not after the tests. The comparison with the last release needs
+the last release checked out, which is the workflow's job, as above.
 
 ## Micro cases
 

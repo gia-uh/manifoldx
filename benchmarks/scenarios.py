@@ -3,6 +3,7 @@
     uv run manifoldx bench run quad_zoom --size 960x540
     uv run manifoldx bench run meshes_spin --loop pipelined
     uv run manifoldx bench run stream_walk
+    uv run manifoldx bench check                # the scenarios with checks, at smoke size
 """
 
 import time
@@ -62,14 +63,15 @@ def meshes_spin(engine, p):
     return None, [bench.hold(frames=5), bench.mark("spin"), bench.hold(frames=60)]
 
 
-# A spawned worker process takes about a second to start: at smoke size the first hold must last that long.
-@bench.scenario("stream_walk", params={"workers": "process", "metres": 2000.0}, sizes={"smoke": 200, "full": None})
-def stream_walk(engine, p):
-    """The stream walk terrain, built in a worker process, walked north 4 m a frame for `metres`."""
+meshes_spin.check(counters_draws=1, phase="spin")  # every cube in one instanced draw
+
+
+def _walk(engine, workers: str, z0: float):
+    """The stream walk terrain from z0, the floating origin following the camera; (streamer, place, walk)."""
     from examples.stream_walk import CAM_UP, CELL, LOOK_AHEAD, STEP, height, make
 
-    streamer = make(engine, p.workers)
-    at = {"z": 0.0}
+    streamer = make(engine, workers)
+    at = {"z": z0}
 
     def place():
         x, z = CELL / 2, at["z"]
@@ -85,8 +87,32 @@ def stream_walk(engine, p):
         place()
 
     place()
+    return streamer, place, walk
+
+
+# A spawned worker process takes about a second to start: at smoke size the first hold must last that long.
+@bench.scenario("stream_walk", params={"workers": "process", "metres": 2000.0}, sizes={"smoke": 200, "full": None})
+def stream_walk(engine, p):
+    """The stream walk terrain, built in a worker process, walked north 4 m a frame for `metres`."""
+    from examples.stream_walk import STEP
+
+    streamer, place, walk = _walk(engine, p.workers, 0.0)
     return streamer, [
         bench.each_frame(lambda app: place(), until=bench.settled(streamer), max_s=60),
         bench.mark("walk"),
         bench.each_frame(walk, frames=int(p.metres / STEP)),
     ]
+
+
+@bench.scenario("far_walk", params={"workers": "process"}, sizes={"smoke": 200, "full": None})
+def far_walk(engine, p):
+    """The stream walk 900 km from the world's origin: the floating origin keeps what is drawn near."""
+    streamer, place, walk = _walk(engine, p.workers, -900_000.0)
+    return streamer, [
+        bench.each_frame(lambda app: place(), until=bench.settled(streamer), max_s=60),
+        bench.mark("far"),
+        bench.each_frame(walk, frames=30),
+    ]
+
+
+far_walk.check(origin_max_m=250, phase="far")  # 101 m measured at smoke size; 900 km without the origin

@@ -18,13 +18,14 @@ from typing import Callable, Iterator
 
 @dataclass
 class Scenario:
-    """A named function `fn(engine, params) -> (app, steps)`, its default params and its sizes."""
+    """A named function `fn(engine, params) -> (app, steps)`, its default params, its sizes and its checks."""
 
     name: str
     fn: Callable
     params: dict = field(default_factory=dict)
     sizes: dict = field(default_factory=lambda: {"smoke": 30, "full": None})
     doc: str = ""
+    checks: list = field(default_factory=list)  # manifoldx.bench.checks.Check
 
 
 @dataclass
@@ -65,11 +66,20 @@ class Ctx:
 
 
 def scenario(name: str, *, params: dict | None = None, sizes: dict | None = None):
-    """Register `fn(engine, params) -> (app, steps)` as scenario `name`."""
+    """Register `fn(engine, params) -> (app, steps)` as scenario `name`; `fn.check(...)` then adds a check."""
+    from manifoldx.bench.checks import Check, check_name
 
     def wrap(fn):
         SCENARIOS[name] = Scenario(name, fn, dict(params or {}), {"smoke": 30, "full": None, **(sizes or {})},
                                    (fn.__doc__ or "").strip().split("\n")[0])
+
+        def check(f=None, *, phase=None, on=None, **budgets):
+            """Add a check to this scenario: budgets (`p95_ms=40`, `origin_max_m=20_000`) or a function
+            `f(run) -> bool`, in one phase or in every one; `on="gpu"` skips it on a software adapter."""
+            SCENARIOS[name].checks.append(Check(check_name(f, budgets), budgets, f, phase, on))
+            return f
+
+        fn.check = check
         return fn
 
     return wrap
@@ -177,7 +187,10 @@ def load_json(path: Path) -> Scenario:
     """A scenario from a JSON file: {"name", "app": "module:function", "params", "sizes", "steps"}.
 
     `app` is called as function(engine, params) and returns the app; each step is {name: args}, where
-    args is a dict (keywords), a list (positional) or one value."""
+    args is a dict (keywords), a list (positional) or one value. `checks` is a list of
+    {"budgets": {name: bound}, "phase": ..., "on": ...}."""
+    from manifoldx.bench.checks import Check, check_name
+
     data = json.loads(Path(path).read_text())
     module, _, func = data["app"].partition(":")
     steps = [_call_of(e) for e in data.get("steps", [])]
@@ -187,4 +200,6 @@ def load_json(path: Path) -> Scenario:
         return make(engine, p), list(steps)
 
     return Scenario(data.get("name", Path(path).stem), fn, dict(data.get("params", {})),
-                    {"smoke": 30, "full": None, **data.get("sizes", {})}, data.get("doc", ""))
+                    {"smoke": 30, "full": None, **data.get("sizes", {})}, data.get("doc", ""),
+                    [Check(c.get("name") or check_name(None, c["budgets"]), dict(c["budgets"]), None, c.get("phase"),
+                           c.get("on")) for c in data.get("checks", [])])

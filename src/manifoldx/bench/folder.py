@@ -6,12 +6,14 @@
                     spans_ms and metrics, each matrix with its column names (split_names, ...)
       events.jsonl  marks, steps, shots and errors, with their times
       shots/*.png   the scenario's shots
+      report.html   one page with all of it: charts, tables and the shots (manifoldx.bench.report)
 """
 
 from __future__ import annotations
 
 import json
 import secrets
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -39,6 +41,12 @@ def write_run(run: Run, runs_dir: Path, history: Path | None) -> Path:
         history.parent.mkdir(parents=True, exist_ok=True)
         with history.open("a") as f:
             f.write(json.dumps({**run.summary, "folder": folder.name}) + "\n")
+    from manifoldx.bench import report
+
+    try:
+        report.write_report(folder)
+    except Exception as e:  # the run's own files are written; a page that fails leaves them as they are
+        print(f"manifoldx bench: no report.html for {folder.name}: {type(e).__name__}: {e}", file=sys.stderr)
     return folder
 
 

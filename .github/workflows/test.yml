@@ -35,12 +35,13 @@ jobs:
         run: uv sync --locked --extra offline --extra viz --extra svg --dev
 
       - name: Run tests
-        # The whole suite on the offscreen backend with the software adapter.
+        # The whole suite on the offscreen backend with the software adapter,
+        # and each bench scenario as a test (benchmarks/scenarios.py::test_bench[name]).
         # A skip that says there is no adapter means lavapipe did not load.
         shell: bash
         run: |
           set -o pipefail
-          uv run pytest tests/ --ignore=tests/web -v --tb=short -rs | tee tests.log
+          uv run pytest tests/ benchmarks/scenarios.py --ignore=tests/web -v --tb=short -rs | tee tests.log
           if grep -qE 'SKIPPED.*no GPU adapter' tests.log; then echo "render tests skipped without a GPU adapter"; exit 1; fi
 
       - name: Run linter
