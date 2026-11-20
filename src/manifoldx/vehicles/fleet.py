@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import sqrt
 from typing import Sequence
 
 import numpy as np
@@ -12,6 +13,18 @@ from .body import cross, integrate, matrices, slerp, yaw_quaternion
 from .spec import VehicleSpec
 from .state import pack
 
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _mul(m, v):
+    return tuple(m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2] for i in range(3))
+
 G = 9.81
 AIR = 1.2  # kg/m³
 
@@ -20,6 +33,11 @@ class Vehicles:
     DT = 1 / 120
     SINGLE = True  # step a fleet of one in plain Python (single.py): numpy's cost per call dominates at N == 1
     MAX_FRAME = 0.05  # seconds: a longer frame runs as this long, as the game did before
+    STATE = ("position", "velocity", "angular", "rotation", "load", "compression", "ground_y", "omega", "wheel_turn",
+             "slip", "steer_angle", "extra_brake", "gear", "shift_timer", "rpm", "drive_cut", "impulse",
+             "brake_scale", "lit")  # every row a vehicle carries from step to step
+    PER_WHEEL = ("load", "compression", "ground_y", "omega", "wheel_turn", "slip", "steer_angle", "extra_brake",
+                 "brake_scale")  # those with a column per wheel
 
     def __init__(self, specs: Sequence[VehicleSpec]):
         self.specs = list(specs)
@@ -61,6 +79,32 @@ class Vehicles:
         self.omega[i] = self.slip[i] = 0.0
         self.gear[i], self.shift_timer[i], self.rpm[i] = 1, 0.0, self.p.engine[i, 0]
         self._before[0][i], self._before[1][i] = self.position[i], self.rotation[i]
+
+    def add(self, spec: VehicleSpec) -> int:
+        """Add a vehicle at rest at the origin, every other vehicle keeping its state; returns its index."""
+        new = Vehicles([spec])
+        self.specs.append(spec)
+        self.p = pack(self.specs)
+        w = self.p.wheel_mask.shape[1]
+        for k in self.STATE:
+            rows = [getattr(self, k), getattr(new, k)]
+            if k in self.PER_WHEEL:  # a vehicle with more wheels widens every row, with idle wheels
+                fill = 1.0 if k == "brake_scale" else 0.0
+                rows = [np.pad(r, [(0, 0), (0, w - r.shape[1])] + [(0, 0)] * (r.ndim - 2), constant_values=fill)
+                        for r in rows]
+            setattr(self, k, np.concatenate(rows))
+        self._before = tuple(np.concatenate([a, b]) for a, b in zip(self._before, new._before))
+        return len(self.specs) - 1
+
+    def remove(self, i: int) -> None:
+        """Take vehicle i out; the vehicles after it move down one index and keep their state."""
+        del self.specs[i]
+        self.p = pack(self.specs)
+        w = self.p.wheel_mask.shape[1]
+        for k in self.STATE:
+            row = np.delete(getattr(self, k), i, axis=0)
+            setattr(self, k, row[:, :w] if k in self.PER_WHEEL else row)
+        self._before = tuple(np.delete(a, i, axis=0) for a in self._before)
 
     def pick_gear(self, i: int) -> int:
         """Put vehicle i in the gear an automatic would hold at its road speed, as after a launch; returns it."""
@@ -265,6 +309,8 @@ class Vehicles:
             self.position = self.position + self.velocity * dt / n_sub
             if walls is not None and len(walls):
                 self._walls(R, inv_inertia, walls)
+            if len(p.mass) > 1:
+                self._bodies(R, inv_inertia)
             if np.any(loose):
                 self._body_on_ground(R, inv_inertia, ground)
 
@@ -292,6 +338,64 @@ class Vehicles:
             lever = np.stack([point[:, 0] - self.position[:, 0], np.zeros(len(point)),
                               point[:, 1] - self.position[:, 2]], -1)
             self._apply(inv_inertia, lever, n3, depth)
+
+    def _bodies(self, R, inv_inertia):
+        """Vehicles against each other: each pair whose footprints and heights overlap gets one impulse. The few
+        pairs that come near are worked in plain Python, which costs far less than numpy's calls for so few."""
+        p = self.p
+        xz, y = self.position[:, [0, 2]], self.position[:, 1]
+        reach = np.hypot(p.size[:, 0], p.size[:, 2]) / 2
+        near = np.linalg.norm(xz[:, None] - xz[None], axis=-1) < reach[:, None] + reach[None]
+        near &= np.abs(y[:, None] - y[None]) < (p.size[:, 1][:, None] + p.size[:, 1][None]) / 2
+        pairs = np.argwhere(np.triu(near, 1)).tolist()
+        if not pairs:
+            return
+        heading = R[:, [0, 2], 0].tolist()
+        half = (p.size[:, [0, 2]] / 2).tolist()
+        for a, b in pairs:
+            hit = contacts.box_hit(self.position[a, [0, 2]].tolist(), heading[a], half[a],
+                                   self.position[b, [0, 2]].tolist(), heading[b], half[b])
+            if hit is not None:
+                self._pair(a, b, inv_inertia, *hit)
+
+    def _pair(self, a, b, inv_inertia, normal, point, depth):
+        """One impulse between vehicles a and b at point along normal (the way a must move), with restitution and
+        friction, and the overlap pushed out, each body by its share of the inverse mass."""
+        n = (normal[0], 0.0, normal[1])
+        pa, pb = self.position[a].tolist(), self.position[b].tolist()
+        ra, rb = (point[0] - pa[0], 0.0, point[1] - pa[2]), (point[0] - pb[0], 0.0, point[1] - pb[2])
+        ia, ib = 1 / float(self.p.mass[a]), 1 / float(self.p.mass[b])
+        Ia, Ib = inv_inertia[a].tolist(), inv_inertia[b].tolist()
+        va, wa = self.velocity[a].tolist(), self.angular[a].tolist()
+        vb, wb = self.velocity[b].tolist(), self.angular[b].tolist()
+        ca, cb = _cross(wa, ra), _cross(wb, rb)
+        rel = [va[i] + ca[i] - vb[i] - cb[i] for i in range(3)]
+        vn = _dot(rel, n)
+        size = 0.0
+        if vn < 0:
+
+            def give(d):  # how much speed a unit impulse along d brings the two contact points apart
+                return (ia + ib + _dot(d, _cross(_mul(Ia, _cross(ra, d)), ra))
+                        + _dot(d, _cross(_mul(Ib, _cross(rb, d)), rb)))
+
+            bounce = contacts.RESTITUTION if vn < -contacts.RESTING else 0.0
+            jn = -(1 + bounce) * vn / give(n)
+            tangent = [rel[i] - vn * n[i] for i in range(3)]
+            speed_t = sqrt(_dot(tangent, tangent))
+            t = [c / max(speed_t, 1e-9) for c in tangent]
+            jt = min(speed_t / give(t), contacts.FRICTION * jn)
+            j = [jn * n[i] - jt * t[i] for i in range(3)]
+            spin_a, spin_b = _mul(Ia, _cross(ra, j)), _mul(Ib, _cross(rb, j))
+            self.velocity[a] = [va[i] + j[i] * ia for i in range(3)]
+            self.velocity[b] = [vb[i] - j[i] * ib for i in range(3)]
+            self.angular[a] = [wa[i] + spin_a[i] for i in range(3)]
+            self.angular[b] = [wb[i] - spin_b[i] for i in range(3)]
+            size = sqrt(_dot(j, j))
+        self.impulse[a] += size
+        self.impulse[b] += size
+        push = max(depth - contacts.SLOP, 0.0) * contacts.PUSH / (ia + ib)
+        self.position[a] = [pa[i] + n[i] * push * ia for i in range(3)]
+        self.position[b] = [pb[i] - n[i] * push * ib for i in range(3)]
 
     def _body_on_ground(self, R, inv_inertia, ground):
         """The body box's eight corners against the ground: a car on its side or roof rests on them."""
