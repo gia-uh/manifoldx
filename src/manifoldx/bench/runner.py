@@ -81,7 +81,8 @@ def _version(dist):
 def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt: float | None = None,
                  overrides: dict | None = None, smoke: bool = False, label: str | None = None,
                  app_name: str | None = None, progress=None, folders: dict | None = None) -> Run:
-    """Run one scenario and return what it recorded. `progress(frames, phase)` is called once a frame.
+    """Run one scenario and return what it recorded. `progress(frames, phase, step, steps)` is called once a
+    frame, with the step running (from 1) and how many there are.
     `folders` maps names to folders the app fills (caches, exports), sized at the start and the end."""
     import manifoldx as mx
 
@@ -114,6 +115,7 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         wall = end - (state["last"] if state["last"] is not None else t0)
         state["last"] = end
         ctx.dt = step_dt or wall
+        ctx.t += ctx.dt
         took = counters.take()
         ready = all(s.settled for s in streamers) if streamers else False
         t_end = counters.now()
@@ -132,7 +134,7 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         memory.frame()
         host.tick()
         if progress:
-            progress(len(frames.wall_ms), rec.phases[rec.phase])
+            progress(len(frames.wall_ms), rec.phases[rec.phase], ctx.index + 1, n_steps)
         if keep:
             from manifoldx.engine import _drop_alpha
 
@@ -141,6 +143,7 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
 
     rec = _Recorder(frame)
     ctx = None
+    n_steps = 0
     from manifoldx import streaming
 
     old = {id(s) for s in streaming.live()}
@@ -159,6 +162,7 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         engine._fire_startup()
         ctx = Ctx(engine, app, rec)
         cap = sc.sizes.get("smoke") if smoke else None
+        n_steps = len(steps)
         for i, call in enumerate(steps):
             ctx.index = i
             rec.event("step", name=call.name, index=i)

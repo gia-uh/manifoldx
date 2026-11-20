@@ -190,11 +190,11 @@ def _run(args) -> int:
         overrides[k] = v
     last = {"t": 0.0}
 
-    def progress(n, phase):
+    def progress(n, phase, step, steps):
         now = time.monotonic()
         if now - last["t"] >= 1.0 or n == 1:
             last["t"] = now
-            print(f"frame {n} phase {phase}", file=sys.stderr, flush=True)
+            print(f"frame {n} phase {phase} step {step}/{steps}", file=sys.stderr, flush=True)
 
     import contextlib
 

@@ -244,3 +244,11 @@ def test_a_folder_outside_the_project_is_refused(project, capsys):
         f.write('folders = ["../elsewhere"]\n')
     assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 2
     assert "folders" in capsys.readouterr().err
+
+
+def test_progress_lines_count_steps(project, capsys):
+    import re
+
+    assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 0
+    err = capsys.readouterr().err
+    assert re.search(r"^frame \d+ phase hold step \d/3$", err, re.M), err

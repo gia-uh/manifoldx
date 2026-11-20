@@ -46,20 +46,27 @@ def camera(pos, look_at) -> StepCall:
 
 
 def fly(frm, to, speed: float) -> StepCall:
-    """Fly the camera in a straight line from `frm` to `to` at `speed` m/s, looking ahead at `to`."""
+    """Fly the camera in a straight line from `frm` to `to` at `speed` m/s of game time, looking ahead at `to`."""
+    if not speed > 0:
+        raise ValueError(f"fly needs a speed above 0, not {speed}")
+    if tuple(map(float, frm)) == tuple(map(float, to)):
+        raise ValueError("fly needs two different points; use camera() for one pose")
     return StepCall("fly", (tuple(frm), tuple(to), float(speed)))
 
 
 def zoom(h0: float, h1: float, *, at=(0.0, 0.0), seconds: float | None = None, steps: int | None = None,
          hold=None, max_s: float = 30.0) -> StepCall:
     """Move the camera from height h0 to h1 over the point `at` (x, z), geometrically: over `seconds`
-    of frames, or in `steps` heights, each held until `hold()` is true (at most max_s seconds each)."""
+    of game time, or in `steps` heights, each held until `hold()` is true (at most max_s seconds each)."""
+    if not (h0 > 0 and h1 > 0):
+        raise ValueError(f"zoom needs heights above 0, not {h0} and {h1}")
     return StepCall("zoom", (float(h0), float(h1)),
                     {"at": tuple(at), "seconds": seconds, "steps": steps, "hold": hold, "max_s": max_s})
 
 
 def hold(*, seconds: float | None = None, frames: int | None = None, until=None, max_s: float = 60.0) -> StepCall:
-    """Keep rendering: for `seconds`, for `frames`, or until `until()` is true (at most max_s seconds)."""
+    """Keep rendering: for `seconds` of game time, for `frames`, or until `until()` is true (at most max_s
+    seconds of wall time)."""
     return StepCall("hold", (), {"seconds": seconds, "frames": frames, "until": until, "max_s": max_s})
 
 
@@ -84,7 +91,7 @@ def mark(name: str) -> StepCall:
 
 
 def shot(name: str) -> StepCall:
-    """Save the next rendered frame as shots/<name>.png."""
+    """Render a frame of its own and save it as shots/<name>.png."""
     return StepCall("shot", (name,))
 
 
@@ -135,8 +142,8 @@ def _zoom(ctx, h0, h1, *, at=(0.0, 0.0), seconds=None, steps=None, hold=None, ma
             if hold is not None:
                 yield from _wait(ctx, hold, max_s)
         return
-    t0 = time.monotonic()
-    while (t := (time.monotonic() - t0) / seconds) < 1.0:
+    t0 = ctx.t
+    while (t := (ctx.t - t0) / seconds) < 1.0 - 1e-9:
         place(h0 * (h1 / h0) ** t)
         yield
     place(h1)
@@ -148,8 +155,8 @@ def _hold(ctx, *, seconds=None, frames=None, until=None, max_s=60.0):
         for _ in range(frames):
             yield
     elif seconds is not None:
-        t0 = time.monotonic()
-        while time.monotonic() - t0 < seconds:
+        t0 = ctx.t
+        while ctx.t - t0 < seconds - 1e-9:  # game time: a fixed step gives the same frames on any host
             yield
     elif until is not None:
         yield from _wait(ctx, until, max_s)

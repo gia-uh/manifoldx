@@ -6,6 +6,7 @@ import types
 import numpy as np
 import pytest
 
+from manifoldx import bench
 from manifoldx.bench import micro
 from manifoldx.bench.scenario import STEPS, Ctx, Params, StepCall, StepTimeout, iterate, load_json, step
 from manifoldx.bench.steps import camera, each_frame, emit, hold, mark, shot, zoom
@@ -188,3 +189,41 @@ def test_a_comma_list_param_says_sweeps_come_later():
 
 def test_no_engine_step_knows_about_vehicles_or_maps():
     assert not {"drive", "teleport", "latlon", "place"} & STEPS.keys()
+
+
+# --- step 2: game time and checked paths ---------------------------------------------------------
+
+
+def drain_t(gen, engine, ctx):
+    """drain, advancing ctx.t by ctx.dt after each frame as the runner does."""
+    n = 0
+    for _ in gen:
+        engine._draw_frame()
+        engine._render_canvas.draw()
+        ctx.t += ctx.dt
+        n += 1
+    return n
+
+
+def test_hold_seconds_counts_game_time_under_a_fixed_step(engine):
+    ctx = make_ctx(engine)
+    ctx.dt = 1 / 30
+    assert ctx.t == 0.0
+    assert drain_t(iterate(bench.hold(seconds=1.0), ctx), engine, ctx) == 30
+
+
+def test_zoom_seconds_counts_game_time(engine):
+    ctx = make_ctx(engine)
+    ctx.dt = 1 / 10
+    assert drain_t(iterate(bench.zoom(100.0, 10.0, seconds=1.0), ctx), engine, ctx) == 10
+
+
+@pytest.mark.parametrize("call", [
+    lambda: bench.fly((0, 10, 0), (100, 10, 0), speed=0),
+    lambda: bench.fly((0, 10, 0), (0, 10, 0), speed=5),
+    lambda: bench.zoom(0.0, 50.0, steps=3),
+    lambda: bench.zoom(100.0, -1.0, steps=3),
+])
+def test_bad_paths_are_refused(call):
+    with pytest.raises(ValueError):
+        call()
