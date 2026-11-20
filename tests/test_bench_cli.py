@@ -74,7 +74,9 @@ def project(tmp_path, monkeypatch):
     import importlib
 
     registry = importlib.import_module("manifoldx.bench.scenario")
-
+    # Only this project's scenarios: in one pytest session other modules (benchmarks/scenarios.py through
+    # the plugin) register theirs too, and run --all or check would see them.
+    monkeypatch.setattr(registry, "SCENARIOS", {})
     for reg in (registry.SCENARIOS, registry.STEPS):
         for k in [k for k, v in reg.items() if v.fn.__module__ in ("cli_demo_scenarios", "noisy")]:
             del reg[k]
