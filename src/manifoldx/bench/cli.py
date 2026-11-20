@@ -146,6 +146,8 @@ def _parser():
     m.add_argument("--profile", action="store_true")
     m.add_argument("--smoke", action="store_true")
     m.add_argument("--against", type=Path, metavar="DIR", help="another manifoldx project to compare with")
+    m.add_argument("--repeat", type=int, default=3, metavar="N",
+                   help="rounds of each side with --against, interleaved (default 3)")
     m.add_argument("--json", action="store_true")
     return p
 
@@ -440,12 +442,13 @@ def _micro(args) -> int:
         rest = [x for c in args.case or [] for x in ("--case", c)]
         rest += (["--sizes", *map(str, args.sizes)] if args.sizes else []) + (["--smoke"] if args.smoke else [])
         try:
-            base, head = micro.against_results(modules, args.against, rest, cwd=cwd)
+            base, head = micro.against_results(modules, args.against, rest, cwd=cwd, repeat=max(1, args.repeat),
+                                               profile=args.profile)
         except micro.AgainstError as e:
             raise ConfigError(str(e)) from None
         table = micro.compare(base, head, Path(args.against).name)
         print(json.dumps({"base": base, "head": head, "table": table}, indent=1) if args.json else table)
-        return 0
+        return 1 if any(r["error"] for side in (base, head) for r in side["results"]) else 0
     cases = [c for c in micro.load(modules) if not args.case or c.name in args.case]
     if args.json:
         import contextlib
