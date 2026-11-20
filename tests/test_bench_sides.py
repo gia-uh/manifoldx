@@ -48,3 +48,18 @@ def test_a_failing_side_fails_the_set_and_keeps_the_others(project, capsys):  # 
     ok, failed = s["runs"]
     assert ok["error"] is None and ok["exit"] == 0
     assert "broken step" in failed["error"] and failed["exit"] == 1 and failed["folder"]
+
+
+def test_an_app_that_prints_on_import_keeps_its_runs(project, capsys):  # noqa: F811
+    with (project / "cli_demo_scenarios.py").open("a") as f:
+        f.write('\nprint("loading assets...")\n')
+    assert main(["run", "cli_demo", "--param", "frames=2,3", "--smoke", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert all(r["folder"] and r["error"] is None for r in out["runs"])
+
+
+def test_a_summary_after_other_output_is_found():
+    from manifoldx.bench.sides import _summary
+
+    assert _summary('loading\n{"a": {\n "b": 1}}\n') == {"a": {"b": 1}}
+    assert _summary("crashed\n") is None

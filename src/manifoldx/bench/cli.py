@@ -196,7 +196,11 @@ def _run(args) -> int:
     if not config.has_table:
         raise ConfigError(f"{config.root / 'pyproject.toml'} has no [tool.manifoldx.bench]; add one with "
                           "scenarios = \"<module of your @bench.scenario functions>\"")
-    _import_scenarios(config)  # a JSON scenario may call the app steps it registers
+    import contextlib
+
+    with contextlib.redirect_stdout(sys.stderr) if args.json else contextlib.nullcontext():
+        _import_scenarios(config)  # a JSON scenario may call the app steps it registers; with --json, what the
+        # app prints as it loads goes to stderr, so stdout holds only the summary
     if args.scenario.endswith(".json"):
         try:
             sc = load_json(Path(args.scenario))
@@ -400,7 +404,7 @@ def _compare(args) -> int:
         sides = compare.load_sides(args.paths)
     except (OSError, ValueError) as e:
         raise ConfigError(str(e)) from None
-    if len(sides) < 2:
+    if sum(1 for s in sides if s.runs) < 2:
         raise ConfigError("compare needs two sides or more: two run folders, or a set folder with two sides")
     out = args.out
     if out is None:

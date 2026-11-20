@@ -53,6 +53,21 @@ def _slug(label: str) -> str:
     return re.sub(r"[^A-Za-z0-9._=-]+", "_", label).strip("_") or "side"
 
 
+def _summary(out: str) -> dict | None:
+    """The child's summary: the last JSON object it printed, after anything an app or an older manifoldx
+    printed before it; None when there is none."""
+    lines = out.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("{"):
+            try:
+                found = json.loads("\n".join(lines[i:]))
+            except ValueError:
+                continue
+            if isinstance(found, dict):
+                return found
+    return None
+
+
 def run_set(scenario: str, sides: list[Side], repeat: int, run_args: list[str], runs_dir: Path) -> SetResult:
     """Run `scenario` on every side `repeat` times, interleaved; write the set folder and return it."""
     from manifoldx.bench import envs
@@ -76,17 +91,19 @@ def run_set(scenario: str, sides: list[Side], repeat: int, run_args: list[str], 
                                  cwd=cwd, env=env, stdout=subprocess.PIPE, text=True)
         out, _ = child.communicate()
         entry = {"side": k, "round": r, "folder": None, "pid": child.pid, "exit": child.returncode, "error": None}
-        try:
-            summary = json.loads(out)
-        except ValueError:  # it stopped before printing its summary
+        summary = _summary(out)
+        if summary is None or "folder" not in summary:  # it stopped before printing its summary
             entry["error"] = f"exit {child.returncode}: no summary"
         else:
             entry["error"] = summary.get("error")
             made = load_config(Path(side.root)).runs / summary["folder"]
             dest = folder / f"{k}-{_slug(side.label)}"
-            dest.mkdir(exist_ok=True)
-            shutil.move(str(made), dest / made.name)
-            entry["folder"] = f"{dest.name}/{made.name}"
+            try:
+                dest.mkdir(exist_ok=True)
+                shutil.move(str(made), dest / made.name)
+                entry["folder"] = f"{dest.name}/{made.name}"
+            except OSError as e:
+                entry["error"] = f"{entry['error'] or 'ran'}; its folder {made} could not be moved: {e}"
         data["runs"].append(entry)
         (folder / "set.json").write_text(json.dumps(data, indent=1))
     if uses_uv:

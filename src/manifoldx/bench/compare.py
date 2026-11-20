@@ -184,8 +184,8 @@ def _num(v) -> str:
     return f"{v:.0f}" if abs(v) >= 100 else f"{v:.1f}" if abs(v) >= 1 else f"{v:.3g}"
 
 
-def table(sides: list[SideRuns], rows_: list[Row]) -> str:
-    """The rows as Markdown, then one line per side."""
+def table(sides: list[SideRuns], rows_: list[Row], left_out: list[SideRuns] = ()) -> str:
+    """The rows as Markdown, then one line per side, and one per side left out."""
     labels = [s.label for s in sides]
     head = ["phase", "probe", "key", *labels, *(f"{x} ×base" for x in labels[1:]), "note"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
@@ -201,6 +201,7 @@ def table(sides: list[SideRuns], rows_: list[Row]) -> str:
         lines.append(f"- {s.label}: {len(s.runs)} run(s), params {params}, {host.get('cpus')} cpus, "
                      f"load max {max((r.get('host') or {}).get('load_max') or 0 for r in s.runs) if s.runs else '–'}, "
                      f"{host.get('adapter') or 'adapter unknown'}")
+    lines += [f"- {s.label}: no run finished, left out" for s in left_out]
     return "\n".join(lines)
 
 
@@ -232,14 +233,16 @@ def sheets(sides: list[SideRuns], out) -> dict[str, Path]:
 
 
 def write(sides: list[SideRuns], out) -> dict:
-    """compare.md and the sheets in `out`; the rows, the table and the sheets' paths."""
+    """compare.md and the sheets in `out`; the rows, the table and the sheets' paths. A side with no run
+    that finished is left out and named under the table; the first side with runs is the baseline."""
     from dataclasses import asdict
 
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    rows_ = rows(sides)
-    text = table(sides, rows_)
-    made = sheets(sides, out)
+    kept, left_out = [s for s in sides if s.runs], [s for s in sides if not s.runs]
+    rows_ = rows(kept) if kept else []
+    text = table(kept, rows_, left_out)
+    made = sheets(kept, out) if kept else {}
     sheet_lines = "".join(f"\n- sheet {n}: {p}" for n, p in made.items())
     (out / "compare.md").write_text(text + sheet_lines + "\n")
     return {"table": text, "rows": [asdict(r) for r in rows_], "sheets": {n: str(p) for n, p in made.items()},

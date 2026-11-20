@@ -91,3 +91,11 @@ def test_compare_cli_writes_the_table_and_sheets(tmp_path, capsys):
 def test_compare_needs_two_sides(tmp_path, capsys):
     assert main(["compare", str(_run(tmp_path, 20.0))]) == 2
     assert "two" in capsys.readouterr().err
+
+
+def test_a_side_with_no_runs_is_left_out_not_the_table(tmp_path):
+    sides = compare.load_sides([_run(tmp_path, 20.0), _run(tmp_path, 10.0)])
+    sides.insert(0, compare.SideRuns("crashed"))  # every run of the baseline failed
+    out = compare.write(sides, tmp_path / "cmp")
+    assert any(r["key"] == "p50_ms" for r in out["rows"])
+    assert "crashed: no run finished, left out" in out["table"]
