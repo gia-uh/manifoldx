@@ -74,7 +74,7 @@ micro = ["benchmarks.suites.frame", "benchmarks.suites.ecs", "benchmarks.suites.
          "benchmarks.suites.streaming", "benchmarks.suites.vehicles", "benchmarks.suites.web"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "benchmarks/scenarios.py"]
 pythonpath = ["."]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
@@ -82,7 +82,7 @@ python_functions = ["test_*"]
 markers = [
     "slow: marks tests as slow (CPU-heavy precompute; excluded from default `make test`)",
 ]
-addopts = "-m 'not slow'"
+addopts = "-m 'not slow' -p manifoldx.bench.plugin"  # the plugin: benchmarks/scenarios.py::test_bench[name]
 
 [tool.uv.sources]
 scriptorium = { git = "https://github.com/apiad/scriptorium", rev = "v0.14.0" }
