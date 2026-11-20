@@ -178,3 +178,12 @@ def test_clean_and_trim_touch_only_environments_bench_made(tmp_path, monkeypatch
     _env(tmp_path, "ours", 512, 1)
     envs.clean()
     assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.txt", "theirs"]
+
+
+def test_a_relative_spec_is_resolved_from_where_bench_runs(project, fake_uv, tmp_path, monkeypatch, capsys):  # noqa: F811
+    (tmp_path / "mx").mkdir()
+    (project / "sub").mkdir()
+    monkeypatch.chdir(project / "sub")
+    assert main(["run", "cli_demo", "--manifoldx", "../mx", "--smoke", "--json"]) == 0
+    (call,) = _calls(fake_uv)
+    assert call["args"][3:5] == ["--with-editable", str(tmp_path / "mx")]

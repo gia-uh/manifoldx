@@ -63,3 +63,24 @@ def test_a_summary_after_other_output_is_found():
 
     assert _summary('loading\n{"a": {\n "b": 1}}\n') == {"a": {"b": 1}}
     assert _summary("crashed\n") is None
+
+
+def test_ctrl_c_in_a_set_keeps_and_compares_what_ran(project, capsys, monkeypatch):  # noqa: F811
+    import subprocess
+
+    from manifoldx.bench import sides
+
+    real, calls = subprocess.Popen, []
+
+    def popen(*a, **kw):
+        calls.append(a)
+        if len(calls) == 3:
+            raise KeyboardInterrupt
+        return real(*a, **kw)
+
+    monkeypatch.setattr(sides.subprocess, "Popen", popen)
+    assert main(["run", "cli_demo", "--param", "frames=2,3", "--repeat", "2", "--smoke", "--json"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    s = json.loads((project / "bench/runs" / out["set"] / "set.json").read_text())
+    assert len(s["runs"]) == 2 and s["interrupted"] is True
+    assert "p50_ms" in out["table"]

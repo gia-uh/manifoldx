@@ -466,3 +466,30 @@ def test_each_entry_of_a_phase_is_timed_from_its_own_start():
     assert s["first_drawn_s"] == 0.2
     assert s["settled_s"] == 1.0  # the last entry's settle, from 5.0
     assert [e["start_s"] for e in s["entries"]] == [0.0, 5.0]
+
+
+def test_a_streamer_swapped_in_a_step_is_tracked():
+    from manifoldx.streaming import Streamer
+    from test_streaming import build_cell
+
+    def fn(engine, p):
+        made = {"s": Streamer(engine, cell=8.0, build=build_cell, workers="thread")}
+
+        def first(app):
+            made["s"].focus(4.0, 4.0)
+
+        def swap(app):  # one streamer closed and another made in the same frame: as many live as before
+            if not made.get("swapped"):
+                made["s"].close()
+                made["s"] = Streamer(engine, cell=8.0, build=build_cell, workers="thread")
+                made["swapped"] = True
+            made["s"].focus(4.0, 4.0)
+
+        return None, [bench.mark("a"), bench.each_frame(first, until=lambda: made["s"].settled),
+                      bench.mark("b"), bench.each_frame(swap, until=lambda: made.get("swapped") and made["s"].settled)]
+
+    run = run_scenario(Scenario("swap", fn, {}, {"smoke": 400, "full": None}), size=(64, 48))
+    assert run.error is None
+    b = run.summary["phases"]["b"]["streamer"]
+    assert b["first_drawn_s"] is not None and b["settled_s"] is not None
+    assert b["settled_s"] >= b["first_drawn_s"]  # settled when the new streamer had drawn, not the closed one
