@@ -25,7 +25,7 @@ uv run python examples/<name>.py
 uv run manifoldx run examples/<name>.py
 
 # Benchmarks, before/after against main (know-how/benchmarking.md)
-uv run python -m benchmarks frame --case sprites --against main
+uv run python -m benchmarks frame --case sprites --against ../manifoldx-main   # a copy of main, made with git worktree
 
 # Smoke-render an example to MP4 (good for visual regression)
 uv run python examples/<name>.py --render --duration 2 --fps 30 --output /tmp/<name>.mp4
@@ -60,7 +60,7 @@ Procedure docs in `know-how/` encode how to do things in this repo. Match the cu
 
 - [authoring-an-ecs-component](know-how/authoring-an-ecs-component.md) — adding a new ECS component (PointCloud-style marker, ScalarValue-style scalar, Velocity-style vector, etc.) using the `Component` base class with annotation-driven dtype + shape.
 
-- [benchmarking](know-how/benchmarking.md) — making something faster or proving a performance change in a PR: `benchmarks/` suites, `--against main` before/after tables.
+- [benchmarking](know-how/benchmarking.md) — making something faster or proving a performance change in a PR: `manifoldx bench` scenarios and micro suites, `--against <a copy of main>` before/after tables.
 
 - [hot-reload](know-how/hot-reload.md) — running an app with `manifoldx run`, keeping state across reloads in `engine.state`, the gotchas of rerunning app code, and keeping reloads fast.
 

@@ -66,7 +66,11 @@ def _import_scenarios(config: Config) -> None:
     if config.scenarios:
         if str(config.root) not in sys.path:
             sys.path.insert(0, str(config.root))
-        importlib.import_module(config.scenarios)
+        try:
+            importlib.import_module(config.scenarios)
+        except ImportError as e:
+            raise ConfigError(f"cannot import the scenarios module {config.scenarios!r} named in "
+                              f"{config.root / 'pyproject.toml'}: {e}") from None
 
 
 def _size(text: str):
@@ -78,10 +82,14 @@ def _size(text: str):
 
 
 def _step(text: str) -> float:
-    if "/" in text:
-        a, b = text.split("/")
-        return float(a) / float(b)
-    return float(text)
+    try:
+        a, _, b = text.partition("/")
+        dt = float(a) / float(b or 1)
+    except (ValueError, ZeroDivisionError):
+        dt = 0.0
+    if dt <= 0:
+        raise argparse.ArgumentTypeError(f"step must be a positive number of seconds, such as 1/30, not {text!r}")
+    return dt
 
 
 def _parser():
@@ -152,12 +160,13 @@ def _run(args) -> int:
     if not config.has_table:
         raise ConfigError(f"{config.root / 'pyproject.toml'} has no [tool.manifoldx.bench]; add one with "
                           "scenarios = \"<module of your @bench.scenario functions>\"")
+    _import_scenarios(config)  # a JSON scenario may call the app steps it registers
     if args.scenario.endswith(".json"):
-        if str(config.root) not in sys.path:
-            sys.path.insert(0, str(config.root))
-        sc = load_json(Path(args.scenario))
+        try:
+            sc = load_json(Path(args.scenario))
+        except (OSError, ValueError, KeyError) as e:
+            raise ConfigError(f"cannot read the scenario file {args.scenario}: {e}") from None
     else:
-        _import_scenarios(config)
         if args.scenario not in SCENARIOS:
             raise ConfigError(f"no scenario {args.scenario!r}; known: {', '.join(sorted(SCENARIOS)) or 'none'}")
         sc = SCENARIOS[args.scenario]
@@ -175,10 +184,14 @@ def _run(args) -> int:
             last["t"] = now
             print(f"frame {n} phase {phase}", file=sys.stderr, flush=True)
 
+    import contextlib
+
+    quiet = contextlib.redirect_stdout(sys.stderr) if args.json else contextlib.nullcontext()
     try:
-        run = run_scenario(sc, size=args.size, loop=args.loop, step_dt=args.step, overrides=overrides,
-                           smoke=args.smoke, label=args.label or os.environ.get("MANIFOLDX_BENCH_LABEL"),
-                           app_name=config.app_name, progress=progress)
+        with quiet:  # with --json, whatever the app prints goes to stderr
+            run = run_scenario(sc, size=args.size, loop=args.loop, step_dt=args.step, overrides=overrides,
+                               smoke=args.smoke, label=args.label or os.environ.get("MANIFOLDX_BENCH_LABEL"),
+                               app_name=config.app_name, progress=progress)
     except ValueError as e:  # bad params or loop
         raise ConfigError(str(e)) from None
     folder = write_run(run, config.runs, config.history)
@@ -237,8 +250,12 @@ def _micro(args) -> int:
     if args.against:
         rest = [x for c in args.case or [] for x in ("--case", c)]
         rest += (["--sizes", *map(str, args.sizes)] if args.sizes else []) + (["--smoke"] if args.smoke else [])
-        table = micro.against(modules, args.against, rest, cwd=cwd)
-        print(json.dumps({"table": table}) if args.json else table)
+        try:
+            base, head = micro.against_results(modules, args.against, rest, cwd=cwd)
+        except micro.AgainstError as e:
+            raise ConfigError(str(e)) from None
+        table = micro.compare(base, head, Path(args.against).name)
+        print(json.dumps({"base": base, "head": head, "table": table}, indent=1) if args.json else table)
         return 0
     cases = [c for c in micro.load(modules) if not args.case or c.name in args.case]
     if args.json:

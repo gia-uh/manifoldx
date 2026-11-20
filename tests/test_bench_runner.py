@@ -157,3 +157,25 @@ def test_events_record_marks_and_steps():
 def test_check_loop_runs(loop):
     sc, _ = make([bench.hold(frames=3)])
     assert run_scenario(sc, size=(64, 48), loop=loop).error is None
+
+
+def test_the_runner_closes_the_engine_so_shutdown_fires():
+    fired = []
+
+    def fn(engine, p):
+        engine.on("shutdown")(lambda payload: fired.append(1))
+        return App(engine), [bench.hold(frames=1)]
+
+    assert run_scenario(Scenario("s", fn), size=(64, 48)).error is None
+    assert fired == [1]
+
+
+def test_an_engine_whose_setup_raised_is_closed_too():
+    fired = []
+
+    def fn(engine, p):
+        engine.on("shutdown")(lambda payload: fired.append(1))
+        raise RuntimeError("setup broke")
+
+    run = run_scenario(Scenario("s", fn), size=(64, 48))
+    assert "setup broke" in run.error and fired == [1]

@@ -140,6 +140,8 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         rec.event("error", name=error, traceback=traceback.format_exc(limit=8))
     finally:
         _close(app)
+        if engine is not None:
+            engine.close()  # fires 'shutdown' and frees the engine's pools and GPU device
         if loop == "check":
             if saved_env is None:
                 os.environ.pop("MANIFOLDX_PIPELINE", None)

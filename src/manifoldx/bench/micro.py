@@ -223,7 +223,8 @@ def _child(modules, src, argv, out, cwd):
 
     cmd = [sys.executable, str(Path(__file__).resolve()), "--child", str(out), *modules, "--", *argv]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(src), str(cwd)])}
-    subprocess.run(cmd, cwd=cwd, env=env, check=True)
+    done = subprocess.run(cmd, cwd=cwd, env=env, check=True, stdout=subprocess.PIPE, text=True)
+    sys.stderr.write(done.stdout)  # the rows, as progress; the results come back in `out`
     data = json.loads(Path(out).read_text())
     imported = Path(data["manifoldx"]).resolve()
     if not imported.is_relative_to(Path(src).resolve()):  # the run must have measured the code asked for
@@ -231,15 +232,20 @@ def _child(modules, src, argv, out, cwd):
     return data
 
 
-def against(modules: list[str], other, argv: list[str], cwd=None) -> str:
+class AgainstError(Exception):
+    """--against was given something that is not another manifoldx project."""
+
+
+def against_results(modules: list[str], other, argv: list[str], cwd=None) -> tuple[dict, dict]:
     """Run the cases on the manifoldx in `other` (a project directory holding src/manifoldx) and on this
-    one, each in a fresh process, and return a Markdown table of both."""
+    one, each in a fresh process; return both results (base, head). Progress goes to stderr."""
+    import sys
     import tempfile
     from pathlib import Path
 
-    other = Path(other)
+    other = Path(other).resolve()
     if not (other / "src" / "manifoldx" / "__init__.py").exists():
-        raise SystemExit(
+        raise AgainstError(
             f"--against needs a directory holding another manifoldx project (src/manifoldx); {other} has none. "
             "Make one with your version control, e.g. a worktree."
         )
@@ -248,11 +254,22 @@ def against(modules: list[str], other, argv: list[str], cwd=None) -> str:
     here = Path(manifoldx.__file__).resolve().parent.parent
     cwd = Path(cwd or Path.cwd())
     with tempfile.TemporaryDirectory(prefix="mx-micro-") as tmp:
-        print(f"== {other} ==", flush=True)
+        print(f"== {other} ==", file=sys.stderr, flush=True)
         base = _child(modules, other / "src", argv, Path(tmp) / "base.json", cwd)
-        print("== this copy ==", flush=True)
+        print("== this copy ==", file=sys.stderr, flush=True)
         head = _child(modules, here, argv, Path(tmp) / "head.json", cwd)
-    return compare(base, head, other.name)
+    return base, head
+
+
+def against(modules: list[str], other, argv: list[str], cwd=None) -> str:
+    """against_results as a Markdown table; a directory that is not a manifoldx project exits."""
+    from pathlib import Path
+
+    try:
+        base, head = against_results(modules, other, argv, cwd)
+    except AgainstError as e:
+        raise SystemExit(str(e)) from None
+    return compare(base, head, Path(other).name)
 
 
 def _child_main(out, modules, argv):

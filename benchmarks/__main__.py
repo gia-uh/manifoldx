@@ -2,7 +2,7 @@
 
     uv run python -m benchmarks --list
     uv run python -m benchmarks frame ecs --sizes 1000 10000
-    uv run python -m benchmarks frame --case sprites --against main
+    uv run python -m benchmarks frame --case sprites --against ../manifoldx-main
 
 With --against DIR, the same suites (this checkout's benchmarks/) run twice in
 fresh processes: once on DIR's src/ (another manifoldx project, such as a copy of
