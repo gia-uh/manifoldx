@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
 from manifoldx import _deferred, _versions
+from manifoldx import counters
 
 # _SPRITE_QUAD is imported lazily inside GeometryRegistry.__init__ to avoid
 # a circular import: resources -> viz.geometry -> viz -> viz.materials -> resources.
@@ -1960,7 +1961,7 @@ class GeometryRegistry:
                 size=len(data),
                 usage=wgpu.BufferUsage.VERTEX | wgpu.BufferUsage.COPY_DST,
             )
-            queue.write_buffer(vertex_buffer, 0, data)
+            counters.write_buffer(queue, vertex_buffer, 0, data)
             buffers["vertex_buffer"] = vertex_buffer
 
         # Create index buffer
@@ -1972,7 +1973,7 @@ class GeometryRegistry:
                 size=len(data),
                 usage=wgpu.BufferUsage.INDEX | wgpu.BufferUsage.COPY_DST,
             )
-            queue.write_buffer(index_buffer, 0, data)
+            counters.write_buffer(queue, index_buffer, 0, data)
             buffers["index_buffer"] = index_buffer
             buffers["index_count"] = int(np.asarray(indices).size)  # (M, 3) triangles too
 

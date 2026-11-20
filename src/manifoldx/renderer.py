@@ -21,6 +21,7 @@ from manifoldx.skinning import (
 )
 from manifoldx.resources import TINTS_BINDING, detail_shader, fade_shader, tint_shader
 from manifoldx.viz.materials import ColormapMaterial
+from manifoldx import counters
 
 
 def _glow_target(fmt):
@@ -188,7 +189,7 @@ class _BatchBuffers:
         stride = values.nbytes // len(values)
         breaks = np.flatnonzero(np.diff(rows) != 1) + 1
         for run, vals in zip(np.split(rows, breaks), np.split(values, breaks)):
-            self._device.queue.write_buffer(buf, int(run[0]) * stride, vals.tobytes())
+            counters.write_buffer(self._device.queue, buf, int(run[0]) * stride, vals.tobytes())
 
     def upload_transforms(self, data: "np.ndarray"):
         n_bytes = data.nbytes
@@ -200,7 +201,7 @@ class _BatchBuffers:
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
             self.transforms_capacity = size
-        self._device.queue.write_buffer(self.transforms_buf, 0, data.tobytes())
+        counters.write_buffer(self._device.queue, self.transforms_buf, 0, data.tobytes())
         self._transforms_key = None
 
     def upload_tints(self, data: "np.ndarray"):
@@ -214,7 +215,7 @@ class _BatchBuffers:
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
             self.tints_capacity = n_bytes
-        self._device.queue.write_buffer(self.tints_buf, 0, data.tobytes())
+        counters.write_buffer(self._device.queue, self.tints_buf, 0, data.tobytes())
 
     def upload_scalar_values(self, data: "np.ndarray"):
         n_bytes = data.nbytes
@@ -224,7 +225,7 @@ class _BatchBuffers:
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
             self.scalar_values_capacity = n_bytes
-        self._device.queue.write_buffer(self.scalar_values_buf, 0, data.tobytes())
+        counters.write_buffer(self._device.queue, self.scalar_values_buf, 0, data.tobytes())
 
     def upload_radii(self, data: "np.ndarray"):
         n_bytes = data.nbytes
@@ -234,7 +235,7 @@ class _BatchBuffers:
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
             self.radii_capacity = n_bytes
-        self._device.queue.write_buffer(self.radii_buf, 0, data.tobytes())
+        counters.write_buffer(self._device.queue, self.radii_buf, 0, data.tobytes())
 
     def upload_joint_blocks(self, data: "np.ndarray"):
         n_bytes = data.nbytes
@@ -244,7 +245,7 @@ class _BatchBuffers:
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
             self.joint_blocks_capacity = n_bytes
-        self._device.queue.write_buffer(self.joint_blocks_buf, 0, data.tobytes())
+        counters.write_buffer(self._device.queue, self.joint_blocks_buf, 0, data.tobytes())
 
     def upload_label_indices(self, data: "np.ndarray"):
         n_bytes = data.nbytes
@@ -254,7 +255,7 @@ class _BatchBuffers:
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
             self.label_indices_capacity = n_bytes
-        self._device.queue.write_buffer(self.label_indices_buf, 0, data.tobytes())
+        counters.write_buffer(self._device.queue, self.label_indices_buf, 0, data.tobytes())
 
 
 # =============================================================================
@@ -369,6 +370,7 @@ class TransformCache:
         """Compute mat4x4 from pos/rot/scale using vectorized numpy."""
         if len(indices) == 0:
             return
+        counters.add("matrices", len(indices))
 
         transform_data = store.get_component_data("Transform", indices)
 
@@ -1895,7 +1897,7 @@ class RenderPipeline:
             benders[bi] = (bx - ox, bz - oz, radius, strength)
         globals_data[432:560] = np.frombuffer(benders.tobytes(), dtype=np.uint8)
 
-        self._device.queue.write_buffer(self._globals_buffer, 0, globals_data.tobytes())
+        counters.write_buffer(self._device.queue, self._globals_buffer, 0, globals_data.tobytes())
 
         # Upload lights once (shared across all PBR draws)
         lights = getattr(engine, "_lights", [])
@@ -1904,7 +1906,7 @@ class RenderPipeline:
             light_arr = light.get_data()
             offset = li * 8  # 8 floats per light
             lights_data[offset : offset + len(light_arr)] = light_arr
-        self._device.queue.write_buffer(self._lights_buffer, 0, lights_data.tobytes())
+        counters.write_buffer(self._device.queue, self._lights_buffer, 0, lights_data.tobytes())
 
         # ---------------------------------------------------------------
         # Skybox (renders at far plane — before mesh geometry)

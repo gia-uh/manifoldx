@@ -44,6 +44,7 @@ import numpy as np
 from manifoldx import _deferred
 from manifoldx.renderer import vertex_bounds
 from manifoldx.resources import pack_vertices
+from manifoldx import counters
 
 
 class MeshData(NamedTuple):
@@ -193,7 +194,7 @@ class _Uploads:
             at = up["at"][k]
             n = min(len(data) - at, room - spent)
             if n > 0:
-                dev.queue.write_buffer(up["bufs"][k], at, memoryview(data)[at : at + n])
+                counters.write_buffer(dev.queue, up["bufs"][k], at, memoryview(data)[at : at + n])
                 up["at"][k] += n
                 spent += n
         if up["at"] == [len(cell.vbytes), len(cell.ibytes)]:

@@ -199,7 +199,7 @@ class EntityHandle:
             inter[:, bufs["joints_offset"] // 4] = np.asarray(joints, dtype=np.uint32).view(
                 np.float32
             )
-        self._engine._device.queue.write_buffer(bufs["vertex_buffer"], 0, inter.tobytes())
+        counters.write_buffer(self._engine._device.queue, bufs["vertex_buffer"], 0, inter.tobytes())
 
     @_deferred.deferred_in_pipeline
     def set_material(self, material):

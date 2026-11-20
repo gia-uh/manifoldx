@@ -11,6 +11,7 @@ import wgpu
 from manifoldx.trace import bvh as _bvh
 from manifoldx.trace.environment import Environment
 from manifoldx.trace.scene import Camera, Scene
+from manifoldx import counters
 
 _WG = 8
 _PARAMS_SIZE = 176
@@ -222,7 +223,7 @@ class Tracer:
         buf[32], buf[33], buf[34] = self.clamp, self.scene_radius, self.emissive_total
         ints[35] = 1 if self.diffuse_only else 0
         ints[36:44] = self._offsets
-        self.device.queue.write_buffer(self._params, 0, buf.tobytes())
+        counters.write_buffer(self.device.queue, self._params, 0, buf.tobytes())
 
     def _dispatch(self, encoder, pipeline, group):
         cp = encoder.begin_compute_pass()
