@@ -227,3 +227,20 @@ def test_no_doc_compares_against_a_git_ref():
     for p in ["AGENTS.md", "docs/chapters/16-using-every-core.md", "benchmarks/__main__.py", "benchmarks/scenes.py",
               "know-how/benchmarking.md"]:
         assert "--against main" not in (root / p).read_text(), p
+
+
+def test_folders_in_the_config_are_sized(project, capsys):
+    (project / "cache").mkdir()
+    (project / "cache" / "a.bin").write_bytes(b"\0" * 2048)
+    with (project / "pyproject.toml").open("a") as f:
+        f.write('folders = ["cache"]\n')
+    assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 0
+    sizes = json.loads(capsys.readouterr().out)["memory"]["folders_mb"]
+    assert sizes["cache"]["start"] > 0
+
+
+def test_a_folder_outside_the_project_is_refused(project, capsys):
+    with (project / "pyproject.toml").open("a") as f:
+        f.write('folders = ["../elsewhere"]\n')
+    assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 2
+    assert "folders" in capsys.readouterr().err

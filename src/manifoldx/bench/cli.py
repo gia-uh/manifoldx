@@ -13,6 +13,7 @@ The app's pyproject.toml says where its scenarios are:
     runs = "bench/runs"               # one folder per run
     history = "bench/history.jsonl"   # one line per run
     micro = ["myapp.bench_cases"]     # modules of @bench.case functions
+    folders = ["cache"]              # folders under the project sized at each run's start and end
 
 Exit codes: 0 the run passed, 1 it failed, 2 bad usage or configuration. Progress goes to stderr,
 at most once a second; with --json, stdout holds only the JSON.
@@ -46,6 +47,7 @@ class Config:
     micro: list = field(default_factory=list)
     app_name: str | None = None
     has_table: bool = True
+    folders: dict = field(default_factory=dict)  # name -> folder under root, sized by each run
 
 
 def load_config(start: Path) -> Config:
@@ -58,8 +60,18 @@ def load_config(start: Path) -> Config:
             table = t or {}
             return Config(d, table.get("scenarios"), d / table.get("runs", "bench/runs"),
                           d / table.get("history", "bench/history.jsonl"), list(table.get("micro", [])),
-                          data.get("project", {}).get("name"), t is not None)
+                          data.get("project", {}).get("name"), t is not None, _folders(d, table.get("folders", [])))
     raise ConfigError(f"no pyproject.toml in {start} or above; manifoldx bench reads [tool.manifoldx.bench] from it")
+
+
+def _folders(root: Path, names: list) -> dict:
+    out = {}
+    for name in names:
+        path = (root / name).resolve()
+        if not path.is_relative_to(root):
+            raise ConfigError(f"folders: {name!r} is outside the project ({root}); name folders under it")
+        out[str(name)] = path
+    return out
 
 
 def _import_scenarios(config: Config) -> None:
@@ -191,7 +203,7 @@ def _run(args) -> int:
         with quiet:  # with --json, whatever the app prints goes to stderr
             run = run_scenario(sc, size=args.size, loop=args.loop, step_dt=args.step, overrides=overrides,
                                smoke=args.smoke, label=args.label or os.environ.get("MANIFOLDX_BENCH_LABEL"),
-                               app_name=config.app_name, progress=progress)
+                               app_name=config.app_name, progress=progress, folders=config.folders)
     except ValueError as e:  # bad params or loop
         raise ConfigError(str(e)) from None
     folder = write_run(run, config.runs, config.history)

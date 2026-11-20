@@ -315,3 +315,52 @@ def test_settle_time_is_per_phase():
     a, b = run.summary["phases"]["a"]["streamer"], run.summary["phases"]["b"]["streamer"]
     assert a["settled_s"] is not None and b["settled_s"] is not None
     assert a["first_drawn_s"] <= a["settled_s"] and b["first_drawn_s"] <= b["settled_s"]
+
+
+# --- step 2: memory and origin -------------------------------------------------------------------
+
+
+def test_memory_is_recorded():
+    sc, _ = make([bench.hold(frames=3)])
+    mem = run_scenario(sc, size=(64, 48)).summary["memory"]
+    assert mem["rss_mb"]["max"] >= mem["rss_mb"]["start"] > 0
+    assert len(mem["gc"]["runs"]) == 3
+    assert mem["gpu_mb"] is None or mem["gpu_mb"]["max"] >= 0
+
+
+def test_gc_inside_a_frame_is_counted():
+    import gc
+
+    def fn(engine, p):
+        app = App(engine)
+
+        @engine.system
+        def collect(q: mx.Query[Transform], dt: float):
+            gc.collect()
+
+        return app, [bench.hold(frames=2)]
+
+    run = run_scenario(Scenario("gc", fn, {}, {"smoke": 2, "full": None}), size=(64, 48))
+    assert sum(run.summary["memory"]["gc"]["runs"]) >= 2 and run.summary["phases"]["main"]["gc_ms"] > 0
+
+
+def test_folders_named_by_the_app_are_sized(tmp_path):
+    def write(app):
+        (tmp_path / "blob.bin").write_bytes(b"\0" * (1 << 20))
+
+    sc, _ = make([bench.each_frame(write, frames=1)])
+    mem = run_scenario(sc, size=(64, 48), folders={"cache": tmp_path}).summary["memory"]
+    grew = mem["folders_mb"]["cache"]["end"] - mem["folders_mb"]["cache"]["start"]
+    assert abs(grew - 1.0) < 0.01
+
+
+def test_origin_is_the_farthest_thing_drawn():
+    def fn(engine, p):
+        app = App(engine)  # cubes within 5 m of the origin
+        engine.spawn(Mesh(cube(1, 1, 1)), Material(StandardMaterial("#ffffff")),
+                     Transform(pos=np.array([[3000.0, 0.0, 4000.0]], np.float32)), n=1)
+        return app, [bench.hold(frames=31)]
+
+    run = run_scenario(Scenario("far", fn, {}, {"smoke": 31, "full": None}), size=(64, 48))
+    assert abs(run.summary["phases"]["main"]["origin_max_m"] - 5000.0) < 1.0
+    assert len(run.frames["origin_m"]) == 31

@@ -7,17 +7,22 @@ systems: the engine's system_split, each system's ms.
 counters: what manifoldx.counters counted in the frame (draws, bytes uploaded, ...).
 spans: ms of each bench.span, named <system>/<span>.
 metrics: the app's bench.metric values.
+memory: RSS and GPU memory once a second, garbage collections per frame, the app's folders at start and end.
+origin: the farthest anything drawn is from the floating origin, every 30 frames and at each phase's start.
 host: CPUs, the load over the run, the GPU adapter and whether it is a software rasterizer, Python.
 """
 
 from __future__ import annotations
 
+import gc
 import math
 import os
 import platform
 import re
 import sys
 import time
+
+from pathlib import Path
 
 import numpy as np
 
@@ -204,3 +209,120 @@ def jobs_summary(jobs: list, intervals) -> dict:
         out[kind] = {"jobs": len(js), "p50_ms": round(float(np.median(ms)), 3), "max_ms": round(float(ms.max()), 3),
                      "processes": len({j["pid"] for j in js})}
     return out
+
+
+def rss_mb() -> float:
+    """The process's resident memory in MB (Linux /proc; elsewhere the peak, from resource)."""
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**20
+    except (OSError, ValueError):
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return peak / 2**20 if sys.platform == "darwin" else peak / 1024
+
+
+def gpu_mb() -> float | None:
+    """What this process allocated through wgpu, in MB, or None when wgpu does not say."""
+    try:
+        import wgpu
+
+        counts = wgpu.diagnostics.object_counts.get_dict()
+    except Exception:
+        return None
+    mem = [v["resource_mem"] for v in counts.values() if isinstance(v, dict) and "resource_mem" in v]
+    return sum(mem) / 2**20 if mem else None
+
+
+def folder_mb(path: Path) -> float:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.stat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    return total / 2**20
+
+
+class Memory:
+    """RSS and GPU memory sampled once a second, garbage collections timed as they happen, folder sizes."""
+
+    def __init__(self, folders: dict | None = None):
+        self.folders = {k: Path(v) for k, v in (folders or {}).items()}
+        self.start_sizes = {k: folder_mb(v) for k, v in self.folders.items()}
+        self.rss, self.gpu = [rss_mb()], [gpu_mb()]
+        self.rss_mb, self.gpu_mb, self.gc_ms = [], [], []  # per frame; NaN where not sampled
+        self.runs, self.total, self.longest = [0, 0, 0], 0.0, 0.0
+        self._at, self._frame_ms, self._sampled = None, 0.0, time.monotonic()
+        gc.callbacks.append(self._gc)
+
+    def _gc(self, phase, info):
+        if phase == "start":
+            self._at = time.perf_counter()
+        elif self._at is not None:
+            ms, self._at = 1000.0 * (time.perf_counter() - self._at), None
+            self.runs[info["generation"]] += 1
+            self.total += ms
+            self.longest = max(self.longest, ms)
+            self._frame_ms += ms
+
+    def frame(self):
+        """After each frame: the frame's collections, and a sample when a second has passed."""
+        self.gc_ms.append(self._frame_ms)
+        self._frame_ms = 0.0
+        now = time.monotonic()
+        if now - self._sampled >= 1.0 or len(self.gc_ms) == 1:
+            self._sampled = now
+            r, g = rss_mb(), gpu_mb()
+            self.rss.append(r)
+            self.gpu.append(g)
+            self.rss_mb.append(r)
+            self.gpu_mb.append(math.nan if g is None else g)
+        else:
+            self.rss_mb.append(math.nan)
+            self.gpu_mb.append(math.nan)
+
+    def __len__(self):
+        return min(len(self.gc_ms), len(self.rss_mb), len(self.gpu_mb))
+
+    def cut(self, n: int):
+        del self.gc_ms[n:], self.rss_mb[n:], self.gpu_mb[n:]
+
+    def stop(self):
+        if self._gc in gc.callbacks:
+            gc.callbacks.remove(self._gc)
+        self.rss.append(rss_mb())
+        self.gpu.append(gpu_mb())
+
+    def summary(self) -> dict:
+        gpus = [g for g in self.gpu if g is not None]
+        return {
+            "rss_mb": {"start": round(self.rss[0], 1), "max": round(max(self.rss), 1), "end": round(self.rss[-1], 1)},
+            "gc": {"runs": list(self.runs), "ms": round(self.total, 3), "max_ms": round(self.longest, 3)},
+            "gpu_mb": None if not gpus else {"start": round(gpus[0], 2), "max": round(max(gpus), 2),
+                                             "end": round(gpus[-1], 2)},
+            "folders_mb": {k: {"start": round(self.start_sizes[k], 3), "end": round(folder_mb(v), 3)}
+                           for k, v in self.folders.items()},
+        }
+
+    def arrays(self) -> dict:
+        return {"rss_mb": np.array(self.rss_mb), "gpu_mb": np.array(self.gpu_mb), "gc_ms": np.array(self.gc_ms)}
+
+
+def origin_distance(engine) -> float:
+    """The largest distance from the floating origin of an entity drawn with a mesh, in metres.
+
+    Transform rows already hold positions relative to the origin."""
+    store = engine.store
+    if "Transform" not in store._components or "Mesh" not in store._components:
+        return 0.0
+    alive = np.flatnonzero(store._alive)
+    if not len(alive):
+        return 0.0
+    mesh = store.get_component_data("Mesh", alive)
+    rows = alive[mesh[:, 0] != 0] if mesh is not None else alive[:0]
+    if not len(rows):
+        return 0.0
+    return float(np.linalg.norm(store._components["Transform"][rows, 0:3].astype(np.float64), axis=1).max())

@@ -45,6 +45,8 @@ import sys
 
 import numpy as np
 
+from manifoldx.bench.probes import rss_mb as _rss_mb
+
 FOLDER = ".manifoldx"
 PORT = 8770
 MAX_BYTES = 256_000
@@ -106,18 +108,6 @@ def merge_patch(target, patch):
             merge_patch(target[key], value)
         else:
             target[key] = value
-
-
-def _rss_mb():
-    """The process's resident memory in MB (Linux /proc; elsewhere the peak, from resource)."""
-    try:
-        with open("/proc/self/statm") as f:
-            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**20
-    except (OSError, ValueError):
-        import resource
-
-        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return peak / 2**20 if sys.platform == "darwin" else peak / 1024
 
 
 class Meter:
