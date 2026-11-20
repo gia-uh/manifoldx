@@ -24,8 +24,7 @@ from pathlib import Path
 JOBS_ENV = "MANIFOLDX_BENCH_JOBS"  # the folder worker processes write their job lines to
 
 _on = False
-_t0 = 0.0  # perf_counter at start()
-_wall0 = 0.0  # time.time() at start(): job lines from other processes carry wall time
+_t0 = 0.0  # perf_counter at start(); perf_counter is system-wide, so a worker process's job times compare with it
 frame = 0  # the runner's frame number, stamped on events
 system = threading.local()  # .name: the system this thread runs; Engine._in_system sets it
 _counts: dict = {}
@@ -110,11 +109,11 @@ def worker_span(kind: str, key=None):
     if not where:
         yield
         return
-    t, wall = time.perf_counter(), time.time()
+    t = time.perf_counter()
     try:
         yield
     finally:
-        _write_job({"kind": kind, "key": _plain(key), "at": wall, "ms": 1000.0 * (time.perf_counter() - t),
+        _write_job({"kind": kind, "key": _plain(key), "at": t, "ms": 1000.0 * (time.perf_counter() - t),
                     "pid": os.getpid(), "thread": threading.get_ident()}, where)
 
 
@@ -143,9 +142,9 @@ def _write_job(line: dict, where: str) -> None:
 
 def start(jobs_dir=None) -> None:
     """Start recording, from zero. With a folder, worker spans write their jobs there."""
-    global _on, _t0, _wall0, frame, _counts, _spans, _metrics, _events, _jobs_dir
+    global _on, _t0, frame, _counts, _spans, _metrics, _events, _jobs_dir
     _counts, _spans, _metrics, _events, frame = {}, {}, {}, [], 0
-    _t0, _wall0 = time.perf_counter(), time.time()
+    _t0 = time.perf_counter()
     _jobs_dir = Path(jobs_dir) if jobs_dir is not None else None
     if _jobs_dir is not None:
         _jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -197,6 +196,6 @@ def jobs() -> list:
                 j = json.loads(line)
             except ValueError:  # empty, or a worker still writing it
                 continue
-            j["t"] = round(j.pop("at") - _wall0, 5)
+            j["t"] = round(j.pop("at") - _t0, 5)
             out.append(j)
     return sorted(out, key=lambda j: j["t"])

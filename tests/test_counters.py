@@ -133,3 +133,18 @@ def test_a_job_ending_after_the_run_does_not_raise(tmp_path):
     with counters.worker_span("cell", 1):
         counters.stop()  # the run ends while the job still runs
     assert not (tmp_path / "jobs").exists()
+
+
+def test_a_job_time_ignores_the_wall_clock(tmp_path, monkeypatch):
+    import time
+
+    counters.start(tmp_path / "jobs")
+    try:
+        real = time.time
+        monkeypatch.setattr(time, "time", lambda: real() + 3600.0)  # the wall clock jumps an hour
+        with counters.worker_span("cell", 1):
+            pass
+        (j,) = counters.jobs()
+        assert 0.0 <= j["t"] < 5.0
+    finally:
+        counters.stop()

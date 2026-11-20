@@ -303,4 +303,4 @@ def test_show_reads_a_step_1_run(project, capsys):
 
 
 def test_the_summary_carries_its_schema(project, capsys):
-    assert _a_run(capsys)["schema"] == 2
+    assert _a_run(capsys)["schema"] == 3

@@ -26,7 +26,8 @@ from manifoldx.bench.probes import (Columns, Frames, Host, Memory, jobs_summary,
 from manifoldx.bench.scenario import Ctx, Params, Scenario, iterate
 
 LOOPS = ("serial", "pipelined", "check")
-SCHEMA = 2  # run.json's layout: 2 adds draw_ms (cpu_ms became the process's CPU), counters and the step 2 probes
+SCHEMA = 3  # run.json's layout: 2 adds draw_ms (cpu_ms became the process's CPU), counters and the step 2 probes;
+#            3 adds bench_ms (the runner's work between frames) and the streamer's entries
 
 
 @dataclass
@@ -103,7 +104,7 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
     if loop == "check":
         os.environ["MANIFOLDX_PIPELINE"] = "check"
     engine = app = None
-    state = {"last": None}
+    state = {"last": None, "live": -1}  # the end of the runner's work after the last frame; live streamers
     error = None
 
     def frame(keep=False):
@@ -114,10 +115,13 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         img = engine._render_canvas.draw()
         end, cpu = time.perf_counter(), time.process_time() - c0
         wall = end - (state["last"] if state["last"] is not None else t0)
-        state["last"] = end
         ctx.dt = step_dt or wall
         ctx.t += ctx.dt
         took = counters.take()
+        now_live = streaming.live()
+        if len(now_live) != state["live"]:  # a streamer made or closed since: one made in a step counts too
+            state["live"] = len(now_live)
+            streamers[:] = [s for s in now_live if id(s) not in old]
         ready = all(s.settled for s in streamers) if streamers else False
         t_end = counters.now()
         k = len(frames)
@@ -136,11 +140,16 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         host.tick()
         if progress:
             progress(len(frames.wall_ms), rec.phases[rec.phase], ctx.index + 1, n_steps)
+        out = None
         if keep:
             from manifoldx.engine import _drop_alpha
 
-            return _drop_alpha(np.asarray(img)).copy()
-        return None
+            out = _drop_alpha(np.asarray(img)).copy()
+        # The runner's own work after the frame is timed apart, so it stays out of the next frame's wall time.
+        done = time.perf_counter()
+        frames.bench_ms[-1] = 1000.0 * (done - end)
+        state["last"] = done
+        return out
 
     rec = _Recorder(frame)
     ctx = None
