@@ -627,6 +627,19 @@ class Engine:
         """Queue an event for delivery at the start of the next frame."""
         self._event_bus.emit(event, payload)
 
+    def watch(self, *paths) -> None:
+        """Under `manifoldx run`, also reload when one of these files changes, as when a source file does.
+
+        Paths and globs (`**` recursive) are relative to the app's folder (the working directory
+        for `-m`); call it before `engine.run()`. Without `manifoldx run` it does nothing.
+
+            engine.watch("game/regions.toml", "data/*.src")
+        """
+        from manifoldx import hot
+
+        if hot._watched is not None:
+            hot._watched.extend(paths)
+
     def tick(self):
         """Return a future that resolves at the next frame boundary."""
         return self._frame_waiters.add_tick()

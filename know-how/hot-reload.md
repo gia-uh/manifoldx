@@ -69,6 +69,7 @@ Rules:
 - **Engine constructor arguments do not apply on reload.** The window stays, so a new `title`, `width`, `height`, `fullscreen` or `monitor` needs a restart.
 - **Only the app's own files reload.** Editing manifoldx or any other installed package (even an editable install from another repo) needs a restart. With `-m`, run from the project root so the package's files count as the app's.
 - **A file the app never imported is not watched**, except the one it starts from (the script, or the `-m` module). A module that failed to import on its first load is watched only once something imported it.
+- **Data files are not watched unless the app names them.** `engine.watch("game/rules.toml", "data/*.src")` before `engine.run()` makes a save of any of them reload like a source save. Paths and globs (`**` recursive) are relative to the app's folder (the working directory for `-m`); a missing plain path reloads when it appears; a glob is expanded on each load, so a new file it would match counts only from the next reload on. Without `manifoldx run` the call does nothing.
 - **`-- --render` does not work**: `engine.cli()` then renders a video instead of calling `run()`, and `manifoldx run` exits saying the app never called `engine.run()`.
 - **Two saves of one module within the same second that leave it the same size** can load the old cached bytecode (Python checks `.pyc` by whole-second mtime and size). Save again.
 

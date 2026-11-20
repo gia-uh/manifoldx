@@ -155,6 +155,19 @@ module level — never gets as far as detaching: the running version stays on
 screen, the traceback is printed, and the next save tries again. An exception
 in a frame pauses the app until the next edit, even an unrelated one.
 
+The reloader watches the app's Python files and nothing else, so a level, a
+table of rules or a shader the app reads from disk would need a restart. Name
+those files with `engine.watch` before `engine.run()`, and a save of any of them
+reloads the app as a source save does. Paths and globs are relative to the
+app's folder (the working directory under `-m`), `**` reaches into
+subfolders, and a path that does not exist yet reloads when it appears. Under
+plain `python` the call does nothing.
+
+```python
+engine.watch("plaza/benches.toml", "plaza/shaders/**/*.wgsl")
+engine.run()
+```
+
 ## The dev channel
 
 `manifoldx run` also serves a page and an HTTP API on 127.0.0.1 (port 8770, or

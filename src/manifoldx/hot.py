@@ -6,6 +6,7 @@ as plain data: numbers, strings, lists, dicts, numpy arrays. Instances of classe
 from your own modules go stale, because those modules are imported afresh.
 """
 
+import glob
 import importlib.util
 import os
 import runpy
@@ -17,6 +18,7 @@ from manifoldx import devchannel
 from manifoldx.devchannel import LOG
 
 _state = None  # the State every Engine shares while HotReloader loads an app
+_watched = None  # the paths and globs the app named with engine.watch while HotReloader loads it
 
 _MANIFOLDX_DIR = os.path.dirname(os.path.abspath(__file__)) + os.sep
 
@@ -85,7 +87,7 @@ class HotReloader:
 
     def _load(self):
         """Run the app until it calls engine.run(); return that engine, or None if it never did."""
-        global _state
+        global _state, _watched
         from manifoldx.engine import Engine
 
         captured = []
@@ -93,7 +95,7 @@ class HotReloader:
         Engine.run = lambda engine: captured.append((engine, sys.modules.get("__main__")))
         sys.argv = [self.module or self.script, *self.argv]
         sys.path.insert(0, self._root.rstrip(os.sep))
-        _state = self.state
+        _state, _watched = self.state, []
         try:
             if self.module:
                 runpy.run_module(self.module, run_name="__main__", alter_sys=True)
@@ -101,17 +103,27 @@ class HotReloader:
                 runpy.run_path(self.script, run_name="__main__")
         finally:
             entry = self._entry()  # while the app's folder is still on sys.path
-            _state = None
+            watched = self._expand(_watched)
+            _state = _watched = None
             Engine.run, sys.argv = original, saved_argv
             sys.path[:] = saved_path
             # Keep watching files a broken edit failed to import, so fixing them reloads.
-            files = set(self._mtimes) | entry
+            files = set(self._mtimes) | entry | watched
             files |= {m.__file__ for m in list(sys.modules.values()) if getattr(m, "__file__", None) and self._owned(m.__file__)}
             self._mtimes = {f: _mtime(f) for f in files}
         if not captured:
             return None
         engine, self.main = captured[-1]  # the app's __main__ module, for export --web
         return engine
+
+    def _expand(self, patterns):
+        """The files engine.watch named: relative paths and globs against the app's folder, `**` recursive.
+        A path that matches nothing is watched as it is, so creating it reloads."""
+        files = set()
+        for pattern in patterns:
+            pattern = os.path.join(self._root, os.fspath(pattern))  # an absolute path stays as it is
+            files |= set(glob.glob(pattern, recursive=True)) or ({pattern} if not glob.has_magic(pattern) else set())
+        return {os.path.abspath(f) for f in files}
 
     def _entry(self):
         """The file the app starts from: the script, or the -m module's, which runs as __main__

@@ -225,3 +225,57 @@ def test_a_launcher_in_the_projects_venv_stays_main_across_reloads(tmp_path, mon
         assert sys.modules["__main__"] is launcher
     finally:
         sys.modules.pop("venvpkg", None)
+
+
+WATCHING = """
+import manifoldx as mx
+
+engine = mx.Engine("hot", width=64, height=64)
+engine.watch({paths})
+engine.state.setdefault("loads", 0)
+engine.state.loads += 1
+engine.run()
+"""
+
+
+def test_a_watched_data_file_reloads_like_a_source(tmp_path):
+    (tmp_path / "data").mkdir()
+    rules, side = tmp_path / "rules.toml", tmp_path / "data" / "a.src"
+    write(rules, "x = 1\n")
+    write(side, "a\n")
+    app = tmp_path / "app.py"
+    write(app, WATCHING.format(paths='"rules.toml", "data/*.src"'))
+    hot = HotReloader(script=str(app), canvas_factory=offscreen, poll=0)
+    hot.start()
+    hot.step()
+    assert hot.state.loads == 1
+
+    write(rules, "x = 2\n")
+    hot.step()
+    assert hot.state.loads == 2
+    write(side, "b\n")
+    hot.step()
+    assert hot.state.loads == 3
+    hot.step()
+    assert hot.state.loads == 3  # nothing changed since
+
+
+def test_an_unwatched_data_file_does_not_reload(tmp_path):
+    rules = tmp_path / "rules.toml"
+    write(rules, "x = 1\n")
+    app = tmp_path / "app.py"
+    write(app, WATCHING.format(paths=""))
+    hot = HotReloader(script=str(app), canvas_factory=offscreen, poll=0)
+    hot.start()
+    hot.step()
+    write(rules, "x = 2\n")
+    hot.step()
+    assert hot.state.loads == 1
+
+
+def test_watch_without_manifoldx_run_does_nothing(tmp_path):
+    engine = mx.Engine("plain", width=64, height=64)
+    engine.watch("rules.toml", str(tmp_path / "*.src"))
+    from manifoldx import hot
+
+    assert hot._watched is None
