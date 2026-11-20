@@ -364,3 +364,28 @@ def test_origin_is_the_farthest_thing_drawn():
     run = run_scenario(Scenario("far", fn, {}, {"smoke": 31, "full": None}), size=(64, 48))
     assert abs(run.summary["phases"]["main"]["origin_max_m"] - 5000.0) < 1.0
     assert len(run.frames["origin_m"]) == 31
+
+
+def test_settle_time_is_the_last_settle_of_the_phase():
+    from manifoldx.streaming import Streamer
+    from test_streaming import build_cell
+
+    def fn(engine, p):
+        s = Streamer(engine, cell=8.0, build=build_cell)
+        at = {"x": 4.0}
+
+        @engine.system
+        def walk(q: mx.Query[Transform], dt: float):
+            s.focus(at["x"], 4.0)
+
+        def go(app):
+            at["x"] = 4.0 + 8 * 40
+
+        return None, [bench.hold(until=bench.settled(s), max_s=30), bench.mark("b"), bench.hold(frames=3),
+                      bench.each_frame(go, frames=1), bench.hold(until=bench.settled(s), max_s=30)]
+
+    run = run_scenario(Scenario("resettle", fn, {}, {"smoke": 400, "full": None}), size=(64, 48))
+    b = run.summary["phases"]["b"]
+    moved = next(e["t"] for e in run.events if e["kind"] == "step" and e["index"] == 3)
+    start = next(e["t"] for e in run.events if e["kind"] == "mark" and e["name"] == "b")
+    assert b["streamer"]["settled_s"] > moved - start  # after the move, not the settled frames before it

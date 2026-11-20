@@ -181,7 +181,8 @@ def _inside(t: float, intervals) -> bool:
 
 def stream_summary(nodes: list, intervals, ends: list, settled: list, rows: np.ndarray) -> dict:
     """What the streamers did in one phase: node events by kind and level, the time from the phase's start
-    to the first node drawn and to the first frame where every streamer had settled (None if never)."""
+    to the first node drawn, and to the frame where every streamer settled for the last time in the phase:
+    the first settled frame after the last one that was not (None when the phase ends unsettled)."""
     start = intervals[0][0]
     counts: dict = {}
     first_drawn = None
@@ -192,7 +193,10 @@ def stream_summary(nodes: list, intervals, ends: list, settled: list, rows: np.n
         by_level[e["level"]] = by_level.get(e["level"], 0) + 1
         if e["ev"] == "drawn" and first_drawn is None:
             first_drawn = round(e["t"] - start, 4)
-    done = next((ends[i] for i in np.flatnonzero(rows) if settled[i]), None)
+    idx = np.flatnonzero(rows)
+    busy = [i for i in idx if not settled[i]]
+    after = idx[idx > busy[-1]] if busy else idx
+    done = ends[after[0]] if len(after) else None
     return {**counts, "first_drawn_s": first_drawn,
             "settled_s": None if done is None else round(done - start, 4)}
 
