@@ -140,6 +140,12 @@ def unique_meshes(n):
     return _frame(scenes.unique_meshes(n))
 
 
+@case("frame", "unique_materials", sizes=[100, 300, 1_000], smoke=5)
+def unique_materials(n):
+    """n entities with a geometry and a material each: one batch and one material per entity."""
+    return _frame(scenes.unique_materials(n))
+
+
 @case("frame", "still_frame", sizes=[256, 1024, 2048], smoke=32)
 def still_frame(side):
     """render_frame(supersample=1) of an empty side × side scene: the readback and its copy."""

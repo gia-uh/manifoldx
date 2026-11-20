@@ -1553,8 +1553,23 @@ class StandardMaterial(Material):
             "ao": "f32",
         }
 
+    def _bump_version(self, name) -> None:
+        if not name.startswith("_"):
+            self.__dict__.pop("_row", None)  # get_data builds the row again
+        super()._bump_version(name)
+
     def get_data(self, n: int, registry) -> np.ndarray:
-        """Return material data as numpy array (albedo, roughness, metallic, ao + padding)."""
+        """Return material data as numpy array (albedo, roughness, metallic, ao + padding).
+
+        The mesh pass asks for one row of every material in every frame, so that row is kept until a field is
+        written; a spawn of n entities gets its own array."""
+        row = self.__dict__.get("_row")
+        if row is None:
+            row = self._build_data(1)
+            self.__dict__["_row"] = row
+        return row if n == 1 else np.repeat(row, n, axis=0)
+
+    def _build_data(self, n: int) -> np.ndarray:
         albedo = material_rgb(self.color)
 
         data = np.zeros((n, 16), dtype=np.float32)
