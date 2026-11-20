@@ -239,11 +239,26 @@ def test_the_error_event_is_written_once():
 
 
 def test_cpu_is_process_time_and_draw_is_the_engine_frame():
-    sc, _ = make([bench.hold(frames=4)])
-    run = run_scenario(sc, size=(64, 48))
+    import threading
+
+    stop = threading.Event()
+
+    def burn():  # a thread busy beside the frame: process CPU counts it, the engine's frame does not
+        while not stop.is_set():
+            sum(range(1000))
+
+    def fn(engine, p):
+        app = App(engine)
+        threading.Thread(target=burn, daemon=True).start()
+        return app, [bench.hold(frames=6)]
+
+    try:
+        run = run_scenario(Scenario("burn", fn, {}, {"smoke": 6, "full": None}), size=(64, 48))
+    finally:
+        stop.set()
     ph = run.summary["phases"]["main"]
-    assert ph["draw_p50_ms"] > 0 and ph["cpu_p50_ms"] >= 0
-    assert len(run.frames["draw_ms"]) == len(run.frames["cpu_ms"]) == 4
+    assert ph["draw_p50_ms"] > 0 and ph["cpu_p50_ms"] > ph["draw_p50_ms"]
+    assert len(run.frames["draw_ms"]) == len(run.frames["cpu_ms"]) == 6
 
 
 def test_host_says_whether_the_build_is_free_threaded():
@@ -389,3 +404,18 @@ def test_settle_time_is_the_last_settle_of_the_phase():
     moved = next(e["t"] for e in run.events if e["kind"] == "step" and e["index"] == 3)
     start = next(e["t"] for e in run.events if e["kind"] == "mark" and e["name"] == "b")
     assert b["streamer"]["settled_s"] > moved - start  # after the move, not the settled frames before it
+
+
+def test_a_cleanup_that_raises_still_stops_recording(monkeypatch):
+    import os
+
+    from manifoldx import counters
+
+    def broken():
+        raise ValueError("a job file went bad")
+
+    monkeypatch.setattr(counters, "jobs", broken)
+    sc, _ = make([bench.hold(frames=2)])
+    run = run_scenario(sc, size=(64, 48))
+    assert run.summary["phases"]["main"]["frames"] == 2
+    assert not counters.recording() and counters.JOBS_ENV not in os.environ

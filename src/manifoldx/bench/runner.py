@@ -26,6 +26,7 @@ from manifoldx.bench.probes import (Columns, Frames, Host, Memory, jobs_summary,
 from manifoldx.bench.scenario import Ctx, Params, Scenario, iterate
 
 LOOPS = ("serial", "pipelined", "check")
+SCHEMA = 2  # run.json's layout: 2 adds draw_ms (cpu_ms became the process's CPU), counters and the step 2 probes
 
 
 @dataclass
@@ -181,14 +182,16 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         error = f"{type(e).__name__}: {e}"
         rec.event("error", name=error, traceback=traceback.format_exc(limit=8))
     finally:
-        _close(app, [s for s in streaming.live() if id(s) not in old])
+        # Each cleanup on its own: one that fails must not leave recording on or the engine open.
+        _quietly(lambda: _close(app, [s for s in streaming.live() if id(s) not in old]))
         ended = counters.now()
         nodes = [e for e in counters.events() if e["kind"] == "node"]
-        jobs = [{"kind": "job", **{("job" if k == "kind" else k): v for k, v in j.items()}} for j in counters.jobs()]
-        counters.stop()
-        memory.stop()
+        jobs = _quietly(lambda: [{"kind": "job", **{("job" if k == "kind" else k): v for k, v in j.items()}}
+                                 for j in counters.jobs()]) or []
+        _quietly(counters.stop)
+        _quietly(memory.stop)
         if engine is not None:
-            engine.close()  # fires 'shutdown' and frees the engine's pools and GPU device
+            _quietly(engine.close)  # fires 'shutdown' and frees the engine's pools and GPU device
         if loop == "check":
             if saved_env is None:
                 os.environ.pop("MANIFOLDX_PIPELINE", None)
@@ -228,7 +231,7 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         arrays[names] = np.array(probes[key].names(), dtype=str)
         arrays[array] = probes[key].matrix(dtype)
     summary = {
-        "scenario": sc.name, "params": params.as_dict(), "mode": "offscreen", "loop": loop,
+        "schema": SCHEMA, "scenario": sc.name, "params": params.as_dict(), "mode": "offscreen", "loop": loop,
         "step": step_dt, "size": [w, h], "smoke": smoke, "label": label,
         "versions": {"manifoldx": _version("manifold-gfx"), "app": _version(app_name)},
         "host": host.summary(), "phases": phases, "phase_order": rec.phases, "error": error,
@@ -236,6 +239,15 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         "app": last_metrics(probes["metrics"]), "counters_exact": loop == "serial", "memory": memory.summary(),
     }
     return Run(summary, arrays, rec.events, rec.shots, error)
+
+
+def _quietly(fn):
+    """Call fn; print what it raised instead of raising, and return None then."""
+    try:
+        return fn()
+    except Exception:
+        traceback.print_exc(limit=3)
+        return None
 
 
 def _close(app, streamers):

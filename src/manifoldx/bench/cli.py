@@ -246,6 +246,10 @@ def _probe(summary: dict, probe: str, phase: str | None):
     return pick(phases[phase]) if phase is not None else {name: pick(ph) for name, ph in phases.items()}
 
 
+def _ms(v) -> str:
+    return f"{v:>9.1f}" if v is not None else f"{'-':>9}"
+
+
 def _table(summary: dict, folder: Path) -> None:
     host = summary["host"]
     print(f"{summary['scenario']}  loop={summary['loop']}  size={summary['size'][0]}x{summary['size'][1]}  "
@@ -254,8 +258,12 @@ def _table(summary: dict, folder: Path) -> None:
           "  slowest systems")
     for name, ph in summary["phases"].items():
         top = ", ".join(f"{k.rsplit('.', 1)[-1]} {v}" for k, v in list(ph["systems_ms"].items())[:3])
+        draw = ph.get("draw_p50_ms")  # a schema 1 run (no "schema" key) has none, and cpu meant draw
+        cpu = ph["cpu_p50_ms"] if summary.get("schema", 1) >= 2 else None
+        if draw is None and cpu is None:
+            draw = ph["cpu_p50_ms"]
         print(f"{name:<14}{ph['frames']:>7}{ph['p50_ms']:>9.1f}{ph['p95_ms']:>9.1f}{ph['max_ms']:>9.1f}"
-              f"{ph['draw_p50_ms']:>9.1f}{ph['cpu_p50_ms']:>9.1f}  {top}")
+              f"{_ms(draw)}{_ms(cpu)}  {top}")
         c = ph.get("counters", {})
         more = [f"{k} {c[k]['mean']:g}" for k in TABLE_COUNTERS if k in c]
         if (ph.get("streamer") or {}).get("settled_s") is not None:

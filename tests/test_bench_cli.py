@@ -287,3 +287,20 @@ def test_the_table_has_a_line_of_counters(project, capsys):
     assert main(["run", "cli_demo", "--size", "64x48"]) == 0
     out = capsys.readouterr().out
     assert "draws" in out and "bytes_uploaded" in out
+
+
+def test_show_reads_a_step_1_run(project, capsys):
+    run = _a_run(capsys)
+    folder = project / "bench" / "runs" / run["folder"]
+    old = json.loads((folder / "run.json").read_text())
+    for ph in old["phases"].values():  # a step-1 run.json: no draw time, no counters
+        for k in ("draw_p50_ms", "counters", "streamer", "spans_ms"):
+            ph.pop(k, None)
+    old.pop("schema", None)
+    (folder / "run.json").write_text(json.dumps(old))
+    assert main(["show", run["folder"]]) == 0
+    assert "hold" in capsys.readouterr().out
+
+
+def test_the_summary_carries_its_schema(project, capsys):
+    assert _a_run(capsys)["schema"] == 2

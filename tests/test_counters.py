@@ -109,3 +109,27 @@ def test_a_worker_span_outside_a_run_writes_nothing(tmp_path):
     with counters.worker_span("cell", 1):
         pass
     assert list(tmp_path.iterdir()) == []
+
+
+def test_counts_from_many_threads_are_exact(rec):
+    def spin(_):
+        for _ in range(20_000):
+            counters.add("spawned")
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(spin, range(8)))
+    assert counters.take().counts == {"spawned": 160_000}
+
+
+def test_a_partial_job_line_is_skipped(rec):
+    with counters.worker_span("cell", 1):
+        pass
+    (rec / "jobs-999999.jsonl").write_text('{"kind": "cell", "key": 2, "at": 1')  # a worker mid-write
+    assert [j["key"] for j in counters.jobs()] == [1]
+
+
+def test_a_job_ending_after_the_run_does_not_raise(tmp_path):
+    counters.start(tmp_path / "jobs")
+    with counters.worker_span("cell", 1):
+        counters.stop()  # the run ends while the job still runs
+    assert not (tmp_path / "jobs").exists()

@@ -26,6 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
+from manifoldx.devchannel import _rss_mb as rss_mb
+
 SOFTWARE = re.compile(r"llvmpipe|lavapipe|swiftshader|softpipe", re.I)
 
 
@@ -213,18 +215,6 @@ def jobs_summary(jobs: list, intervals) -> dict:
         out[kind] = {"jobs": len(js), "p50_ms": round(float(np.median(ms)), 3), "max_ms": round(float(ms.max()), 3),
                      "processes": len({j["pid"] for j in js})}
     return out
-
-
-def rss_mb() -> float:
-    """The process's resident memory in MB (Linux /proc; elsewhere the peak, from resource)."""
-    try:
-        with open("/proc/self/statm") as f:
-            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**20
-    except (OSError, ValueError):
-        import resource
-
-        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return peak / 2**20 if sys.platform == "darwin" else peak / 1024
 
 
 def gpu_mb() -> float | None:

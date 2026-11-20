@@ -33,6 +33,7 @@ _spans: dict = {}
 _metrics: dict = {}
 _events: list = []
 _jobs_dir: Path | None = None
+_lock = threading.Lock()  # counts, spans and metrics: systems add from several threads
 _job_lock = threading.Lock()
 _job_file = None  # (folder, open file) of this process
 
@@ -59,13 +60,16 @@ def recording() -> bool:
 def add(name: str, n: int = 1) -> None:
     """Count n of `name` in this frame."""
     if _on:
-        _counts[name] = _counts.get(name, 0) + n
+        with _lock:
+            _counts[name] = _counts.get(name, 0) + n
 
 
 def write_buffer(queue, buffer, offset, data) -> None:
     """queue.write_buffer, counting the bytes as bytes_uploaded; every upload in manifoldx goes through it."""
     if _on:
-        _counts["bytes_uploaded"] = _counts.get("bytes_uploaded", 0) + memoryview(data).nbytes
+        n = memoryview(data).nbytes
+        with _lock:
+            _counts["bytes_uploaded"] = _counts.get("bytes_uploaded", 0) + n
     queue.write_buffer(buffer, offset, data)
 
 
@@ -78,7 +82,8 @@ def event(kind: str, **fields) -> None:
 def metric(name: str, value) -> None:
     """Publish an app's number for this frame; the run keeps it under `app`."""
     if _on:
-        _metrics[name] = value
+        with _lock:
+            _metrics[name] = value
 
 
 @contextmanager
@@ -93,7 +98,9 @@ def span(name: str):
     try:
         yield
     finally:
-        _spans[key] = _spans.get(key, 0.0) + 1000.0 * (time.perf_counter() - t)
+        ms = 1000.0 * (time.perf_counter() - t)
+        with _lock:
+            _spans[key] = _spans.get(key, 0.0) + ms
 
 
 @contextmanager
@@ -120,13 +127,18 @@ def _plain(key):
 
 
 def _write_job(line: dict, where: str) -> None:
+    """Append a job line; a job that ends after its run removed the folder is dropped, never raised."""
     global _job_file
     with _job_lock:
-        if _job_file is None or _job_file[0] != where:
-            if _job_file is not None:
-                _job_file[1].close()
-            _job_file = (where, open(Path(where) / f"jobs-{os.getpid()}.jsonl", "a", buffering=1))
-        _job_file[1].write(json.dumps(line) + "\n")
+        try:
+            if _job_file is None or _job_file[0] != where:
+                if _job_file is not None:
+                    _job_file[1].close()
+                _job_file = None
+                _job_file = (where, open(Path(where) / f"jobs-{os.getpid()}.jsonl", "a", buffering=1))
+            _job_file[1].write(json.dumps(line) + "\n")
+        except OSError:
+            pass
 
 
 def start(jobs_dir=None) -> None:
@@ -158,10 +170,11 @@ def stop() -> None:
 def take() -> Frame:
     """This frame's counts, spans and metrics; the next frame starts empty.
 
-    The dicts are swapped, not cleared, so a thread adding while the frame ends adds to the next one."""
+    Under the lock every add, so a thread adding while the frame ends adds to one frame or the next."""
     global _counts, _spans, _metrics
-    f = Frame(_counts, _spans, _metrics)
-    _counts, _spans, _metrics = {}, {}, {}
+    with _lock:
+        f = Frame(_counts, _spans, _metrics)
+        _counts, _spans, _metrics = {}, {}, {}
     return f
 
 
@@ -180,8 +193,10 @@ def jobs() -> list:
     out = []
     for p in sorted(_jobs_dir.glob("jobs-*.jsonl")):
         for line in p.read_text().splitlines():
-            if line.strip():
+            try:
                 j = json.loads(line)
-                j["t"] = round(j.pop("at") - _wall0, 5)
-                out.append(j)
+            except ValueError:  # empty, or a worker still writing it
+                continue
+            j["t"] = round(j.pop("at") - _wall0, 5)
+            out.append(j)
     return sorted(out, key=lambda j: j["t"])
