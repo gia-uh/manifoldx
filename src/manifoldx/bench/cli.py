@@ -6,6 +6,7 @@
                         [--smoke] [--label L] [--json]
     manifoldx bench check [NAME...] [--full] [--size WxH] [--json]
     manifoldx bench show RUN [--probe P [--phase NAME]] [--json]
+    manifoldx bench report RUN [--open]
     manifoldx bench compare PATH [PATH...] [--out DIR] [--json]
     manifoldx bench clean [--json]
     manifoldx bench micro [MODULE...] [--case C] [--sizes N...] [--profile] [--smoke] [--against DIR [--repeat N]]
@@ -163,6 +164,9 @@ def _parser():
     s.add_argument("--probe", choices=sorted([*PHASE_PROBES, *RUN_PROBES]), help="print only this probe")
     s.add_argument("--phase", help="only this phase (with --probe)")
     s.add_argument("--json", action="store_true")
+    rp = sub.add_parser("report", help="write a run's report.html again and print its path")
+    rp.add_argument("run", help="a run folder, or its name under the runs folder")
+    rp.add_argument("--open", action="store_true", help="open it in the browser")
     cmp = sub.add_parser("compare", help="compare runs, sides or a set: a Markdown table and contact sheets")
     cmp.add_argument("paths", nargs="+", type=Path, help="run folders, side folders or a set folder; the first "
                      "side is the baseline")
@@ -187,7 +191,7 @@ def _parser():
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        return {"list": _list, "run": _run, "check": _check, "show": _show, "micro": _micro, "clean": _clean,
+        return {"list": _list, "run": _run, "check": _check, "show": _show, "report": _report, "micro": _micro, "clean": _clean,
                 "compare": _compare}[args.cmd](args)
     except ConfigError as e:
         print(f"manifoldx bench: {e}", file=sys.stderr)
@@ -477,16 +481,36 @@ def _table(summary: dict, folder: Path) -> None:
         if c["skipped"] or not c["ok"]:
             print(f"{'skipped' if c['skipped'] else 'FAILED'} {c['message']}")
     print(f"run folder: {folder}")
+    if (Path(folder) / "report.html").exists():
+        print(f"report: {Path(folder) / 'report.html'}")
+
+
+def _folder(name: str) -> Path:
+    """A run folder, by its path or its name under the runs folder."""
+    folder = Path(name)
+    if not folder.exists():
+        folder = load_config(Path.cwd()).runs / name
+    if not (folder / "run.json").exists():
+        raise ConfigError(f"no run at {folder}")
+    return folder
+
+
+def _report(args) -> int:
+    from manifoldx.bench.report import write_report
+
+    path = write_report(_folder(args.run))
+    print(path)
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(path.resolve().as_uri())
+    return 0
 
 
 def _show(args) -> int:
     from manifoldx.bench.folder import read_run
 
-    folder = Path(args.run)
-    if not folder.exists():
-        folder = load_config(Path.cwd()).runs / args.run
-    if not (folder / "run.json").exists():
-        raise ConfigError(f"no run at {folder}")
+    folder = _folder(args.run)
     summary = read_run(folder)
     if args.phase and not args.probe:
         raise ConfigError("--phase goes with --probe")
