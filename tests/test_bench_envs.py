@@ -157,3 +157,12 @@ def test_a_set_says_how_much_the_cache_grew(project, fake_uv, tmp_path, capsys):
     assert main(["run", "cli_demo", "--against", str(other), "--smoke", "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["cache_added_mb"] >= 0 and "cache_mb" in out
+
+
+def test_a_file_hardlinked_from_elsewhere_is_not_counted(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANIFOLDX_BENCH_CACHE", str(tmp_path / "c"))
+    _env(tmp_path / "c", "a", 512, 1)
+    shared = tmp_path / "uv-cache-file"
+    shared.write_bytes(b"\0" * 1024 * 1024)
+    os.link(shared, tmp_path / "c" / "a" / "venv" / "linked")  # as uv links a package from its own cache
+    assert envs.size_mb() == 0.5  # removing the cache would free only its own half megabyte

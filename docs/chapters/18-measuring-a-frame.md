@@ -284,7 +284,8 @@ run.
 Each (project, spec) pair gets a project environment under one cache folder
 (`~/.cache/manifoldx/bench-envs`, or `MANIFOLDX_BENCH_CACHE`), reused by the
 next run, so nothing is written into the other copy. A set says how much the
-cache grew. Past 2 GB (`MANIFOLDX_BENCH_CACHE_GB`) the environments used least
+cache grew, counting only what removing it would free: uv links most files from
+its own cache, so an environment of a few hundred MB holds a few MB of its own. Past 2 GB (`MANIFOLDX_BENCH_CACHE_GB`) the environments used least
 recently go, and `manifoldx bench clean` removes them all. The layer that
 `--with` adds lives in uv's own cache, which `uv cache prune` cleans.
 

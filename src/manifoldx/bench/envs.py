@@ -69,11 +69,19 @@ def cap_mb() -> float:
 
 
 def size_mb(path=None) -> float:
-    """What a folder holds, the cache by default, in MB."""
-    from manifoldx.bench.probes import folder_mb
-
+    """The disk a folder alone holds, the cache by default, in MB: what removing it would free. uv links
+    packages from its own cache into an environment, so a file with another link is not counted."""
     path = cache_dir() if path is None else Path(path)
-    return folder_mb(path) if path.exists() else 0.0
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                st = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            if st.st_nlink == 1:
+                total += st.st_size
+    return total / 2**20
 
 
 def trim(cap: float | None = None, keep: set | frozenset = frozenset()) -> list[str]:
