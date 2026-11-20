@@ -175,6 +175,7 @@ class Engine:
 
 def main(cspec, sspec, error, msgs, streams, config) -> None:
     """The sound process's loop. config: rate, block, backend, path, stems."""
+    gc.disable()  # a collection stops every thread: the render loop allocates no cycles, so none is needed
     ctl, st = Controls.attach(cspec), Controls.attach(sspec)
     rate, block = config["rate"], config["block"]
     eng = Engine(ctl, block)
