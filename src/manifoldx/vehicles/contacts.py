@@ -4,6 +4,8 @@ and the overlap is pushed out."""
 
 from __future__ import annotations
 
+from math import hypot
+
 import numpy as np
 
 from .body import cross
@@ -69,6 +71,39 @@ def footprint_hit(walls, centre, heading, half):
     normal = axis[:, :1] * heading + axis[:, 1:] * side
     point = centre + point_car[:, :1] * heading + point_car[:, 1:] * side
     return best, normal, point
+
+
+def box_hit(ca, ua, ha, cb, ub, hb):
+    """Two footprints by separating axes, in plain Python: centres (x, z), headings (x, z) and half length and
+    width of a and b. None when apart; otherwise the normal a must move along, the contact point (a corner of the
+    box that goes into the other's face) and the depth."""
+    la, lb = hypot(*ua), hypot(*ub)
+    ua, ub = (ua[0] / la, ua[1] / la), (ub[0] / lb, ub[1] / lb)
+    axes_a, axes_b = (ua, (-ua[1], ua[0])), (ub, (-ub[1], ub[0]))
+    d = (ca[0] - cb[0], ca[1] - cb[1])
+    best = None
+    for owner, axis in [(0, ax) for ax in axes_a] + [(1, ax) for ax in axes_b]:
+        ra = ha[0] * abs(axes_a[0][0] * axis[0] + axes_a[0][1] * axis[1]) + ha[1] * abs(
+            axes_a[1][0] * axis[0] + axes_a[1][1] * axis[1])
+        rb = hb[0] * abs(axes_b[0][0] * axis[0] + axes_b[0][1] * axis[1]) + hb[1] * abs(
+            axes_b[1][0] * axis[0] + axes_b[1][1] * axis[1])
+        along = d[0] * axis[0] + d[1] * axis[1]
+        depth = ra + rb - abs(along)
+        if depth <= 0:
+            return None
+        if best is None or depth < best[0]:
+            best = (depth, owner, axis if along >= 0 else (-axis[0], -axis[1]))
+    depth, owner, n = best
+
+    def corners(c, axes, h):
+        return [(c[0] + sx * h[0] * axes[0][0] + sz * h[1] * axes[1][0],
+                 c[1] + sx * h[0] * axes[0][1] + sz * h[1] * axes[1][1]) for sx in (-1, 1) for sz in (-1, 1)]
+
+    if owner == 1:  # a face of b: a's corner deepest into b
+        point = min(corners(ca, axes_a, ha), key=lambda q: q[0] * n[0] + q[1] * n[1])
+    else:  # a face of a: b's corner deepest into a
+        point = max(corners(cb, axes_b, hb), key=lambda q: q[0] * n[0] + q[1] * n[1])
+    return n, point, depth
 
 
 def _ends(u, v):
