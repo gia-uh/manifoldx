@@ -37,6 +37,12 @@ SCENARIOS = textwrap.dedent('''
     @bench.scenario("cli_broken")
     def cli_broken(engine, p):
         return Demo(engine), [bench.hold(frames=1), cli_fail()]
+
+
+    @bench.scenario("cli_fails_on", params={"bad": 0}, sizes={"smoke": 2})
+    def cli_fails_on(engine, p):
+        """Fails in a step when bad is set: one side of a sweep fails, the other runs."""
+        return Demo(engine), [bench.hold(frames=1), *([cli_fail()] if p.bad else [])]
 ''')
 
 

@@ -115,7 +115,10 @@ def _parser():
     r.add_argument("--size", type=_size, default=(640, 360), help="WxH of the offscreen frame (default 640x360)")
     r.add_argument("--loop", choices=["serial", "pipelined", "check"], default="serial")
     r.add_argument("--step", type=_step, help="fixed dt in seconds, such as 1/30 (default: the wall clock)")
-    r.add_argument("--param", action="append", default=[], metavar="K=V")
+    r.add_argument("--param", action="append", default=[], metavar="K=V",
+                   help="a param's value; K=A,B sweeps it, each value a side run in fresh processes")
+    r.add_argument("--repeat", type=int, default=1, metavar="N",
+                   help="runs of each side, interleaved (with a sweep, --against or --manifoldx)")
     r.add_argument("--smoke", action="store_true", help="cap each waiting step at the scenario's smoke size")
     r.add_argument("--label", help="a free label kept with the run (default: $MANIFOLDX_BENCH_LABEL)")
     r.add_argument("--json", action="store_true", help="print only the summary, as JSON")
@@ -190,6 +193,18 @@ def _run(args) -> int:
         if not sep:
             raise ConfigError(f"--param takes k=v, not {kv!r}")
         overrides[k] = v
+    from manifoldx.bench.scenario import sweep
+
+    try:
+        combos = sweep(sc.params, overrides)
+    except ValueError as e:
+        raise ConfigError(str(e)) from None
+    if args.repeat < 1:
+        raise ConfigError(f"--repeat must be 1 or more, not {args.repeat}")
+    if len(combos) > 1:
+        return _run_set(args, config, combos)
+    if args.repeat > 1:
+        raise ConfigError("--repeat needs more than one side: a swept --param, --against or --manifoldx")
     last = {"t": 0.0}
 
     def progress(n, phase, step, steps):
@@ -218,6 +233,32 @@ def _run(args) -> int:
         print(f"manifoldx bench: the run failed: {run.error}", file=sys.stderr)
         return 1
     return 0
+
+
+def _run_set(args, config: Config, combos: list[dict]) -> int:
+    """Run every side of a sweep in fresh processes, interleaved, into one set folder."""
+    from manifoldx.bench.sides import Side, run_set
+
+    scenario = args.scenario
+    if scenario.endswith(".json"):  # each copy reads its own file, at the same place under its root
+        path = Path(scenario).resolve()
+        scenario = str(path.relative_to(config.root)) if path.is_relative_to(config.root) else str(path)
+    sides = [Side(" ".join(f"{k}={v}" for k, v in combo.items()) or "this copy", config.root, combo)
+             for combo in combos]
+    run_args = ["--size", f"{args.size[0]}x{args.size[1]}", "--loop", args.loop]
+    run_args += (["--step", repr(args.step)] if args.step else []) + (["--smoke"] if args.smoke else [])
+    label = args.label or os.environ.get("MANIFOLDX_BENCH_LABEL")
+    run_args += ["--label", label] if label else []
+    result = run_set(scenario, sides, args.repeat, run_args, config.runs)
+    out = {"set": result.folder.name, "sides": result.data["sides"], "runs": result.data["runs"]}
+    if args.json:
+        print(json.dumps(out, indent=1))
+    else:
+        for e in result.data["runs"]:
+            side = result.data["sides"][e["side"]]["label"]
+            print(f"{side:<24} round {e['round'] + 1}  {e['folder'] or '-'}  {e['error'] or 'ok'}")
+        print(f"set folder: {result.folder}")
+    return 1 if result.failed else 0
 
 
 FRAME_KEYS = ("frames", "p50_ms", "p95_ms", "p99_ms", "max_ms", "over_1_5x", "over_3x", "draw_p50_ms", "cpu_p50_ms")
