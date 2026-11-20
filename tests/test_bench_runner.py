@@ -179,3 +179,84 @@ def test_an_engine_whose_setup_raised_is_closed_too():
 
     run = run_scenario(Scenario("s", fn), size=(64, 48))
     assert "setup broke" in run.error and fired == [1]
+
+
+# --- step 2: counters, spans, metrics, alignment ------------------------------------------------
+
+
+def test_counters_reach_the_phase_summary_and_the_arrays():
+    sc, _ = make([bench.mark("a"), bench.hold(frames=5)])
+    run = run_scenario(sc, size=(64, 48))
+    c = run.summary["phases"]["a"]["counters"]
+    assert c["draws"]["mean"] >= 1 and "bytes_uploaded" in c
+    names = list(run.frames["counter_names"])
+    assert "draws" in names and run.frames["counters"].shape == (len(run.frames["wall_ms"]), len(names))
+
+
+def test_a_span_in_a_system_and_a_metric_are_recorded():
+    def fn(engine, p):
+        app = App(engine)
+
+        @engine.system
+        def walled(q: mx.Query[Transform], dt: float):
+            with bench.span("walls"):
+                time.sleep(0.001)
+            bench.metric("cars", 12)
+
+        return app, [bench.hold(frames=4)]
+
+    run = run_scenario(Scenario("spans", fn, {}, {"smoke": 4, "full": None}), size=(64, 48))
+    spans = run.summary["phases"]["main"]["spans_ms"]
+    assert any(k.endswith("walled/walls") and v >= 0.8 for k, v in spans.items())
+    assert run.summary["app"] == {"cars": 12}
+    assert run.summary["phases"]["main"]["app"]["cars"]["max"] == 12
+
+
+def test_arrays_stay_aligned_when_a_frame_is_cut(monkeypatch):
+    from manifoldx.bench import probes
+
+    calls = {"n": 0}
+    real = probes.Columns.add
+
+    def cut(self, row):
+        calls["n"] += 1
+        if calls["n"] == 11:  # the third frame's first column probe (5 a frame), after frames.add ran
+            raise KeyboardInterrupt
+        real(self, row)
+
+    monkeypatch.setattr(probes.Columns, "add", cut)
+    sc, _ = make([bench.hold(frames=10)])
+    run = run_scenario(sc, size=(64, 48))
+    assert run.error == "interrupted"
+    lengths = {k: len(v) for k, v in run.frames.items() if not k.endswith("_names")}
+    assert len(set(lengths.values())) == 1, lengths
+
+
+def test_the_error_event_is_written_once():
+    sc, _ = make([bench.hold(frames=1), bench.each_frame(lambda app: 1 / 0, frames=1)])
+    run = run_scenario(sc, size=(64, 48))
+    assert [e["kind"] for e in run.events].count("error") == 1
+
+
+def test_cpu_is_process_time_and_draw_is_the_engine_frame():
+    sc, _ = make([bench.hold(frames=4)])
+    run = run_scenario(sc, size=(64, 48))
+    ph = run.summary["phases"]["main"]
+    assert ph["draw_p50_ms"] > 0 and ph["cpu_p50_ms"] >= 0
+    assert len(run.frames["draw_ms"]) == len(run.frames["cpu_ms"]) == 4
+
+
+def test_host_says_whether_the_build_is_free_threaded():
+    import sys
+
+    sc, _ = make([bench.hold(frames=1)])
+    host = run_scenario(sc, size=(64, 48)).summary["host"]
+    assert host["free_threaded"] == (not sys._is_gil_enabled()) and host["python"]
+
+
+def test_counters_are_off_after_a_run():
+    from manifoldx import counters
+
+    sc, _ = make([bench.hold(frames=1)])
+    run = run_scenario(sc, size=(64, 48))
+    assert not counters.recording() and run.summary["counters_exact"] is True

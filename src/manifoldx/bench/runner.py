@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 
 import numpy as np
 
-from manifoldx.bench.probes import Frames, Host, Split, phase_summary
+from manifoldx import counters
+from manifoldx.bench.probes import Columns, Frames, Host, last_metrics, phase_summary
 from manifoldx.bench.scenario import Ctx, Params, Scenario, iterate
 
 LOOPS = ("serial", "pipelined", "check")
@@ -76,7 +77,9 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         raise ValueError(f"loop must be one of {', '.join(LOOPS)}, not {loop!r}")
     params = Params(sc.params, overrides)
     w, h = size
-    host, frames, split, systems = Host(), Frames(), Split(), Split()
+    host, frames = Host(), Frames()
+    probes = {"split": Columns(scale=1000.0), "systems": Columns(scale=1000.0), "counters": Columns(),
+              "spans": Columns(), "metrics": Columns(fill=None)}
     started, t_start = datetime.now(UTC), time.monotonic()
     saved_env = os.environ.get("MANIFOLDX_PIPELINE")
     if loop == "check":
@@ -86,17 +89,23 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
     error = None
 
     def frame(keep=False):
-        t0 = time.perf_counter()
+        counters.frame = len(frames)
+        t0, c0 = time.perf_counter(), time.process_time()
         engine._draw_frame()
-        cpu = time.perf_counter() - t0
+        draw = time.perf_counter() - t0
         img = engine._render_canvas.draw()
-        end = time.perf_counter()
+        end, cpu = time.perf_counter(), time.process_time() - c0
         wall = end - (state["last"] if state["last"] is not None else t0)
         state["last"] = end
         ctx.dt = step_dt or wall
-        frames.add(1000.0 * wall, 1000.0 * cpu, rec.phase)
-        split.add(engine.frame_split)
-        systems.add(engine.system_split)
+        took = counters.take()
+        # Everything is measured before anything is stored; a Ctrl-C between two stores is cut at the end.
+        frames.add(1000.0 * wall, 1000.0 * draw, 1000.0 * cpu, rec.phase)
+        probes["split"].add(engine.frame_split)
+        probes["systems"].add(engine.system_split)
+        probes["counters"].add(took.counts)
+        probes["spans"].add(took.spans)
+        probes["metrics"].add(took.metrics)
         host.tick()
         if progress:
             progress(len(frames.wall_ms), rec.phases[rec.phase])
@@ -108,6 +117,7 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
 
     rec = _Recorder(frame)
     ctx = None
+    counters.start(None)
     try:
         engine = mx.Engine(sc.name, width=w, height=h)
         app, steps = sc.fn(engine, params)
@@ -139,6 +149,7 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
         error = f"{type(e).__name__}: {e}"
         rec.event("error", name=error, traceback=traceback.format_exc(limit=8))
     finally:
+        counters.stop()
         _close(app)
         if engine is not None:
             engine.close()  # fires 'shutdown' and frees the engine's pools and GPU device
@@ -147,25 +158,33 @@ def run_scenario(sc: Scenario, *, size=(640, 360), loop: str = "serial", step_dt
                 os.environ.pop("MANIFOLDX_PIPELINE", None)
             else:
                 os.environ["MANIFOLDX_PIPELINE"] = saved_env
-    if error:
+    if error == "interrupted":
         rec.event("error", name=error)
 
+    n = min(len(frames), *(len(pr) for pr in probes.values()))
+    frames.cut(n)
+    for pr in probes.values():
+        pr.cut(n)
     arrays = frames.arrays()
     phases = {}
     for k, name in enumerate(rec.phases):
         rows = arrays["phase"] == k
         if rows.any():
-            phases[name] = phase_summary(arrays["wall_ms"], arrays["cpu_ms"], split, systems, rows)
-    for key, probe in (("split", split), ("systems", systems)):
-        arrays[f"{key}_names"] = np.array(probe.names(), dtype=str)
-        arrays[f"{key}_ms"] = probe.matrix()
+            phases[name] = phase_summary(arrays, probes, rows)
+    for key, names, array, dtype in (("split", "split_names", "split_ms", float),
+                                     ("systems", "systems_names", "systems_ms", float),
+                                     ("counters", "counter_names", "counters", np.int64),
+                                     ("spans", "span_names", "spans_ms", float),
+                                     ("metrics", "metric_names", "metrics", float)):
+        arrays[names] = np.array(probes[key].names(), dtype=str)
+        arrays[array] = probes[key].matrix(dtype)
     summary = {
         "scenario": sc.name, "params": params.as_dict(), "mode": "offscreen", "loop": loop,
         "step": step_dt, "size": [w, h], "smoke": smoke, "label": label,
         "versions": {"manifoldx": _version("manifold-gfx"), "app": _version(app_name)},
         "host": host.summary(), "phases": phases, "phase_order": rec.phases, "error": error,
         "started": started.isoformat(timespec="seconds"), "seconds": round(time.monotonic() - t_start, 3),
-        "app": {},
+        "app": last_metrics(probes["metrics"]), "counters_exact": loop == "serial",
     }
     return Run(summary, arrays, rec.events, rec.shots, error)
 

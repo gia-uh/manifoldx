@@ -1,15 +1,22 @@
 """What a run records each frame, and the summaries made from it.
 
-frames: wall time (start of one frame to the next), CPU time of the engine's frame, the phase.
+frames: wall time (start of one frame to the next), the engine's frame (`draw`), the process's CPU
+time over the frame (every thread), the phase.
 split: the engine's frame_split (update, acquire, render, overlap) in ms.
 systems: the engine's system_split, each system's ms.
-host: CPUs, the load over the run, the GPU adapter and whether it is a software rasterizer.
+counters: what manifoldx.counters counted in the frame (draws, bytes uploaded, ...).
+spans: ms of each bench.span, named <system>/<span>.
+metrics: the app's bench.metric values.
+host: CPUs, the load over the run, the GPU adapter and whether it is a software rasterizer, Python.
 """
 
 from __future__ import annotations
 
+import math
 import os
+import platform
 import re
+import sys
 import time
 
 import numpy as np
@@ -19,26 +26,41 @@ SOFTWARE = re.compile(r"llvmpipe|lavapipe|swiftshader|softpipe", re.I)
 
 class Frames:
     def __init__(self):
-        self.wall_ms, self.cpu_ms, self.phase = [], [], []
+        self.wall_ms, self.draw_ms, self.cpu_ms, self.phase = [], [], [], []
 
-    def add(self, wall_ms: float, cpu_ms: float, phase: int):
+    def add(self, wall_ms: float, draw_ms: float, cpu_ms: float, phase: int):
         self.wall_ms.append(wall_ms)
+        self.draw_ms.append(draw_ms)
         self.cpu_ms.append(cpu_ms)
         self.phase.append(phase)
 
+    def __len__(self):
+        return min(len(self.wall_ms), len(self.draw_ms), len(self.cpu_ms), len(self.phase))
+
+    def cut(self, n: int):
+        for col in (self.wall_ms, self.draw_ms, self.cpu_ms, self.phase):
+            del col[n:]
+
     def arrays(self) -> dict:
-        return {"wall_ms": np.array(self.wall_ms), "cpu_ms": np.array(self.cpu_ms),
-                "phase": np.array(self.phase, dtype=np.int32)}
+        return {"wall_ms": np.array(self.wall_ms), "draw_ms": np.array(self.draw_ms),
+                "cpu_ms": np.array(self.cpu_ms), "phase": np.array(self.phase, dtype=np.int32)}
 
 
-class Split:
-    """Per-frame dicts of name -> ms, kept as columns (a name missing in a frame counts 0)."""
+class Columns:
+    """Per-frame dicts of name -> number, kept as columns; a name missing in a frame counts `fill`."""
 
-    def __init__(self):
+    def __init__(self, fill=0.0, scale=1.0):
         self.rows: list[dict] = []
+        self.fill, self.scale = fill, scale
 
-    def add(self, seconds: dict):
-        self.rows.append({k: 1000.0 * float(v) for k, v in (seconds or {}).items()})
+    def add(self, row: dict):
+        self.rows.append({k: v * self.scale if self.scale != 1.0 else v for k, v in (row or {}).items()})
+
+    def __len__(self):
+        return len(self.rows)
+
+    def cut(self, n: int):
+        del self.rows[n:]
 
     def names(self) -> list[str]:
         out: dict[str, None] = {}
@@ -46,9 +68,14 @@ class Split:
             out.update(dict.fromkeys(r))
         return list(out)
 
-    def matrix(self) -> np.ndarray:
+    def matrix(self, dtype=float) -> np.ndarray:
         names = self.names()
-        return np.array([[r.get(n, 0.0) for n in names] for r in self.rows]).reshape(len(self.rows), len(names))
+        return np.array([[_number(r.get(n, self.fill)) for n in names] for r in self.rows],
+                        dtype=dtype).reshape(len(self.rows), len(names))
+
+
+def _number(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else math.nan
 
 
 class Host:
@@ -77,7 +104,8 @@ class Host:
         return {"cpus": os.cpu_count(), "load_before": self.load_before,
                 "load_max": max(self.loads + ([after] if after is not None else []), default=None),
                 "load_after": after, "adapter": self.adapter, "adapter_type": self.adapter_type,
-                "software": software}
+                "software": software, "python": platform.python_version(),
+                "free_threaded": not sys._is_gil_enabled()}
 
 
 def _load():
@@ -87,9 +115,11 @@ def _load():
         return None
 
 
-def phase_summary(wall: np.ndarray, cpu: np.ndarray, split: Split, systems: Split, rows: np.ndarray) -> dict:
-    """The numbers of one phase from the frames in `rows` (a boolean mask)."""
-    w, c = wall[rows], cpu[rows]
+def phase_summary(arrays: dict, probes: dict, rows: np.ndarray) -> dict:
+    """The numbers of one phase from the frames in `rows` (a boolean mask).
+
+    `probes` holds the Columns probes by name: split, systems, counters, spans, metrics."""
+    w = arrays["wall_ms"][rows]
     med = float(np.median(w))
     out = {
         "frames": int(rows.sum()),
@@ -99,13 +129,42 @@ def phase_summary(wall: np.ndarray, cpu: np.ndarray, split: Split, systems: Spli
         "max_ms": round(float(w.max()), 3),
         "over_1_5x": int((w > 1.5 * med).sum()),
         "over_3x": int((w > 3.0 * med).sum()),
-        "cpu_p50_ms": round(float(np.median(c)), 3),
+        "draw_p50_ms": round(float(np.median(arrays["draw_ms"][rows])), 3),
+        "cpu_p50_ms": round(float(np.median(arrays["cpu_ms"][rows])), 3),
     }
     idx = np.flatnonzero(rows)
-    for key, probe, top in (("split_ms", split, None), ("systems_ms", systems, 10)):
+    for key, name, top in (("split_ms", "split", None), ("systems_ms", "systems", 10), ("spans_ms", "spans", None)):
+        probe = probes[name]
         names, m = probe.names(), probe.matrix()
         means = {n: round(float(m[idx, k].mean()), 3) for k, n in enumerate(names)} if len(names) else {}
         if top:
             means = dict(sorted(means.items(), key=lambda kv: -kv[1])[:top])
         out[key] = means
+    names, m = probes["counters"].names(), probes["counters"].matrix()
+    out["counters"] = {n: {"mean": round(float(m[idx, k].mean()), 3), "max": int(m[idx, k].max())}
+                       for k, n in enumerate(names)}
+    out["app"] = _metrics_summary(probes["metrics"], idx)
+    return out
+
+
+def _metrics_summary(probe: Columns, idx: np.ndarray) -> dict:
+    """Per metric set in these frames: last, and mean and max when it is a number."""
+    out = {}
+    rows = [probe.rows[i] for i in idx]
+    for name in probe.names():
+        vals = [r[name] for r in rows if name in r]
+        if not vals:
+            continue
+        nums = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        out[name] = {"last": vals[-1]}
+        if len(nums) == len(vals):
+            out[name].update(mean=round(sum(nums) / len(nums), 3), max=max(nums))
+    return out
+
+
+def last_metrics(probe: Columns) -> dict:
+    """The last value each metric was set to over the run."""
+    out = {}
+    for r in probe.rows:
+        out.update(r)
     return out

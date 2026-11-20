@@ -210,11 +210,12 @@ def _table(summary: dict, folder: Path) -> None:
     host = summary["host"]
     print(f"{summary['scenario']}  loop={summary['loop']}  size={summary['size'][0]}x{summary['size'][1]}  "
           f"{host['adapter']}{' (software)' if host['software'] else ''}  load {host['load_before']}–{host['load_max']}")
-    print(f"{'phase':<14}{'frames':>7}{'p50 ms':>9}{'p95 ms':>9}{'max ms':>9}{'cpu p50':>9}  slowest systems")
+    print(f"{'phase':<14}{'frames':>7}{'p50 ms':>9}{'p95 ms':>9}{'max ms':>9}{'draw p50':>9}{'cpu p50':>9}"
+          "  slowest systems")
     for name, ph in summary["phases"].items():
         top = ", ".join(f"{k.rsplit('.', 1)[-1]} {v}" for k, v in list(ph["systems_ms"].items())[:3])
         print(f"{name:<14}{ph['frames']:>7}{ph['p50_ms']:>9.1f}{ph['p95_ms']:>9.1f}{ph['max_ms']:>9.1f}"
-              f"{ph['cpu_p50_ms']:>9.1f}  {top}")
+              f"{ph['draw_p50_ms']:>9.1f}{ph['cpu_p50_ms']:>9.1f}  {top}")
     print(f"run folder: {folder}")
 
 
