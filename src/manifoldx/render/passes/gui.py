@@ -299,7 +299,9 @@ def layout_gui(engine) -> Painter:
     which the sprite and label passes share within the frame.
 
     A root panel whose widgets did not change since the last call (see
-    `_fingerprint`) is not laid out again: its ops from then are reused.
+    `_fingerprint`) is not laid out again: its ops from then are reused, and
+    when only its offset changed they are shifted to its new slot, so a
+    panel that moves every frame (a marker on a map) costs no layout.
     """
     scale = engine.gui.effective_scale(engine.h)
     exact = getattr(engine.gui, "exact_colors", True)
@@ -308,10 +310,14 @@ def layout_gui(engine) -> Painter:
     cache = {}
     painter = Painter()
     for panel in engine.gui:
-        key = (engine.w, engine.h, scale, exact, style.version, _fingerprint(panel))
+        key = (engine.w, engine.h, scale, exact, style.version, _placed(panel))
         hit = last.get(id(panel))
         if hit is not None and hit[0] is panel and hit[1] == key:
-            ops = hit[2]
+            spec, slot, ops = hit[3], hit[4], hit[2]
+            if panel.offset != hit[5]:  # only moved: the same ops, shifted by how far its slot went
+                moved = anchored_slot(panel.anchor, panel.offset, spec, viewport)
+                ops = _shift_ops(ops, (moved.x - slot.x) * scale, (moved.y - slot.y) * scale)
+                slot = moved
         else:
             ops = Painter()
             spec = panel.build_layout_spec()
@@ -322,13 +328,31 @@ def layout_gui(engine) -> Painter:
                 _scale_ops(ops, scale)
             if exact:
                 _decode_colors(ops)
-        cache[id(panel)] = (panel, key, ops)
+        cache[id(panel)] = (panel, key, ops, spec, slot, panel.offset)
         _merge(painter, ops)
     engine.gui.__dict__["_layout_cache"] = cache
     return painter
 
 
 _DERIVED = frozenset({"_cached_intrinsic", "_gui_attached"})  # fields that follow from the others
+
+
+def _placed(panel) -> tuple:
+    """A root panel's fingerprint without its offset: what decides its ops up to where they stand."""
+    fields = tuple((k, v if isinstance(v, _PLAIN) else _frozen(v))
+                   for k, v in panel.__dict__.items() if k not in _DERIVED and k != "offset")
+    return (type(panel), fields)
+
+
+def _shift_ops(ops: Painter, dx: float, dy: float) -> Painter:
+    """A copy of a panel's ops moved by (dx, dy) screen pixels."""
+    def at(box):
+        return LayoutBox(box.x + dx, box.y + dy, box.w, box.h)
+
+    return Painter(rect_ops=[replace(op, box=at(op.box)) for op in ops.rect_ops],
+                   text_ops=[replace(op, box=at(op.box)) for op in ops.text_ops],
+                   image_ops=[replace(op, box=at(op.box)) for op in ops.image_ops],
+                   order=ops.order)
 
 
 class _Same:

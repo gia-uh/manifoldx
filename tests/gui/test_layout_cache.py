@@ -106,3 +106,27 @@ def test_a_new_theme_lays_out_again():
         assert layout_gui(engine).rect_ops[0].border == 3
     finally:
         style.reset()
+
+
+@pytest.mark.parametrize("which", ["left", "right"])
+def test_a_panel_that_only_moved_is_shifted_not_laid_out(layouts, which):
+    engine, left, right, *_ = _engine()
+    layout_gui(engine)
+    n = len(layouts)
+    panel = left if which == "left" else right
+    panel.offset = (panel.offset[0] + 37, panel.offset[1] + 11)
+    moved = layout_gui(engine)
+    assert len(layouts) == n  # no layout ran: the ops were shifted
+    fresh_engine, fresh_left, fresh_right, *_ = _engine()
+    (fresh_left if which == "left" else fresh_right).offset = panel.offset
+    assert _ops(moved) == _ops(layout_gui(fresh_engine))
+
+
+def test_a_panel_that_moved_and_changed_is_laid_out(layouts):
+    engine, left, _, a, _ = _engine()
+    layout_gui(engine)
+    n = len(layouts)
+    left.offset = (50, 50)
+    a.text = "11:00"
+    layout_gui(engine)
+    assert len(layouts) == n + 1
