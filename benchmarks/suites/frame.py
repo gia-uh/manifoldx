@@ -281,3 +281,40 @@ def gui_one_text(n):
         texts[0].text = f"{k[0] % 200:03d}"
 
     return _frame(engine)
+
+
+def _ground_frame_ms(side: int, detail: bool) -> float:
+    """Median ms of a whole frame, GPU wait and readback included, of a side × side view down a field whose
+    ground fills the screen, its surface DETAIL_GROUND."""
+    import manifoldx as mx
+    from manifoldx.components import Material, Mesh, Transform
+    from manifoldx.resources import DETAIL_GROUND, DirectionalLight, StandardMaterial
+
+    engine = mx.Engine("ground", width=side, height=side)
+    h = 2000.0
+    geo = {"positions": np.array([[-h, 0, -h], [h, 0, -h], [h, 0, h], [-h, 0, h]], np.float32),
+           "normals": np.tile([0, 1, 0], (4, 1)).astype(np.float32),
+           "colors": np.tile((0.30, 0.44, 0.20), (4, 1)).astype(np.float32),
+           "indices": np.array([0, 2, 1, 0, 3, 2], np.uint32), "surfaces": np.full(4, DETAIL_GROUND, np.int32)}
+    engine.spawn(Mesh(geo), Material(StandardMaterial("#ffffff", roughness=0.95, vertex_colors=True, detail=detail)),
+                 Transform(pos=(0, 0, 0)))
+    engine.set_sun(DirectionalLight(color="#ffffff", intensity=3.0, direction=(-0.3, -1.0, -0.4)))
+    engine.camera.set_pose(position=(0, 3, 0), target=(0, 0, -6))  # the horizon above the top edge
+    start(engine)
+
+    def frame():
+        engine._draw_frame()
+        engine._render_canvas.draw()
+
+    for _ in range(3):
+        frame()
+    return measure(frame, number=5)
+
+
+@case("frame", "ground_detail", sizes=[256, 1024, 1536], smoke=32)
+def ground_detail(side):
+    """A side × side frame of ground filling the screen, GPU included, with StandardMaterial(detail=True)
+    against without: the fragment cost of the procedural detail."""
+    flat = _ground_frame_ms(side, False)
+    rich = _ground_frame_ms(side, True)
+    return {"ms": rich, "flat_ms": flat, "extra_ms": rich - flat}

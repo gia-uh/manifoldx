@@ -1349,6 +1349,160 @@ def fade_shader(source: str) -> str:
     )
 
 
+DETAIL_ASPHALT = 10  # surface id (vcolor.w) of asphalt for a StandardMaterial with detail=True
+DETAIL_GROUND = 11  # surface id of bare ground and grass, likewise
+
+# Procedural detail (StandardMaterial with detail=True): value noise over the world's (x, z), a few octaves
+# of it, round the vertex colour of the vertices whose surface id is DETAIL_ASPHALT or DETAIL_GROUND. Every
+# wavelength is a power of two metres, so a lattice point's integer coordinate is that of the floating
+# origin's 256 m tile plus its own, exact at any distance from the world's origin: the noise never repeats.
+# Each octave fades out where a wave would span fewer than eight pixels and is skipped under three
+# pixels, so far away the surface keeps its flat colour, never shimmers and costs nothing.
+DETAIL_WGSL = """
+// ---- procedural detail: asphalt and ground from world-space value noise ----
+const DT_FAR = vec2<f32>(250.0, 600.0);  // metres from the eye over which all detail fades out
+const DT_DRY = vec3<f32>(0.266, 0.171, 0.051);  // dry yellow-brown grass, linear (#8c7340)
+const DT_DEEP = vec3<f32>(0.033, 0.089, 0.014);  // deep green, linear (#33541f)
+const DT_SOIL = vec3<f32>(0.133, 0.073, 0.033);  // soil, linear (#664d33)
+
+// Dave Hoskins' hash without sine, at four lattice points (x, y) at once: 0..1 each. The points are under 4096
+// plus the seed's offset, where an f32 still holds every bit the hash needs.
+fn dt_hash4(x: vec4<f32>, y: vec4<f32>, seed: f32) -> vec4<f32> {
+    let a = fract((x + seed * 317.0) * 0.1031);
+    let b = fract(y * 0.1030);
+    let d = a * (b + 33.33) + b * (a + 33.33) + a * (a + 33.33);
+    return fract((a + b + 2.0 * d) * (a + d));
+}
+// Value noise in 0..1 of wavelength lam metres (a power of two up to 256) at p, metres from the corner of
+// the origin's tile `tile`. The lattice wraps every 4096 waves, far wider than the eye could match.
+fn dt_noise(p: vec2<f32>, lam: f32, tile: vec2<i32>, seed: f32) -> f32 {
+    let q = p / lam;
+    let i = floor(q);
+    var f = q - i;
+    f = f * f * (3.0 - 2.0 * f);
+    let c = vec2<i32>(i) + tile * i32(256.0 / lam);
+    let x = vec2<f32>(vec2<i32>(c.x, c.x + 1) & vec2<i32>(4095));
+    let y = vec2<f32>(vec2<i32>(c.y, c.y + 1) & vec2<i32>(4095));
+    let h = dt_hash4(vec4<f32>(x.x, x.y, x.x, x.y), vec4<f32>(y.x, y.x, y.y, y.y), seed);
+    return mix(mix(h.x, h.y, f.x), mix(h.z, h.w, f.x), f.y);
+}
+// How much of an octave of wavelength lam shows where a pixel spans fw metres: all of it from eight pixels
+// a wave, none under three. fw.x is a pixel's mean span (the geometric mean of its two sides), for the soft
+// octaves of two metres and more; fw.y its longest side, for the fine ones, which would shimmer down a
+// street seen at a grazing angle.
+fn dt_w(lam: f32, fw: vec2<f32>) -> f32 { return smoothstep(3.0, 8.0, lam / select(fw.y, fw.x, lam >= 2.0)); }
+
+// Asphalt: soft blotches metres across (repaired patches darker and smoother, worn stretches greyer and
+// rougher), stains a metre across, grain, and the aggregate's light stones a few centimetres across.
+fn dt_asphalt(base: vec3<f32>, p: vec2<f32>, t: vec2<i32>, fw: vec2<f32>, far: f32) -> vec4<f32> {
+    var col = base;
+    var r = 0.0;
+    let w8 = dt_w(8.0, fw) * far;
+    if (w8 > 0.0) {
+        let n = dt_noise(p, 8.0, t, 1.0);
+        let patched = smoothstep(0.62, 0.7, n) * w8;
+        let worn = smoothstep(0.38, 0.3, n) * w8;
+        let grey = vec3<f32>(dot(col, vec3<f32>(0.2126, 0.7152, 0.0722)));
+        col = col * (1.0 + 0.6 * (n - 0.5) * w8) * (1.0 - 0.4 * patched);
+        col = mix(col, grey * 1.7, 0.6 * worn);
+        r += 0.06 * worn - 0.15 * patched;
+    }
+    let w1 = dt_w(1.0, fw) * far;
+    if (w1 > 0.0) {
+        col *= 1.0 + 0.8 * (dt_noise(p, 1.0, t, 2.0) - 0.5) * w1;
+    }
+    let w025 = dt_w(0.25, fw) * far;
+    if (w025 > 0.0) {
+        col *= 1.0 + 0.9 * (dt_noise(p, 0.25, t, 3.0) - 0.5) * w025;
+    }
+    let w003 = dt_w(0.03125, fw) * far;
+    if (w003 > 0.0) {
+        let s = dt_noise(p, 0.03125, t, 4.0);
+        col *= 1.0 + (0.9 * smoothstep(0.62, 0.85, s) - 0.5 * smoothstep(0.38, 0.15, s)) * w003;
+    }
+    return vec4<f32>(col, r);
+}
+
+// Ground: mottled greens and dry yellow-brown over tens of metres (on top of what the vertex colours vary
+// over larger distances), lighter and darker patches a few metres across with soil showing through, most
+// where it is dry, then tufts down to a few centimetres.
+fn dt_ground(base: vec3<f32>, p: vec2<f32>, t: vec2<i32>, fw: vec2<f32>, far: f32) -> vec4<f32> {
+    var col = base;
+    var dry = 0.5;
+    let w16 = dt_w(16.0, fw) * far;
+    if (w16 > 0.0) {
+        dry = dt_noise(p, 16.0, t, 5.0);
+        let lum = dot(base, vec3<f32>(0.2126, 0.7152, 0.0722));
+        col = mix(col, DT_DRY * (1.3 * lum / 0.18), 0.7 * smoothstep(0.5, 0.7, dry) * w16);
+        col = mix(col, DT_DEEP * (lum / 0.07), 0.5 * smoothstep(0.5, 0.3, dry) * w16);
+    }
+    let w2 = dt_w(2.0, fw) * far;
+    if (w2 > 0.0) {
+        let n = dt_noise(p, 2.0, t, 6.0);
+        col *= 1.0 + 0.5 * (n - 0.5) * w2;
+        col = mix(col, DT_SOIL, 0.7 * smoothstep(0.7, 0.8, 0.7 * n + 0.3 * dry) * w2);
+    }
+    let w025 = dt_w(0.25, fw) * far;
+    if (w025 > 0.0) {
+        col *= 1.0 + 0.5 * (dt_noise(p, 0.25, t, 7.0) - 0.5) * w025;
+    }
+    let w006 = dt_w(0.0625, fw) * far;
+    if (w006 > 0.0) {
+        col *= 1.0 + 0.4 * (dt_noise(p, 0.0625, t, 8.0) - 0.5) * w006;
+    }
+    return vec4<f32>(col, 0.0);
+}
+
+// The albedo (xyz) and roughness change (w) of surface `id` round the linear colour `base`, at p metres from
+// the corner of the origin's tile, where a pixel spans fw metres (see dt_w) and the eye is dist metres away.
+fn detail_surface(base: vec3<f32>, id: i32, p: vec2<f32>, fw: vec2<f32>, dist: f32) -> vec4<f32> {
+    let far = 1.0 - smoothstep(DT_FAR.x, DT_FAR.y, dist);
+    if (far <= 0.0 || (id != 10 && id != 11)) { return vec4<f32>(base, 0.0); }
+    let t = vec2<i32>(globals.origin_tile);
+    if (id == 10) { return dt_asphalt(base, p, t, fw, far); }
+    return dt_ground(base, p, t, fw, far);
+}
+"""
+
+
+def detail_shader(source: str) -> str:
+    """A vertex-colour StandardMaterial shader with procedural detail (StandardMaterial with detail=True):
+    the vertices of surface DETAIL_ASPHALT or DETAIL_GROUND take DETAIL_WGSL's albedo and roughness, the
+    rest draw as before."""
+    head, sep, tail = source.partition("    let F0 = mix(vec3<f32>(0.04), vertex_albedo, material.metallic);\n")
+    if not sep:
+        raise ValueError("detail needs a vertex-colour StandardMaterial shader")
+    tail = tail.replace("vertex_albedo", "detail_albedo").replace("material.roughness", "detail_rough")
+    head = (
+        head.replace(
+            "    _pad_ibl:        vec2<f32>,     // offset 232\n",
+            "    origin_tile:     vec2<f32>,     // offset 232  (floor(origin / 256): the floating origin's tile)\n",
+            1,
+        )
+        .replace(
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n",
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n" + DETAIL_WGSL,
+            1,
+        )
+        .replace(
+            "    let sp_fw = length(fwidth(sp_proj));\n",
+            "    let sp_fw = length(fwidth(sp_proj));\n"
+            "    let dt_dx = length(dpdx(sp_w.xz));\n    let dt_dy = length(dpdy(sp_w.xz));\n"
+            "    let dt_fw = vec2<f32>(sqrt(dt_dx * dt_dy), max(dt_dx, dt_dy));\n",
+            1,
+        )
+    )
+    return (
+        head
+        + "    let dt = detail_surface(vertex_albedo, i32(in.vcolor.w + 0.5), sp_w.xz, dt_fw,\n"
+        "                            distance(globals.camera_pos, in.world_pos));\n"
+        "    let detail_albedo = dt.xyz;\n"
+        "    let detail_rough = clamp(material.roughness + dt.w, 0.04, 1.0);\n"
+        "    let F0 = mix(vec3<f32>(0.04), detail_albedo, material.metallic);\n"
+        + tail
+    )
+
+
 # Surface patterns (vertex_colors materials): id -> (scale, contrast, tones, ink width,
 # ink darkness). Ids: 1 grass, 2 cobbles, 3 veins, 4 brick, 5 blocks, 6 planks, 7 tiles;
 # 0 draws the flat vertex colour. Tuned values from a game's art direction; blocks
@@ -1530,6 +1684,7 @@ class StandardMaterial(Material):
         surface_patterns=None,
         tinted=False,
         faded=False,
+        detail=False,
     ):
         from manifoldx.textures import TextureHandle
 
@@ -1569,6 +1724,11 @@ class StandardMaterial(Material):
         # faded: each entity's Fade component (1 drawn, 0 gone) drops that share of its pixels against a
         # 4x4 pattern, in its shadow too, so a level of detail can give way to another without a pop.
         self.faded = bool(faded)
+        # detail (with vertex_colors): the vertices of surface DETAIL_ASPHALT or DETAIL_GROUND get procedural
+        # detail from their world position (DETAIL_WGSL), fading out with distance; other surfaces draw as before.
+        if detail and not vertex_colors:
+            raise ValueError("detail needs vertex_colors=True")
+        self.detail = bool(detail)
 
     @property
     def pipeline_subtype(self):
@@ -1576,6 +1736,8 @@ class StandardMaterial(Material):
             base = "textured"
         elif self.vertex_colors:
             base = "vcolor-tint" if self.tinted else "vcolor"
+            if self.detail:
+                base += "-detail"
         else:
             base = None
         if self.faded:

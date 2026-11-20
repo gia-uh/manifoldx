@@ -19,7 +19,7 @@ from manifoldx.skinning import (
     JointStore,
     skin_shader,
 )
-from manifoldx.resources import TINTS_BINDING, fade_shader, tint_shader
+from manifoldx.resources import TINTS_BINDING, detail_shader, fade_shader, tint_shader
 from manifoldx.viz.materials import ColormapMaterial
 
 
@@ -855,6 +855,10 @@ class RenderPipeline:
         faded = bool(getattr(material, "faded", False))
         if faded:
             material_subtype = material_subtype.removesuffix("fade").removesuffix("-") or None
+        # Likewise a StandardMaterial with detail ("vcolor-detail", ...) adds it to its subtype's shader.
+        detailed = bool(getattr(material, "detail", False))
+        if detailed:
+            material_subtype = material_subtype.removesuffix("-detail")
 
         if line:
             # 3 bindings: globals, transforms, material uniform.
@@ -1060,6 +1064,8 @@ class RenderPipeline:
                                               facade=(geometry_buffers or {}).get("has_facade", False))
             if material_subtype == "vcolor-tint":
                 shader_source = tint_shader(shader_source)
+            if detailed:
+                shader_source = detail_shader(shader_source)
         else:
             shader_source = material._compile()
         if faded:
@@ -1804,7 +1810,10 @@ class RenderPipeline:
                 np.float32(ibl_env.intensity).tobytes(), dtype=np.uint8
             )
             globals_data[228:232] = np.frombuffer(np.uint32(1).tobytes(), dtype=np.uint8)
-        # bytes 232-239: padding
+        # bytes 232-239: the floating origin's 256 m tile, floor(origin / 256), for world-placed detail
+        globals_data[232:240] = np.frombuffer(
+            np.array([ox // 256.0, oz // 256.0], dtype=np.float32).tobytes(), dtype=np.uint8
+        )
 
         # --- Shadow / lighting block (offset 240+) ---
         cfg = getattr(engine, "_shadow_config", None)

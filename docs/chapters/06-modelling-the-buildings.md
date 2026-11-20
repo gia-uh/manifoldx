@@ -295,6 +295,16 @@ shadow drops the same share. A negative fade draws the complementary pixels:
 an entity at `Fade(value=-0.7)` and one at `Fade(value=0.3)` cover every pixel
 once between them, which is how a coarse model hands over to a fine one.
 
+Large flat surfaces need grain the vertex colours cannot carry. A
+vertex-coloured `StandardMaterial` made with `detail=True` paints the vertices
+whose surface id is `DETAIL_ASPHALT` (10) or `DETAIL_GROUND` (11) with value
+noise of the world's x and z: asphalt gets worn and patched blotches, stains,
+grain and light stones, ground gets green and dry patches, soil and tufts. The
+noise is fixed to the world, so it stays put when the floating origin moves,
+and each octave fades out before its waves get smaller than a few pixels; past
+600 m the surface keeps its flat colour. Other surface ids draw as before, and
+a material without `detail=True` builds the same shader as before.
+
 Most sources carry a small symbolic syntax tree beside their callable.
 `field_to_wgsl` walks that tree and emits a WGSL function, so the same field can
 move vertices in a shader. `fbm` transpiles; `worley` does not, because it is
