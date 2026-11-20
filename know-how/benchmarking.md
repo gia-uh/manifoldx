@@ -11,23 +11,37 @@ Reach for this before and after any change meant to make manifoldx faster, and w
 
 ## Running
 
+Two tools, one command. A scenario runs a whole app through steps and records every frame; a micro case times one function at several sizes.
+
 ```bash
-uv run python -m benchmarks --list                          # suites, cases, default sizes
-uv run python -m benchmarks frame                           # one suite, every case, default sizes
-uv run python -m benchmarks frame --case sprites --sizes 1000 100000
-uv run python -m benchmarks frame --case sprites --profile  # adds a cProfile top-15 per case
-uv run python -m benchmarks frame --case sprites --against main
+uv run manifoldx bench list                                   # scenarios, engine steps, app steps
+uv run manifoldx bench run quad_zoom --size 960x540           # a table per phase and a run folder
+uv run manifoldx bench run meshes_spin --loop pipelined --json   # the summary alone, for an agent
+uv run manifoldx bench show <run folder> --json
+uv run manifoldx bench micro benchmarks.suites.frame --case sprites --sizes 1000 100000
+uv run manifoldx bench micro benchmarks.suites.frame --case sprites --profile
+uv run python -m benchmarks frame --case sprites               # the same micro cases by suite name
 ```
 
-Suites: `frame` (whole scenes, CPU per `Engine._draw_frame`), `ecs`, `compute`, `skinning`, `modeling`, `loaders`, `web` (the exported page in headless Chromium, see below). `--sizes` replaces every selected case's sizes, so select cases of one kind with it: a modeling size is a subdivision level, and 1000 there runs out of memory.
+Scenarios are in `benchmarks/scenarios.py`, micro suites in `benchmarks/suites/`, both listed under `[tool.manifoldx.bench]` in `pyproject.toml`. Chapter 18 of the book explains steps, phases, loops (`--loop serial|pipelined|check`), `--step 1/30`, `--param`, `--smoke` and the run folder (`run.json`, `frames.npz`, `events.jsonl`, `shots/`). A run that fails still writes its folder and exits 1; progress goes to stderr once a second, so a monitor can count it.
 
-`--against REF` extracts `src/` of that git ref to a temp folder and runs the selected cases twice in fresh processes, on REF's code and on this checkout's, then prints a Markdown table with the speed-up. It refuses a run that imported manifoldx from anywhere else. The suites themselves come from this checkout, so a new case shows `n/a` or `error` on the old code, which is expected for a new API.
+## Comparing with another copy
+
+manifoldx never calls a version control system. To compare with main, make a copy of main first, then point `--against` at it:
+
+```bash
+git worktree add ../manifoldx-main origin/main        # or any copy of another manifoldx project
+uv run manifoldx bench micro benchmarks.suites.frame --case sprites --against ../manifoldx-main
+git worktree remove ../manifoldx-main
+```
+
+The cases run twice in fresh processes, on the other copy's `src/` and on this one, and a Markdown table of both is printed, ready for a pull request. The other copy needs no `manifoldx.bench`: the harness comes from this one.
 
 ## Proving a change in a pull request
 
-1. Before touching the code, add or extend a case that exercises the path, scaling N over at least three sizes up to the largest a real scene uses (100k entities for the frame suite). Put the scene setup in `benchmarks/scenes.py` when another case can reuse it.
+1. Before touching the code, add or extend a case that exercises the path, scaling N over at least three sizes up to the largest a real scene uses (100k entities for the frame suite), or a scenario when the cost is a whole frame of an app. Put the scene setup in `benchmarks/scenes.py`.
 2. Pin the behaviour with tests first (they must pass on the old code), then change the code.
-3. Run `uv run python -m benchmarks <suite> --case <name> --against main` on a quiet machine and paste the table into the PR under a `## Timing` heading, with the machine line (`cpus`, GPU or software rasterizer).
+3. Run the case with `--against` a copy of main on a quiet machine and paste the table into the PR under a `## Timing` heading, with the machine line (`cpus`, GPU or software). For a scenario, run it on both copies and give both phase tables.
 4. Say in the PR what the table cannot show, such as GPU time on a real GPU.
 
 ## Reading the numbers
@@ -41,7 +55,8 @@ Suites: `frame` (whole scenes, CPU per `Engine._draw_frame`), `ecs`, `compute`, 
 ## Writing a case
 
 ```python
-from benchmarks.harness import case, measure
+from manifoldx.bench import case
+from manifoldx.bench.micro import measure
 
 @case("modeling", "my_op", sizes=[5, 6, 7], smoke=1)
 def my_op(level):

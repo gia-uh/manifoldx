@@ -3,12 +3,19 @@
 GPU cases skip on a machine without an adapter (tests/conftest.py); the web case reports an
 error without a browser."""
 
+import re
+import shutil
+from pathlib import Path
+
 import pytest
 
 from benchmarks import harness
-from benchmarks.__main__ import SUITES, load, run
+from benchmarks.__main__ import SUITES, modules
+from manifoldx.bench import micro
+from manifoldx.bench.micro import load, run
 
-CASES = load(SUITES)
+ROOT = Path(__file__).resolve().parent.parent
+CASES = load(modules(SUITES))
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +53,7 @@ def test_run_records_a_failing_case_as_an_error():
 
 
 def test_compare_reports_speedup_and_missing_cases():
-    from benchmarks.__main__ import compare
+    from manifoldx.bench.micro import compare
 
     base = {"results": [{"suite": "s", "case": "a", "n": 1, "ms": 10.0, "extra": {}}]}
     head = {
@@ -58,3 +65,24 @@ def test_compare_reports_speedup_and_missing_cases():
     table = compare(base, head, "main")
     assert "| s.a | 1 | 10.0 | 2.0 | 5.0× |" in table
     assert "| s.new | 1 | n/a | 1.0 | – |" in table
+
+
+def test_the_old_harness_is_the_package_module():
+    assert harness is micro and harness.case is micro.case
+
+
+def test_against_refuses_a_directory_without_manifoldx(tmp_path):
+    with pytest.raises(SystemExit, match="src/manifoldx"):
+        micro.against(["benchmarks.suites.ecs"], tmp_path, ["--case", "spawn"])
+
+
+def test_against_runs_the_other_source(tmp_path):
+    other = tmp_path / "other"
+    shutil.copytree(ROOT / "src", other / "src", ignore=shutil.ignore_patterns("bench", "__pycache__"))
+    table = micro.against(["benchmarks.suites.ecs"], other, ["--case", "spawn", "--sizes", "10"])
+    assert "| ecs.spawn | 10 |" in table and "error" not in table
+
+
+def test_bench_never_calls_git():
+    for p in (ROOT / "src/manifoldx/bench").rglob("*.py"):
+        assert not re.search(r"\bgit\b", p.read_text(), re.I), p

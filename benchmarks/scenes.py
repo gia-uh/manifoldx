@@ -146,7 +146,7 @@ def independent_systems(k: int, *, parallel: bool = True):
     """k independent systems, each moving 2,000 entities of a component of its own.
 
     One group when the engine has parallel systems; on a build without the
-    `parallel` argument the same systems register serially, so `--against main`
+    `parallel` argument the same systems register serially, so `--against ../manifoldx-main`
     times the work rather than failing on the new keyword.
     """
     import inspect

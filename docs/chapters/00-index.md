@@ -47,3 +47,4 @@ enough for still frames.
 14. The plaza, end to end.
 15. Models from drawings: assets built from an image model's drawings, linted and corrected.
 16. Using every core: four systems, four cores, and what a parallel system may do.
+18. Measuring a frame: scenarios, phases, run folders and micro cases with `manifoldx bench`.

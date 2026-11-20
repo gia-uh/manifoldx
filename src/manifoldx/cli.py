@@ -18,6 +18,7 @@ running under `manifoldx run` in this folder (see manifoldx.devchannel).
     manifoldx metrics [-n N]
     manifoldx trace scene.glb -o out.png [--camera ...] [--size WxH] [--spp N] [--sun X,Y,Z]
     manifoldx asset FILE COMMAND [options]
+    manifoldx bench list | run NAME | show RUN | micro [MODULE...]   (manifoldx.bench.cli)
 """
 
 import argparse
@@ -27,6 +28,10 @@ import sys
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["bench"]:  # its own parser, with its own subcommands
+        from manifoldx.bench.cli import main as bench
+
+        return bench(argv[1:])
     app_args = []
     if "--" in argv:
         cut = argv.index("--")
@@ -63,6 +68,7 @@ def main(argv=None):
     lg.add_argument("--after", type=int, help="only lines after this sequence number")
     lg.add_argument("--match", help="only lines matching this regex")
     lg.add_argument("--wait", type=float, default=0.0, help="seconds to wait for a line (at most 300)")
+    sub.add_parser("bench", help="benchmark, profile and check an app's scenarios (manifoldx bench --help)")
     from manifoldx.trace.command import add_parser as add_trace
 
     add_trace(sub)

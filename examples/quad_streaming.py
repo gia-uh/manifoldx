@@ -45,23 +45,19 @@ def build_node(L, a, b):
                     np.array(idx, np.uint32))
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--render", action="store_true")
-    ap.add_argument("--output", default="/tmp/quad_streaming.mp4")
-    ap.add_argument("--duration", type=float, default=20.0)
-    args = ap.parse_args()
-
-    engine = mx.Engine("Quad streaming", width=960, height=540)
+def build(engine, *, fly: bool = True) -> QuadStreamer:
+    """The plain and its streamer on `engine`; with fly, a system that flies the camera up to 6 km and back."""
     engine.background_color = (0.70, 0.80, 0.92)
     engine.camera.near, engine.camera.far = 0.5, 30000.0
     engine.set_sun(DirectionalLight(color="#fff4e0", intensity=3.0, direction=(-0.4, -0.7, -0.5)))
     streamer = QuadStreamer(engine, CELL, (0, 0), LEVELS, lambda L, a, b: True, build_node,
                             error=lambda L: CELL * 2**L / 16)
+    if not fly:
+        return streamer
     st = {"t": 0.0}
 
     @engine.system
-    def fly(query, dt):
+    def fly_camera(query, dt):
         st["t"] += dt
         t = st["t"]
         x, z = 51_200.0 + 300.0 * t, 51_200.0
@@ -72,6 +68,18 @@ def main():
         streamer.focus(x, z, y)
         engine.camera.set_pose((x - ox, y, z - oz), (x - ox + 400.0, y * 0.6, z - oz - 200.0))
 
+    return streamer
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--render", action="store_true")
+    ap.add_argument("--output", default="/tmp/quad_streaming.mp4")
+    ap.add_argument("--duration", type=float, default=20.0)
+    args = ap.parse_args()
+
+    engine = mx.Engine("Quad streaming", width=960, height=540)
+    streamer = build(engine)
     if args.render:
         engine.render(args.output, fps=24, duration=args.duration)
     else:

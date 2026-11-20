@@ -144,7 +144,7 @@ once-a-second line of `manifoldx run --debug` and `manifoldx state`, as
 `systems name ms ...`. The benchmark suite runs the same shape headless:
 
 ```bash
-uv run python -m benchmarks frame --case parallel_systems --sizes 1 4 8 --against main
+uv run python -m benchmarks frame --case parallel_systems --sizes 1 4 8 --against ../manifoldx-main
 ```
 
 ## What a parallel system may do
