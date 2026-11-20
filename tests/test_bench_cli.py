@@ -414,3 +414,25 @@ def test_run_all_runs_every_scenario(project, capsys):
 def test_run_needs_a_scenario_or_all(project, capsys):
     assert main(["run"]) == 2
     assert "--all" in capsys.readouterr().err
+
+
+def _interrupted_after_one(monkeypatch):
+    from manifoldx.bench import runner
+
+    real, calls = runner.run_scenario, []
+
+    def fake(*a, **kw):
+        run = real(*a, **kw)
+        calls.append(run.summary["scenario"])
+        run.error = run.summary["error"] = "interrupted"  # as a Ctrl-C during the run leaves it
+        return run
+
+    monkeypatch.setattr(runner, "run_scenario", fake)
+    return calls
+
+
+@pytest.mark.parametrize("argv", [["run", "--all", "--smoke", "--size", "64x48"], ["check"]])
+def test_ctrl_c_ends_a_run_of_many_scenarios(project, monkeypatch, capsys, argv):
+    calls = _interrupted_after_one(monkeypatch)
+    assert main(argv) == 1
+    assert len(calls) == 1 and "interrupted" in capsys.readouterr().err

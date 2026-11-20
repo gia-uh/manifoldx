@@ -1,4 +1,6 @@
-"""The pytest plugin: each scenario of the project is a test, `<scenarios file>::test_bench[<name>]`.
+"""The pytest plugin: each scenario defined in the project's scenarios module is a test,
+`<scenarios file>::test_bench[<name>]`. A scenario registered in another module that it imports is
+not: `manifoldx bench check` runs those.
 
 It is never loaded by installing manifoldx; a project turns it on in its pyproject.toml,
 

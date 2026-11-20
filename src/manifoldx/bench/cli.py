@@ -252,6 +252,8 @@ def _run(args) -> int:
         code, out = _run_one(args, config, name, budgets)
         codes.append(code)
         outs.append(out)
+        if out.get("error") == "interrupted" or out.get("interrupted"):  # Ctrl-C ends the whole run
+            break
     if args.json:
         print(json.dumps(outs, indent=1))
     return max(codes, default=0)
@@ -292,6 +294,8 @@ def _check(args) -> int:
                 print(f"{'SKIP' if c['skipped'] else 'PASS' if c['ok'] else 'FAIL'} {name}: {c['message']}")
             if not results and not run.error:
                 print(f"PASS {name}: ran, no checks")
+        if run.error == "interrupted":  # Ctrl-C ends the whole check
+            break
     if args.json:
         print(json.dumps(outs, indent=1))
     for line in failed:

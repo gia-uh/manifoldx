@@ -320,7 +320,9 @@ A budget name is a number of the phase summary (`p95_ms`, `max_ms`,
 `frames_p95_ms`, `counters_draws` (its mean), `streamer_settled_s`,
 `systems_<name>`, `spans_<name>`, `split_<name>`, `app_<metric>` (its mean)
 and `workers_<kind>` (its p50). A name the phase does not have fails the check
-and lists the names it has. Without `phase`, a budget holds in every phase. A
+and lists the names it has. A phase keeps only its ten slowest systems, so a
+`systems_<name>` budget also fails when that system got fast enough to leave
+them; a span (`bench.span`) is always kept. Without `phase`, a budget holds in every phase. A
 function gets a `RunView`: the summary, the per-frame arrays and the events.
 Checks run after the run has closed the app and the engine, never inside the
 timed loop, and their results go to `checks` in `run.json`. The same functions
@@ -399,7 +401,8 @@ uv run manifoldx bench run --all --smoke --against base --label "$GITHUB_REF_NAM
 
 The tables go to the job's summary, and that step never fails the release:
 on the runner's software Vulkan driver, a timing compares nothing a player
-sees.
+sees. A release older than `manifoldx bench` cannot run the scenarios, so
+until one release has it, the summary lists that side's errors and no table.
 
 An app that runs its CI through fastci adds the same run as a stage of its
 release tier:

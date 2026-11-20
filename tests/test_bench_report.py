@@ -70,3 +70,16 @@ def test_a_report_that_fails_leaves_the_run(tmp_path, monkeypatch, capsys):
     folder, _ = _folder(tmp_path)
     assert (folder / "run.json").exists() and not (folder / "report.html").exists()
     assert "no page" in capsys.readouterr().err
+
+
+def test_names_in_headers_and_charts_are_escaped(tmp_path):
+    from manifoldx.bench.report import write_report
+
+    folder, _ = _folder(tmp_path)
+    summary = json.loads((folder / "run.json").read_text())
+    summary["phases"]["a"]["split_ms"] = {"<u>part</u>": 1.0}
+    (folder / "run.json").write_text(json.dumps(summary))
+    with open(folder / "events.jsonl", "a") as f:
+        f.write(json.dumps({"t": 0.1, "kind": "node", "ev": "<u>ev</u>", "level": 0}) + "\n")
+    page = write_report(folder).read_text()
+    assert "<u>" not in page and "&lt;u&gt;part&lt;/u&gt;" in page and "&lt;u&gt;ev&lt;/u&gt;" in page

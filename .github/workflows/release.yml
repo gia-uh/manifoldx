@@ -39,6 +39,7 @@ jobs:
     # Every scenario with checks runs at smoke size and must pass. Then every
     # scenario runs here and on the last release, and the comparison goes to
     # the job's summary: timings on a software adapter never gate a release.
+    # A last release without `manifoldx bench` gives no table, only its errors.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

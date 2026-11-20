@@ -65,10 +65,10 @@ def _n(v, fmt=".1f") -> str:
 
 
 def _table(head: list[str], rows: list[list[str]]) -> str:
-    """A table of cells already escaped."""
+    """A table: the head's cells are escaped here, the rows' cells are escaped by the caller."""
     if not rows:
         return ""
-    h = "".join(f"<th>{c}</th>" for c in head)
+    h = "".join(f"<th>{_e(c)}</th>" for c in head)
     body = "".join("<tr>" + "".join(c if c.startswith("<td") else f"<td>{c}</td>" for c in r) + "</tr>"
                    for r in rows)
     return f'<div class="t"><table><thead><tr>{h}</tr></thead><tbody>{body}</tbody></table></div>'
@@ -160,7 +160,7 @@ def _dots(points: list[tuple[float, int]], w: int = 640, h: int = 140) -> str:
 
     out = [f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="nodes drawn over time by level">']
     for lv in range(levels):
-        out.append(f'<text x="2" y="{Y(lv) + 4:.1f}">L{lv}</text>')
+        out.append(f'<text x="2" y="{Y(lv) + 4:.1f}">L{_e(lv)}</text>')
     for t, lv in points:
         out.append(f'<circle cx="{left + (w - left - 8) * t / t1:.1f}" cy="{Y(lv):.1f}" r="2.5" fill="#9fb4d0"/>')
     out.append(f'<text x="{left}" y="{h - 6}">0 s</text><text x="{w - 6}" y="{h - 6}" text-anchor="end">'
