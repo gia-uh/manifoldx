@@ -18,12 +18,15 @@ uv run manifoldx bench list                                   # scenarios, engin
 uv run manifoldx bench run quad_zoom --size 960x540           # a table per phase and a run folder
 uv run manifoldx bench run meshes_spin --loop pipelined --json   # the summary alone, for an agent
 uv run manifoldx bench show <run folder> --json
+uv run manifoldx bench check                                  # every scenario with checks, smoke size; exit 1 on a failure
+uv run manifoldx bench report <run folder> --open             # the run's report.html: charts, tables, shots
+uv run pytest "benchmarks/scenarios.py::test_bench[far_walk]" # one scenario as a test
 uv run manifoldx bench micro benchmarks.suites.frame --case sprites --sizes 1000 100000
 uv run manifoldx bench micro benchmarks.suites.frame --case sprites --profile
 uv run python -m benchmarks frame --case sprites               # the same micro cases by suite name
 ```
 
-Scenarios are in `benchmarks/scenarios.py`, micro suites in `benchmarks/suites/`, both listed under `[tool.manifoldx.bench]` in `pyproject.toml`. Chapter 18 of the book explains steps, phases, loops (`--loop serial|pipelined|check`), `--step 1/30`, `--param`, `--smoke` and the run folder (`run.json`, `frames.npz`, `events.jsonl`, `shots/`). A run that fails still writes its folder and exits 1; progress goes to stderr once a second with the step it is on (`step 3/5`), so a monitor can count it.
+Scenarios are in `benchmarks/scenarios.py`, micro suites in `benchmarks/suites/`, both listed under `[tool.manifoldx.bench]` in `pyproject.toml`. Chapter 18 of the book explains steps, phases, loops (`--loop serial|pipelined|check`), `--step 1/30`, `--param`, `--smoke` and the run folder (`run.json`, `frames.npz`, `events.jsonl`, `shots/`, `report.html`). Send `report.html` to a person: it is one file, with no requests, and reads on a phone. A run that fails still writes its folder and exits 1; progress goes to stderr once a second with the step it is on (`step 3/5`), so a monitor can count it.
 
 `--sizes` replaces every selected case's sizes, so select cases of one kind with it: a modeling size is an icosphere subdivision level, and 1000 there runs out of memory.
 
@@ -60,6 +63,14 @@ uv run manifoldx bench clean                          # the environments --again
 `micro --against` runs the cases in fresh processes, on the other copy's `src/` and on this one, taking turns over `--repeat` rounds (3 by default), and prints a Markdown table of both, ready for a pull request. The other copy needs no `manifoldx.bench`: the harness comes from this one. It exits 1 when a case fails on either side.
 
 `run --against DIR` runs a scenario on another copy of an app (manifoldx is one: its scenarios are in `benchmarks/scenarios.py`) through `uv run --project DIR`, and `run --manifoldx SPEC` runs this copy on another manifoldx through `uv run --with`. The other copy needs uv and a manifoldx with `bench run --json`. Its environment is kept in `~/.cache/manifoldx/bench-envs` (capped at 2 GB, `MANIFOLDX_BENCH_CACHE_GB`) until `bench clean`; check the free disk before the first run on a full machine. `--param k=a,b` sweeps a param the same way, with no uv. Each of these runs every side in fresh processes, alternating the order each round, into one set folder, and ends with `bench compare`'s table; `bench compare A B` makes it from any two runs, sides or a set, with a contact sheet of the shots both took.
+
+## Checks: what must hold on every change
+
+A check answers a question that has a right answer, so it can fail a pull request: an origin that must stay near (`far_walk.check(origin_max_m=250, phase="far")`), a count that must not grow (`meshes_spin.check(counters_draws=1, phase="spin")`), or any function of the run. Each scenario in `benchmarks/scenarios.py` is a test, `benchmarks/scenarios.py::test_bench[name]`, through the plugin that `pyproject.toml` turns on (`-p manifoldx.bench.plugin`), so a check runs in the `test` job of every pull request. A failure names the check, the number and its budget, the phase and the frame.
+
+Pick a budget from a measured run: `uv run manifoldx bench run NAME --smoke --size 160x90 --json`, then the exact value for a counter, and about twice the measured value for a distance or a timing on a shared host. Timing budgets go on `on="gpu"` (skipped on a software adapter) or in the release job; never put one in a pull request's smoke test, which runs on software Vulkan. Then break what the check guards and see the test fail before you trust it.
+
+The release workflow's `bench` job runs `manifoldx bench check` as a gate, and `bench run --all --smoke --against` the last release into the job summary, which never gates.
 
 ## Proving a change in a pull request
 

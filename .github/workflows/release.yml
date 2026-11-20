@@ -2,8 +2,8 @@ name: Release
 
 # A tag v<version> publishes manifold-gfx to PyPI and makes a GitHub release
 # with that version's CHANGELOG section. Nothing publishes unless the whole
-# test suite passes on lavapipe, the docs gate passes, and the tag matches
-# pyproject.toml. Re-running it on the same tag is safe.
+# test suite passes on lavapipe, the docs gate passes, every bench check
+# passes, and the tag matches pyproject.toml. Re-running it on the same tag is safe.
 on:
   push:
     tags:
@@ -33,7 +33,53 @@ jobs:
           [ "$tag" = "$declared" ] || { echo "::error::tag $GITHUB_REF_NAME != pyproject version $declared"; exit 1; }
 
       - name: Run the whole suite
-        run: uv run pytest tests/ -q --tb=short
+        run: uv run pytest tests/ benchmarks/scenarios.py -q --tb=short
+
+  bench:
+    # Every scenario with checks runs at smoke size and must pass. Then every
+    # scenario runs here and on the last release, and the comparison goes to
+    # the job's summary: timings on a software adapter never gate a release.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find the last release
+        # The workflow finds and checks out the last release; manifoldx's own
+        # code never runs version control.
+        id: last
+        run: echo "tag=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.last.outputs.tag != ''
+        with:
+          ref: ${{ steps.last.outputs.tag }}
+          path: base
+
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.14t'
+
+      - name: Install dependencies from the lockfile
+        run: uv sync --locked --extra offline --dev
+
+      - name: Bench checks gate the release
+        run: uv run manifoldx bench check
+
+      - name: Timings against the last release, in the job summary
+        if: steps.last.outputs.tag != ''
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          echo "## manifoldx bench: $GITHUB_REF_NAME against ${{ steps.last.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          uv run manifoldx bench run --all --smoke --against base --label "$GITHUB_REF_NAME" | tee bench.md
+          cat bench.md >> "$GITHUB_STEP_SUMMARY"
 
   docs:
     uses: ./.github/workflows/docs.yml
@@ -41,7 +87,7 @@ jobs:
       target: docs-check
 
   publish:
-    needs: [test, docs]
+    needs: [test, docs, bench]
     runs-on: ubuntu-latest
     permissions:
       contents: write
