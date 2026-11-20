@@ -96,7 +96,14 @@ depends on it.
 
 The folder holds `run.json` (the summary), `frames.npz` (every frame's numbers,
 one array per probe), `events.jsonl` (steps, marks, streamer nodes and worker
-jobs, with their times) and `shots/street.png`. The summary is also appended as
+jobs, with their times), `shots/street.png` and `report.html`. The report is the
+page to send a person: the run line, the checks, each phase's frame table with
+a chart of every frame's time against the median, the split as one bar per
+phase, the slowest systems, the counters, the streamer's node events by level
+with a dot for each node drawn at its time, the workers, memory, the app's
+metrics and the shots, in one file with no request that reads on a phone.
+`manifoldx bench report <folder> --open` writes it again, also for an older
+run. The summary is also appended as
 one line to `bench/history.jsonl`. `manifoldx bench show <folder>` prints it
 again; `--json` on `run` or `show` prints the summary alone, for an agent.
 Progress goes to stderr, one line a second, with the step it is on
@@ -316,7 +323,11 @@ and `workers_<kind>` (its p50). A name the phase does not have fails the check
 and lists the names it has. Without `phase`, a budget holds in every phase. A
 function gets a `RunView`: the summary, the per-frame arrays and the events.
 Checks run after the run has closed the app and the engine, never inside the
-timed loop, and their results go to `checks` in `run.json`.
+timed loop, and their results go to `checks` in `run.json`. The same functions
+serve a script: `manifoldx.bench.checks.lookup(phase, name)` reads a budget's
+number, `evaluate(checks, run)` returns the results, and `read_budgets(path)`
+reads a budgets file; `manifoldx.bench.report.write_report(folder)` writes a
+folder's page.
 
 A project can keep budgets apart from its scenarios, in the file named by
 `budgets` under `[tool.manifoldx.bench]`, one table per scenario:

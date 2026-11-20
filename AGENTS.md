@@ -26,6 +26,7 @@ uv run manifoldx run examples/<name>.py
 
 # Benchmarks, before/after against main (know-how/benchmarking.md)
 uv run python -m benchmarks frame --case sprites --against ../manifoldx-main   # a copy of main, made with git worktree
+uv run manifoldx bench check     # every scenario with checks at smoke size; they also run as benchmarks/scenarios.py::test_bench[name]
 
 # Smoke-render an example to MP4 (good for visual regression)
 uv run python examples/<name>.py --render --duration 2 --fps 30 --output /tmp/<name>.mp4
