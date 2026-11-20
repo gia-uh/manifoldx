@@ -4,6 +4,7 @@ import numpy as np
 import wgpu
 
 from manifoldx.viz.materials import ColormapMaterial
+from manifoldx import counters
 
 
 _MAX_RUNS = 64  # more runs of changed rows than this: one full upload beats many small writes
@@ -105,13 +106,15 @@ def render_sprite_batches(
 
         # Upload material uniforms
         mat_data = mat_obj.get_data(1, engine._material_registry)  # only row 0 is uploaded
+        counters.add("material_reads")
         material_type = type(mat_obj).__name__
         material_subtype = getattr(mat_obj, "pipeline_subtype", None)
         bkey = (sprite_geom_id, material_type, material_subtype, True)
         mat_buffer = rp._material_buffers.get(bkey)
         if mat_buffer is not None:
             first_row = mat_data[0] if mat_data.ndim > 1 else mat_data
-            rp._device.queue.write_buffer(
+            counters.add("material_uploads")
+            counters.write_buffer(rp._device.queue,
                 mat_buffer, 0, first_row.astype(np.float32).tobytes()
             )
 
@@ -122,6 +125,7 @@ def render_sprite_batches(
         render_pass.set_bind_group(0, bind_group, [], 0, 0)
         render_pass.set_vertex_buffer(0, gpu_buffers["vertex_buffer"])
         render_pass.set_index_buffer(gpu_buffers["index_buffer"], wgpu.IndexFormat.uint32)
+        counters.add("draws")
         render_pass.draw_indexed(
             gpu_buffers["index_count"],
             instance_count,

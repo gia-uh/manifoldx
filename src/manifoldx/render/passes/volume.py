@@ -7,6 +7,7 @@ space, fixed-step front-to-back composite. See design doc
 
 import numpy as np
 import wgpu
+from manifoldx import counters
 
 
 VOLUME_SHADER_SOURCE = """
@@ -369,7 +370,7 @@ def write_volume_uniforms(rp, buf, entity_local_idx, mat_obj, vol_res, engine):
     u32_view = packed.view(np.uint32)
     u32_view[36] = mat_obj.max_steps
     # slots 37, 38, 39 are pad (already zero).
-    rp._device.queue.write_buffer(buf, 0, packed.tobytes())
+    counters.write_buffer(rp._device.queue, buf, 0, packed.tobytes())
 
 
 def render_volume_pass(rp, engine, render_pass, volume_batches):

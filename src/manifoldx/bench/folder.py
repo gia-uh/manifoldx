@@ -2,7 +2,8 @@
 
     <runs>/<UTC time>-<scenario>-<4 hex>/
       run.json      the summary
-      frames.npz    per-frame arrays: wall_ms, cpu_ms, phase, split_ms (+ names), systems_ms (+ names)
+      frames.npz    per-frame arrays: wall_ms, draw_ms, cpu_ms, phase, split_ms, systems_ms, counters,
+                    spans_ms and metrics, each matrix with its column names (split_names, ...)
       events.jsonl  marks, steps, shots and errors, with their times
       shots/*.png   the scenario's shots
 """

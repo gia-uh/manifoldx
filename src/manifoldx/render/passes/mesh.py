@@ -12,6 +12,7 @@ import wgpu
 
 from manifoldx.resources import TINTS_BINDING
 from manifoldx.skinning import BLOCKS_BINDING, JOINTS_BINDING
+from manifoldx import counters
 
 _ARGS = 5  # draw_indexed_indirect's u32s: index count, instance count, first index, base vertex, first instance
 
@@ -132,6 +133,7 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
         if mat_obj is None:
             continue
         mat_data = mat_obj.get_data(1, engine._material_registry)
+        counters.add("material_reads")
         first_row = mat_data[0] if mat_data.ndim > 1 else mat_data
         row = first_row.astype(np.float32).tobytes()
         needs_lights = "@binding(3)" in type(mat_obj)._compile()
@@ -144,7 +146,8 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
             )
             rp._material_buffers_by_mat_id[mat_id] = mat_buffer
         if rp._material_uniforms_by_mat_id.get(mat_id) != row:
-            rp._device.queue.write_buffer(mat_buffer, 0, row)
+            counters.add("material_uploads")
+            counters.write_buffer(rp._device.queue, mat_buffer, 0, row)
             rp._material_uniforms_by_mat_id[mat_id] = row
         mats[mat_id] = (mat_obj, needs_lights, mat_buffer, mat_buffer_size)
 
@@ -204,6 +207,7 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
                 )
                 _encode(encoder, c.entries, lambda e, s: e.draw_indexed_indirect(args_buf, 4 * _ARGS * s))
                 c.bundle = encoder.finish()
+                counters.add("bundles_recorded")
             c.dirty = False
 
     counts = np.zeros(len(draw.index_counts), np.int64)  # per slot: gone and hidden batches draw none
@@ -214,11 +218,14 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
         args[:, 0], args[:, 1], args[:, 4] = draw.index_counts, counts, first
         data = args.tobytes()
         if rp.__dict__.get("_mesh_args_bytes") != data:  # a still view writes nothing
-            rp._device.queue.write_buffer(args_buf, 0, data)
+            counters.write_buffer(rp._device.queue, args_buf, 0, data)
             rp._mesh_args_bytes = data
+        counters.add("draws", sum(len(c.entries) for c in draw.chunks))
         render_pass.execute_bundles([c.bundle for c in draw.chunks if c.entries])
     else:
-        _encode(render_pass, [e for c in draw.chunks for e in c.entries if counts[e[0]]],
+        drawn = [e for c in draw.chunks for e in c.entries if counts[e[0]]]
+        counters.add("draws", len(drawn))
+        _encode(render_pass, drawn,
                 lambda p, s: p.draw_indexed(int(draw.index_counts[s]), int(counts[s]), first_index=0,
                                             base_vertex=0, first_instance=int(first[s])))
 
@@ -468,7 +475,7 @@ def _upload_tints(rp, mesh_batches, entities):
     if bufs.tints_buf is None or bufs.tints_capacity < len(data):
         bufs.upload_tints(out)
     elif rp.__dict__.get("_mesh_tint_bytes") != data:  # a still view writes nothing
-        rp._device.queue.write_buffer(bufs.tints_buf, 0, data)
+        counters.write_buffer(rp._device.queue, bufs.tints_buf, 0, data)
     rp._mesh_tint_bytes = data
     return bufs.tints_buf
 

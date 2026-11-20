@@ -528,3 +528,34 @@ def test_settled_only_when_every_picked_node_is_drawn():
     s.focus(100.0, 100.0, 1e4)  # zoomed out: the root is wanted, not built yet
     assert not s.settled
     s.close()
+
+
+def test_nodes_report_their_life():
+    from manifoldx import counters
+
+    counters.start(None)
+    try:
+        s = faked(3)
+        for _ in range(20):
+            s.focus(100.0, 100.0, 1.0)
+            s._pool.finish()
+        evs = {e["ev"] for e in counters.events() if e["kind"] == "node"}
+        assert {"submitted", "built", "landed", "drawn"} <= evs
+        for _ in range(20):
+            s.focus(5000.0, 5000.0, 1.0)
+            s._pool.finish()
+        nodes = [e for e in counters.events() if e["kind"] == "node"]
+        assert "undrawn" in {e["ev"] for e in nodes}
+        assert all(e["level"] == e["key"][0] and e["streamer"] == s._serial for e in nodes)
+        s.close()
+    finally:
+        counters.stop()
+
+
+def test_live_lists_open_streamers_only():
+    from manifoldx import streaming
+
+    s = faked(2)
+    assert s in streaming.live()
+    s.close()
+    assert s not in streaming.live()

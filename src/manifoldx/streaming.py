@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import math
 import multiprocessing
+import itertools
 import threading
+import weakref
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from time import perf_counter
 from typing import Callable, NamedTuple
@@ -44,6 +46,7 @@ import numpy as np
 from manifoldx import _deferred
 from manifoldx.renderer import vertex_bounds
 from manifoldx.resources import pack_vertices
+from manifoldx import counters
 
 
 class MeshData(NamedTuple):
@@ -72,6 +75,11 @@ def _started() -> None:
 
 def _pack(build, *key):
     """The worker's job: build cell (i, j), or node (L, a, b), and pack it for its GPU buffers."""
+    with counters.worker_span("stream", key):
+        return _pack_now(build, key)
+
+
+def _pack_now(build, key):
     data = build(*key)
     if data is None:
         return None
@@ -92,6 +100,15 @@ def _pack(build, *key):
 
 
 _VECTOR_FROM = 256  # QuadStreamer computes distances with numpy from this many nodes up
+
+
+_LIVE: weakref.WeakSet = weakref.WeakSet()  # every streamer made and not closed
+_SERIAL = itertools.count()
+
+
+def live() -> list:
+    """The streamers made and not closed yet, in the order they were made."""
+    return sorted(_LIVE, key=lambda s: s._serial)
 
 
 def _streamer_engine(args, kwargs):
@@ -134,6 +151,14 @@ class _Uploads:
         self._stats = {"built": 0, "uploaded": 0, "dropped": 0, "max_frame_ms": 0.0}
         self._last = None
         self._landed = 0  # uploads finished so far
+        self._serial = next(_SERIAL)
+        _LIVE.add(self)
+
+    def _note(self, ev, key):
+        """Tell a recording bench run what happened to a cell or node."""
+        if counters.recording():
+            counters.event("node", ev=ev, key=list(key), level=key[0] if len(key) == 3 else 0,
+                           streamer=self._serial)
 
     def _is_deferred(self) -> bool:
         """Whether this thread's calls to this streamer's engine are deferred."""
@@ -153,6 +178,7 @@ class _Uploads:
         for c, fut in done:
             self._ready[c] = fut.result()
             self._stats["built"] += 1
+            self._note("built", c)
             got += 1
         return got
 
@@ -193,7 +219,7 @@ class _Uploads:
             at = up["at"][k]
             n = min(len(data) - at, room - spent)
             if n > 0:
-                dev.queue.write_buffer(up["bufs"][k], at, memoryview(data)[at : at + n])
+                counters.write_buffer(dev.queue, up["bufs"][k], at, memoryview(data)[at : at + n])
                 up["at"][k] += n
                 spent += n
         if up["at"] == [len(cell.vbytes), len(cell.ibytes)]:
@@ -209,6 +235,7 @@ class _Uploads:
             )
             up["done"] = True
             self._landed += 1
+            self._note("landed", c)
             cell.vbytes = cell.ibytes = None
         return spent
 
@@ -237,16 +264,21 @@ class _Uploads:
             *([Fade(value=0.0)] if getattr(self, "crossfade", None) else []),
         )
         # Drawn before any device: its buffers come from the render pass, and are still ours to free.
-        self._gpu.setdefault(c, {"id": self._drawn[c]._geometry_id, "done": True})
+        if c not in self._gpu:
+            self._gpu[c] = {"id": self._drawn[c]._geometry_id, "done": True}
+            self._note("landed", c)
         self._stats["uploaded"] += 1
+        self._note("drawn", c)
 
     def _undraw(self, c):
         handle = self._drawn.pop(c)
+        self._note("undrawn", c)
         if handle is not None:
             handle.destroy(free_geometry=False)
 
     def close(self) -> None:
         """Stop the worker and destroy every drawn cell."""
+        _LIVE.discard(self)
         self._pool.shutdown(wait=False, cancel_futures=True)
         for c in list(self._drawn):
             self._undraw(c)
@@ -299,8 +331,10 @@ class Streamer(_Uploads):
             del self._ready[c]
             self._unload(c)
             self._stats["dropped"] += 1
+            self._note("dropped", c)
         for c in [c for c in self._pending if ring(c) > self.ready_radius]:
-            self._pending.pop(c).cancel()
+            if self._pending.pop(c).cancel():
+                self._note("cancelled", c)
 
         r = self.ready_radius
         wanted = sorted(
@@ -311,6 +345,7 @@ class Streamer(_Uploads):
         for c in wanted:
             if c not in self._ready and c not in self._pending:
                 self._pending[c] = self._pool.submit(_pack, self.build, *c)
+                self._note("submitted", c)
         room = self.upload_bytes_per_frame
         for c in wanted:
             if room <= 0:
@@ -602,6 +637,7 @@ class QuadStreamer(_Uploads):
             for n in [n for n in self._pending if n not in keep]:
                 if self._pending[n].cancel():  # one already building lands in the cache instead
                     del self._pending[n]
+                    self._note("cancelled", n)
             todo = [n for n in wanted if n not in self._ready and n not in self._pending]
             self._todo = todo[::-1]  # most error last, for pop()
             while self._todo and len(self._pending) < self.in_flight:
@@ -632,6 +668,7 @@ class QuadStreamer(_Uploads):
             del self._ready[n]
             self._unload(n)
             self._stats["dropped"] += 1
+            self._note("dropped", n)
         # Quiet: the refinement settled, nothing builds, and every selected node is drawn.
         self._shown_for, self._shown_landed, self._waiting = selected, landed, bool(wanted)
         self._quiet = not (self._queue or self._pass_started or self._pending or self._waiting)
@@ -639,6 +676,7 @@ class QuadStreamer(_Uploads):
     def _submit(self, n):
         """Start building node n; call it holding the lock."""
         self._pending[n] = fut = self._pool.submit(_pack, self.build, *n)
+        self._note("submitted", n)
         fut.add_done_callback(self._next)
 
     def _next(self, fut):
@@ -737,6 +775,7 @@ class QuadStreamer(_Uploads):
         if old is not None and old[2]:  # given way and back before it faded out: it fades in from what shows
             handle, started, _ = old
             self._drawn[c] = handle
+            self._note("drawn", c)
             self._fading[c] = (handle, 2 * perf_counter() - started - self.crossfade, False)
             return
         super()._draw(c, pos)
@@ -748,6 +787,7 @@ class QuadStreamer(_Uploads):
             self._fading.pop(c, None)
             return super()._undraw(c)
         handle = self._drawn.pop(c)
+        self._note("undrawn", c)
         old = self._fading.get(c)
         now = perf_counter()
         # Fading out from what shows now: a node still fading in starts out where its fade in stands.

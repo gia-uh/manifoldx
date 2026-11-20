@@ -5,7 +5,7 @@ import threading
 import numpy as np
 from typing import TYPE_CHECKING
 
-from manifoldx import _deferred, _versions
+from manifoldx import _deferred, _versions, counters
 
 
 if TYPE_CHECKING:
@@ -113,6 +113,7 @@ class EntityStore:
         """
         if n <= 0:
             return np.zeros(0, dtype=np.int32)
+        counters.add("spawned", n)
         with self._lock:
             # Free list first, popped from its end, then the lowest never-used
             # slots that nobody has reserved. Every free-list slot is dead.
@@ -194,6 +195,7 @@ class EntityStore:
         # enter the free list twice (two spawns would then share its slot).
         indices = np.unique(np.asarray(indices))
         indices = indices[self._alive[indices]]
+        counters.add("destroyed", len(indices))
         with self._lock:
             self._alive[indices] = False
             self._free_list.extend(indices.tolist())

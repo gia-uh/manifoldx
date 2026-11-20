@@ -179,3 +179,243 @@ def test_an_engine_whose_setup_raised_is_closed_too():
 
     run = run_scenario(Scenario("s", fn), size=(64, 48))
     assert "setup broke" in run.error and fired == [1]
+
+
+# --- step 2: counters, spans, metrics, alignment ------------------------------------------------
+
+
+def test_counters_reach_the_phase_summary_and_the_arrays():
+    sc, _ = make([bench.mark("a"), bench.hold(frames=5)])
+    run = run_scenario(sc, size=(64, 48))
+    c = run.summary["phases"]["a"]["counters"]
+    assert c["draws"]["mean"] >= 1 and "bytes_uploaded" in c
+    names = list(run.frames["counter_names"])
+    assert "draws" in names and run.frames["counters"].shape == (len(run.frames["wall_ms"]), len(names))
+
+
+def test_a_span_in_a_system_and_a_metric_are_recorded():
+    def fn(engine, p):
+        app = App(engine)
+
+        @engine.system
+        def walled(q: mx.Query[Transform], dt: float):
+            with bench.span("walls"):
+                time.sleep(0.001)
+            bench.metric("cars", 12)
+
+        return app, [bench.hold(frames=4)]
+
+    run = run_scenario(Scenario("spans", fn, {}, {"smoke": 4, "full": None}), size=(64, 48))
+    spans = run.summary["phases"]["main"]["spans_ms"]
+    assert any(k.endswith("walled/walls") and v >= 0.8 for k, v in spans.items())
+    assert run.summary["app"] == {"cars": 12}
+    assert run.summary["phases"]["main"]["app"]["cars"]["max"] == 12
+
+
+def test_arrays_stay_aligned_when_a_frame_is_cut(monkeypatch):
+    from manifoldx.bench import probes
+
+    calls = {"n": 0}
+    real = probes.Columns.add
+
+    def cut(self, row):
+        calls["n"] += 1
+        if calls["n"] == 11:  # the third frame's first column probe (5 a frame), after frames.add ran
+            raise KeyboardInterrupt
+        real(self, row)
+
+    monkeypatch.setattr(probes.Columns, "add", cut)
+    sc, _ = make([bench.hold(frames=10)])
+    run = run_scenario(sc, size=(64, 48))
+    assert run.error == "interrupted"
+    lengths = {k: len(v) for k, v in run.frames.items() if not k.endswith("_names")}
+    assert len(set(lengths.values())) == 1, lengths
+
+
+def test_the_error_event_is_written_once():
+    sc, _ = make([bench.hold(frames=1), bench.each_frame(lambda app: 1 / 0, frames=1)])
+    run = run_scenario(sc, size=(64, 48))
+    assert [e["kind"] for e in run.events].count("error") == 1
+
+
+def test_cpu_is_process_time_and_draw_is_the_engine_frame():
+    import threading
+
+    stop = threading.Event()
+
+    def burn():  # a thread busy beside the frame: process CPU counts it, the engine's frame does not
+        while not stop.is_set():
+            sum(range(1000))
+
+    def fn(engine, p):
+        app = App(engine)
+        threading.Thread(target=burn, daemon=True).start()
+        return app, [bench.hold(frames=6)]
+
+    try:
+        run = run_scenario(Scenario("burn", fn, {}, {"smoke": 6, "full": None}), size=(64, 48))
+    finally:
+        stop.set()
+    ph = run.summary["phases"]["main"]
+    assert ph["draw_p50_ms"] > 0 and ph["cpu_p50_ms"] > ph["draw_p50_ms"]
+    assert len(run.frames["draw_ms"]) == len(run.frames["cpu_ms"]) == 6
+
+
+def test_host_says_whether_the_build_is_free_threaded():
+    import sys
+
+    sc, _ = make([bench.hold(frames=1)])
+    host = run_scenario(sc, size=(64, 48)).summary["host"]
+    assert host["free_threaded"] == (not sys._is_gil_enabled()) and host["python"]
+
+
+def test_counters_are_off_after_a_run():
+    from manifoldx import counters
+
+    sc, _ = make([bench.hold(frames=1)])
+    run = run_scenario(sc, size=(64, 48))
+    assert not counters.recording() and run.summary["counters_exact"] is True
+
+
+# --- step 2: streamers and workers ---------------------------------------------------------------
+
+
+def _walk_scenario(workers="thread", far=None):
+    """A Streamer only a system's closure holds; the app is None. With `far`, a second phase elsewhere."""
+    from manifoldx.streaming import Streamer
+    from test_streaming import build_cell
+
+    def fn(engine, p):
+        s = Streamer(engine, cell=8.0, build=build_cell, workers=workers)
+        at = {"x": 4.0}
+
+        @engine.system
+        def walk(q: mx.Query[Transform], dt: float):
+            s.focus(at["x"], 4.0)
+
+        def go(app):
+            at["x"] = far
+
+        steps = [bench.mark("a"), bench.hold(until=bench.settled(s), max_s=30)]
+        if far is not None:
+            steps += [bench.mark("b"), bench.each_frame(go, frames=1), bench.hold(until=bench.settled(s), max_s=30)]
+        return None, steps
+
+    return Scenario("walk", fn, {}, {"smoke": 400, "full": None})
+
+
+def test_a_streamer_in_a_closure_is_found_and_closed():
+    from manifoldx import streaming
+
+    before = set(map(id, streaming.live()))
+    run = run_scenario(_walk_scenario(), size=(64, 48))
+    assert run.error is None
+    assert not [s for s in streaming.live() if id(s) not in before]
+    assert run.summary["phases"]["a"]["streamer"]["drawn"]
+
+
+def test_process_workers_report_their_jobs():
+    import glob
+    import tempfile
+
+    run = run_scenario(_walk_scenario("process"), size=(64, 48))
+    w = run.summary["phases"]["a"]["workers"]["stream"]
+    assert run.error is None and w["jobs"] >= 1 and w["processes"] == 1 and w["max_ms"] >= w["p50_ms"]
+    assert any(e["kind"] == "job" for e in run.events)
+    assert not glob.glob(f"{tempfile.gettempdir()}/manifoldx-bench-*")
+
+
+def test_settle_time_is_per_phase():
+    run = run_scenario(_walk_scenario(far=4.0 + 8 * 40), size=(64, 48))
+    a, b = run.summary["phases"]["a"]["streamer"], run.summary["phases"]["b"]["streamer"]
+    assert a["settled_s"] is not None and b["settled_s"] is not None
+    assert a["first_drawn_s"] <= a["settled_s"] and b["first_drawn_s"] <= b["settled_s"]
+
+
+# --- step 2: memory and origin -------------------------------------------------------------------
+
+
+def test_memory_is_recorded():
+    sc, _ = make([bench.hold(frames=3)])
+    mem = run_scenario(sc, size=(64, 48)).summary["memory"]
+    assert mem["rss_mb"]["max"] >= mem["rss_mb"]["start"] > 0
+    assert len(mem["gc"]["runs"]) == 3
+    assert mem["gpu_mb"] is None or mem["gpu_mb"]["max"] >= 0
+
+
+def test_gc_inside_a_frame_is_counted():
+    import gc
+
+    def fn(engine, p):
+        app = App(engine)
+
+        @engine.system
+        def collect(q: mx.Query[Transform], dt: float):
+            gc.collect()
+
+        return app, [bench.hold(frames=2)]
+
+    run = run_scenario(Scenario("gc", fn, {}, {"smoke": 2, "full": None}), size=(64, 48))
+    assert sum(run.summary["memory"]["gc"]["runs"]) >= 2 and run.summary["phases"]["main"]["gc_ms"] > 0
+
+
+def test_folders_named_by_the_app_are_sized(tmp_path):
+    def write(app):
+        (tmp_path / "blob.bin").write_bytes(b"\0" * (1 << 20))
+
+    sc, _ = make([bench.each_frame(write, frames=1)])
+    mem = run_scenario(sc, size=(64, 48), folders={"cache": tmp_path}).summary["memory"]
+    grew = mem["folders_mb"]["cache"]["end"] - mem["folders_mb"]["cache"]["start"]
+    assert abs(grew - 1.0) < 0.01
+
+
+def test_origin_is_the_farthest_thing_drawn():
+    def fn(engine, p):
+        app = App(engine)  # cubes within 5 m of the origin
+        engine.spawn(Mesh(cube(1, 1, 1)), Material(StandardMaterial("#ffffff")),
+                     Transform(pos=np.array([[3000.0, 0.0, 4000.0]], np.float32)), n=1)
+        return app, [bench.hold(frames=31)]
+
+    run = run_scenario(Scenario("far", fn, {}, {"smoke": 31, "full": None}), size=(64, 48))
+    assert abs(run.summary["phases"]["main"]["origin_max_m"] - 5000.0) < 1.0
+    assert len(run.frames["origin_m"]) == 31
+
+
+def test_settle_time_is_the_last_settle_of_the_phase():
+    from manifoldx.streaming import Streamer
+    from test_streaming import build_cell
+
+    def fn(engine, p):
+        s = Streamer(engine, cell=8.0, build=build_cell)
+        at = {"x": 4.0}
+
+        @engine.system
+        def walk(q: mx.Query[Transform], dt: float):
+            s.focus(at["x"], 4.0)
+
+        def go(app):
+            at["x"] = 4.0 + 8 * 40
+
+        return None, [bench.hold(until=bench.settled(s), max_s=30), bench.mark("b"), bench.hold(frames=3),
+                      bench.each_frame(go, frames=1), bench.hold(until=bench.settled(s), max_s=30)]
+
+    run = run_scenario(Scenario("resettle", fn, {}, {"smoke": 400, "full": None}), size=(64, 48))
+    b = run.summary["phases"]["b"]
+    moved = next(e["t"] for e in run.events if e["kind"] == "step" and e["index"] == 3)
+    start = next(e["t"] for e in run.events if e["kind"] == "mark" and e["name"] == "b")
+    assert b["streamer"]["settled_s"] > moved - start  # after the move, not the settled frames before it
+
+
+def test_a_cleanup_that_raises_still_stops_recording(monkeypatch):
+    import os
+
+    from manifoldx import counters
+
+    def broken():
+        raise ValueError("a job file went bad")
+
+    monkeypatch.setattr(counters, "jobs", broken)
+    sc, _ = make([bench.hold(frames=2)])
+    run = run_scenario(sc, size=(64, 48))
+    assert run.summary["phases"]["main"]["frames"] == 2
+    assert not counters.recording() and counters.JOBS_ENV not in os.environ

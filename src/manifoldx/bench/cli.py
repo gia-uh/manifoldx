@@ -3,7 +3,7 @@
     manifoldx bench list [--json]
     manifoldx bench run NAME|FILE.json [--size WxH] [--loop serial|pipelined|check] [--step 1/30]
                         [--param k=v]... [--smoke] [--label L] [--json]
-    manifoldx bench show RUN [--json]
+    manifoldx bench show RUN [--probe P [--phase NAME]] [--json]
     manifoldx bench micro [MODULE...] [--case C] [--sizes N...] [--profile] [--smoke] [--against DIR] [--json]
 
 The app's pyproject.toml says where its scenarios are:
@@ -13,6 +13,7 @@ The app's pyproject.toml says where its scenarios are:
     runs = "bench/runs"               # one folder per run
     history = "bench/history.jsonl"   # one line per run
     micro = ["myapp.bench_cases"]     # modules of @bench.case functions
+    folders = ["cache"]              # folders under the project sized at each run's start and end
 
 Exit codes: 0 the run passed, 1 it failed, 2 bad usage or configuration. Progress goes to stderr,
 at most once a second; with --json, stdout holds only the JSON.
@@ -46,6 +47,7 @@ class Config:
     micro: list = field(default_factory=list)
     app_name: str | None = None
     has_table: bool = True
+    folders: dict = field(default_factory=dict)  # name -> folder under root, sized by each run
 
 
 def load_config(start: Path) -> Config:
@@ -58,8 +60,18 @@ def load_config(start: Path) -> Config:
             table = t or {}
             return Config(d, table.get("scenarios"), d / table.get("runs", "bench/runs"),
                           d / table.get("history", "bench/history.jsonl"), list(table.get("micro", [])),
-                          data.get("project", {}).get("name"), t is not None)
+                          data.get("project", {}).get("name"), t is not None, _folders(d, table.get("folders", [])))
     raise ConfigError(f"no pyproject.toml in {start} or above; manifoldx bench reads [tool.manifoldx.bench] from it")
+
+
+def _folders(root: Path, names: list) -> dict:
+    out = {}
+    for name in names:
+        path = (root / name).resolve()
+        if not path.is_relative_to(root):
+            raise ConfigError(f"folders: {name!r} is outside the project ({root}); name folders under it")
+        out[str(name)] = path
+    return out
 
 
 def _import_scenarios(config: Config) -> None:
@@ -109,6 +121,8 @@ def _parser():
     r.add_argument("--json", action="store_true", help="print only the summary, as JSON")
     s = sub.add_parser("show", help="print a run's summary")
     s.add_argument("run", help="a run folder, or its name under the runs folder")
+    s.add_argument("--probe", choices=sorted([*PHASE_PROBES, *RUN_PROBES]), help="print only this probe")
+    s.add_argument("--phase", help="only this phase (with --probe)")
     s.add_argument("--json", action="store_true")
     m = sub.add_parser("micro", help="time micro cases")
     m.add_argument("modules", nargs="*", help="modules of @bench.case functions (default: the config's micro)")
@@ -178,11 +192,11 @@ def _run(args) -> int:
         overrides[k] = v
     last = {"t": 0.0}
 
-    def progress(n, phase):
+    def progress(n, phase, step, steps):
         now = time.monotonic()
         if now - last["t"] >= 1.0 or n == 1:
             last["t"] = now
-            print(f"frame {n} phase {phase}", file=sys.stderr, flush=True)
+            print(f"frame {n} phase {phase} step {step}/{steps}", file=sys.stderr, flush=True)
 
     import contextlib
 
@@ -191,7 +205,7 @@ def _run(args) -> int:
         with quiet:  # with --json, whatever the app prints goes to stderr
             run = run_scenario(sc, size=args.size, loop=args.loop, step_dt=args.step, overrides=overrides,
                                smoke=args.smoke, label=args.label or os.environ.get("MANIFOLDX_BENCH_LABEL"),
-                               app_name=config.app_name, progress=progress)
+                               app_name=config.app_name, progress=progress, folders=config.folders)
     except ValueError as e:  # bad params or loop
         raise ConfigError(str(e)) from None
     folder = write_run(run, config.runs, config.history)
@@ -206,15 +220,56 @@ def _run(args) -> int:
     return 0
 
 
+FRAME_KEYS = ("frames", "p50_ms", "p95_ms", "p99_ms", "max_ms", "over_1_5x", "over_3x", "draw_p50_ms", "cpu_p50_ms")
+PHASE_PROBES = {"frames": None, "split": "split_ms", "systems": "systems_ms", "counters": "counters",
+                "spans": "spans_ms", "streamer": "streamer", "workers": "workers", "app": "app",
+                "memory": None, "origin": "origin_max_m"}  # memory: per phase, rss_max_mb and gc_ms
+RUN_PROBES = ("host",)
+TABLE_COUNTERS = ("draws", "bytes_uploaded", "material_reads")
+
+
+def _probe(summary: dict, probe: str, phase: str | None):
+    """One probe of a run: of one phase, of every phase by name, or of the run (host, and memory without a phase)."""
+    if probe in RUN_PROBES or (probe == "memory" and phase is None):
+        return summary[probe]
+    phases = summary["phases"]
+    if phase is not None and phase not in phases:
+        raise ConfigError(f"no phase {phase!r} in this run; its phases: {', '.join(phases) or 'none'}")
+
+    def pick(ph):
+        if probe == "frames":
+            return {k: ph[k] for k in FRAME_KEYS if k in ph}
+        if probe == "memory":
+            return {k: ph.get(k) for k in ("rss_max_mb", "gc_ms")}
+        return ph.get(PHASE_PROBES[probe])
+
+    return pick(phases[phase]) if phase is not None else {name: pick(ph) for name, ph in phases.items()}
+
+
+def _ms(v) -> str:
+    return f"{v:>9.1f}" if v is not None else f"{'-':>9}"
+
+
 def _table(summary: dict, folder: Path) -> None:
     host = summary["host"]
     print(f"{summary['scenario']}  loop={summary['loop']}  size={summary['size'][0]}x{summary['size'][1]}  "
           f"{host['adapter']}{' (software)' if host['software'] else ''}  load {host['load_before']}–{host['load_max']}")
-    print(f"{'phase':<14}{'frames':>7}{'p50 ms':>9}{'p95 ms':>9}{'max ms':>9}{'cpu p50':>9}  slowest systems")
+    print(f"{'phase':<14}{'frames':>7}{'p50 ms':>9}{'p95 ms':>9}{'max ms':>9}{'draw p50':>9}{'cpu p50':>9}"
+          "  slowest systems")
     for name, ph in summary["phases"].items():
         top = ", ".join(f"{k.rsplit('.', 1)[-1]} {v}" for k, v in list(ph["systems_ms"].items())[:3])
+        draw = ph.get("draw_p50_ms")  # a schema 1 run (no "schema" key) has none, and cpu meant draw
+        cpu = ph["cpu_p50_ms"] if summary.get("schema", 1) >= 2 else None
+        if draw is None and cpu is None:
+            draw = ph["cpu_p50_ms"]
         print(f"{name:<14}{ph['frames']:>7}{ph['p50_ms']:>9.1f}{ph['p95_ms']:>9.1f}{ph['max_ms']:>9.1f}"
-              f"{ph['cpu_p50_ms']:>9.1f}  {top}")
+              f"{_ms(draw)}{_ms(cpu)}  {top}")
+        c = ph.get("counters", {})
+        more = [f"{k} {c[k]['mean']:g}" for k in TABLE_COUNTERS if k in c]
+        if (ph.get("streamer") or {}).get("settled_s") is not None:
+            more.append(f"settled {ph['streamer']['settled_s']:.2f} s")
+        if more:
+            print(f"{'':<14}per frame: {', '.join(more)}")
     print(f"run folder: {folder}")
 
 
@@ -227,7 +282,11 @@ def _show(args) -> int:
     if not (folder / "run.json").exists():
         raise ConfigError(f"no run at {folder}")
     summary = read_run(folder)
-    if args.json:
+    if args.phase and not args.probe:
+        raise ConfigError("--phase goes with --probe")
+    if args.probe:
+        print(json.dumps(_probe(summary, args.probe, args.phase), indent=1))
+    elif args.json:
         print(json.dumps(summary, indent=1))
     else:
         _table(summary, folder)

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Generic, Optional, TypeVa
 
 import numpy as np
 from dataclasses import dataclass, field
+from manifoldx import counters
 
 
 # =============================================================================
@@ -409,7 +410,7 @@ class ComputeRunner:
             comp_name = comp_type.__name__
             if rows and not getattr(comp_type, "_gpu_only", False):
                 arr = engine.store._components[comp_name]
-                device.queue.write_buffer(buf, 0, arr[:rows])
+                counters.write_buffer(device.queue, buf, 0, arr[:rows])
 
         # 2. Resolve uniforms + pack into bytes.
         engine._last_dt = dt  # auto-bound 'frame_dt' uses this
@@ -436,7 +437,7 @@ class ComputeRunner:
             pad = (-len(packed)) % 16
             if pad:
                 packed = packed + b"\x00" * pad
-            device.queue.write_buffer(cc.uniform_buffer, 0, packed)
+            counters.write_buffer(device.queue, cc.uniform_buffer, 0, packed)
 
         # 3. Build the bind group fresh each dispatch (cheap; lets buffers move).
         entries = []

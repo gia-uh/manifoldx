@@ -2,6 +2,8 @@
 
 import wgpu
 
+from manifoldx import counters
+
 _SKYBOX_SHADER = """
 struct Globals {
     vp:            mat4x4<f32>,
@@ -125,4 +127,5 @@ def render_skybox(rp, engine, render_pass):
     render_pass.set_pipeline(pipeline)
     render_pass.set_bind_group(0, bg0)
     render_pass.set_bind_group(1, ibl_bg)
+    counters.add("draws")
     render_pass.draw(3, 1, 0, 0)

@@ -11,6 +11,7 @@ import re
 import numpy as np
 
 from manifoldx import _deferred
+from manifoldx import counters
 
 MAX_JOINTS = 32
 
@@ -87,7 +88,7 @@ class JointStore:
         n = len(matrices)
         self.mirror[block, :n] = matrices.transpose(0, 2, 1)
         if self._current():
-            self._device.queue.write_buffer(self.buffer, block * _BLOCK_BYTES, self.mirror[block, :n].tobytes())
+            counters.write_buffer(self._device.queue, self.buffer, block * _BLOCK_BYTES, self.mirror[block, :n].tobytes())
 
     @_deferred.deferred_in_pipeline
     def set_many(self, entities, matrices: np.ndarray):
@@ -101,7 +102,7 @@ class JointStore:
         self.mirror[blocks, : matrices.shape[1]] = matrices.transpose(0, 1, 3, 2)
         if self._current():
             lo, hi = int(blocks.min()), int(blocks.max()) + 1
-            self._device.queue.write_buffer(self.buffer, lo * _BLOCK_BYTES, self.mirror[lo:hi].tobytes())
+            counters.write_buffer(self._device.queue, self.buffer, lo * _BLOCK_BYTES, self.mirror[lo:hi].tobytes())
 
     def pose(self, entity: int, j: int) -> np.ndarray:
         """The entity's first j joint matrices, (j, 4, 4) float32 row-major; identity when never posed."""
@@ -119,7 +120,7 @@ class JointStore:
         for b in blocks.tolist():
             self.mirror[b] = _IDENTITY_BLOCK
             if self._current():
-                self._device.queue.write_buffer(self.buffer, b * _BLOCK_BYTES, _IDENTITY_BLOCK.tobytes())
+                counters.write_buffer(self._device.queue, self.buffer, b * _BLOCK_BYTES, _IDENTITY_BLOCK.tobytes())
             self._free.append(b)
 
     @_deferred.deferred_in_pipeline
@@ -133,7 +134,7 @@ class JointStore:
                 size=self.mirror.nbytes,
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
-            device.queue.write_buffer(self.buffer, 0, self.mirror.tobytes())
+            counters.write_buffer(device.queue, self.buffer, 0, self.mirror.tobytes())
             self._buffer_blocks = len(self.mirror)
         return self.buffer
 

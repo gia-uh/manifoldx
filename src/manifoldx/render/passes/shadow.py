@@ -11,6 +11,7 @@ import wgpu
 
 from manifoldx.resources import FADE_WGSL, TINTS_BINDING
 from manifoldx.skinning import BLOCKS_BINDING, JOINT_LOCATION, JOINTS_BINDING, skin_shadow_shader
+from manifoldx import counters
 
 
 def _ensure_shadow_map(rp, resolution):
@@ -310,16 +311,20 @@ def render_shadow_map(rp, engine, command_encoder):
         args_buf = _args_buffer(rp, len(gpus))
         data = args.tobytes()
         if rp.__dict__.get("_shadow_args_bytes") != data:  # a still view writes nothing
-            rp._device.queue.write_buffer(args_buf, 0, data)
+            counters.write_buffer(rp._device.queue, args_buf, 0, data)
             rp._shadow_args_bytes = data
         if casters.bundle is None or casters.recorded is not args_buf:
             encoder = rp._device.create_render_bundle_encoder(
                 color_formats=[], depth_stencil_format=wgpu.TextureFormat.depth24plus)
             _encode(encoder, entries, lambda e, s: e.draw_indexed_indirect(args_buf, 4 * _ARGS * s))
             casters.bundle, casters.recorded = encoder.finish(), args_buf
+            counters.add("bundles_recorded")
+        counters.add("draws", len(entries))
         shadow_pass.execute_bundles([casters.bundle])
     else:
-        _encode(shadow_pass, [e for e in entries if counts[e[0]]],
+        drawn = [e for e in entries if counts[e[0]]]
+        counters.add("draws", len(drawn))
+        _encode(shadow_pass, drawn,
                 lambda p, s: p.draw_indexed(int(casters.index_counts[s]), int(counts[s]), first_index=0,
                                             base_vertex=0, first_instance=int(first[s])))
     shadow_pass.end()
@@ -387,7 +392,7 @@ def _faded_bind_group(rp, fades):
     if buffers.tints_buf is None or buffers.tints_capacity < len(data):
         buffers.upload_tints(fades)
     elif rp.__dict__.get("_shadow_fade_bytes") != data:
-        rp._device.queue.write_buffer(buffers.tints_buf, 0, data)
+        counters.write_buffer(rp._device.queue, buffers.tints_buf, 0, data)
     rp._shadow_fade_bytes = data
     key = (buffers.transforms_buf, buffers.tints_buf)
     kept = rp.__dict__.get("_shadow_faded_group")

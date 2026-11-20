@@ -227,3 +227,80 @@ def test_no_doc_compares_against_a_git_ref():
     for p in ["AGENTS.md", "docs/chapters/16-using-every-core.md", "benchmarks/__main__.py", "benchmarks/scenes.py",
               "know-how/benchmarking.md"]:
         assert "--against main" not in (root / p).read_text(), p
+
+
+def test_folders_in_the_config_are_sized(project, capsys):
+    (project / "cache").mkdir()
+    (project / "cache" / "a.bin").write_bytes(b"\0" * 2048)
+    with (project / "pyproject.toml").open("a") as f:
+        f.write('folders = ["cache"]\n')
+    assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 0
+    sizes = json.loads(capsys.readouterr().out)["memory"]["folders_mb"]
+    assert sizes["cache"]["start"] > 0
+
+
+def test_a_folder_outside_the_project_is_refused(project, capsys):
+    with (project / "pyproject.toml").open("a") as f:
+        f.write('folders = ["../elsewhere"]\n')
+    assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 2
+    assert "folders" in capsys.readouterr().err
+
+
+def test_progress_lines_count_steps(project, capsys):
+    import re
+
+    assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 0
+    err = capsys.readouterr().err
+    assert re.search(r"^frame \d+ phase hold step \d/3$", err, re.M), err
+
+
+def _a_run(capsys):
+    assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_show_picks_one_probe_of_one_phase(project, capsys):
+    run = _a_run(capsys)
+    assert main(["show", run["folder"], "--probe", "counters", "--phase", "hold", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == run["phases"]["hold"]["counters"]
+
+
+def test_show_a_probe_without_a_phase_gives_every_phase(project, capsys):
+    run = _a_run(capsys)
+    assert main(["show", run["folder"], "--probe", "split", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"hold": run["phases"]["hold"]["split_ms"]}
+
+
+def test_show_run_level_probes(project, capsys):
+    run = _a_run(capsys)
+    assert main(["show", run["folder"], "--probe", "memory", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == run["memory"]
+
+
+def test_show_an_unknown_phase_lists_the_phases(project, capsys):
+    run = _a_run(capsys)
+    assert main(["show", run["folder"], "--probe", "counters", "--phase", "nope"]) == 2
+    assert "hold" in capsys.readouterr().err
+
+
+def test_the_table_has_a_line_of_counters(project, capsys):
+    assert main(["run", "cli_demo", "--size", "64x48"]) == 0
+    out = capsys.readouterr().out
+    assert "draws" in out and "bytes_uploaded" in out
+
+
+def test_show_reads_a_step_1_run(project, capsys):
+    run = _a_run(capsys)
+    folder = project / "bench" / "runs" / run["folder"]
+    old = json.loads((folder / "run.json").read_text())
+    for ph in old["phases"].values():  # a step-1 run.json: no draw time, no counters
+        for k in ("draw_p50_ms", "counters", "streamer", "spans_ms"):
+            ph.pop(k, None)
+    old.pop("schema", None)
+    (folder / "run.json").write_text(json.dumps(old))
+    assert main(["show", run["folder"]]) == 0
+    assert "hold" in capsys.readouterr().out
+
+
+def test_the_summary_carries_its_schema(project, capsys):
+    assert _a_run(capsys)["schema"] == 2

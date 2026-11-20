@@ -64,6 +64,9 @@ The project's `pyproject.toml` says where the scenarios are:
 scenarios = "benchmarks.scenarios"
 ```
 
+An app can also name `folders` under its project, such as a cache its workers
+fill; each run sizes them at its start and its end.
+
 ## Running it
 
 ```bash
@@ -72,25 +75,100 @@ uv run manifoldx bench run quad_zoom --size 960x540
 ```
 
 ```text
-quad_zoom  loop=serial  size=960x540  Quadro M2000M  load 5.01–5.09
-phase          frames   p50 ms   p95 ms   max ms  cpu p50  slowest systems
-main                4    334.9    885.1    932.8    332.9  follow 26.915
-zoom               69     40.0     77.0    109.1     38.6  follow 26.163
-run folder: bench/runs/2026-11-20T14-18-56-quad_zoom-89fc
+quad_zoom  loop=serial  size=960x540  Quadro M2000M  load 5.95–5.95
+phase          frames   p50 ms   p95 ms   max ms draw p50  cpu p50  slowest systems
+main                4    359.8    851.5    886.6    357.3    358.9  follow 29.784
+              per frame: draws 69.5, bytes_uploaded 851768, material_reads 0.5, settled 2.65 s
+zoom               71     46.3     92.4    117.6     44.7     80.1  follow 28.706
+              per frame: draws 998.62, bytes_uploaded 437408, material_reads 1, settled 3.10 s
+run folder: bench/runs/2026-11-20T15-36-42-quad_zoom-0b65
 ```
 
 The four frames of `main` are the first view of the plain: each one waited for
-nodes 25 km wide to upload. The zoom itself runs at 40 ms a frame, and the
-`follow` system, which is the streamer choosing its nodes, takes 26 of them.
-The load average goes in the first line because every number on a shared
-machine depends on it.
+nodes 25 km wide to upload, 850 KB a frame. The zoom runs at 46 ms a frame; the
+`follow` system, which is the streamer choosing its nodes, takes 29 of them,
+and a frame draws about a thousand nodes. `draw` is the engine's frame on the
+main thread; `cpu` is the CPU time of the whole process over the frame, every
+thread included, so a `cpu` above `draw` is work done beside the frame, here the
+streamer's builds. The streamer settled 3.1 s after the zoom started. The load
+average goes in the first line because every number on a shared machine
+depends on it.
 
-The folder holds `run.json` (the summary), `frames.npz` (every frame's wall
-time, CPU time, phase, split and systems), `events.jsonl` (each step and mark
-with its time) and `shots/street.png`. The summary is also appended as one line
-to `bench/history.jsonl`. `manifoldx bench show <folder>` prints it again;
-`--json` on `run` or `show` prints the summary alone, for an agent. Progress
-goes to stderr, one line a second.
+The folder holds `run.json` (the summary), `frames.npz` (every frame's numbers,
+one array per probe), `events.jsonl` (steps, marks, streamer nodes and worker
+jobs, with their times) and `shots/street.png`. The summary is also appended as
+one line to `bench/history.jsonl`. `manifoldx bench show <folder>` prints it
+again; `--json` on `run` or `show` prints the summary alone, for an agent.
+Progress goes to stderr, one line a second, with the step it is on
+(`step 4/5`).
+
+## What a run records
+
+Every run records the same probes; nothing has to be turned on.
+
+- **frames**: each frame's wall time, the engine's frame (`draw`) and the
+  process's CPU time, with p50, p95, p99, max, and how many frames took more
+  than 1.5 and 3 times the median.
+- **split** and **systems**: the frame's parts (update, acquire, render,
+  overlap) and each system's milliseconds.
+- **counters**: what the engine did in the frame, counted where it does it:
+  `draws`, `bundles_recorded`, `material_reads`, `material_uploads`, `matrices`
+  recomputed, `bytes_uploaded`, entities `spawned` and `destroyed`. The engine
+  reports them through `manifoldx.counters`, whose calls do nothing outside a
+  run. A run on the pipelined loop marks them `counters_exact: false`: a render
+  that overlaps the next update counts with whichever frame ends first.
+- **streamer**: each node a `Streamer` or `QuadStreamer` submitted, built,
+  landed on the GPU, drew, undrew, cancelled or dropped, by level, with the
+  time to the first node drawn and the time until the streamers settled.
+- **workers**: each build's milliseconds, measured inside the worker, by kind,
+  and how many processes ran them.
+- **memory**: resident memory and the GPU memory allocated through wgpu, once
+  a second; garbage collections and their milliseconds; the app's `folders`.
+- **origin**: the farthest anything is drawn from the floating origin, every
+  30 frames. On `quad_zoom` it is 52 km: the coarse nodes keep their far
+  corners.
+- **host**: CPUs, load, the adapter and whether it is a software rasterizer,
+  the Python version and whether the build is free-threaded.
+
+`show` picks one probe, of one phase or of each:
+
+```bash
+uv run manifoldx bench show <folder> --probe counters --phase zoom
+uv run manifoldx bench show <folder> --probe streamer
+uv run manifoldx bench show <folder> --probe memory
+```
+
+## What an app adds
+
+The engine cannot know which part of a system is slow, or how many cars the
+game has. Three calls let the app say so, and do nothing outside a run:
+
+```python
+from manifoldx import bench
+
+
+@engine.system
+def drive(query, dt):
+    with bench.span("walls"):          # reported as drive/walls, under spans_ms
+        collide_with_walls()
+    bench.metric("cars", len(cars))    # the summary's app dict: last, mean, max
+
+
+def build_block(key):                  # runs in the app's own worker pool
+    with bench.worker_span("block", key):
+        return polygonize(key)
+```
+
+`worker_span` works in threads and in processes: a run names a folder in the
+environment variable `MANIFOLDX_BENCH_JOBS`, each process writes its jobs there,
+and the run reads them and removes the folder at its end. manifoldx's own
+streamers wrap their builds the same way. `meshes_spin` opens a `busy` span and
+publishes a `cubes` metric; `stream_walk` walks the terrain of
+`examples/stream_walk.py`, whose cells are built in a worker process.
+
+The counts of one frame are a `Frame`: its counts, its spans and its metrics.
+Code that drives the engine itself can call `counters.start()`,
+`counters.take()` once a frame and `counters.stop()`.
 
 ## The engine's steps and an app's own
 
@@ -130,7 +208,9 @@ kinds of step.
 free-threaded build; the `overlap` column of the split says how much of the
 frame they shared. `--loop check` adds `MANIFOLDX_PIPELINE=check`, which raises
 when a system writes something the render reads. `--step 1/30` gives systems a
-fixed dt instead of the wall clock, so two runs see the same simulation.
+fixed dt instead of the wall clock, so two runs see the same simulation;
+`hold(seconds=…)`, `zoom(seconds=…)` and `fly` count that game time, so they
+take the same frames on any machine, while every `max_s` stays real seconds.
 `--param n=200` overrides a param, parsed to the default's type. `--smoke`
 caps every waiting step at the scenario's smoke size, which is what the tests
 run.
@@ -142,7 +222,7 @@ uv run manifoldx bench run meshes_spin --loop pipelined --param n=5000
 A run ends with its numbers even when it fails: a step that raises, a hold that
 times out or Ctrl-C still write the folder, with the error in `run.json`, and
 `run` exits 1. The app's `close()` and its streamers' worker pools are closed
-on the way out. The `Run` that `run_scenario` returns holds the same summary,
+on the way out, wherever the app kept them. The `Run` that `run_scenario` returns holds the same summary,
 the per-frame arrays, the events and the shots, for code that drives scenarios
 itself.
 
@@ -155,13 +235,14 @@ milliseconds. Each case is a `Case`, and each timing a `Result`.
 ```python
 from manifoldx import bench
 from manifoldx.bench.micro import measure
+from manifoldx.modeling import Mesh
 
 
 @bench.case("modeling", "smooth", sizes=[5, 6, 7], smoke=1)
 def smooth(level):
     """Smooth a subdivided sphere."""
-    m = sphere(level)
-    return measure(lambda: m.smooth())
+    m = Mesh.icosphere(subdivisions=level)
+    return measure(lambda: m.smooth(iterations=1))
 ```
 
 ```bash

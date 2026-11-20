@@ -31,6 +31,7 @@ from manifoldx.gui.material import RectMaterial
 from manifoldx.gui.painter import Painter, paint
 from manifoldx.gui.value_display import ValueDisplay
 from manifoldx.gui.widgets import Panel, Widget, _measure_text
+from manifoldx import counters
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +463,7 @@ def _ensure_globals_viewport(rp, engine) -> None:
     8 bytes unconditionally to keep the rect NDC conversion correct.
     """
     viewport_size = np.array([float(engine.w), float(engine.h)], dtype=np.float32)
-    rp._device.queue.write_buffer(rp._globals_buffer, 208, viewport_size.tobytes())
+    counters.write_buffer(rp._device.queue, rp._globals_buffer, 208, viewport_size.tobytes())
 
 
 def _anchored(panel: Panel, viewport: LayoutBox) -> LayoutBox:
@@ -577,7 +578,7 @@ def _upload_rect_instances(rp, data: np.ndarray) -> None:
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         rp._gui_instance_capacity = max(needed, 4096)
-    rp._device.queue.write_buffer(rp._gui_instance_buf, 0, data.tobytes())
+    counters.write_buffer(rp._device.queue, rp._gui_instance_buf, 0, data.tobytes())
 
 
 def _bind_group(rp, key, make):
@@ -620,6 +621,7 @@ def _draw_rects(rp, engine, render_pass, first: int, instance_count: int) -> Non
     render_pass.set_bind_group(0, bind_group, [], 0, 0)
     render_pass.set_vertex_buffer(0, rp._gui_quad_vbuf)
     render_pass.set_index_buffer(rp._gui_quad_ibuf, wgpu.IndexFormat.uint32)
+    counters.add("draws")
     render_pass.draw_indexed(6, instance_count, 0, 0, first)
 
 
@@ -764,7 +766,7 @@ def _upload_glyph_instances(rp, data: np.ndarray) -> None:
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         rp._gui_glyph_instance_capacity = max(needed, 4096)
-    rp._device.queue.write_buffer(rp._gui_glyph_instance_buf, 0, data.tobytes())
+    counters.write_buffer(rp._device.queue, rp._gui_glyph_instance_buf, 0, data.tobytes())
 
 
 def _draw_glyphs(rp, engine, render_pass, first: int, instance_count: int) -> None:
@@ -805,6 +807,7 @@ def _draw_glyphs(rp, engine, render_pass, first: int, instance_count: int) -> No
     render_pass.set_bind_group(0, bind_group, [], 0, 0)
     render_pass.set_vertex_buffer(0, rp._gui_quad_vbuf)
     render_pass.set_index_buffer(rp._gui_quad_ibuf, wgpu.IndexFormat.uint32)
+    counters.add("draws")
     render_pass.draw_indexed(6, instance_count, 0, 0, first)
 
 
@@ -1008,7 +1011,7 @@ def _prepare_images(rp, engine, image_ops) -> list:
             size=rp._gui_image_instance_capacity,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
-    rp._device.queue.write_buffer(rp._gui_image_instance_buf, 0, data.tobytes())
+    counters.write_buffer(rp._device.queue, rp._gui_image_instance_buf, 0, data.tobytes())
     return groups
 
 
@@ -1035,4 +1038,5 @@ def _draw_images(rp, render_pass, groups: list, first: int, count: int) -> None:
     for i in range(first, first + count):
         if groups[i] is not None:
             render_pass.set_bind_group(1, groups[i], [], 0, 0)
+            counters.add("draws")
             render_pass.draw_indexed(6, 1, 0, 0, i)

@@ -84,5 +84,5 @@ def test_against_runs_the_other_source(tmp_path):
 
 
 def test_bench_never_calls_git():
-    for p in (ROOT / "src/manifoldx/bench").rglob("*.py"):
+    for p in [*(ROOT / "src/manifoldx/bench").rglob("*.py"), ROOT / "src/manifoldx/counters.py"]:
         assert not re.search(r"\bgit\b", p.read_text(), re.I), p

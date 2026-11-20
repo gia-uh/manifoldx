@@ -58,6 +58,7 @@ class Ctx:
         self.engine, self.app, self.run = engine, app, run
         self.index, self.step_name = 0, ""
         self.dt = 1 / 60  # the last frame's dt; the runner keeps it current
+        self.t = 0.0  # seconds of game time: the sum of dt over the frames so far
 
     def timeout(self, max_s: float):
         raise StepTimeout(f"step {self.step_name} #{self.index} did not finish in {max_s:g} s")
