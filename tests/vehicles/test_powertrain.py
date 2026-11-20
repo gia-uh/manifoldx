@@ -97,3 +97,39 @@ def test_ackermann_turns_the_inner_wheel_more():
     fleet.step(controls(steer=-1.0), ground)
     assert fleet.steer_angle[0, 1] == pytest.approx(-fleet.p.max_steer[0])
     assert fleet.steer_angle[0, 0] < fleet.steer_angle[0, 1]
+
+
+def test_a_light_pedal_drives_on_through_the_gears():
+    fleet, ground = launched()
+    drive(fleet, ground, controls(gas=0.4), 40.0)
+    assert forward_speed(fleet) > 60 / 3.6 and fleet.gear[0] >= 3
+
+
+def test_a_tenth_of_the_pedal_moves_off():
+    fleet, ground = launched()
+    drive(fleet, ground, controls(gas=0.1), 10.0)
+    assert forward_speed(fleet) > 1.0
+
+
+def first_shift_rpm(gas):
+    fleet, ground = launched()
+    seen = []
+    drive(fleet, ground, controls(gas=gas), 30.0,
+          each=lambda f: seen.append(float(f.rpm[0])) if f.gear[0] == 1 else None)
+    return seen[-1]
+
+
+def test_a_light_pedal_shifts_up_sooner_and_a_full_one_where_it_did():
+    from manifoldx.vehicles import powertrain
+
+    assert first_shift_rpm(0.3) < 0.6 * first_shift_rpm(1.0)
+    assert powertrain.up_rpm(6000.0, 1.0) == pytest.approx(powertrain.UP_AT * 6000.0)  # the full pedal's, as before
+
+
+def test_the_released_pedal_still_brakes_with_the_engine():
+    lost = {}
+    for gas in (0.0, 0.15):
+        fleet, ground = launched(20.0, gear=3)
+        drive(fleet, ground, controls(gas=gas), 3.0)
+        lost[gas] = 20.0 - forward_speed(fleet)
+    assert lost[0.0] > lost[0.15] + 0.5

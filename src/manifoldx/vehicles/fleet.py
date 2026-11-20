@@ -220,7 +220,7 @@ class Vehicles:
 
         # the automatic box, with a gap between up and down so it does not hunt
         self.shift_timer = np.maximum(self.shift_timer - dt, 0.0)
-        up_rpm = powertrain.UP_AT * p.engine[:, 2]
+        up_rpm = powertrain.up_rpm(p.engine[:, 2], pedal)
         ready = (self.shift_timer == 0) & ~back
         up = ready & ~neutral & (road_rpm > up_rpm) & (self.gear < p.n_gears)
         lower = p.ratios[np.arange(len(g)), np.maximum(g - 1, 0)]

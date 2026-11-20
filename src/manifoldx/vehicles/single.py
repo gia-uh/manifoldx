@@ -401,7 +401,7 @@ def _torques(fleet, k, c, vel, forward, load, dt):
     road_rpm = abs(v / max(k.driven_radius, 1e-3) * ratio) * P.RPM
 
     timer = max(float(fleet.shift_timer[0]) - dt, 0.0)
-    up_rpm = P.UP_AT * p_rpm
+    up_rpm = P.up_rpm(p_rpm, pedal)
     ready = timer == 0 and not back
     up = ready and not neutral and road_rpm > up_rpm and gear < k.n_gears
     lower = k.ratios[max(g - 1, 0)]
@@ -422,7 +422,8 @@ def _torques(fleet, k, c, vel, forward, load, dt):
     else:
         x0, x1, y0, y1 = idle, t_rpm, idle_t, peak_t
     curve = y0 + (y1 - y0) * (r - x0) / max(x1 - x0, 1e-9)
-    engine = (curve * pedal - e_brake * max(rpm - idle, 0.0) * (1 - pedal)) * (1 - float(fleet.drive_cut[0]))
+    off = _clip(1 - pedal / P.OFF_PEDAL, 0.0, 1.0)
+    engine = (curve * pedal - e_brake * max(rpm - idle, 0.0) * off) * (1 - float(fleet.drive_cut[0]))
     if timer > 0 or neutral:
         engine = 0.0 if neutral else min(engine, 0.0)
     if engine > 0:
