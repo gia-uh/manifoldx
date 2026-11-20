@@ -12,10 +12,11 @@
 
 from manifoldx.bench import micro
 from manifoldx.bench.micro import case
+from manifoldx.bench.runner import Run, run_scenario
 from manifoldx.bench.scenario import Ctx, Params, Scenario, StepCall, StepTimeout, load_json, scenario, step
 from manifoldx.bench.steps import camera, drawn, each_frame, emit, fly, hold, mark, set, settled, shot, zoom
 
 __all__ = [
-    "Ctx", "Params", "Scenario", "StepCall", "StepTimeout", "camera", "case", "drawn", "each_frame", "emit", "fly",
-    "hold", "load_json", "mark", "micro", "scenario", "set", "settled", "shot", "step", "zoom",
+    "Ctx", "Params", "Run", "Scenario", "StepCall", "StepTimeout", "camera", "case", "drawn", "each_frame", "emit", "fly",
+    "hold", "load_json", "mark", "micro", "run_scenario", "scenario", "set", "settled", "shot", "step", "zoom",
 ]
