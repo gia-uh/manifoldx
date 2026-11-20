@@ -249,7 +249,7 @@ def main(cspec, sspec, error, msgs, streams, config) -> None:
 
     threading.Thread(target=builder, name="audio-builder", daemon=True).start()
     st.set("alive", 1.0)
-    t0, produced = time.monotonic(), 0
+    t0, produced, was_late = time.monotonic(), 0, False
     cpu_t, wall_t, last_check = time.process_time(), time.monotonic(), time.monotonic()
     while not flags["stop"]:
         while ready:
@@ -259,9 +259,10 @@ def main(cspec, sspec, error, msgs, streams, config) -> None:
             ahead = len(ring) < RING
         else:
             played = (now - t0) * rate
-            if produced + block < played - RING * block:  # fell behind the clock
+            late = produced + block < played - RING * block  # a device would have run dry
+            if late and not was_late:  # one underrun per late spell; a file keeps every sample and catches up
                 counters["underruns"] += 1
-                produced = int(played)
+            was_late = late
             ahead = produced < played + RING * block
         if ahead:
             x = eng.render()
