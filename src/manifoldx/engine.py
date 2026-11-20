@@ -19,7 +19,7 @@ from time import perf_counter_ns
 import manifoldx.ecs as ecs
 from manifoldx.ecs import EntityStore
 from manifoldx.commands import CommandBuffer, Command, CommandType
-from manifoldx import _deferred, _versions
+from manifoldx import _deferred, _versions, counters
 from manifoldx.systems import SystemRegistry, _gil_is_on
 from manifoldx.resources import GeometryRegistry, MaterialRegistry, VolumeRegistry
 from manifoldx.renderer import RenderPipeline
@@ -726,13 +726,13 @@ class Engine:
 
     @contextmanager
     def _in_system(self, name: str):
-        """Mark this thread as running system `name`, so its deferred calls note it."""
+        """Mark this thread as running system `name`, so its deferred calls and bench spans note it."""
         previous = getattr(self._command_tls, "system_name", None)
-        self._command_tls.system_name = name
+        self._command_tls.system_name = counters.system.name = name
         try:
             yield
         finally:
-            self._command_tls.system_name = previous
+            self._command_tls.system_name = counters.system.name = previous
 
     # === Render-state fields behind deferring properties ===
     # A plain attribute write from a system would race the render; these
