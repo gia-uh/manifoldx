@@ -119,6 +119,10 @@ def _parser():
                    help="a param's value; K=A,B sweeps it, each value a side run in fresh processes")
     r.add_argument("--repeat", type=int, default=1, metavar="N",
                    help="runs of each side, interleaved (with a sweep, --against or --manifoldx)")
+    r.add_argument("--against", type=Path, metavar="DIR",
+                   help="another copy of the app to run the same scenario on, through uv (the baseline)")
+    r.add_argument("--manifoldx", metavar="SPEC",
+                   help="run this copy on another manifoldx as well: anything uv run --with takes, or a directory")
     r.add_argument("--smoke", action="store_true", help="cap each waiting step at the scenario's smoke size")
     r.add_argument("--label", help="a free label kept with the run (default: $MANIFOLDX_BENCH_LABEL)")
     r.add_argument("--json", action="store_true", help="print only the summary, as JSON")
@@ -201,7 +205,7 @@ def _run(args) -> int:
         raise ConfigError(str(e)) from None
     if args.repeat < 1:
         raise ConfigError(f"--repeat must be 1 or more, not {args.repeat}")
-    if len(combos) > 1:
+    if len(combos) > 1 or args.against or args.manifoldx:
         return _run_set(args, config, combos)
     if args.repeat > 1:
         raise ConfigError("--repeat needs more than one side: a swept --param, --against or --manifoldx")
@@ -237,19 +241,45 @@ def _run(args) -> int:
 
 def _run_set(args, config: Config, combos: list[dict]) -> int:
     """Run every side of a sweep in fresh processes, interleaved, into one set folder."""
+    from manifoldx.bench import envs
     from manifoldx.bench.sides import Side, run_set
 
+    if args.against and args.manifoldx:
+        raise ConfigError("--against and --manifoldx go one at a time: with both, which copy runs which "
+                          "manifoldx has two readings")
+    copies = [("this copy", config.root, None, False)]
+    if args.against or args.manifoldx:
+        try:
+            envs.uv()
+        except envs.UvMissing as e:
+            raise ConfigError(str(e)) from None
+    if args.against:
+        other = args.against.resolve()
+        if not (other / "pyproject.toml").exists():
+            raise ConfigError(f"--against needs another copy of the app, a project with a pyproject.toml; {other} "
+                              "has none. manifoldx makes no copies: make one with your version control or unpack "
+                              "a release")
+        copies.insert(0, (other.name, other, None, True))
+    if args.manifoldx:
+        copies.append((args.manifoldx, config.root, args.manifoldx, False))
     scenario = args.scenario
     if scenario.endswith(".json"):  # each copy reads its own file, at the same place under its root
         path = Path(scenario).resolve()
         scenario = str(path.relative_to(config.root)) if path.is_relative_to(config.root) else str(path)
-    sides = [Side(" ".join(f"{k}={v}" for k, v in combo.items()) or "this copy", config.root, combo)
-             for combo in combos]
+    sides = []
+    for name, root, spec, other in copies:
+        for combo in combos:
+            params = " ".join(f"{k}={v}" for k, v in combo.items())
+            label = params if len(copies) == 1 and params else " ".join(x for x in (name, params) if x)
+            sides.append(Side(label, root, combo, spec, other))
     run_args = ["--size", f"{args.size[0]}x{args.size[1]}", "--loop", args.loop]
     run_args += (["--step", repr(args.step)] if args.step else []) + (["--smoke"] if args.smoke else [])
     label = args.label or os.environ.get("MANIFOLDX_BENCH_LABEL")
     run_args += ["--label", label] if label else []
-    result = run_set(scenario, sides, args.repeat, run_args, config.runs)
+    try:
+        result = run_set(scenario, sides, args.repeat, run_args, config.runs)
+    except envs.UvMissing as e:
+        raise ConfigError(str(e)) from None
     out = {"set": result.folder.name, "sides": result.data["sides"], "runs": result.data["runs"]}
     if args.json:
         print(json.dumps(out, indent=1))
