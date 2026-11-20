@@ -121,6 +121,8 @@ def _parser():
     r.add_argument("--json", action="store_true", help="print only the summary, as JSON")
     s = sub.add_parser("show", help="print a run's summary")
     s.add_argument("run", help="a run folder, or its name under the runs folder")
+    s.add_argument("--probe", choices=sorted([*PHASE_PROBES, *RUN_PROBES]), help="print only this probe")
+    s.add_argument("--phase", help="only this phase (with --probe)")
     s.add_argument("--json", action="store_true")
     m = sub.add_parser("micro", help="time micro cases")
     m.add_argument("modules", nargs="*", help="modules of @bench.case functions (default: the config's micro)")
@@ -218,6 +220,32 @@ def _run(args) -> int:
     return 0
 
 
+FRAME_KEYS = ("frames", "p50_ms", "p95_ms", "p99_ms", "max_ms", "over_1_5x", "over_3x", "draw_p50_ms", "cpu_p50_ms")
+PHASE_PROBES = {"frames": None, "split": "split_ms", "systems": "systems_ms", "counters": "counters",
+                "spans": "spans_ms", "streamer": "streamer", "workers": "workers", "app": "app",
+                "memory": None, "origin": "origin_max_m"}  # memory: per phase, rss_max_mb and gc_ms
+RUN_PROBES = ("host",)
+TABLE_COUNTERS = ("draws", "bytes_uploaded", "material_reads")
+
+
+def _probe(summary: dict, probe: str, phase: str | None):
+    """One probe of a run: of one phase, of every phase by name, or of the run (host, and memory without a phase)."""
+    if probe in RUN_PROBES or (probe == "memory" and phase is None):
+        return summary[probe]
+    phases = summary["phases"]
+    if phase is not None and phase not in phases:
+        raise ConfigError(f"no phase {phase!r} in this run; its phases: {', '.join(phases) or 'none'}")
+
+    def pick(ph):
+        if probe == "frames":
+            return {k: ph[k] for k in FRAME_KEYS if k in ph}
+        if probe == "memory":
+            return {k: ph.get(k) for k in ("rss_max_mb", "gc_ms")}
+        return ph.get(PHASE_PROBES[probe])
+
+    return pick(phases[phase]) if phase is not None else {name: pick(ph) for name, ph in phases.items()}
+
+
 def _table(summary: dict, folder: Path) -> None:
     host = summary["host"]
     print(f"{summary['scenario']}  loop={summary['loop']}  size={summary['size'][0]}x{summary['size'][1]}  "
@@ -228,6 +256,12 @@ def _table(summary: dict, folder: Path) -> None:
         top = ", ".join(f"{k.rsplit('.', 1)[-1]} {v}" for k, v in list(ph["systems_ms"].items())[:3])
         print(f"{name:<14}{ph['frames']:>7}{ph['p50_ms']:>9.1f}{ph['p95_ms']:>9.1f}{ph['max_ms']:>9.1f}"
               f"{ph['draw_p50_ms']:>9.1f}{ph['cpu_p50_ms']:>9.1f}  {top}")
+        c = ph.get("counters", {})
+        more = [f"{k} {c[k]['mean']:g}" for k in TABLE_COUNTERS if k in c]
+        if (ph.get("streamer") or {}).get("settled_s") is not None:
+            more.append(f"settled {ph['streamer']['settled_s']:.2f} s")
+        if more:
+            print(f"{'':<14}per frame: {', '.join(more)}")
     print(f"run folder: {folder}")
 
 
@@ -240,7 +274,11 @@ def _show(args) -> int:
     if not (folder / "run.json").exists():
         raise ConfigError(f"no run at {folder}")
     summary = read_run(folder)
-    if args.json:
+    if args.phase and not args.probe:
+        raise ConfigError("--phase goes with --probe")
+    if args.probe:
+        print(json.dumps(_probe(summary, args.probe, args.phase), indent=1))
+    elif args.json:
         print(json.dumps(summary, indent=1))
     else:
         _table(summary, folder)

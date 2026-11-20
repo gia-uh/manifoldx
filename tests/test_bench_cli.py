@@ -252,3 +252,38 @@ def test_progress_lines_count_steps(project, capsys):
     assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 0
     err = capsys.readouterr().err
     assert re.search(r"^frame \d+ phase hold step \d/3$", err, re.M), err
+
+
+def _a_run(capsys):
+    assert main(["run", "cli_demo", "--size", "64x48", "--json"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_show_picks_one_probe_of_one_phase(project, capsys):
+    run = _a_run(capsys)
+    assert main(["show", run["folder"], "--probe", "counters", "--phase", "hold", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == run["phases"]["hold"]["counters"]
+
+
+def test_show_a_probe_without_a_phase_gives_every_phase(project, capsys):
+    run = _a_run(capsys)
+    assert main(["show", run["folder"], "--probe", "split", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"hold": run["phases"]["hold"]["split_ms"]}
+
+
+def test_show_run_level_probes(project, capsys):
+    run = _a_run(capsys)
+    assert main(["show", run["folder"], "--probe", "memory", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == run["memory"]
+
+
+def test_show_an_unknown_phase_lists_the_phases(project, capsys):
+    run = _a_run(capsys)
+    assert main(["show", run["folder"], "--probe", "counters", "--phase", "nope"]) == 2
+    assert "hold" in capsys.readouterr().err
+
+
+def test_the_table_has_a_line_of_counters(project, capsys):
+    assert main(["run", "cli_demo", "--size", "64x48"]) == 0
+    out = capsys.readouterr().out
+    assert "draws" in out and "bytes_uploaded" in out
