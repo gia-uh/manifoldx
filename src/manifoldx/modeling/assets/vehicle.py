@@ -155,7 +155,14 @@ class Part:
 def _rotate(q, v) -> np.ndarray:
     """Rotate points by a quaternion (x, y, z, w), one point or an (N, 3) array."""
     u, w = q[:3], q[3]
-    return v + 2 * np.cross(u, np.cross(u, v) + w * v)
+    return v + 2 * _cross(u, _cross(u, v) + w * v)
+
+
+def _cross(a, b) -> np.ndarray:
+    """np.cross of 3-vectors, written out: np.cross costs tens of microseconds on one pair."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    return np.stack([a[..., 1] * b[..., 2] - a[..., 2] * b[..., 1], a[..., 2] * b[..., 0] - a[..., 0] * b[..., 2],
+                     a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]], axis=-1)
 
 
 def _colour(value) -> np.ndarray:
