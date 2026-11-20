@@ -392,7 +392,9 @@ anything. Each frame `focus(x, z, height)` picks the coarsest nodes whose
 `error(L)`, projected on the screen from the camera's distance, stays under
 `tau` pixels, so near ground is drawn cell by cell and far ground in a few
 large nodes. A camera that has not moved, with everything it selected drawn,
-costs nothing on the next `focus`.
+costs nothing on the next `focus`. With `crossfade=0.3`, a node that gives way
+to finer ones stays drawn for 0.3 s, fading out while they fade in, so the
+level of detail changes without a pop (see `Fade`).
 
 To open the finished plaza in a window, install the `desktop` extra and end the
 program with `engine.run()`, which draws every frame until you close it.

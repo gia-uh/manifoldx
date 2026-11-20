@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Fade`, a per-instance screen-door fade: a `StandardMaterial(faded=True)` drops each entity's pixels against a 4x4 Bayer pattern by its `Fade(value=...)` (1 whole, 0 gone, negative the complementary pixels), in the main pass and in the shadow map, with no blending or sorting. Materials without `faded=True` build the same pipelines as before. `QuadStreamer(crossfade=0.3)` keeps a node that gives way drawn for that long, fading it out while the nodes that replace it fade in.
 - `Tint`, a per-instance colour: a `StandardMaterial(vertex_colors=True, tinted=True)` multiplies each entity's vertex colours by its `Tint(rgb=...)`, so many instances of one geometry stay one instanced draw while each wears its own colour; an entity without a Tint keeps its colours. `Engine.spawn(..., n=)` returns a handle whose `indices` holds every entity it made. Benchmark case `frame meshes_tinted`.
 - `Camera.vertical_scale` stretches heights on screen around y = 0, for relief maps; `project` and frustum culling follow it, `get_right` and `get_up` stay unscaled.
 - `Engine.read_texture(handle)` reads a `render_to_texture` texture back as an (h, w, 3) uint8 RGB array through a `concurrent.futures.Future`, done after one or two more frames (window or `render_frame`); a `live=False` texture not rendered yet is read after its first render (#309).

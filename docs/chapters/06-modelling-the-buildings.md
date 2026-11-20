@@ -288,6 +288,13 @@ each its own shade without splitting the batch: a `StandardMaterial` made with
 a linear colour, so a thousand stones or trees of one mesh stay one instanced
 draw. Entities without a `Tint` keep their colours.
 
+A `Fade` component says how much of an entity draws, from 1 (all of it) to 0
+(none), when its `StandardMaterial` is made with `faded=True`. The mesh drops
+pixels against a 4x4 pattern instead of blending, so nothing is sorted, and its
+shadow drops the same share. A negative fade draws the complementary pixels:
+an entity at `Fade(value=-0.7)` and one at `Fade(value=0.3)` cover every pixel
+once between them, which is how a coarse model hands over to a fine one.
+
 Most sources carry a small symbolic syntax tree beside their callable.
 `field_to_wgsl` walks that tree and emits a WGSL function, so the same field can
 move vertices in a shader. `fbm` transpiles; `worley` does not, because it is
