@@ -35,6 +35,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from manifoldx import _deferred
+
 from manifoldx.modeling._poly import _triangulate
 from manifoldx.modeling.assets.vehicle import PALETTE, ParamsRanges, Part, Vehicle, _rotate, choice, rng
 from manifoldx.modeling.mesh import Mesh
@@ -1776,9 +1778,36 @@ def place_car(handles: dict, car: Vehicle, at=(0.0, 0.0, 0.0), yaw=0.0, pitch=0.
     qy = np.asarray(rotation, float) if rotation is not None else _quat_mul(_axis_angle(np.array([0.0, 1.0, 0.0]), yaw),
                    _quat_mul(_axis_angle(np.array([0.0, 0.0, 1.0]), pitch),
                              _axis_angle(np.array([1.0, 0.0, 0.0]), roll)))
-    for name, (pos, q) in car.pose(**pose).items():
-        world_pos = np.asarray(at, float) + _rotate(qy, pos)
-        world_rot = _quat_mul(qy, q)
-        for h in handles[name]:
-            h.transform.pos = tuple(world_pos)
-            h.transform.rot = tuple(world_rot)
+    from manifoldx.engine import EntityHandle
+
+    poses = car.pose(**pose)
+    names = list(poses)
+    offsets = np.array([poses[n][0] for n in names], float)
+    turns = np.array([poses[n][1] for n in names], float)
+    world_pos = np.asarray(at, float) + _rotate(qy, offsets)
+    world_rot = _quat_mul_many(qy, turns)
+    pieces = [(k, h) for k, n in enumerate(names) for h in handles[n]]
+    if pieces and all(isinstance(h, EntityHandle) for _, h in pieces):
+        part = np.array([k for k, _ in pieces])
+        _write_transforms(pieces[0][1]._engine, np.array([h.index for _, h in pieces]), world_pos[part], world_rot[part])
+        return
+    for k, h in pieces:  # stand-ins for entity handles, such as a test's
+        h.transform.pos = tuple(world_pos[k])
+        h.transform.rot = tuple(world_rot[k])
+
+
+def _quat_mul_many(a, b) -> np.ndarray:
+    """_quat_mul of one quaternion a by each row of b, (N, 4)."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b.T
+    return np.stack([aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+                     aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz], axis=1)
+
+
+@_deferred.deferred_in_pipeline
+def _write_transforms(engine, rows, pos, rot) -> None:
+    """Every row's position (world, float64) and rotation in the Transform store at once, as a handle writes one."""
+    ox, oz = engine._origin
+    t = engine.store._components["Transform"]
+    t[rows, 0:3] = (pos - np.array([ox, 0.0, oz])).astype(np.float32)
+    t[rows, 3:7] = rot.astype(np.float32)

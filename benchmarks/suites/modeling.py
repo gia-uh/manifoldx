@@ -52,3 +52,20 @@ def recompute_normals(level):
     """Mesh.recompute_normals()."""
     m = _sphere(level)
     return {"ms": measure(m.recompute_normals), **_faces(level)}
+
+
+@case("modeling", "place_car", sizes=[1, 4, 16], smoke=1)
+def place_car(n):
+    """Place n spawned stock cars once each, as a game does every frame for the cars it draws in parts."""
+    from benchmarks.harness import headless_engine
+    from manifoldx.modeling.assets.car import build_car, place_car, spawn_car
+
+    engine = headless_engine(80 * n)
+    car = build_car()
+    cars = [spawn_car(engine, car) for _ in range(n)]
+
+    def run():
+        for i, handles in enumerate(cars):
+            place_car(handles, car, at=(1000.0 + i, 0.0, 2000.0), yaw=0.3, wheel_turn=1.0, steer=0.1)
+
+    return measure(run)

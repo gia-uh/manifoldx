@@ -645,3 +645,19 @@ def test_place_car_takes_a_rotation():
     for name in a:
         assert np.allclose(a[name][0].transform.pos, b[name][0].transform.pos)
         assert np.allclose(a[name][0].transform.rot, b[name][0].transform.rot)
+
+
+def test_place_car_moves_every_spawned_piece_to_its_part_pose():
+    from manifoldx import Engine
+    from manifoldx.modeling.assets.car import _axis_angle, _quat_mul, _rotate, place_car, spawn_car
+
+    engine = Engine("place", width=64, height=64, max_entities=256)
+    car = build_car(CarParams())
+    handles = spawn_car(engine, car)
+    at, yaw = np.array([1234.5, 2.0, -678.25]), 0.7
+    place_car(handles, car, at=at, yaw=yaw, wheel_turn=1.3, steer=0.2, travel=[0.01, 0.02, 0.03, 0.04])
+    qy = _axis_angle(np.array([0.0, 1.0, 0.0]), yaw)
+    for name, (pos, q) in car.pose(wheel_turn=1.3, steer=0.2, travel=[0.01, 0.02, 0.03, 0.04]).items():
+        for h in handles[name]:
+            assert np.allclose(h.transform.pos, at + _rotate(qy, pos), atol=1e-3), name
+            assert np.allclose(h.transform.rot, _quat_mul(qy, q), atol=1e-6), name

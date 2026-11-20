@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import math
 import multiprocessing
+import threading
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from time import perf_counter
 from typing import Callable, NamedTuple
@@ -126,6 +127,7 @@ class _Uploads:
         self.material = material
         self.upload_bytes_per_frame = max(4, int(upload_bytes_per_frame) // 4 * 4)
         self._pending = {}  # key -> Future
+        self._lock = threading.RLock()  # _pending, also changed by QuadStreamer's done callbacks
         self._ready = {}  # key -> _Cell | None, built and kept
         self._gpu = {}  # key -> its upload: geometry id, buffers, bytes written, done
         self._drawn = {}  # key -> EntityHandle | None (None: an empty cell)
@@ -144,12 +146,14 @@ class _Uploads:
             self._stats["max_frame_ms"] = max(self._stats["max_frame_ms"], (now - self._last) * 1000.0)
         self._last = now
         got = 0
-        for c, fut in list(self._pending.items()):
-            if fut.done():
+        with self._lock:
+            done = [(c, fut) for c, fut in self._pending.items() if fut.done()]
+            for c, _fut in done:
                 del self._pending[c]
-                self._ready[c] = fut.result()
-                self._stats["built"] += 1
-                got += 1
+        for c, fut in done:
+            self._ready[c] = fut.result()
+            self._stats["built"] += 1
+            got += 1
         return got
 
     def _on_gpu(self, c) -> bool:
@@ -356,13 +360,19 @@ class QuadStreamer(_Uploads):
     a teleport costs a bounded slice of each frame; `refine_ms=None` refines to the end every frame. Once a
     pass settles, the next starts only after the camera moves `move` metres (cell / 8 by default) or its fov,
     far plane or viewport changes, or tau does, and the nodes keep their order till then. A game may
-    change `tau` while it runs, to trade detail for frame time. The nodes picked are built
-    nearest first, by `builders` workers at once, and uploaded within `upload_bytes_per_frame`. The workers
-    start when the streamer is made, each running `warm()` first when given, so what a build loads once per
-    worker loads while the app starts. One not
-    built yet leaves its nearest drawn ancestor drawn, and a drawn node hides everything under it, so
-    each spot is drawn once. A frame where the selection, the builds and the uploads did not change only
-    carries on the uploads in flight.
+    change `tau` while it runs, to trade detail for frame time. The nodes picked are built by `builders`
+    workers, with `in_flight` (twice builders) jobs at most submitted: each time one finishes, the node with
+    the most error on screen still to build goes next. They are uploaded within `upload_bytes_per_frame`,
+    in the same order. The workers start when the streamer is made, each running `warm()` first when given,
+    so what a build loads once per worker loads while the app starts.
+
+    The view sharpens a level at a time: a drawn node gives way to its children as soon as every one of
+    them is built and uploaded (or covered by its own children), and those children are built before the
+    finer nodes under them, so each level shows on the way down. A selected node not built yet leaves the
+    nodes drawn under it drawn, and each spot is drawn once. Built nodes stay in a cache: past `cache` nodes
+    out of use, the least recently used are freed, so zooming back out finds the coarse nodes still built.
+    A frame where the selection, the builds and the uploads did not change only carries on the uploads
+    in flight.
 
     With `crossfade` seconds (about 0.3), a node that gives way stays drawn that long, fading out while
     the nodes that replace it fade in, over the complementary pixels of a 4x4 pattern (see Fade), so a
@@ -392,6 +402,7 @@ class QuadStreamer(_Uploads):
         refine_ms: float | None = 2.0,
         move: float | None = None,
         warm: Callable[[], None] | None = None,
+        cache: int = 256,
         crossfade: float | None = None,
     ):
         if crossfade and material is None:
@@ -401,6 +412,8 @@ class QuadStreamer(_Uploads):
         if crossfade and not getattr(material, "faded", False):
             raise ValueError("crossfade needs a StandardMaterial made with faded=True")
         self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders, warm)
+        self.in_flight, self.cache = 2 * builders, int(cache)
+        self._todo: list = []  # the nodes to build next, most error on screen last
         self.crossfade = float(crossfade) if crossfade else None
         self._fading: dict = {}  # node -> (handle, started, out): drawn while it fades in, or out once undrawn
         self.cell, self.origin, self.levels = float(cell), (int(origin[0]), int(origin[1])), int(levels)
@@ -411,7 +424,7 @@ class QuadStreamer(_Uploads):
         self._sel, self._sel_at = None, None  # the nodes to draw, nearest first, and the camera they were for
         self._shown_for, self._shown_landed = None, -1  # the selection and uploads the drawn set was last made for
         self._to_upload: list = []  # selected nodes built and not on the GPU yet, nearest first
-        self._fell_back = False
+        self._waiting = False  # some node wanted is not built and uploaded yet
         self._selected: set = set()
         self._kids: dict = {}  # node -> its existing children
         self._cut: set | None = None  # the nodes that tile the tree now; None before the first focus
@@ -471,7 +484,7 @@ class QuadStreamer(_Uploads):
         focal = self.engine.h / (2.0 * math.tan(math.radians(cam.fov) / 2.0))
         here = (x, z, height, cam.fov, cam.far, self.engine.h, self.tau)
         first = self._cut is None
-        if first:  # refined to the end: coarse nodes drawn first would hide everything under them till all is built
+        if first:  # refined to the end: the first frame asks for the nodes it will draw, not for coarser ones
             root = (self.levels, 0, 0)
             self._cut = {root} if self.exists(*root) else set()
         stop = None if self.refine_ms is None or first else perf_counter() + self.refine_ms / 1000.0
@@ -568,83 +581,144 @@ class QuadStreamer(_Uploads):
                         room = 0
                     else:
                         room -= self._upload(n, room)
-            self._quiet = not (self._queue or self._pass_started or self._pending or self._fell_back)
+            self._quiet = not (self._queue or self._pass_started or self._pending or self._waiting)
             return
         self._selected = set(selected)
-        for n in selected:
-            if n not in self._ready and n not in self._pending:
-                self._pending[n] = self._pool.submit(_pack, self.build, *n)
+        landed = self._landed  # what the draw set below sees; an upload finished after it calls for another
+        show, wanted, parked = self._plan(selected, x, z, height)
+
+        # Build what is wanted, by its error on screen, `in_flight` jobs at a time: each job that finishes
+        # submits the next (_next), so no backlog of jobs picked for an old camera builds first, and the
+        # workers never wait for a frame.
+        keep = self._selected | show | set(wanted) | set(parked) | self._fading.keys()
+        with self._lock:
+            for n in [n for n in self._pending if n not in keep]:
+                if self._pending[n].cancel():  # one already building lands in the cache instead
+                    del self._pending[n]
+            todo = [n for n in wanted if n not in self._ready and n not in self._pending]
+            self._todo = todo[::-1]  # most error last, for pop()
+            while self._todo and len(self._pending) < self.in_flight:
+                self._submit(self._todo.pop())
         room = self.upload_bytes_per_frame
-        self._to_upload = [n for n in selected
-                           if n not in self._drawn and self._ready.get(n) is not None and not self._on_gpu(n)]
+        self._to_upload = [n for n in wanted if self._ready.get(n) is not None and not self._on_gpu(n)]
         for n in self._to_upload:
             if room <= 0:
                 break
-            if not self._on_gpu(n):
-                if self._is_deferred():
-                    self._upload(n, room)  # queued whole at apply: it spends the frame's budget
-                    room = 0
-                else:
-                    room -= self._upload(n, room)
+            if self._is_deferred():
+                self._upload(n, room)  # queued whole at apply: it spends the frame's budget
+                room = 0
+            else:
+                room -= self._upload(n, room)
 
-        landed = self._landed  # what the draw set below sees; an upload finished after it calls for another
-
-        # What to draw: each selected node once it is built and on the GPU, else what covers its spot now;
-        # then nothing under a node that is drawn, so four children replace their parent in one frame.
-        # The selection is disjoint, so only a coarser node drawn for one that fell back can cover others.
-        under: dict = {}  # level -> {node at that level: the drawn nodes below it}, built per level on need
-        ups = set()  # the coarser nodes kept for nodes that fell back
-        cover: dict = {}  # node -> its nearest drawn ancestor or None, for the walks up that share a path
-        show = set()
-        fell_back = False
-        for n in selected:
-            if n in self._drawn or (n in self._ready and self._on_gpu(n)):
-                show.add(n)
-                continue
-            fell_back = True  # not ready: what covers its spot now stays, a coarser node above or finer ones below
-            up, walked = None, []
-            for u in self._ancestors(n):
-                if u in cover:
-                    up = cover[u]
-                    break
-                walked.append(u)
-                if u in self._drawn:
-                    up = u
-                    break
-            for u in walked:
-                cover[u] = up
-            if up is not None:
-                show.add(up)
-                ups.add(up)
-                continue
-            L = n[0]
-            if L not in under:
-                below = under[L] = {}
-                for d in self._drawn:
-                    if d[0] < L:
-                        k = L - d[0]
-                        below.setdefault((L, d[1] >> k, d[2] >> k), []).append(d)
-            show.update(under[L].get(n, ()))
-        if ups:
-            levels = sorted({u[0] for u in ups})
-            show = {n for n in show
-                    if not any((M, n[1] >> (M - n[0]), n[2] >> (M - n[0])) in ups for M in levels if M > n[0])}
         for n in [n for n in self._drawn if n not in show]:
             self._undraw(n)
         for n in sorted(show - set(self._drawn), key=lambda n: self._distance(n, x, z, height)):
             x0, z0, _ = self._box(n)
             self._draw(n, (x0, 0.0, z0))
 
-        keep = self._selected | show | self._fading.keys()
-        for n in [n for n in self._ready if n not in keep]:
+        # The built nodes in use move to the end of _ready; past `cache` others, the least recently used go.
+        for n in keep:
+            if n in self._ready:
+                self._ready[n] = self._ready.pop(n)
+        spare = [n for n in self._ready if n not in keep]
+        for n in spare[: max(0, len(spare) - self.cache)]:
             del self._ready[n]
             self._unload(n)
             self._stats["dropped"] += 1
-        for n in [n for n in self._pending if n not in keep]:
-            self._pending.pop(n).cancel()
-        # Quiet: the refinement settled, nothing builds, and every selected node is drawn (none fell back).
-        self._shown_for, self._shown_landed, self._fell_back = selected, landed, fell_back
-        self._quiet = not (self._queue or self._pass_started or self._pending or fell_back)
+        # Quiet: the refinement settled, nothing builds, and every selected node is drawn.
+        self._shown_for, self._shown_landed, self._waiting = selected, landed, bool(wanted)
+        self._quiet = not (self._queue or self._pass_started or self._pending or self._waiting)
+
+    def _submit(self, n):
+        """Start building node n; call it holding the lock."""
+        self._pending[n] = fut = self._pool.submit(_pack, self.build, *n)
+        fut.add_done_callback(self._next)
+
+    def _next(self, fut):
+        """A build finished, in a worker's thread or the pool's: submit the next node to build."""
+        if fut.cancelled():
+            return
+        with self._lock:
+            while self._todo:
+                n = self._todo.pop()
+                if n not in self._pending:
+                    self._submit(n)
+                    return
+
+    def close(self) -> None:
+        with self._lock:
+            self._todo = []  # no done callback submits to a pool shut down
+        for c, (handle, _, out) in list(self._fading.items()):
+            if out:
+                handle.destroy(free_geometry=False)
+        self._fading.clear()
+        super().close()
+
+    def _plan(self, selected, x, z, height) -> tuple[set, list, list]:
+        """What to draw for the selected nodes, the nodes to build for it, most error on screen first, and
+        the built nodes waiting under a node drawn in their place, to keep till their siblings land.
+
+        A selected node is drawn once it is built and on the GPU; till then the nodes drawn under it stay.
+        Above them, a node is drawn in place of its children until every one of them is covered, so each
+        level shows as soon as it is whole, and its children are the ones to build next. A spot nothing
+        covers yet asks for the root, and the levels below it come one at a time."""
+        sel = self._selected
+        inner = set()  # the ancestors of the selected nodes
+        for n in selected:
+            for u in self._ancestors(n):
+                if u in inner:
+                    break
+                inner.add(u)
+        below: dict | None = None  # node -> the drawn nodes under it, built on need
+        wanted, parked = [], []
+
+        def ready(n):
+            return n in self._ready and self._on_gpu(n)
+
+        def cover(n):
+            """The nodes that draw n's square now, and whether they cover all of what is picked in it."""
+            nonlocal below
+            if n in sel:
+                if ready(n):
+                    return [n], True
+                wanted.append(n)
+                if below is None:
+                    below = {}
+                    for d in self._drawn:
+                        for u in self._ancestors(d):
+                            below.setdefault(u, []).append(d)
+                kept = below.get(n, [])
+                return kept, bool(kept)
+            if n not in inner:
+                return [], True  # nothing in it is picked: beyond the far plane
+            parts, short = [], []
+            for k in self._children(n):
+                p, whole = cover(k)
+                parts += p
+                if not whole:
+                    short.append(k)
+            if not short:
+                return parts, True
+            if ready(n):
+                wanted.extend(k for k in short if k in inner and not ready(k))
+                parked.extend(parts)
+                return [n], True
+            return parts, False
+
+        show = set()
+        if selected:
+            root = (self.levels, 0, 0)
+            parts, whole = cover(root)
+            if not whole and root not in sel and not ready(root):
+                wanted.append(root)
+            show.update(parts)
+        if wanted:
+            cam = self.engine.camera
+            focal = self.engine.h / (2.0 * math.tan(math.radians(cam.fov) / 2.0))
+            d = self._distances(wanted, x, z, height)
+            err = np.array([self.error(n[0]) for n in wanted]) * focal / d
+            wanted = [wanted[k] for k in np.argsort(-err, kind="stable")]
+        return show, wanted, parked
 
     @_deferred.deferred_in_pipeline(find=_streamer_engine)
     def _draw(self, c, pos):
@@ -676,7 +750,7 @@ class QuadStreamer(_Uploads):
         self.engine.store._components["Fade"][handle.index] = value
 
     def _fade(self):
-        """Step every fade; a node faded out is destroyed, and freed unless it is wanted again."""
+        """Step every fade; a node faded out is destroyed and stays built, for the cache to keep or free."""
         now = perf_counter()
         for c, (handle, started, out) in list(self._fading.items()):
             t = min((now - started) / self.crossfade, 1.0)
@@ -687,18 +761,7 @@ class QuadStreamer(_Uploads):
             if not out:
                 self._set_fade(handle, 1.0)
                 continue
-            handle.destroy(free_geometry=False)
-            if c not in self._selected and c in self._ready:
-                del self._ready[c]
-                self._unload(c)
-                self._stats["dropped"] += 1
-
-    def close(self) -> None:
-        for c, (handle, _, out) in list(self._fading.items()):
-            if out:
-                handle.destroy(free_geometry=False)
-        self._fading.clear()
-        super().close()
+            handle.destroy(free_geometry=False)  # still built: the cache frees it when it must
 
     def drawn(self) -> set[tuple[int, int, int]]:
         """The nodes drawn now, empty ones (build returned None) included; not those fading out."""

@@ -340,7 +340,7 @@ def test_crossfade_keeps_the_parent_till_its_children_fade_in():
     time.sleep(0.2)
     s.focus(200.0, 200.0, 1.0)
     assert not s._fading and all(fade(k) == 1.0 for k in kids)
-    assert (1, 0, 0) not in s._ready  # faded out and freed
+    assert (1, 0, 0) in s._ready and (1, 0, 0) not in s.drawn()  # faded out, kept built in the cache
     destroyed = [i for c in engine.commands._commands if c.type == CommandType.DESTROY for i in c.data["indices"]]
     assert root.index in destroyed  # gone at the frame's flush
     s.close()
@@ -354,3 +354,147 @@ def test_crossfade_needs_a_faded_material():
     with pytest.raises(ValueError):
         QuadStreamer(engine, CELL, (0, 0), 1, full(1), tri, lambda L: CELL, crossfade=0.3,
                      material=StandardMaterial("#fff", vertex_colors=True))
+
+
+class FakePool:
+    """Stands in for the build pool: jobs wait until the test finishes them, in the order it likes."""
+
+    def __init__(self):
+        self.jobs = {}  # node -> Future, in the order submitted
+        self.submitted = []
+
+    def submit(self, fn, *args):
+        from concurrent.futures import Future
+
+        f = Future()
+        f.job = (fn, args)
+        node = tuple(args[1:])
+        self.jobs[node] = f
+        self.submitted.append(node)
+        return f
+
+    def finish(self, keep=lambda n: False):
+        """Run every waiting job except those `keep` holds back."""
+        for node, f in list(self.jobs.items()):
+            if f.cancelled():
+                del self.jobs[node]
+            elif not keep(node):
+                fn, args = f.job
+                f.set_result(fn(*args))
+                del self.jobs[node]
+
+    def shutdown(self, **_):
+        pass
+
+
+def faked(levels, **kw):
+    engine = mx.Engine("quad", width=64, height=600)
+    engine.camera.far = 15000.0
+    s = QuadStreamer(engine, CELL, (0, 0), levels, full(levels), tri, lambda L: CELL * 2**L / 16,
+                     refine_ms=None, **kw)
+    s._pool.shutdown()
+    s._pool = FakePool()
+    return s
+
+
+def covering(s, cell):
+    """The level of the drawn node over cell (i, j)."""
+    return [L for L, a, b in s.drawn() if a == cell[0] >> L and b == cell[1] >> L]
+
+
+def test_each_level_shows_as_soon_as_it_is_whole():
+    s = faked(3)
+    s.in_flight = 1000  # the level-0 builds held back below take no room from the coarser ones
+    seen = []
+    for _ in range(12):  # every build but the cells lands
+        s.focus(100.0, 100.0, 1.0)
+        s._pool.finish(keep=lambda n: n[0] == 0)
+        lv = covering(s, (0, 0))
+        if lv and (not seen or seen[-1] != lv[0]):
+            seen.append(lv[0])
+    assert seen == [3, 2, 1]  # the root, then each level under the camera as soon as it is whole
+    assert all(L > 0 for L, _a, _b in s.drawn()) and (3, 0, 0) not in s.drawn()
+    for _ in range(12):
+        s.focus(100.0, 100.0, 1.0)
+        s._pool.finish()
+    assert covering(s, (0, 0)) == [0] and s.drawn() == set(s._selected) and s._quiet
+    s.close()
+
+
+def test_one_missing_node_keeps_only_its_parent():
+    s = faked(3)
+    s.in_flight = 1000
+    late = (0, 0, 0)
+    for _ in range(20):
+        s.focus(100.0, 100.0, 1.0)
+        s._pool.finish(keep=lambda n: n == late)
+    parent = (1, 0, 0)
+    assert late in s._selected and parent not in s._selected
+    under = {n for n in s._selected if n[0] < 1 and (n[1] >> 1, n[2] >> 1) == parent[1:]}
+    assert s.drawn() == (set(s._selected) - under) | {parent}  # everything else drawn at its own level
+    s.close()
+
+
+def test_builds_go_by_error_on_screen_a_few_at_a_time():
+    s = faked(4, builders=2)
+    x, z, h = 100.0, 100.0, 1.0
+    for _ in range(400):
+        s.focus(x, z, h)
+        assert len(s._pool.jobs) <= 4  # twice the builders in flight, never a backlog
+        if s._quiet:
+            break
+        first = next(iter(s._pool.jobs), None)  # one job finishes a frame, the oldest
+        if first is not None:
+            s._pool.finish(keep=lambda n: n != first)
+    assert s._quiet and s.drawn() == set(s._selected)
+    f = focal(s)
+    err = [s.error(n[0]) * f / s._distance(n, x, z, h) for n in s._pool.submitted if n in s._selected]
+    assert err == sorted(err, reverse=True)  # the selected nodes went most error on screen first
+    assert len(s._pool.submitted) == len(set(s._pool.submitted))  # none built twice
+    s.close()
+
+
+def test_zooming_back_out_finds_the_coarse_nodes_built():
+    counts = {}
+
+    def build(L, a, b):
+        counts[(L, a, b)] = counts.get((L, a, b), 0) + 1
+        return tri()
+
+    for cache, root_builds in ((256, 1), (0, 2)):
+        counts.clear()
+        engine = mx.Engine("quad", width=64, height=600)
+        engine.camera.far = 1e6
+        s = QuadStreamer(engine, CELL, (0, 0), 3, full(3), build, lambda L: CELL * 2**L / 16, cache=cache)
+        _settle(s, 800.0, 800.0, 50_000.0)
+        assert s.drawn() == {(3, 0, 0)}
+        _settle(s, 100.0, 100.0, 1.0)
+        assert (3, 0, 0) not in s.drawn()
+        _settle(s, 800.0, 800.0, 50_000.0)
+        assert s.drawn() == {(3, 0, 0)} and counts[(3, 0, 0)] == root_builds
+        s.close()
+
+
+def test_with_a_device_every_picked_node_is_uploaded_and_drawn():
+    import pytest
+
+    try:
+        from manifoldx.backends import get_offscreen_canvas
+
+        canvas = get_offscreen_canvas(width=32, height=32)
+    except Exception as e:
+        pytest.skip(f"offscreen canvas unavailable: {e}")
+    engine = mx.Engine("quad", width=32, height=32)
+    engine._init_canvas(canvas)
+    engine._running = True
+    engine.camera.far = 15000.0
+    s = QuadStreamer(engine, CELL, (0, 0), 4, full(4), tri, lambda L: CELL * 2**L / 16)
+    for _ in range(600):
+        s.focus(100.0, 100.0, 1.0)
+        engine._draw_frame()
+        if s._quiet:
+            break
+        time.sleep(0.002)
+    assert s._quiet and s.drawn() == set(s._selected)
+    assert all(s._gpu[n]["done"] for n in s.drawn())
+    s.close()

@@ -139,3 +139,62 @@ def test_far_walls_do_not_reach_the_contact_test(monkeypatch, single):
     for _ in range(5):
         fleet.step(np.zeros((1, 4)), ground, np.concatenate([far, near]))
     assert seen and max(seen) <= 10
+
+
+def two_cars(offset=0.0, speed=10.0):
+    """A car rolling at speed along +x toward a parked car 3 m ahead of its nose, offset metres to its side."""
+    ground = FlatGround()
+    fleet = Vehicles([car(), car()])
+    fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
+    fleet.place(1, (fleet.p.size[0, 0] + 3.0, 0.0, offset), 0.0, ground)
+    for _ in range(60):
+        fleet.step(np.zeros((2, 4)), ground)
+    fleet.velocity[0] = (speed, 0.0, 0.0)
+    fleet.omega[0] = speed / fleet.p.radius[0]
+    return fleet, ground
+
+
+def test_a_car_hitting_a_parked_one_passes_it_momentum():
+    fleet, ground = two_cars()
+    before = fleet.p.mass @ fleet.velocity[:, 0]
+    hit = 0
+    for _ in range(240):  # until a few steps after the first contact
+        fleet.step(np.zeros((2, 4)), ground)
+        hit += hit > 0 or fleet.impulse.max() > 0
+        if hit >= 12:
+            break
+    after = fleet.p.mass @ fleet.velocity[:, 0]
+    assert fleet.velocity[1, 0] > 2.0 and fleet.velocity[0, 0] < 8.0
+    assert after == pytest.approx(before, rel=0.1)  # the tyres take a little in those few steps
+    gap = fleet.position[1, 0] - fleet.position[0, 0] - fleet.p.size[0, 0]
+    assert gap > -0.05  # pushed apart, not through each other
+
+
+def test_an_off_centre_hit_spins_the_parked_car():
+    fleet, ground = two_cars(offset=1.3, speed=12.0)
+    for _ in range(90):
+        fleet.step(np.zeros((2, 4)), ground)
+    assert abs(fleet.angular[1, 1]) > 0.3  # rad/s about the vertical
+
+
+def test_cars_apart_never_touch():
+    fleet, ground = two_cars(speed=0.0)
+    for _ in range(120):
+        fleet.step(np.zeros((2, 4)), ground)
+    assert fleet.impulse.max() == 0.0 and np.linalg.norm(fleet.velocity[1]) < 0.05
+
+
+def test_add_and_remove_keep_the_other_vehicles_state():
+    fleet, ground = fresh()
+    fleet.velocity[0] = (5.0, 0.0, 0.0)
+    kept = {k: np.array(getattr(fleet, k)[0]) for k in Vehicles.STATE}
+    i = fleet.add(car(n_wheels=6))  # more wheels: every row widens
+    assert i == 1 and len(fleet.position) == 2
+    fleet.place(1, (20.0, 0.0, 0.0), 0.0, ground)
+    for k, v in kept.items():
+        assert np.array_equal(getattr(fleet, k)[0][: v.shape[0]] if v.ndim else getattr(fleet, k)[0], v), k
+    fleet.remove(0)
+    assert len(fleet.position) == 1 and fleet.position[0, 0] == pytest.approx(20.0)
+    for _ in range(60):
+        fleet.step(np.zeros((1, 4)), ground)
+    assert np.hypot(fleet.velocity[0, 0], fleet.velocity[0, 2]) < 0.05  # it settles on its springs, standing still
