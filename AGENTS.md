@@ -40,6 +40,7 @@ uv run python examples/<name>.py --render --duration 2 --fps 30 --output /tmp/<n
   - `examples/` — **focused**: one file, one feature, minimal code (documentation). Named by the feature (`shadows.py`, `fields.py`, `booleans.py`), not `*_demo.py`. New single-feature showcases go here, minimal.
   - `demos/` — **show-off**: game-like / sim-like experiences combining many systems, possibly multi-file + assets (`terrain_stream.py`, `labyrinth_fps.py`, `sun_earth_moon.py`, `smoke.py`). New multi-system experiences go here.
   - Each folder has a `README.md` stating the convention. Long-term demo roadmap: `.knowledge/analysis/2026-07-28-demo-roadmap-lague-inspired.md`.
+- **Audio**: `src/manifoldx/audio/` plays what an app gives it (anything with `block(n)`), in a sound process started with the spawn context; it never imports a synthesis library. Tests in `tests/audio/`.
 - **Plans**: `.knowledge/plans/` — TDD-structured implementation plans, each task split into "write failing test → confirm fail → implement → confirm pass → commit" steps
 - **Changelog**: `CHANGELOG.md` — Keep-a-Changelog format, `[Unreleased]` accumulates between version bumps
 

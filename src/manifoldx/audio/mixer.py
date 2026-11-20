@@ -72,23 +72,31 @@ class Placed:
             x = np.asarray(self.source.block(need - len(self._buf)), np.float32)
             if x.ndim == 2:
                 x = x.mean(axis=1)
-            self._buf = np.concatenate([self._buf, x])
+            self._buf = np.concatenate([self._buf, x]) if len(self._buf) else x
 
     def block(self, n: int, src: Pose, lis: Pose) -> np.ndarray:
-        d = np.array([src.x - lis.x, src.y - lis.y, src.z - lis.z])
-        dist = float(np.linalg.norm(d))
-        u = -d / dist if dist > 1e-6 else np.zeros(3)  # from the source toward the listener
-        rel = np.array([src.vx - lis.vx, src.vy - lis.vy, src.vz - lis.vz])
-        v = float(np.clip(rel @ u, -MAX_RADIAL, MAX_RADIAL))
+        dx, dy, dz = src.x - lis.x, src.y - lis.y, src.z - lis.z
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if dist > 1e-6:
+            ux, uy, uz = -dx / dist, -dy / dist, -dz / dist  # from the source toward the listener
+            v = (src.vx - lis.vx) * ux + (src.vy - lis.vy) * uy + (src.vz - lis.vz) * uz
+            v = min(MAX_RADIAL, max(-MAX_RADIAL, v))
+        else:
+            ux = uy = uz = v = 0.0
         ratio = SOUND / (SOUND - v)
-        pos = self._phase + np.arange(n) * ratio
-        self._pull(int(math.floor(pos[-1])) + 2)
-        i = np.floor(pos).astype(int)
-        f = (pos - i).astype(np.float32)
-        x = self._buf[i] * (1 - f) + self._buf[i + 1] * f
-        self._phase = pos[-1] + ratio
-        drop = int(math.floor(self._phase))
-        self._buf, self._phase = self._buf[drop:], self._phase - drop
+        if ratio == 1.0 and self._phase == 0.0:  # no shift: read the samples as they are
+            self._pull(n)
+            x, self._buf = self._buf[:n], self._buf[n:]
+        else:
+            pos = self._phase + _ramp(n) * ratio
+            self._pull(int(pos[-1]) + 2)
+            i = pos.astype(np.int64)
+            f = (pos - i).astype(np.float32)
+            a = self._buf[i]
+            x = a + (self._buf[i + 1] - a) * f
+            nxt = self._phase + n * ratio
+            drop = int(nxt)
+            self._buf, self._phase = self._buf[drop:], nxt - drop
 
         gain = 1.0 if dist <= self.ref else self.ref / dist
         if dist >= self.far:
@@ -97,10 +105,23 @@ class Placed:
             gain *= (self.far - dist) / (0.1 * self.far)
         cutoff = 20_000.0 if dist <= 50 else max(2000.0, 20_000.0 * 50 / dist)
         x, self._air = _box(x, _box_len(cutoff), self._air)
-        right = np.array([-math.sin(lis.yaw), 0.0, math.cos(lis.yaw)])
-        p = float(-u @ right) if dist > 1e-6 else 0.0
+        p = (-ux * -math.sin(lis.yaw) + -uz * math.cos(lis.yaw)) if dist > 1e-6 else 0.0  # sine of the bearing
         a = (p + 1) * math.pi / 4
-        return np.stack([x * (gain * math.cos(a)), x * (gain * math.sin(a))], 1).astype(np.float32)
+        out = np.empty((n, 2), np.float32)
+        np.multiply(x, gain * math.cos(a), out=out[:, 0])
+        np.multiply(x, gain * math.sin(a), out=out[:, 1])
+        return out
+
+
+_RAMPS: dict[int, np.ndarray] = {}
+
+
+def _ramp(n: int) -> np.ndarray:
+    """0, 1, ..., n - 1 as float64, made once per block size."""
+    r = _RAMPS.get(n)
+    if r is None:
+        r = _RAMPS[n] = np.arange(n, dtype=np.float64)
+    return r
 
 
 class Bus:
@@ -147,6 +168,7 @@ class Mixer:
         self._air = None
         self._delay = np.zeros((LOOKAHEAD, 2), np.float32)
         self._lim = 1.0
+        self.last: dict[str, np.ndarray] = {}
 
     def __getitem__(self, bus: str) -> Bus:
         return self.buses[bus]
@@ -162,13 +184,17 @@ class Mixer:
         self._cut = float(cutoff_hz)
 
     def out(self, n: int) -> np.ndarray:
-        x = sum(b.take(n) for b in self.buses.values())
+        self.last = {name: b.take(n) for name, b in self.buses.items()}  # each bus's block, for stems
+        x = sum(self.last.values())
         x, self._air = _box(x, _box_len(self._cut), self._air)
         return self._limit(x)
 
     def _limit(self, x: np.ndarray) -> np.ndarray:
         n = len(x)
         full = np.concatenate([self._delay, x])  # what plays now is LOOKAHEAD samples old
+        if self._lim == 1.0 and float(np.abs(full).max(initial=0.0)) <= CEILING:  # nothing to hold back
+            self._delay = full[n:]
+            return full[:n].astype(np.float32)
         peak = sliding_window_view(np.abs(full).max(axis=1), LOOKAHEAD + 1).max(axis=1)
         need = np.minimum(1.0, CEILING / np.maximum(peak, 1e-9))
         r = 1.0 / (RELEASE * RATE)
