@@ -70,6 +70,13 @@ def build_cell(i, j):
                     (LOW * (1 - t) + HIGH * t).astype(np.float32), tris.astype(np.uint32))
 
 
+def make(engine, workers: str = "process") -> Streamer:
+    """The sky, the sun and the terrain's streamer on `engine`."""
+    engine.background_color = (0.70, 0.80, 0.92)
+    engine.set_sun(DirectionalLight(color="#fff4e0", intensity=3.0, direction=(-0.4, -0.7, -0.5)))
+    return Streamer(engine, CELL, build_cell, workers=workers)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--km", type=float, default=50.0)
@@ -88,9 +95,7 @@ def main():
     args = ap.parse_args()
 
     engine = mx.Engine("Stream walk", width=960, height=540)
-    engine.background_color = (0.70, 0.80, 0.92)
-    engine.set_sun(DirectionalLight(color="#fff4e0", intensity=3.0, direction=(-0.4, -0.7, -0.5)))
-    streamer = Streamer(engine, CELL, build_cell, workers=args.workers)
+    streamer = make(engine, args.workers)
     ms_text, km_text = mx.gui.Text(""), mx.gui.Text("")  # the atlas keeps each string: round them
     if not args.headless:
         engine.gui.append(mx.gui.Panel(children=[ms_text, km_text], anchor="top-left", offset=(12, 12),

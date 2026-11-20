@@ -181,3 +181,4 @@ docs/.scriptorium/
 docs/build/
 examples/models/*.asset/cost.csv
 bench/runs/
+bench/history.jsonl

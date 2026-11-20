@@ -45,3 +45,30 @@ def test_bench_list_in_the_repo(monkeypatch, capsys):
     monkeypatch.chdir(ROOT)
     assert main(["list", "--json"]) == 0
     assert {"quad_zoom", "meshes_spin"} <= {s["name"] for s in json.loads(capsys.readouterr().out)["scenarios"]}
+
+
+def run_ours(name):
+    return run_scenario(SCENARIOS[name], size=(160, 90), smoke=True)
+
+
+def test_quad_zoom_shows_the_streamer_workers_and_origin():
+    run = run_ours("quad_zoom")
+    zoom = run.summary["phases"]["zoom"]
+    assert run.error is None
+    assert zoom["streamer"]["drawn"] and zoom["workers"]["stream"]["jobs"] >= 1
+    assert zoom["origin_max_m"] > 0  # coarse nodes keep their far corners: the root's is 52 km out
+
+
+def test_meshes_spin_shows_counters_spans_and_the_metric():
+    run = run_ours("meshes_spin")
+    spin = run.summary["phases"]["spin"]
+    assert spin["counters"]["draws"]["mean"] >= 1
+    assert any(k.endswith("spin/busy") for k in spin["spans_ms"])
+    assert run.summary["app"]["cubes"] == 22_000
+
+
+def test_stream_walk_reports_jobs_from_a_process():
+    run = run_ours("stream_walk")
+    assert run.error is None
+    w = run.summary["phases"]["walk"]["workers"]["stream"]
+    assert w["jobs"] >= 1 and w["processes"] == 1

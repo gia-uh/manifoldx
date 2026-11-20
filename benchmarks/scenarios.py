@@ -2,6 +2,7 @@
 
     uv run manifoldx bench run quad_zoom --size 960x540
     uv run manifoldx bench run meshes_spin --loop pipelined
+    uv run manifoldx bench run stream_walk
 """
 
 import time
@@ -53,7 +54,39 @@ def meshes_spin(engine, p):
     def spin(q: mx.Query[Transform], dt: float):
         data = q[Transform].position.data
         deadline = time.perf_counter() + p.system_ms / 1000.0
-        while time.perf_counter() < deadline:
-            data = np.sin(data) * 0.5 + 0.5
+        with bench.span("busy"):
+            while time.perf_counter() < deadline:
+                data = np.sin(data) * 0.5 + 0.5
+        bench.metric("cubes", p.n)
 
     return None, [bench.hold(frames=5), bench.mark("spin"), bench.hold(frames=60)]
+
+
+# A spawned worker process takes about a second to start: at smoke size the first hold must last that long.
+@bench.scenario("stream_walk", params={"workers": "process", "metres": 2000.0}, sizes={"smoke": 200, "full": None})
+def stream_walk(engine, p):
+    """The stream walk terrain, built in a worker process, walked north 4 m a frame for `metres`."""
+    from examples.stream_walk import CAM_UP, CELL, LOOK_AHEAD, STEP, height, make
+
+    streamer = make(engine, p.workers)
+    at = {"z": 0.0}
+
+    def place():
+        x, z = CELL / 2, at["z"]
+        if abs(z - engine.origin[1]) > CELL * 1.5:  # rebase with half a cell of slack, as the example does
+            engine.set_origin(0.0, float(np.floor(z / CELL) * CELL))
+        ox, oz = engine.origin
+        streamer.focus(x, z)
+        eye = (x - ox, float(height(x, z)) + CAM_UP, z - oz)
+        engine.camera.set_pose(eye, (x - ox, float(height(x, z - LOOK_AHEAD)), z - oz - LOOK_AHEAD))
+
+    def walk(app):
+        at["z"] -= STEP
+        place()
+
+    place()
+    return streamer, [
+        bench.each_frame(lambda app: place(), until=bench.settled(streamer), max_s=60),
+        bench.mark("walk"),
+        bench.each_frame(walk, frames=int(p.metres / STEP)),
+    ]
