@@ -1,9 +1,10 @@
 """`manifoldx bench`: list, run and show an app's scenarios, and time micro cases.
 
     manifoldx bench list [--json]
-    manifoldx bench run NAME|FILE.json [--size WxH] [--loop serial|pipelined|check] [--step 1/30]
+    manifoldx bench run NAME|FILE.json|--all [--size WxH] [--loop serial|pipelined|check] [--step 1/30]
                         [--param k=v[,v2...]]... [--repeat N] [--against DIR | --manifoldx SPEC]
                         [--smoke] [--label L] [--json]
+    manifoldx bench check [NAME...] [--full] [--size WxH] [--json]
     manifoldx bench show RUN [--probe P [--phase NAME]] [--json]
     manifoldx bench compare PATH [PATH...] [--out DIR] [--json]
     manifoldx bench clean [--json]
@@ -18,8 +19,9 @@ The app's pyproject.toml says where its scenarios are:
     history = "bench/history.jsonl"   # one line per run
     micro = ["myapp.bench_cases"]     # modules of @bench.case functions
     folders = ["cache"]              # folders under the project sized at each run's start and end
+    budgets = "bench/budgets.toml"    # more checks: one [scenario] table of budgets each
 
-Exit codes: 0 the run passed, 1 it failed, 2 bad usage or configuration. Progress goes to stderr,
+Exit codes: 0 the run passed, 1 it failed or a check failed, 2 bad usage or configuration. Progress goes to stderr,
 at most once a second; with --json, stdout holds only the JSON.
 """
 
@@ -52,6 +54,7 @@ class Config:
     app_name: str | None = None
     has_table: bool = True
     folders: dict = field(default_factory=dict)  # name -> folder under root, sized by each run
+    budgets: Path | None = None  # the budgets file: more checks, by scenario
 
 
 def load_config(start: Path) -> Config:
@@ -64,7 +67,8 @@ def load_config(start: Path) -> Config:
             table = t or {}
             return Config(d, table.get("scenarios"), d / table.get("runs", "bench/runs"),
                           d / table.get("history", "bench/history.jsonl"), list(table.get("micro", [])),
-                          data.get("project", {}).get("name"), t is not None, _folders(d, table.get("folders", [])))
+                          data.get("project", {}).get("name"), t is not None, _folders(d, table.get("folders", [])),
+                          d / table["budgets"] if table.get("budgets") else None)
     raise ConfigError(f"no pyproject.toml in {start} or above; manifoldx bench reads [tool.manifoldx.bench] from it")
 
 
@@ -87,6 +91,24 @@ def _import_scenarios(config: Config) -> None:
         except ImportError as e:
             raise ConfigError(f"cannot import the scenarios module {config.scenarios!r} named in "
                               f"{config.root / 'pyproject.toml'}: {e}") from None
+
+
+def _budgets(config: Config) -> dict:
+    """The budgets file's checks by scenario, once the scenarios are imported; {} without a file."""
+    from manifoldx.bench.checks import read_budgets
+    from manifoldx.bench.scenario import SCENARIOS
+
+    if config.budgets is None:
+        return {}
+    try:
+        out = read_budgets(config.budgets)
+    except (OSError, ValueError) as e:  # tomllib's error is a ValueError
+        raise ConfigError(f"cannot read the budgets file {config.budgets}: {e}") from None
+    unknown = [n for n in out if n not in SCENARIOS]
+    if unknown:
+        raise ConfigError(f"{config.budgets} names {', '.join(unknown)}, which no scenario is; known: "
+                          f"{', '.join(sorted(SCENARIOS)) or 'none'}")
+    return out
 
 
 def _size(text: str):
@@ -115,7 +137,8 @@ def _parser():
     ls = sub.add_parser("list", help="scenarios and steps")
     ls.add_argument("--json", action="store_true")
     r = sub.add_parser("run", help="run a scenario and write its run folder")
-    r.add_argument("scenario", help="a scenario's name, or a JSON scenario file")
+    r.add_argument("scenario", nargs="?", help="a scenario's name, or a JSON scenario file")
+    r.add_argument("--all", action="store_true", help="run every scenario, one after another")
     r.add_argument("--size", type=_size, default=(640, 360), help="WxH of the offscreen frame (default 640x360)")
     r.add_argument("--loop", choices=["serial", "pipelined", "check"], default="serial")
     r.add_argument("--step", type=_step, help="fixed dt in seconds, such as 1/30 (default: the wall clock)")
@@ -130,6 +153,11 @@ def _parser():
     r.add_argument("--smoke", action="store_true", help="cap each waiting step at the scenario's smoke size")
     r.add_argument("--label", help="a free label kept with the run (default: $MANIFOLDX_BENCH_LABEL)")
     r.add_argument("--json", action="store_true", help="print only the summary, as JSON")
+    k = sub.add_parser("check", help="run scenarios at smoke size and fail on any check that fails")
+    k.add_argument("names", nargs="*", help="scenarios (default: every one with checks)")
+    k.add_argument("--full", action="store_true", help="run each step in full, not capped at the smoke size")
+    k.add_argument("--size", type=_size, default=(160, 90), help="WxH of the offscreen frame (default 160x90)")
+    k.add_argument("--json", action="store_true", help="print only the results, as JSON")
     s = sub.add_parser("show", help="print a run's summary")
     s.add_argument("run", help="a run folder, or its name under the runs folder")
     s.add_argument("--probe", choices=sorted([*PHASE_PROBES, *RUN_PROBES]), help="print only this probe")
@@ -159,7 +187,7 @@ def _parser():
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        return {"list": _list, "run": _run, "show": _show, "micro": _micro, "clean": _clean,
+        return {"list": _list, "run": _run, "check": _check, "show": _show, "micro": _micro, "clean": _clean,
                 "compare": _compare}[args.cmd](args)
     except ConfigError as e:
         print(f"manifoldx bench: {e}", file=sys.stderr)
@@ -187,11 +215,8 @@ def _list(args) -> int:
     return 0
 
 
-def _run(args) -> int:
-    from manifoldx.bench.folder import write_run
-    from manifoldx.bench.runner import run_scenario
-    from manifoldx.bench.scenario import SCENARIOS, load_json
-
+def _project(args) -> Config:
+    """The project's config, its scenarios imported."""
     config = load_config(Path.cwd())
     if not config.has_table:
         raise ConfigError(f"{config.root / 'pyproject.toml'} has no [tool.manifoldx.bench]; add one with "
@@ -201,15 +226,91 @@ def _run(args) -> int:
     with contextlib.redirect_stdout(sys.stderr) if args.json else contextlib.nullcontext():
         _import_scenarios(config)  # a JSON scenario may call the app steps it registers; with --json, what the
         # app prints as it loads goes to stderr, so stdout holds only the summary
-    if args.scenario.endswith(".json"):
+    return config
+
+
+def _run(args) -> int:
+    from manifoldx.bench.scenario import SCENARIOS
+
+    if bool(args.scenario) == args.all:
+        raise ConfigError("run takes a scenario's name, a JSON scenario file, or --all")
+    config = _project(args)
+    budgets = _budgets(config)
+    if not args.all:
+        code, out = _run_one(args, config, args.scenario, budgets)
+        if args.json:
+            print(json.dumps(out, indent=1))
+        return code
+    codes, outs = [], []
+    for name in list(SCENARIOS):
+        if not args.json:
+            print(f"== {name} ==")
+        code, out = _run_one(args, config, name, budgets)
+        codes.append(code)
+        outs.append(out)
+    if args.json:
+        print(json.dumps(outs, indent=1))
+    return max(codes, default=0)
+
+
+def _check(args) -> int:
+    """Run each scenario at smoke size with its checks and the budgets file's; 1 when any fails."""
+    import contextlib
+
+    from manifoldx.bench.folder import write_run
+    from manifoldx.bench.runner import run_scenario
+    from manifoldx.bench.scenario import SCENARIOS
+
+    config = _project(args)
+    budgets = _budgets(config)
+    names = args.names or [n for n, sc in SCENARIOS.items() if sc.checks or budgets.get(n)]
+    unknown = [n for n in names if n not in SCENARIOS]
+    if unknown:
+        raise ConfigError(f"no scenario {', '.join(unknown)}; known: {', '.join(sorted(SCENARIOS)) or 'none'}")
+    if not names:
+        raise ConfigError("no scenario has a check: add one with name.check(...) or in a budgets file")
+    outs, failed = [], []
+    for name in names:
+        with contextlib.redirect_stdout(sys.stderr) if args.json else contextlib.nullcontext():
+            run = run_scenario(SCENARIOS[name], size=args.size, smoke=not args.full, app_name=config.app_name,
+                               folders=config.folders, budgets=budgets.get(name),
+                               label=os.environ.get("MANIFOLDX_BENCH_LABEL"))
+        folder = write_run(run, config.runs, config.history)
+        results = run.summary["checks"]
+        outs.append({"scenario": name, "folder": folder.name, "error": run.error, "checks": results})
+        if run.error:
+            failed.append(f"{name}: the run failed: {run.error}")
+        failed += [f"{name}: {c['message']}" for c in results if not c["ok"]]
+        if not args.json:
+            if run.error:
+                print(f"FAIL {name}: the run failed: {run.error}")
+            for c in results:
+                print(f"{'SKIP' if c['skipped'] else 'PASS' if c['ok'] else 'FAIL'} {name}: {c['message']}")
+            if not results and not run.error:
+                print(f"PASS {name}: ran, no checks")
+    if args.json:
+        print(json.dumps(outs, indent=1))
+    for line in failed:
+        print(f"manifoldx bench: {line}", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def _run_one(args, config: Config, scenario: str, budgets: dict) -> tuple[int, dict]:
+    """Run one scenario, or the set its sweep or other copy makes; print its table unless --json and
+    return the exit code and what --json prints."""
+    from manifoldx.bench.folder import write_run
+    from manifoldx.bench.runner import run_scenario
+    from manifoldx.bench.scenario import SCENARIOS, load_json
+
+    if scenario.endswith(".json"):
         try:
-            sc = load_json(Path(args.scenario))
+            sc = load_json(Path(scenario))
         except (OSError, ValueError, KeyError) as e:
-            raise ConfigError(f"cannot read the scenario file {args.scenario}: {e}") from None
+            raise ConfigError(f"cannot read the scenario file {scenario}: {e}") from None
     else:
-        if args.scenario not in SCENARIOS:
-            raise ConfigError(f"no scenario {args.scenario!r}; known: {', '.join(sorted(SCENARIOS)) or 'none'}")
-        sc = SCENARIOS[args.scenario]
+        if scenario not in SCENARIOS:
+            raise ConfigError(f"no scenario {scenario!r}; known: {', '.join(sorted(SCENARIOS)) or 'none'}")
+        sc = SCENARIOS[scenario]
     overrides = {}
     for kv in args.param:
         k, sep, v = kv.partition("=")
@@ -225,7 +326,7 @@ def _run(args) -> int:
     if args.repeat < 1:
         raise ConfigError(f"--repeat must be 1 or more, not {args.repeat}")
     if len(combos) > 1 or args.against or args.manifoldx:
-        return _run_set(args, config, combos)
+        return _run_set(args, config, combos, scenario)
     if args.repeat > 1:
         raise ConfigError("--repeat needs more than one side: a swept --param, --against or --manifoldx")
     last = {"t": 0.0}
@@ -243,22 +344,23 @@ def _run(args) -> int:
         with quiet:  # with --json, whatever the app prints goes to stderr
             run = run_scenario(sc, size=args.size, loop=args.loop, step_dt=args.step, overrides=overrides,
                                smoke=args.smoke, label=args.label or os.environ.get("MANIFOLDX_BENCH_LABEL"),
-                               app_name=config.app_name, progress=progress, folders=config.folders)
+                               app_name=config.app_name, progress=progress, folders=config.folders,
+                               budgets=budgets.get(sc.name))
     except ValueError as e:  # bad params or loop
         raise ConfigError(str(e)) from None
     folder = write_run(run, config.runs, config.history)
     summary = {**run.summary, "folder": folder.name}
-    if args.json:
-        print(json.dumps(summary, indent=1))
-    else:
+    if not args.json:
         _table(summary, folder)
+    failed = [c["message"] for c in run.summary["checks"] if not c["ok"]]
+    for message in failed:
+        print(f"manifoldx bench: {message}", file=sys.stderr)
     if run.error:
         print(f"manifoldx bench: the run failed: {run.error}", file=sys.stderr)
-        return 1
-    return 0
+    return (1 if run.error or failed else 0), summary
 
 
-def _run_set(args, config: Config, combos: list[dict]) -> int:
+def _run_set(args, config: Config, combos: list[dict], scenario: str) -> tuple[int, dict]:
     """Run every side of a sweep in fresh processes, interleaved, into one set folder."""
     from manifoldx.bench import envs
     from manifoldx.bench.sides import Side, run_set
@@ -283,7 +385,6 @@ def _run_set(args, config: Config, combos: list[dict]) -> int:
         spec = args.manifoldx  # a path is resolved here: the child runs from the app's root
         spec = str(Path(spec).resolve()) if Path(spec).exists() else spec
         copies.append((args.manifoldx, config.root, spec, False))
-    scenario = args.scenario
     if scenario.endswith(".json"):  # each copy reads its own file, at the same place under its root
         path = Path(scenario).resolve()
         scenario = str(path.relative_to(config.root)) if path.is_relative_to(config.root) else str(path)
@@ -307,10 +408,9 @@ def _run_set(args, config: Config, combos: list[dict]) -> int:
     sides = compare.load_sides([result.folder])
     done = sum(1 for s in sides if s.runs) >= 2
     cmp = compare.write(sides, result.folder) if done else None
-    if args.json:
-        print(json.dumps({**out, **({"table": cmp["table"], "rows": cmp["rows"], "sheets": cmp["sheets"]}
-                                    if cmp else {})}, indent=1))
-    else:
+    if cmp:
+        out.update(table=cmp["table"], rows=cmp["rows"], sheets=cmp["sheets"])
+    if not args.json:
         for e in result.data["runs"]:
             if e["error"] or e["exit"]:
                 side = result.data["sides"][e["side"]]["label"]
@@ -320,7 +420,7 @@ def _run_set(args, config: Config, combos: list[dict]) -> int:
             for name, path in cmp["sheets"].items():
                 print(f"sheet {name}: {path}")
         print(f"set folder: {result.folder}")
-    return 1 if result.failed else 0
+    return (1 if result.failed else 0), out
 
 
 FRAME_KEYS = ("frames", "p50_ms", "p95_ms", "p99_ms", "max_ms", "over_1_5x", "over_3x", "draw_p50_ms", "cpu_p50_ms")
@@ -373,6 +473,9 @@ def _table(summary: dict, folder: Path) -> None:
             more.append(f"settled {ph['streamer']['settled_s']:.2f} s")
         if more:
             print(f"{'':<14}per frame: {', '.join(more)}")
+    for c in summary.get("checks", []):
+        if c["skipped"] or not c["ok"]:
+            print(f"{'skipped' if c['skipped'] else 'FAILED'} {c['message']}")
     print(f"run folder: {folder}")
 
 

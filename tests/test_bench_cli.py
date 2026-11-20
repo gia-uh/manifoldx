@@ -29,6 +29,18 @@ SCENARIOS = textwrap.dedent('''
         return Demo(engine), [bench.mark("hold"), bench.hold(frames=p.frames), bench.shot("cube")]
 
 
+    cli_demo.check(counters_draws=1000)
+
+
+    @bench.scenario("cli_tight", sizes={"smoke": 3})
+    def cli_tight(engine, p):
+        """A budget no frame meets."""
+        return Demo(engine), [bench.mark("tight"), bench.hold(frames=3)]
+
+
+    cli_tight.check(p95_ms=0.001)
+
+
     @bench.step("cli_fail")
     def cli_fail(app):
         raise RuntimeError("broken step")
@@ -349,4 +361,56 @@ def test_show_reads_a_step_1_run(project, capsys):
 
 
 def test_the_summary_carries_its_schema(project, capsys):
-    assert _a_run(capsys)["schema"] == 3
+    assert _a_run(capsys)["schema"] == 4
+
+
+def test_check_runs_scenarios_with_checks_at_smoke_size(project, capsys):
+    assert main(["check", "cli_demo", "--json"]) == 0
+    (out,) = json.loads(capsys.readouterr().out)
+    assert out["scenario"] == "cli_demo" and out["error"] is None
+    assert [(c["phase"], c["ok"]) for c in out["checks"]] == [("hold", True)]
+    assert (project / "bench" / "runs" / out["folder"] / "run.json").exists()
+
+
+def test_check_exits_1_and_says_why(project, capsys):
+    assert main(["check", "cli_tight"]) == 1
+    captured = capsys.readouterr()
+    assert "FAIL" in captured.out
+    assert all(w in captured.err for w in ("check", "p95_ms", "phase tight", "frame"))
+
+
+def test_check_without_names_runs_the_scenarios_with_checks(project, capsys):
+    assert main(["check", "--json"]) == 1
+    assert [o["scenario"] for o in json.loads(capsys.readouterr().out)] == ["cli_demo", "cli_tight"]
+
+
+def test_run_exits_1_on_a_failed_check(project, capsys):
+    assert main(["run", "cli_tight", "--size", "64x48"]) == 1
+    captured = capsys.readouterr()
+    assert "check p95_ms" in captured.out and "check p95_ms" in captured.err
+    (folder,) = (project / "bench" / "runs").iterdir()
+    assert json.loads((folder / "run.json").read_text())["checks"][0]["ok"] is False
+
+
+def test_budgets_file_adds_checks(project, capsys):
+    with open(project / "pyproject.toml", "a") as f:
+        f.write('budgets = "bench/budgets.toml"\n')
+    (project / "bench").mkdir()
+    (project / "bench" / "budgets.toml").write_text("[cli_demo]\np95_ms = 0.001\n")
+    assert main(["check", "cli_demo"]) == 1
+    assert "p95_ms" in capsys.readouterr().err
+    (project / "bench" / "budgets.toml").write_text("[no_such_scenario]\np95_ms = 1\n")
+    assert main(["check", "cli_demo"]) == 2
+    assert "no_such_scenario" in capsys.readouterr().err
+
+
+def test_run_all_runs_every_scenario(project, capsys):
+    assert main(["run", "--all", "--smoke", "--size", "64x48", "--json"]) == 1  # cli_broken fails
+    out = json.loads(capsys.readouterr().out)
+    names = [o["scenario"] for o in out]
+    assert names == [n for n in ["cli_demo", "cli_tight", "cli_broken", "cli_fails_on"] if n in names] and len(names) >= 4
+
+
+def test_run_needs_a_scenario_or_all(project, capsys):
+    assert main(["run"]) == 2
+    assert "--all" in capsys.readouterr().err

@@ -17,6 +17,8 @@ key: `frames_p95_ms`, `counters_draws` (its mean), `streamer_settled_s`, `system
 
 from __future__ import annotations
 
+import tomllib
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -165,3 +167,18 @@ def check_name(fn: Callable | None, budgets: dict) -> str:
     """A check is named after its budgets, or after its function."""
     return ", ".join(budgets) if budgets else getattr(fn, "__name__", "check")
 
+
+
+def read_budgets(path: Path) -> dict[str, list[Check]]:
+    """A budgets file: one TOML table per scenario; its keys are budgets, besides `phase` and `on`."""
+    data = tomllib.loads(Path(path).read_text())
+    out = {}
+    for scenario, table in data.items():
+        if not isinstance(table, dict):
+            raise ValueError(f"{path}: {scenario} must be a table, as [{scenario}]")
+        budgets = {k: v for k, v in table.items() if k not in ("phase", "on")}
+        bad = [k for k, v in budgets.items() if not _number(v)]
+        if bad:
+            raise ValueError(f"{path}: [{scenario}] {', '.join(bad)} must be numbers")
+        out[scenario] = [Check(check_name(None, budgets), budgets, None, table.get("phase"), table.get("on"))]
+    return out
