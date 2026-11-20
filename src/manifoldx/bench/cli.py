@@ -131,6 +131,12 @@ def _parser():
     s.add_argument("--probe", choices=sorted([*PHASE_PROBES, *RUN_PROBES]), help="print only this probe")
     s.add_argument("--phase", help="only this phase (with --probe)")
     s.add_argument("--json", action="store_true")
+    cmp = sub.add_parser("compare", help="compare runs, sides or a set: a Markdown table and contact sheets")
+    cmp.add_argument("paths", nargs="+", type=Path, help="run folders, side folders or a set folder; the first "
+                     "side is the baseline")
+    cmp.add_argument("--out", type=Path, help="where compare.md and sheets/ go (default: the set folder, or a "
+                     "new folder beside the first path)")
+    cmp.add_argument("--json", action="store_true")
     c = sub.add_parser("clean", help="remove the environments --against and --manifoldx keep")
     c.add_argument("--json", action="store_true")
     m = sub.add_parser("micro", help="time micro cases")
@@ -147,7 +153,8 @@ def _parser():
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        return {"list": _list, "run": _run, "show": _show, "micro": _micro, "clean": _clean}[args.cmd](args)
+        return {"list": _list, "run": _run, "show": _show, "micro": _micro, "clean": _clean,
+                "compare": _compare}[args.cmd](args)
     except ConfigError as e:
         print(f"manifoldx bench: {e}", file=sys.stderr)
         return 2
@@ -283,12 +290,23 @@ def _run_set(args, config: Config, combos: list[dict]) -> int:
     except envs.UvMissing as e:
         raise ConfigError(str(e)) from None
     out = {"set": result.folder.name, **{k: v for k, v in result.data.items() if k != "scenario"}}
+    from manifoldx.bench import compare
+
+    sides = compare.load_sides([result.folder])
+    done = sum(1 for s in sides if s.runs) >= 2
+    cmp = compare.write(sides, result.folder) if done else None
     if args.json:
-        print(json.dumps(out, indent=1))
+        print(json.dumps({**out, **({"table": cmp["table"], "rows": cmp["rows"], "sheets": cmp["sheets"]}
+                                    if cmp else {})}, indent=1))
     else:
         for e in result.data["runs"]:
-            side = result.data["sides"][e["side"]]["label"]
-            print(f"{side:<24} round {e['round'] + 1}  {e['folder'] or '-'}  {e['error'] or 'ok'}")
+            if e["error"] or e["exit"]:
+                side = result.data["sides"][e["side"]]["label"]
+                print(f"{side}, round {e['round'] + 1}: {e['error'] or 'exit ' + str(e['exit'])}")
+        if cmp:
+            print(cmp["table"])
+            for name, path in cmp["sheets"].items():
+                print(f"sheet {name}: {path}")
         print(f"set folder: {result.folder}")
     return 1 if result.failed else 0
 
@@ -363,6 +381,36 @@ def _show(args) -> int:
         print(json.dumps(summary, indent=1))
     else:
         _table(summary, folder)
+    return 0
+
+
+def _compare(args) -> int:
+    import secrets
+    from datetime import UTC, datetime
+
+    from manifoldx.bench import compare
+
+    try:
+        sides = compare.load_sides(args.paths)
+    except (OSError, ValueError) as e:
+        raise ConfigError(str(e)) from None
+    if len(sides) < 2:
+        raise ConfigError("compare needs two sides or more: two run folders, or a set folder with two sides")
+    out = args.out
+    if out is None:
+        if len(args.paths) == 1:
+            out = args.paths[0]
+        else:
+            stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
+            out = args.paths[0].resolve().parent / f"{stamp}-compare-{secrets.token_hex(2)}"
+    cmp = compare.write(sides, out)
+    if args.json:
+        print(json.dumps(cmp, indent=1))
+    else:
+        print(cmp["table"])
+        for name, path in cmp["sheets"].items():
+            print(f"sheet {name}: {path}", file=sys.stderr)
+        print(f"written to {cmp['folder']}", file=sys.stderr)
     return 0
 
 
