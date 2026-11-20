@@ -405,8 +405,12 @@ def covering(s, cell):
 def test_each_level_shows_as_soon_as_it_is_whole():
     s = faked(3)
     s.in_flight = 1000  # the level-0 builds held back below take no room from the coarser ones
+    for _ in range(12):  # from high up the root is the view
+        s.focus(100.0, 100.0, 1e4)
+        s._pool.finish()
+    assert s.drawn() == {(3, 0, 0)}
     seen = []
-    for _ in range(12):  # every build but the cells lands
+    for _ in range(12):  # zoom in: every build but the cells lands
         s.focus(100.0, 100.0, 1.0)
         s._pool.finish(keep=lambda n: n[0] == 0)
         lv = covering(s, (0, 0))
@@ -418,6 +422,18 @@ def test_each_level_shows_as_soon_as_it_is_whole():
         s.focus(100.0, 100.0, 1.0)
         s._pool.finish()
     assert covering(s, (0, 0)) == [0] and s.drawn() == set(s._selected) and s._quiet
+    s.close()
+
+
+def test_a_bare_spot_asks_for_the_level_above_its_nodes_not_the_root():
+    s = faked(3)
+    s.in_flight = 1000
+    s.focus(100.0, 100.0, 1.0)  # nothing drawn yet, as after a teleport
+    asked = set(s._pool.jobs)
+    assert (3, 0, 0) not in asked and (1, 0, 0) in asked and (0, 0, 0) in asked
+    s._pool.finish(keep=lambda n: n[0] == 0)
+    s.focus(100.0, 100.0, 1.0)
+    assert covering(s, (0, 0)) == [1]  # the first thing under the camera is one level above its cells
     s.close()
 
 

@@ -661,7 +661,8 @@ class QuadStreamer(_Uploads):
         A selected node is drawn once it is built and on the GPU; till then the nodes drawn under it stay.
         Above them, a node is drawn in place of its children until every one of them is covered, so each
         level shows as soon as it is whole, and its children are the ones to build next. A spot nothing
-        covers yet asks for the root, and the levels below it come one at a time."""
+        covers yet asks for the parents of its picked nodes, not the root: after a teleport the first
+        detail comes in one build, and no node drawn is much larger than the view."""
         sel = self._selected
         inner = set()  # the ancestors of the selected nodes
         for n in selected:
@@ -703,14 +704,15 @@ class QuadStreamer(_Uploads):
                 wanted.extend(k for k in short if k in inner and not ready(k))
                 parked.extend(parts)
                 return [n], True
+            if (not parts and any(k in sel for k in self._children(n))
+                    and not any(u in self._drawn for u in self._ancestors(n))):
+                wanted.append(n)  # nothing drawn here: the level just above the picked nodes shows first
             return parts, False
 
         show = set()
         if selected:
             root = (self.levels, 0, 0)
-            parts, whole = cover(root)
-            if not whole and root not in sel and not ready(root):
-                wanted.append(root)
+            parts, _ = cover(root)
             show.update(parts)
         if wanted:
             cam = self.engine.camera
