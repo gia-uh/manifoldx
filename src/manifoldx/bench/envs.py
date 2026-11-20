@@ -61,3 +61,44 @@ def command(side) -> tuple[list[str], dict, Path]:
         # uv keeps a directory's build until its pyproject.toml changes: editable sees every edit.
         argv += ["--with-editable" if Path(side.manifoldx).is_dir() else "--with", side.manifoldx]
     return [*argv, "manifoldx"], env, side.root
+
+
+def cap_mb() -> float:
+    """The cache's cap: $MANIFOLDX_BENCH_CACHE_GB, 2 GB by default."""
+    return 1024.0 * float(os.environ.get("MANIFOLDX_BENCH_CACHE_GB", 2))
+
+
+def size_mb(path=None) -> float:
+    """What a folder holds, the cache by default, in MB."""
+    from manifoldx.bench.probes import folder_mb
+
+    path = cache_dir() if path is None else Path(path)
+    return folder_mb(path) if path.exists() else 0.0
+
+
+def trim(cap: float | None = None, keep: set | frozenset = frozenset()) -> list[str]:
+    """Drop the least recently used environments until the cache is under its cap; never one in `keep`."""
+    root = cache_dir()
+    if not root.exists():
+        return []
+    cap = cap_mb() if cap is None else cap
+    homes = sorted((d for d in root.iterdir() if d.is_dir()),
+                   key=lambda d: (d / "used").stat().st_mtime if (d / "used").exists() else 0.0)
+    sizes = {d.name: size_mb(d) for d in homes}
+    total, dropped = sum(sizes.values()), []
+    for d in homes:
+        if total <= cap:
+            break
+        if d.name in keep:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        total -= sizes[d.name]
+        dropped.append(d.name)
+    return dropped
+
+
+def clean() -> float:
+    """Remove the whole cache; return the MB it held."""
+    held = size_mb()
+    shutil.rmtree(cache_dir(), ignore_errors=True)
+    return held

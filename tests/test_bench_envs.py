@@ -112,3 +112,48 @@ def test_the_key_depends_on_project_and_spec(tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
     assert envs.key(a, None) != envs.key(b, None) != envs.key(b, "x")
     assert envs.key(a, "x") == envs.key(tmp_path / "a" / ".." / "a", "x")
+
+
+# --- the cache -----------------------------------------------------------------------------------
+
+
+def _env(cache, name, kb, used):
+    d = cache / name
+    (d / "venv").mkdir(parents=True)
+    (d / "venv" / "blob").write_bytes(b"\0" * kb * 1024)
+    (d / "used").write_text("")
+    os.utime(d / "used", (used, used))
+
+
+def test_the_cache_drops_the_oldest_past_its_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANIFOLDX_BENCH_CACHE", str(tmp_path))
+    for name, used in (("old", 1), ("mid", 2), ("new", 3)):
+        _env(tmp_path, name, 400, used)
+    dropped = envs.trim(cap=0.9, keep={"new"})
+    assert dropped == ["old"] and sorted(p.name for p in tmp_path.iterdir()) == ["mid", "new"]
+
+
+def test_the_cache_never_drops_what_this_run_uses(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANIFOLDX_BENCH_CACHE", str(tmp_path))
+    _env(tmp_path, "only", 2048, 1)
+    assert envs.trim(cap=1, keep={"only"}) == []
+
+
+def test_the_cap_comes_from_the_environment(monkeypatch):
+    monkeypatch.setenv("MANIFOLDX_BENCH_CACHE_GB", "0.5")
+    assert envs.cap_mb() == 512
+
+
+def test_clean_empties_the_cache(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MANIFOLDX_BENCH_CACHE", str(tmp_path / "c"))
+    _env(tmp_path / "c", "a", 512, 1)
+    assert main(["clean"]) == 0
+    assert not (tmp_path / "c").exists() and "0.5 MB" in capsys.readouterr().out
+    assert main(["clean"]) == 0  # nothing left: still fine
+
+
+def test_a_set_says_how_much_the_cache_grew(project, fake_uv, tmp_path, capsys):  # noqa: F811
+    other = _other(project, tmp_path)
+    assert main(["run", "cli_demo", "--against", str(other), "--smoke", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["cache_added_mb"] >= 0 and "cache_mb" in out

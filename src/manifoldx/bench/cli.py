@@ -131,6 +131,8 @@ def _parser():
     s.add_argument("--probe", choices=sorted([*PHASE_PROBES, *RUN_PROBES]), help="print only this probe")
     s.add_argument("--phase", help="only this phase (with --probe)")
     s.add_argument("--json", action="store_true")
+    c = sub.add_parser("clean", help="remove the environments --against and --manifoldx keep")
+    c.add_argument("--json", action="store_true")
     m = sub.add_parser("micro", help="time micro cases")
     m.add_argument("modules", nargs="*", help="modules of @bench.case functions (default: the config's micro)")
     m.add_argument("--case", action="append")
@@ -145,7 +147,7 @@ def _parser():
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        return {"list": _list, "run": _run, "show": _show, "micro": _micro}[args.cmd](args)
+        return {"list": _list, "run": _run, "show": _show, "micro": _micro, "clean": _clean}[args.cmd](args)
     except ConfigError as e:
         print(f"manifoldx bench: {e}", file=sys.stderr)
         return 2
@@ -280,7 +282,7 @@ def _run_set(args, config: Config, combos: list[dict]) -> int:
         result = run_set(scenario, sides, args.repeat, run_args, config.runs)
     except envs.UvMissing as e:
         raise ConfigError(str(e)) from None
-    out = {"set": result.folder.name, "sides": result.data["sides"], "runs": result.data["runs"]}
+    out = {"set": result.folder.name, **{k: v for k, v in result.data.items() if k != "scenario"}}
     if args.json:
         print(json.dumps(out, indent=1))
     else:
@@ -361,6 +363,15 @@ def _show(args) -> int:
         print(json.dumps(summary, indent=1))
     else:
         _table(summary, folder)
+    return 0
+
+
+def _clean(args) -> int:
+    from manifoldx.bench import envs
+
+    where = envs.cache_dir()
+    mb = envs.clean()
+    print(json.dumps({"removed": str(where), "mb": round(mb, 1)}) if args.json else f"removed {where}: {mb:.1f} MB")
     return 0
 
 

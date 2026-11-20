@@ -64,6 +64,8 @@ def run_set(scenario: str, sides: list[Side], repeat: int, run_args: list[str], 
     data = {"scenario": scenario, "repeat": repeat,
             "sides": [{**asdict(s), "root": str(s.root)} for s in sides], "runs": []}
     plan = order(len(sides), repeat)
+    uses_uv = any(s.other or s.manifoldx for s in sides)
+    before = envs.size_mb() if uses_uv else 0.0
     for n, (k, r) in enumerate(plan, 1):
         side = sides[k]
         print(f"== side {k + 1}/{len(sides)} {side.label}, round {r + 1}/{repeat} ({n}/{len(plan)}) ==",
@@ -86,6 +88,16 @@ def run_set(scenario: str, sides: list[Side], repeat: int, run_args: list[str], 
             shutil.move(str(made), dest / made.name)
             entry["folder"] = f"{dest.name}/{made.name}"
         data["runs"].append(entry)
+        (folder / "set.json").write_text(json.dumps(data, indent=1))
+    if uses_uv:
+        dropped = envs.trim(keep={envs.key(s.root, s.manifoldx) for s in sides if s.other or s.manifoldx})
+        if dropped:
+            print(f"bench: the environment cache passed its cap; dropped {len(dropped)} unused",
+                  file=sys.stderr)
+        data["cache_mb"] = round(envs.size_mb(), 1)
+        data["cache_added_mb"] = round(max(0.0, data["cache_mb"] - before), 1)
+        print(f"bench: environments under {envs.cache_dir()}: +{data['cache_added_mb']} MB, "
+              f"{data['cache_mb']} MB in all (manifoldx bench clean empties it)", file=sys.stderr)
         (folder / "set.json").write_text(json.dumps(data, indent=1))
     failed = any(e["exit"] != 0 or e["error"] for e in data["runs"])
     return SetResult(folder, failed, data)
