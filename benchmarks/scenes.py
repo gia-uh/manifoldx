@@ -95,6 +95,22 @@ def unique_meshes(n: int):
     return engine
 
 
+def unique_materials(n: int):
+    """n entities, each with its own geometry and its own vertex-coloured material: one batch and one material
+    each, like a traffic of n vehicle looks."""
+    from manifoldx.components import Material, Mesh, Transform
+    from manifoldx.resources import StandardMaterial, cube
+
+    engine = headless_engine(n)
+    engine.camera.fit(60)
+    for p in _positions(n):
+        geo = cube(0.5, 0.5, 0.5)
+        geo["colors"] = np.ones((len(geo["positions"]), 3), np.float32)
+        mat = StandardMaterial("#ffffff", roughness=0.6, vertex_colors=True)
+        engine.spawn(Mesh(geo), Material(mat), Transform(pos=tuple(p)), n=1)
+    return engine
+
+
 def skinned(n: int):
     """n entities of one skinned cube (every vertex on joint 0); returns (engine, first handle)."""
     from manifoldx.components import Material, Mesh, Transform
