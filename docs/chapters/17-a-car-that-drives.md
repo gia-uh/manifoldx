@@ -60,7 +60,7 @@ print("loads, N:", np.round(fleet.load[0]).tolist())
 Each tyre turns its slip into force with the magic formula, `magic`: the force grows with the slip, peaks and
 falls to about 80 % when the tyre slides. `forces` measures the slip ratio and the slip angle in their own
 peaks and shares one curve between them, so a wheel that brakes hard grips less sideways and a locked wheel slides
-along its slide. Each wheel spins with its own inertia: the throttle can spin it and the brake can lock it.
+along its slide. Each wheel spins with its own inertia: the throttle can spin it and the brake can lock it. The automatic shifts up early under a light pedal and late with it down, and the engine brakes only with the pedal released.
 
 ## Driving, with and without help
 

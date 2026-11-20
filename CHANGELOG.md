@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `manifoldx.vehicles`: a light pedal no longer keeps the automatic in first. The shift-up point rises with the pedal squared, from 0.4 of the power peak's rpm to 0.9 with the pedal down (`powertrain.up_rpm`), and the engine brakes only with the pedal under 0.1. Before, a mid-size car at 40 % pedal topped out at 45 km/h in first and at 10 % did not move off; now it reaches 69 km/h in fourth and 21 km/h in second.
 - Per-vertex colours are sRGB, the same convention as a material's `color=`, and the renderer, glTF writer and path tracer decode them to linear light on the way in: a `#c62828` box drawn with `Mesh.with_colors(..., vertex_colors=True)` now matches the same hex as `color=` instead of rendering pale (#292).
 - Interactive `dt` is smoothed (#299): systems in `run()` get a running mean of the recent frame intervals, kept in step with the wall clock (`manifoldx.frame_clock`), instead of the raw start-to-start interval, which under vsync disagrees with the time each image stays on screen and made motion judder. An interval over four times the mean passes through as it is. `Engine(smooth_dt=False)` restores the raw interval; `engine.elapsed` stays on the wall clock.
 - A derived `grille` (`grille=None`) is fitted to the nose's end cap instead of using 94% of the body's half-width: a full-width unit on a narrow nose no longer runs off the face, where the decal was dropped or `_decals` raised "grille misses the front face" (#294).
