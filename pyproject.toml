@@ -67,6 +67,12 @@ docs = [
     "scriptorium",
 ]
 
+[tool.manifoldx.bench]
+scenarios = "benchmarks.scenarios"
+micro = ["benchmarks.suites.frame", "benchmarks.suites.ecs", "benchmarks.suites.compute", "benchmarks.suites.skinning",
+         "benchmarks.suites.modeling", "benchmarks.suites.loaders", "benchmarks.suites.trace", "benchmarks.suites.startup",
+         "benchmarks.suites.streaming", "benchmarks.suites.vehicles", "benchmarks.suites.web"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
