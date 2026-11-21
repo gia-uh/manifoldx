@@ -238,6 +238,36 @@ program the walls are four boxes, so the water sits inside them. The reflection 
 the water is the shader's own sky tint, not the environment map that comes next;
 water has no roughness parameter to blur an environment with.
 
+## Open sea
+
+A basin is small enough to be still. A sea reaching the horizon is not: the
+wind ripples it, it shows more sky the lower you look at it, and a low sun
+draws a road of sparks across it. `SeaMaterial` is that water. It takes the
+sky's colour overhead and at the horizon, which an app changes as its day goes
+by, and its ripples move with the engine's clock. Paired with the post sky,
+`Sky`, which draws a gradient and a sun far brighter than white behind
+everything, the sun and its reflection glow together.
+
+```python {run}
+import manifoldx as mx
+from PIL import Image
+
+from manifoldx.components import Material, Mesh, Transform
+from manifoldx.post import Bloom, Sky
+from manifoldx.resources import DirectionalLight, SeaMaterial, plane
+
+zenith, horizon = (0.12, 0.22, 0.55), (0.95, 0.55, 0.35)
+sea = mx.Engine("sea", width=480, height=270)
+sea.camera.far = 20000.0
+sea.background_color = horizon
+sea.set_sun(DirectionalLight(color="#ffb070", intensity=1.5, direction=(0.0, -0.08, 1.0)))
+sea.spawn(Mesh(plane(20000, 20000)), Material(SeaMaterial(zenith=zenith, horizon=horizon)),
+          Transform(pos=(0, 0, 0), rot=(-0.7071068, 0.0, 0.0, 0.7071068)))
+sea.camera.set_pose(position=(0.0, 4.0, 0.0), target=(0.0, 3.0, -100.0))
+sea.set_post(sky=Sky(zenith=zenith, horizon=horizon), bloom=Bloom(), fxaa=True)
+Image.fromarray(sea.render_frame())
+```
+
 ## Reflections from an environment
 
 A polished surface needs to know what surrounds it. Image-based lighting (IBL)

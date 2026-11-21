@@ -133,3 +133,40 @@ def test_gpu_timings_carry_the_post_passes():
     if t is None:
         pytest.skip("no timestamp queries on this adapter")
     assert t["post"] >= 0
+
+
+def _sea(name, sky=False):
+    from manifoldx.post import Sky
+    from manifoldx.resources import SeaMaterial
+
+    zenith, horizon = (0.12, 0.22, 0.55), (0.95, 0.55, 0.35)
+    eng = _make_offscreen_engine(name, w=160, h=90)
+    eng.camera.far = 20000.0
+    eng.background_color = horizon
+    eng.set_sun(DirectionalLight(color="#ffb070", intensity=1.5, direction=(0.0, -0.08, 1.0)))
+    eng.spawn(Mesh(plane(20000, 20000)), Material(SeaMaterial(zenith=zenith, horizon=horizon)),
+              Transform(pos=(0, 0, 0), rot=_FLOOR_ROT))
+    eng.camera.position = (0.0, 4.0, 0.0)
+    eng.camera.target = (0.0, 3.0, -100.0)
+    if sky:
+        eng.set_post(sky=Sky(zenith=zenith, horizon=horizon))
+    return eng
+
+
+def test_the_sea_glitters_toward_the_sun():
+    sea = _lum(_render_array(_sea("post-sea")))
+    below = sea[60:, :]  # water under the horizon
+    path, side = below[:, 75:85].mean(), below[:, :20].mean()
+    assert path > side + 30  # the road of sparks toward the sun
+
+
+def test_the_sky_draws_a_gradient_and_the_sun():
+    eng = _sea("post-sky", sky=True)
+    img = _lum(_render_array(eng))
+    from manifoldx.post import sun_on_screen
+
+    u, v, vis = sun_on_screen(eng.camera, 160 / 90, eng._sun)
+    assert vis > 0.5
+    sx, sy = int(u * 160), int(v * 90)
+    assert img[sy, sx] > 240  # the disk
+    assert abs(img[2, 5] - img[sy - 2, 5]) > 10  # zenith and horizon differ
