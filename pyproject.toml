@@ -34,7 +34,8 @@ offline = [
 ]
 viz = ["pillow>=10.0"]
 svg = ["thorvg-python>=1.1.3"]
-all = ["manifold-gfx[desktop,offline,viz,svg]"]
+audio = ["sounddevice>=0.5"]
+all = ["manifold-gfx[desktop,offline,viz,svg,audio]"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/manifoldx"]
@@ -71,7 +72,8 @@ docs = [
 scenarios = "benchmarks.scenarios"
 micro = ["benchmarks.suites.frame", "benchmarks.suites.ecs", "benchmarks.suites.compute", "benchmarks.suites.skinning",
          "benchmarks.suites.modeling", "benchmarks.suites.loaders", "benchmarks.suites.trace", "benchmarks.suites.startup",
-         "benchmarks.suites.streaming", "benchmarks.suites.vehicles", "benchmarks.suites.web"]
+         "benchmarks.suites.streaming", "benchmarks.suites.vehicles", "benchmarks.suites.web",
+         "benchmarks.suites.audio"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "benchmarks/scenarios.py"]
