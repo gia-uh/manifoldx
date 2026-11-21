@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 
-PASSES = ("views", "shadow", "main")
+PASSES = ("views", "shadow", "main", "post")
 EVERY = 8  # frames between two measured ones
 LATE = 2  # frames after a measured frame before its timestamps are read
 

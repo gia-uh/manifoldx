@@ -581,6 +581,8 @@ class Engine:
         # Directional sun (separate from the point-light array). Consumed by
         # StandardMaterial as a directional term; also a shadow caster.
         self._sun = None
+        self._post = None  # manifoldx.post.Post, set by set_post
+        self._post_passes = None
         # Spot light (flashlight): cone + distance falloff, and a shadow caster.
         self._spot = None
         # Floating origin (x, z), float64: entities, camera and lights are stored
@@ -1069,6 +1071,16 @@ class Engine:
         for it; enable_shadows() makes it cast a shadow.
         """
         self._sun = light
+
+    def set_post(self, **effects):
+        """Turn screen-space effects on or off after the main pass (manifoldx.post): ssao, bloom, shafts
+        (light shafts from the sun), grade (a colour grade) and fxaa. Each takes its settings
+        (`ssao=SSAO(radius=2)`), True for its defaults, or None/False to turn it off; effects not named
+        keep their state. All off draws the frame as before. Returns the Post now in force."""
+        from manifoldx.post import Post
+
+        self._post = (self._post or Post()).changed(**effects)
+        return self._post
 
     @_deferred.deferred_in_pipeline
     def set_spot(self, light):
@@ -1750,10 +1762,20 @@ class Engine:
             self._depth_texture = self._device.create_texture(
                 size=(tex_size[0], tex_size[1], 1),
                 format=wgpu.TextureFormat.depth32float,
-                usage=wgpu.TextureUsage.RENDER_ATTACHMENT,
+                usage=wgpu.TextureUsage.RENDER_ATTACHMENT | wgpu.TextureUsage.TEXTURE_BINDING,  # post reads it
             )
             self._depth_texture_view = self._depth_texture.create_view()
             self._depth_texture_size = tex_size
+
+        post = self._post if self._post is not None and self._post.active() else None
+        scene_view = texture_view
+        if post is not None:
+            from manifoldx.post import PostPasses
+
+            if self._post_passes is None or self._post_passes.fmt != self._texture_format:
+                self._post_passes = PostPasses(self._device, self._texture_format)
+            self._post_passes.resize(tex_size)
+            scene_view = self._post_passes.scene
 
         # Second cameras first: each view is its own submit, so its globals and
         # instance uploads land before the main pass overwrites them.
@@ -1772,7 +1794,7 @@ class Engine:
             timestamp_writes=None if timer is None else timer.writes("main"),
             color_attachments=[
                 {
-                    "view": texture_view,
+                    "view": scene_view,
                     "resolve_target": None,
                     "clear_value": (*self.background_color, 1.0),
                     "load_op": wgpu.LoadOp.clear,
@@ -1788,10 +1810,22 @@ class Engine:
         )
 
         # Issue draw calls via render pipeline
-        self._render_pipeline.render(self, render_pass)
+        self._render_pipeline.render(self, render_pass, gui=post is None)
 
         # End render pass
         render_pass.end()
+
+        if post is not None:  # the effects into the swapchain, then the GUI over them
+            self._post_passes.run(post, command_encoder, texture_view, self._depth_texture_view, self._camera,
+                                  self._sun, timer)
+            gui_pass = command_encoder.begin_render_pass(
+                color_attachments=[{"view": texture_view, "resolve_target": None, "load_op": wgpu.LoadOp.load,
+                                    "store_op": wgpu.StoreOp.store}],
+                depth_stencil_attachment={"view": self._depth_texture_view, "depth_load_op": wgpu.LoadOp.load,
+                                          "depth_store_op": wgpu.StoreOp.store},
+            )
+            self._render_pipeline.render_gui(self, gui_pass)
+            gui_pass.end()
 
         if timer is not None:
             timer.resolve(command_encoder)
@@ -2090,6 +2124,7 @@ class Engine:
         others = np.setdiff1d(alive, meshes)
         saved_mats = mats[alive].copy()
         saved_view = (self.background_color, self._environment, self.fog_enabled, self.gui)
+        saved_post, self._post = self._post, None  # labels must reach the read-back exact
         try:
             mats[meshes, 0] = self._material_registry.register(self._flat_for_label(0))
             for label, indices in enumerate(groups, start=1):
@@ -2107,6 +2142,7 @@ class Engine:
             mats[alive] = saved_mats
             self.store._alive[others] = True
             self.background_color, self._environment, self.fog_enabled, self.gui = saved_view
+            self._post = saved_post
         return rgb[..., 0] | (rgb[..., 1] << 8) | (rgb[..., 2] << 16)
 
     def _pump_aio_loop(self) -> None:
