@@ -41,6 +41,53 @@ def quad_zoom(engine, p):
     ]
 
 
+_BUILD_S = [0.0]  # what quad_arrive's node build sleeps, as a real build takes that long
+
+
+def _slow_node(L, a, b):
+    from examples.quad_streaming import build_node
+
+    time.sleep(_BUILD_S[0])
+    return build_node(L, a, b)
+
+
+@bench.scenario("quad_arrive", params={"build_ms": 20.0, "builders": 2}, sizes={"smoke": 20, "full": None})
+def quad_arrive(engine, p):
+    """The quad streaming plain at street height, looking along it, each node costing build_ms to build:
+    `near_s` is how long after the camera arrives every node it draws within two cells of it is drawn."""
+    from manifoldx.streaming import QuadStreamer
+
+    from examples.quad_streaming import CELL, LEVELS
+
+    _BUILD_S[0] = p.build_ms / 1000.0
+    engine.camera.near, engine.camera.far = 0.5, 30000.0
+    streamer = QuadStreamer(engine, CELL, (0, 0), LEVELS, lambda L, a, b: True, _slow_node,
+                            error=lambda L: CELL * 2**L / 16, builders=int(p.builders))
+    radius = 2 * CELL
+    at = {"t0": None, "near_s": None}
+
+    @engine.system
+    def follow(query, dt):
+        ox, oz = engine.origin
+        x, y, z = (float(v) for v in engine.camera.position)
+        streamer.focus(x + ox, z + oz, y)
+        if at["t0"] is None:
+            if abs(x + ox - AT[0]) + abs(z + oz - AT[1]) > 1.0:
+                return  # the frames before the camera step put it there
+            at["t0"] = time.perf_counter()
+        near = [n for n in streamer._selected if streamer._distance(n, x + ox, z + oz, 0.0) <= radius]
+        if at["near_s"] is None and near and all(n in streamer.drawn() for n in near):
+            at["near_s"] = time.perf_counter() - at["t0"]
+        if at["near_s"] is not None:
+            bench.metric("near_s", round(at["near_s"], 3))
+
+    return streamer, [
+        bench.camera((AT[0], 2.0, AT[1]), (AT[0] + 400.0, 1.0, AT[1])),
+        bench.mark("arrive"),
+        bench.hold(until=bench.settled(streamer), max_s=120),
+    ]
+
+
 @bench.scenario("meshes_spin", params={"n": 22_000, "system_ms": 4.0}, sizes={"smoke": 20, "full": None})
 def meshes_spin(engine, p):
     """n cubes and a system that busies the CPU for system_ms: what --loop pipelined overlaps."""
