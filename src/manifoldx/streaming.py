@@ -320,7 +320,7 @@ class _Uploads:
     def _take_layer(self, cell) -> int:
         """A free layer of the baked array holding cell's image, or -1: no image, or every layer taken (the
         node then draws its vertices' own colours)."""
-        if self._baked is None or cell.levels is None:
+        if cell.levels is None or not self._baking():
             return -1
         if not self._free_layers:
             self._stats["unbaked"] += 1
@@ -331,6 +331,10 @@ class _Uploads:
         write_layer(self.engine, self._baked, layer, cell.levels)
         self._stats["baked"] += 1
         return layer
+
+    def _baking(self) -> bool:
+        """Whether drawn nodes get layers: a baked material, and a device to write them on."""
+        return self._baked is not None and self.engine._device is not None
 
     def _destroy(self, handle):
         """Destroy a drawn node's entity, keeping its geometry, and give its layer back."""

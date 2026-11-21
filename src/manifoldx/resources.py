@@ -1414,29 +1414,31 @@ def baked_shader(source: str) -> str:
             "    let bk_dx = dpdx(in.vcolor.xy);\n    let bk_dy = dpdy(in.vcolor.xy);\n",
             1,
         )
-        .replace(
-            "    let vertex_albedo = surface_albedo(",
-            "    let vertex_albedo_s = surface_albedo(",
-            1,
-        )
-        .replace(
-            "                                       i32(in.vcolor.w + 0.5), sp_proj, sp_fw);\n",
-            "                                       i32(in.vcolor.w + 0.5), sp_proj, sp_fw);\n"
-            f"    var vertex_albedo = vertex_albedo_s;\n"
-            f"    if (i32(in.vcolor.w + 0.5) == {SURFACE_BAKED}) {{\n"
-            "        if (in.layer >= 0.0) {\n"
-            "            vertex_albedo = textureSampleGrad(baked_tex, baked_sampler, in.vcolor.xy,\n"
-            "                                              i32(in.layer + 0.5), bk_dx, bk_dy).rgb * material.albedo;\n"
-            "        } else {\n"
-            "            vertex_albedo = baked_own(in.vcolor.z) * material.albedo;\n"
-            "        }\n"
-            "    }\n",
-            1,
-        )
+    )
+    # The last definition of vertex_albedo (a vertex colour with its surface pattern, or a facade over it)
+    # becomes vertex_albedo_s, and vertex_albedo is that or, on a SURFACE_BAKED vertex, the image.
+    at = out.rfind("    let vertex_albedo = ")
+    end = out.index(";\n", at) + 2 if at >= 0 else -1
+    if at < 0:
+        raise ValueError("baked needs a vertex-colour StandardMaterial shader")
+    out = (
+        out[:at] + out[at:end].replace("let vertex_albedo =", "let vertex_albedo_s =", 1)
+        + "    var vertex_albedo = vertex_albedo_s;\n"
+        f"    if (i32(in.vcolor.w + 0.5) == {SURFACE_BAKED}) {{\n"
+        "        if (in.layer >= 0.0) {\n"
+        "            vertex_albedo = textureSampleGrad(baked_tex, baked_sampler, in.vcolor.xy,\n"
+        "                                              i32(in.layer + 0.5), bk_dx, bk_dy).rgb * material.albedo;\n"
+        "        } else {\n"
+        "            vertex_albedo = baked_own(in.vcolor.z) * material.albedo;\n"
+        "        }\n"
+        "    }\n"
+        + out[end:]
     )
     if "vertex_albedo_s" not in out or "baked_tex" not in out:
         raise ValueError("baked needs a vertex-colour StandardMaterial shader")
     return out
+
+
 DETAIL_GROUND = 11  # surface id of bare ground and grass, likewise
 
 # Procedural detail (StandardMaterial with detail=True): value noise over the world's (x, z), a few octaves
@@ -1851,7 +1853,9 @@ class StandardMaterial(Material):
 
     def get_texture_bindings(self):
         if self.baked is not None:
-            return {BAKED_BINDING: self.baked}
+            from manifoldx.textures import ready
+
+            return {BAKED_BINDING: ready(self.baked)}
         if self.albedo_map is None:
             return {}
         return {4: self.albedo_map}

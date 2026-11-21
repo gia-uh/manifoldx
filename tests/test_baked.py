@@ -80,13 +80,17 @@ def _colours(canvas):
     return f[32, 16], f[32, 48]  # left and right of the square's middle row
 
 
+@pytest.mark.parametrize("facade", [False, True])
 @pytest.mark.parametrize("kw", [{}, {"detail": True}, {"faded": True}, {"detail": True, "faded": True}])
-def test_an_entity_draws_its_layer_and_without_one_its_own_colour(kw):
+def test_an_entity_draws_its_layer_and_without_one_its_own_colour(kw, facade):
     eng, canvas = _offscreen()
+    square = _square()
+    if facade:  # a building's mesh: its walls carry facade coordinates, its roof none
+        square["facade"] = np.zeros((4, 4), np.float32)
     arr = texture_array(eng, layers=2, size=16)
     write_layer(eng, arr, 1, layer_mips(_halves()))
     mat = StandardMaterial("#ffffff", roughness=1.0, vertex_colors=True, baked=arr, **kw)
-    h = eng.spawn(Mesh(_square()), Material(mat), Transform(), Baked(layer=1.0),
+    h = eng.spawn(Mesh(square), Material(mat), Transform(), Baked(layer=1.0),
                   *([Fade(value=1.0)] if kw.get("faded") else []))
     eng._draw_frame()
     left, right = _colours(canvas)
@@ -95,6 +99,27 @@ def test_an_entity_draws_its_layer_and_without_one_its_own_colour(kw):
     eng._draw_frame()
     left, right = _colours(canvas)
     assert left[1] > 3 * max(left[0], left[2]) and right[1] > 3 * max(right[0], right[2])  # its own green
+
+
+def test_an_array_asked_for_before_the_device_is_made_on_first_use():
+    try:
+        from manifoldx.backends import get_offscreen_canvas
+        canvas = get_offscreen_canvas(width=64, height=64)
+    except Exception as e:
+        pytest.skip(f"offscreen canvas unavailable: {e}")
+    eng = mx.Engine("t", width=64, height=64)
+    arr = texture_array(eng, layers=2, size=16)
+    assert arr.texture is None and arr.layers == 2
+    mat = StandardMaterial("#ffffff", roughness=1.0, vertex_colors=True, baked=arr)
+    eng._init_canvas(canvas)
+    eng._running = True
+    eng.camera.set_pose(position=(0.5, 0.5, 3), target=(0.5, 0.5, 0))
+    eng.camera.fov = 30
+    write_layer(eng, arr, 0, layer_mips(_halves()))
+    eng.spawn(Mesh(_square()), Material(mat), Transform(), Baked(layer=0.0))
+    eng._draw_frame()
+    left, right = _colours(canvas)
+    assert arr.texture is not None and left[0] > 3 * max(left[1], left[2])
 
 
 def test_other_surfaces_ignore_the_image():
@@ -121,6 +146,7 @@ def _node(L, a, b):
 def test_the_streamer_gives_each_drawn_node_with_an_image_a_layer_and_takes_it_back(monkeypatch):
     written = []
     monkeypatch.setattr("manifoldx.textures.write_layer", lambda eng, h, layer, levels: written.append(layer))
+    monkeypatch.setattr(QuadStreamer, "_baking", lambda self: True)  # no device here: write_layer is faked
     arr = SimpleNamespace(layers=1)
     mat = StandardMaterial("#ffffff", vertex_colors=True, faded=True, baked=arr)
     engine = mx.Engine("quad", width=64, height=600)
