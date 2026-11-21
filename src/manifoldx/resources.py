@@ -862,8 +862,19 @@ struct LightData {
 @group(1) @binding(2) var prefiltered_map: texture_cube<f32>;
 @group(1) @binding(3) var brdf_lut:        texture_2d<f32>;
 
-@group(2) @binding(0) var shadow_map:     texture_depth_2d;
+@group(2) @binding(0) var shadow_map:     texture_depth_2d_array;
 @group(2) @binding(1) var shadow_sampler: sampler_comparison;
+
+// The sun's cascades (renderer._sun_cascades); count <= 1 means one map, layer 0, globals.light_view_proj.
+struct Cascades {
+    light_view_proj: array<mat4x4<f32>, 4>,
+    splits:      vec4<f32>,  // view-space far distance of each cascade
+    texel:       vec4<f32>,  // world size of one texel of each cascade's map
+    depth_range: vec4<f32>,  // depth of each cascade's box, metres
+    count:       u32,
+    _pad0: u32, _pad1: u32, _pad2: u32,
+};
+@group(2) @binding(2) var<uniform> cascades: Cascades;
 
 const PI: f32 = 3.14159265359;
 
@@ -947,8 +958,60 @@ fn calculateSpot(N: vec3<f32>, V: vec3<f32>, worldPos: vec3<f32>, F0: vec3<f32>,
     return (kD * albedo / PI + specular) * radiance * max(dot(N, L), 0.0);
 }
 
+// PCF: average an (2r+1)x(2r+1) grid of comparisons in one layer for soft edges.
+// r == 0 collapses to a single hard-shadow tap. textureSampleCompareLevel
+// (explicit level, no derivatives) is legal in non-uniform control flow.
+fn shadowTaps(layer: i32, uv: vec2<f32>, ref_depth: f32) -> f32 {
+    let texel = 1.0 / globals.shadow_map_size;
+    let r = i32(globals.shadow_pcf_radius);
+    var sum = 0.0;
+    var count = 0.0;
+    for (var dy = -r; dy <= r; dy = dy + 1) {
+        for (var dx = -r; dx <= r; dx = dx + 1) {
+            let off = vec2<f32>(f32(dx), f32(dy)) * texel;
+            sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + off, layer, ref_depth);
+            count += 1.0;
+        }
+    }
+    return sum / count;
+}
+
+// One cascade's shadow: the point pushed off the surface by a texel and a depth bias of a texel,
+// both in that cascade's own size, so near and far cascades neither acne nor float.
+fn cascadeShadow(k: i32, world_pos: vec3<f32>, N: vec3<f32>, ndl: f32) -> f32 {
+    let texel = cascades.texel[k];
+    let p = world_pos + N * texel * (1.0 + (1.0 - ndl));
+    let lp = cascades.light_view_proj[k] * vec4<f32>(p, 1.0);
+    let uv = vec2<f32>(lp.x * 0.5 + 0.5, -lp.y * 0.5 + 0.5);
+    if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || lp.z > 1.0 || lp.z < 0.0 {
+        return 1.0;
+    }
+    let bias = texel / cascades.depth_range[k] * (1.0 + 2.0 * (1.0 - ndl));
+    return shadowTaps(k, uv, lp.z - bias);
+}
+
 fn shadowFactor(world_pos: vec3<f32>, N: vec3<f32>) -> f32 {
     if globals.shadow_enabled == 0u { return 1.0; }
+    if cascades.count > 1u {
+        let depth = -(globals.view * vec4<f32>(world_pos, 1.0)).z;
+        let n = i32(cascades.count);
+        if depth > cascades.splits[n - 1] { return 1.0; }
+        var k = 0;
+        while k < n - 1 && depth > cascades.splits[k] { k = k + 1; }
+        let ndl = max(dot(N, normalize(-globals.sun_direction)), 0.0);
+        var shade = cascadeShadow(k, world_pos, N, ndl);
+        // Over the far 10% of a cascade blend into the next, and the last one into no shadow.
+        var near_k = 0.0;
+        if k > 0 { near_k = cascades.splits[k - 1]; }
+        let blend = 0.1 * (cascades.splits[k] - near_k);
+        let t = clamp((depth - (cascades.splits[k] - blend)) / blend, 0.0, 1.0);
+        if t > 0.0 {
+            var next = 1.0;
+            if k < n - 1 { next = cascadeShadow(k + 1, world_pos, N, ndl); }
+            shade = mix(shade, next, t);
+        }
+        return shade;
+    }
     let lp = globals.light_view_proj * vec4<f32>(world_pos, 1.0);
     let ndc = lp.xyz / lp.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
@@ -963,25 +1026,11 @@ fn shadowFactor(world_pos: vec3<f32>, N: vec3<f32>) -> f32 {
     }
     let ndl = max(dot(N, Lc), 0.0);
     let bias = globals.shadow_bias * (1.0 + 4.0 * (1.0 - ndl));
-    // PCF: average an (2r+1)x(2r+1) grid of comparisons for soft edges.
-    // r == 0 collapses to a single hard-shadow tap. textureSampleCompareLevel
-    // (explicit level, no derivatives) is legal in non-uniform control flow.
-    let ref_depth = ndc.z - bias;
-    let texel = 1.0 / globals.shadow_map_size;
-    let r = i32(globals.shadow_pcf_radius);
-    var sum = 0.0;
-    var count = 0.0;
-    for (var dy = -r; dy <= r; dy = dy + 1) {
-        for (var dx = -r; dx <= r; dx = dx + 1) {
-            let off = vec2<f32>(f32(dx), f32(dy)) * texel;
-            sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + off, ref_depth);
-            count += 1.0;
-        }
-    }
+    let shade = shadowTaps(0, uv, ndc.z - bias);
     // Fade to unshadowed over the outer 15% of the map, so the edge of what it
     // covers never shows on screen as a line where the shadows stop.
     let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-    return mix(1.0, sum / count, smoothstep(0.0, 0.15, edge));
+    return mix(1.0, shade, smoothstep(0.0, 0.15, edge));
 }
 
 struct VertexInput {

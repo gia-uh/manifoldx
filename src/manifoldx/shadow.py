@@ -77,3 +77,38 @@ def compute_light_view_proj(direction, target, extent, near, far, back_distance=
     view = _look_at(eye, target, up=np.array([0.0, 1.0, 0.0]))
     proj = _ortho(extent, near, far)
     return (proj @ view).astype(np.float32)
+
+
+MAX_CASCADES = 4
+
+
+def cascade_splits(near, far, count, lam=0.75):
+    """The view-space far distance of each of `count` cascades from `near` to `far`: the practical
+    scheme, `lam` of the way from uniform to logarithmic splits."""
+    i = np.arange(1, count + 1, dtype=np.float64) / count
+    near = max(float(near), 1e-3)
+    return lam * near * (far / near) ** i + (1.0 - lam) * (near + (far - near) * i)
+
+
+def fit_cascade(inv_view, tan_half_fov, aspect, d0, d1, direction, resolution, reach):
+    """An ortho light view-projection around the bounding sphere of the camera's view slice from depth
+    `d0` to `d1`, its origin snapped to whole texels so shadows hold still while the camera moves.
+
+    The sphere depends only on the slice, not on where the camera looks, so the box keeps its size when
+    the camera turns. `reach` metres before the sphere toward the sun still cast into it. `inv_view` is
+    the camera's view-to-world matrix (column vectors). Returns (matrix (4, 4) float32, the world size of
+    a texel, the box's depth in metres)."""
+    a2 = tan_half_fov**2 * (1.0 + aspect**2)  # squared corner offset per metre of depth
+    c = min(0.5 * (d0 + d1) * (1.0 + a2), d1)  # where the near and far corners are equally far
+    r = float(np.sqrt(max((c - d0) ** 2 + a2 * d0**2, (d1 - c) ** 2 + a2 * d1**2)))
+    inv_view = np.asarray(inv_view, dtype=np.float64)
+    centre = inv_view[:3, :3] @ np.array([0.0, 0.0, -c]) + inv_view[:3, 3]
+    direction = np.asarray(direction, dtype=np.float64)
+    direction = direction / np.linalg.norm(direction)
+    basis = _look_at(np.zeros(3), direction, up=np.array([0.0, 1.0, 0.0]))[:2, :3]  # light right, up
+    texel = 2.0 * r / resolution
+    along = basis @ centre
+    centre = centre + basis.T @ (np.round(along / texel) * texel - along)
+    back = r + reach
+    lvp = compute_light_view_proj(direction, centre, r, 0.0, back + r, back_distance=back)
+    return lvp, texel, back + r

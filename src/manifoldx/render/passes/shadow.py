@@ -14,16 +14,81 @@ from manifoldx.skinning import BLOCKS_BINDING, JOINT_LOCATION, JOINTS_BINDING, s
 from manifoldx import counters
 
 
-def _ensure_shadow_map(rp, resolution):
-    if rp._shadow_map is not None and rp._shadow_map_size == resolution:
+def _ensure_shadow_map(rp, resolution, layers):
+    """The shadow map: `layers` depth layers of `resolution` squared, a view of each to draw into and
+    one array view the Standard shader samples."""
+    if rp._shadow_map is not None and rp._shadow_map_size == resolution and len(rp._shadow_layer_views) == layers:
         return
     rp._shadow_map = rp._device.create_texture(
-        size=(resolution, resolution, 1),
+        size=(resolution, resolution, layers),
         format=wgpu.TextureFormat.depth24plus,
         usage=wgpu.TextureUsage.RENDER_ATTACHMENT | wgpu.TextureUsage.TEXTURE_BINDING,
     )
-    rp._shadow_map_view = rp._shadow_map.create_view()
+    rp._shadow_map_view = rp._shadow_map.create_view(dimension=wgpu.TextureViewDimension.d2_array)
+    rp._shadow_layer_views = [
+        rp._shadow_map.create_view(dimension=wgpu.TextureViewDimension.d2, base_array_layer=k, array_layer_count=1)
+        for k in range(layers)
+    ]
     rp._shadow_map_size = resolution
+
+
+_SLOT = 256  # bytes between the layers' light matrices in their uniform buffer (the offset alignment)
+
+
+class _LayerGpu:
+    """One shadow-map layer's buffers and bind groups, kept between frames: the drawn casters' matrices
+    (`buffers`), its bind groups, the fades and indirect args last written."""
+
+    def __init__(self, buffers):
+        self.buffers = buffers
+        self.vs_group = self.skinned_group = self.faded_group = None
+        self.fade_bytes = self.args_buf = self.args_bytes = None
+
+
+def _layer_gpu(rp, k):
+    layers = rp.__dict__.setdefault("_shadow_layers", [])
+    while len(layers) <= k:
+        from manifoldx.renderer import _BatchBuffers
+
+        layers.append(_LayerGpu(rp._shadow_batch_buffers if not layers else _BatchBuffers(rp._device)))
+    return layers[k]
+
+
+def _write_light_matrices(rp, matrices):
+    """Each layer's light view-projection (column-major) into its slot of the layers' uniform buffer."""
+    from manifoldx.shadow import MAX_CASCADES
+
+    buf = rp.__dict__.get("_shadow_lvp_buf")
+    if buf is None:
+        buf = rp._shadow_lvp_buf = rp._device.create_buffer(
+            size=_SLOT * MAX_CASCADES, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        rp._shadow_lvp_bytes = None
+    data = np.zeros((len(matrices), _SLOT // 4), np.float32)
+    for k, m in enumerate(matrices):
+        data[k, :16] = np.asarray(m, np.float32).T.reshape(-1)
+    data = data.tobytes()
+    if rp.__dict__.get("_shadow_lvp_bytes") != data:
+        counters.write_buffer(rp._device.queue, buf, 0, data)
+        rp._shadow_lvp_bytes = data
+
+
+def _write_cascades(rp, fitted):
+    """The Standard shader's Cascades uniform: count 0 when one map covers the caster's box."""
+    data = np.zeros(80, np.float32)
+    if fitted is not None:
+        cascades, splits = fitted
+        for k, (m, texel, depth) in enumerate(cascades):
+            data[16 * k:16 * k + 16] = np.asarray(m, np.float32).T.reshape(-1)
+            data[64 + k], data[68 + k], data[72 + k] = splits[k], texel, depth
+        data[76:77] = np.frombuffer(np.uint32(len(cascades)).tobytes(), np.float32)
+    data = data.tobytes()
+    if rp.__dict__.get("_cascades_bytes") != data:
+        counters.write_buffer(rp._device.queue, rp._cascades_buffer, 0, data)
+        rp._cascades_bytes = data
+
+
+def _lvp_entry(rp, k):
+    return {"binding": 0, "resource": {"buffer": rp._shadow_lvp_buf, "offset": _SLOT * k, "size": 64}}
 
 
 def _storage_entry(binding):
@@ -168,9 +233,30 @@ class _Casters:
         self.ents, self.geoms, self.mats = ents, geoms_s, mats_s
         self.starts = np.flatnonzero(np.r_[True, np.diff(geoms_s) != 0]) if len(geoms_s) else np.zeros(0, np.int64)
         self.uniq = geoms_s[self.starts]
-        self.bundle, self.recorded, self.index_counts = None, None, np.zeros(len(self.uniq), np.uint32)
-        self.gpu_version, self.gpus, self.skinned, self.entries, self.groups = None, [], False, None, None
-        self.culled = None
+        self.index_counts = np.zeros(len(self.uniq), np.uint32)
+        self.gpu_version, self.gpus, self.skinned = None, [], False
+        self.layers = []
+
+    def layer(self, k):
+        while len(self.layers) <= k:
+            self.layers.append(_Layer())
+        return self.layers[k]
+
+    @property
+    def bundle(self):
+        return self.layer(0).bundle
+
+    @property
+    def culled(self):
+        return self.layer(0).culled
+
+
+class _Layer:
+    """One layer's draws of a _Casters: `culled` (box, transform cache version, drawn casters, counts per
+    geometry), `entries` as resolved for bind `groups`, and the `bundle` replaying them against `recorded`."""
+
+    def __init__(self):
+        self.culled = self.entries = self.groups = self.bundle = self.recorded = None
 
 
 def _casters(rp, engine):
@@ -210,7 +296,15 @@ def render_shadow_map(rp, engine, command_encoder):
     if cfg is None or (sun is None and spot is None) or not rp._initialized:
         return
 
-    _ensure_shadow_map(rp, cfg["resolution"])
+    fitted = rp._sun_cascades(engine)
+    if fitted is None:  # one map: the caster's box, or the whole scene when auto-fit
+        boxes = [None if cfg.get("auto_fit", True) else rp._caster_light_view_proj(engine, 2 if spot is not None else 1)]
+        matrices = [rp._caster_light_view_proj(engine, 2 if spot is not None else 1)]
+    else:
+        boxes = matrices = [c[0] for c in fitted[0]]
+    _ensure_shadow_map(rp, cfg["resolution"], len(boxes))
+    _write_cascades(rp, fitted)
+    _write_light_matrices(rp, matrices)
     _ensure_vs_layout(rp)
 
     casters = _casters(rp, engine)
@@ -223,32 +317,6 @@ def render_shadow_map(rp, engine, command_encoder):
     dirty = cache._dirty[ents]
     if dirty.any():
         cache._recompute_matrices(store, ents[dirty])
-    if not cfg.get("auto_fit", True):
-        # Only what the shadow caster's box holds casts; its box is fixed, not fitted to these. The spheres
-        # are kept per entity, so a still city costs a compare.
-        clip = rp._caster_light_view_proj(engine, 2 if spot is not None else 1)
-        box = np.asarray(clip, np.float64).tobytes()
-        kept = casters.culled  # (box, transform cache version, drawn casters, counts per geometry)
-        if kept is not None and kept[0] == box and not cache.changed_since(kept[1], ents):
-            local, counts = kept[2], kept[3]  # a box that stays put over still casters culls the same
-        else:
-            from manifoldx.renderer import _Rows
-
-            vis = rp._in_frustum(engine, casters.geoms, _Rows(cache._matrix_cache, ents), casters.mats, clip, ents)
-            local = ents[vis]
-            counts = np.add.reduceat(vis.astype(np.int64), casters.starts)
-            casters.culled = (box, cache.version, local, counts)
-    else:
-        local = ents
-        counts = np.diff(np.r_[casters.starts, len(ents)])
-    if not len(local):
-        return
-    first = np.cumsum(counts) - counts
-
-    # Upload the drawn casters' matrices (column-major), geometry after geometry, unless the buffer holds them.
-    rp._shadow_batch_buffers.upload_transforms_for(
-        local, cache, lambda: cache._matrix_cache[local].reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16))
-    buffers = rp._shadow_batch_buffers
     geometry = engine._geometry_registry
     if casters.gpu_version != geometry._version_value:  # the geometries' buffers, once per geometry change
         casters.gpus = []
@@ -258,71 +326,109 @@ def render_shadow_map(rp, engine, command_encoder):
                 geom = geometry.get(int(geom_id))
                 gpu = geometry.create_buffers(int(geom_id), geom, rp._device.queue) if geom else None
             casters.gpus.append(gpu)
+            casters.index_counts[len(casters.gpus) - 1] = 0 if gpu is None else gpu["index_count"]
         casters.skinned = any(g is not None and g.get("has_joints") for g in casters.gpus)
-        casters.gpu_version, casters.entries = geometry._version_value, None
-    gpus = casters.gpus
-    skinned = _skinned_bind_group(rp, local) if casters.skinned else None
-    plain = rp.__dict__.get("_shadow_vs_group")
-    if plain is None or plain[0] is not buffers.transforms_buf:
-        plain = rp._shadow_vs_group = (buffers.transforms_buf, rp._device.create_bind_group(
-            layout=rp._shadow_bind_layout_vs,
-            entries=[
-                {"binding": 0, "resource": {"buffer": rp._globals_buffer, "offset": 0, "size": 416}},
-                {"binding": 1, "resource": {"buffer": buffers.transforms_buf, "offset": 0,
-                                            "size": buffers.transforms_capacity}},
-            ],
-        ))
-
-    fades = _fades(rp, engine, casters, local)
-    faded = None if fades is None else _faded_bind_group(rp, fades)
-    groups = (plain[1], skinned, faded)
-    if casters.entries is None or casters.groups != groups:
-        casters.entries, casters.groups = [], groups  # (slot, pipeline, bind group, vertex buffer, index buffer)
-        for b, gpu in enumerate(gpus):
-            casters.index_counts[b] = 0 if gpu is None else gpu["index_count"]
-            if gpu is None:
-                continue
-            stride = gpu.get("stride", 6 * 4)
-            if gpu.get("has_joints"):
-                casters.entries.append((b, _get_pipeline(rp, stride, gpu["joints_offset"]), skinned,
-                                        gpu["vertex_buffer"], gpu["index_buffer"]))
-            elif faded is not None:
-                casters.entries.append((b, _get_pipeline(rp, stride, faded=True), faded, gpu["vertex_buffer"],
-                                        gpu["index_buffer"]))
-            else:
-                casters.entries.append((b, _get_pipeline(rp, stride), plain[1], gpu["vertex_buffer"],
-                                        gpu["index_buffer"]))
-        casters.bundle = None
-    entries = casters.entries
-
+        casters.gpu_version = geometry._version_value
+        for layer in casters.layers:
+            layer.entries = None
     timer = engine._gpu_timer()
+    last = len(boxes) - 1
+    for k, box in enumerate(boxes):
+        writes = None if timer is None else timer.writes("shadow", begin=k == 0, end=k == last)
+        _render_layer(rp, engine, casters, k, box, command_encoder, writes)
+
+
+def _render_layer(rp, engine, casters, k, clip, command_encoder, timestamp_writes):
+    """Draw into layer k what its box `clip` holds (every caster when None) from its light matrix."""
+    cache, ents, layer, g = rp._transform_cache, casters.ents, casters.layer(k), _layer_gpu(rp, k)
+    if clip is not None:
+        # Only what the layer's box holds casts. The spheres are kept per entity, so a still city costs a
+        # compare, and a box that stays put over still casters culls the same.
+        box = np.asarray(clip, np.float64).tobytes()
+        kept = layer.culled
+        if kept is not None and kept[0] == box and not cache.changed_since(kept[1], ents):
+            local, counts = kept[2], kept[3]
+        else:
+            from manifoldx.renderer import _Rows
+
+            vis = rp._in_frustum(engine, casters.geoms, _Rows(cache._matrix_cache, ents), casters.mats, clip, ents)
+            local = ents[vis]
+            counts = np.add.reduceat(vis.astype(np.int64), casters.starts)
+            layer.culled = (box, cache.version, local, counts)
+    else:
+        local = ents
+        counts = np.diff(np.r_[casters.starts, len(ents)])
+
     shadow_pass = command_encoder.begin_render_pass(
-        timestamp_writes=None if timer is None else timer.writes("shadow"),
+        timestamp_writes=timestamp_writes,
         color_attachments=[],
         depth_stencil_attachment={
-            "view": rp._shadow_map_view,
+            "view": rp._shadow_layer_views[k],
             "depth_clear_value": 1.0,
             "depth_load_op": wgpu.LoadOp.clear,
             "depth_store_op": wgpu.StoreOp.store,
         },
     )
+    if not len(local):
+        shadow_pass.end()  # cleared: last frame's casters must not linger in this layer
+        return
+    first = np.cumsum(counts) - counts
+
+    # Upload the drawn casters' matrices (column-major), geometry after geometry, unless the buffer holds them.
+    buffers = g.buffers
+    buffers.upload_transforms_for(
+        local, cache, lambda: cache._matrix_cache[local].reshape(-1, 4, 4).transpose(0, 2, 1).reshape(-1, 16))
+    gpus = casters.gpus
+    skinned = _skinned_bind_group(rp, g, k, local) if casters.skinned else None
+    if g.vs_group is None or g.vs_group[0] is not buffers.transforms_buf:
+        g.vs_group = (buffers.transforms_buf, rp._device.create_bind_group(
+            layout=rp._shadow_bind_layout_vs,
+            entries=[
+                _lvp_entry(rp, k),
+                {"binding": 1, "resource": {"buffer": buffers.transforms_buf, "offset": 0,
+                                            "size": buffers.transforms_capacity}},
+            ],
+        ))
+    plain = g.vs_group[1]
+
+    fades = _fades(rp, engine, casters, local)
+    faded = None if fades is None else _faded_bind_group(rp, g, k, fades)
+    groups = (plain, skinned, faded)
+    if layer.entries is None or layer.groups != groups:
+        layer.entries, layer.groups = [], groups  # (slot, pipeline, bind group, vertex buffer, index buffer)
+        for b, gpu in enumerate(gpus):
+            if gpu is None:
+                continue
+            stride = gpu.get("stride", 6 * 4)
+            if gpu.get("has_joints"):
+                layer.entries.append((b, _get_pipeline(rp, stride, gpu["joints_offset"]), skinned,
+                                      gpu["vertex_buffer"], gpu["index_buffer"]))
+            elif faded is not None:
+                layer.entries.append((b, _get_pipeline(rp, stride, faded=True), faded, gpu["vertex_buffer"],
+                                      gpu["index_buffer"]))
+            else:
+                layer.entries.append((b, _get_pipeline(rp, stride), plain, gpu["vertex_buffer"],
+                                      gpu["index_buffer"]))
+        layer.bundle = None
+    entries = layer.entries
+
     if rp._use_bundles:
         # The draws are recorded once into a bundle of indirect draws; a frame writes only their counts.
         args = np.zeros((len(gpus), _ARGS), np.uint32)
         args[:, 0], args[:, 1], args[:, 4] = casters.index_counts, counts, first
-        args_buf = _args_buffer(rp, len(gpus))
+        args_buf = _args_buffer(g, rp._device, len(gpus))
         data = args.tobytes()
-        if rp.__dict__.get("_shadow_args_bytes") != data:  # a still view writes nothing
+        if g.args_bytes != data:  # a still view writes nothing
             counters.write_buffer(rp._device.queue, args_buf, 0, data)
-            rp._shadow_args_bytes = data
-        if casters.bundle is None or casters.recorded is not args_buf:
+            g.args_bytes = data
+        if layer.bundle is None or layer.recorded is not args_buf:
             encoder = rp._device.create_render_bundle_encoder(
                 color_formats=[], depth_stencil_format=wgpu.TextureFormat.depth24plus)
             _encode(encoder, entries, lambda e, s: e.draw_indexed_indirect(args_buf, 4 * _ARGS * s))
-            casters.bundle, casters.recorded = encoder.finish(), args_buf
+            layer.bundle, layer.recorded = encoder.finish(), args_buf
             counters.add("bundles_recorded")
         counters.add("draws", len(entries))
-        shadow_pass.execute_bundles([casters.bundle])
+        shadow_pass.execute_bundles([layer.bundle])
     else:
         drawn = [e for e in entries if counts[e[0]]]
         counters.add("draws", len(drawn))
@@ -332,15 +438,13 @@ def render_shadow_map(rp, engine, command_encoder):
     shadow_pass.end()
 
 
-def _args_buffer(rp, draws):
-    """The shadow pass's indirect-args buffer, grown to hold `draws` draws."""
-    buf = rp.__dict__.get("_shadow_args_buf")
+def _args_buffer(g, device, draws):
+    """A layer's indirect-args buffer, grown to hold `draws` draws."""
     size = max(4 * _ARGS * draws, 4 * _ARGS)
-    if buf is None or buf.size < size:
-        buf = rp._shadow_args_buf = rp._device.create_buffer(
-            size=size, usage=wgpu.BufferUsage.INDIRECT | wgpu.BufferUsage.COPY_DST)
-        rp._shadow_args_bytes = None
-    return buf
+    if g.args_buf is None or g.args_buf.size < size:
+        g.args_buf = device.create_buffer(size=size, usage=wgpu.BufferUsage.INDIRECT | wgpu.BufferUsage.COPY_DST)
+        g.args_bytes = None
+    return g.args_buf
 
 
 def _encode(target, entries, draw):
@@ -387,47 +491,45 @@ def _fades(rp, engine, casters, local):
     return out
 
 
-def _faded_bind_group(rp, fades):
-    """Bindings 0, 1, 10: the shared ones plus the casters' fades, written when they changed."""
-    buffers = rp._shadow_batch_buffers
+def _faded_bind_group(rp, g, k, fades):
+    """Bindings 0, 1, 10: layer k's light matrix and casters plus their fades, written when they changed."""
+    buffers = g.buffers
     data = fades.tobytes()
     if buffers.tints_buf is None or buffers.tints_capacity < len(data):
         buffers.upload_tints(fades)
-    elif rp.__dict__.get("_shadow_fade_bytes") != data:
+    elif g.fade_bytes != data:
         counters.write_buffer(rp._device.queue, buffers.tints_buf, 0, data)
-    rp._shadow_fade_bytes = data
+    g.fade_bytes = data
     key = (buffers.transforms_buf, buffers.tints_buf)
-    kept = rp.__dict__.get("_shadow_faded_group")
-    if kept is not None and kept[0] == key:
-        return kept[1]
+    if g.faded_group is not None and g.faded_group[0] == key:
+        return g.faded_group[1]
     group = rp._device.create_bind_group(
         layout=rp._shadow_bind_layout_faded,
         entries=[
-            {"binding": 0, "resource": {"buffer": rp._globals_buffer, "offset": 0, "size": 416}},
+            _lvp_entry(rp, k),
             {"binding": 1, "resource": {"buffer": buffers.transforms_buf, "offset": 0,
                                         "size": buffers.transforms_capacity}},
             {"binding": TINTS_BINDING, "resource": {"buffer": buffers.tints_buf, "offset": 0,
                                                     "size": buffers.tints_capacity}},
         ],
     )
-    rp._shadow_faded_group = (key, group)
+    g.faded_group = (key, group)
     return group
 
 
-def _skinned_bind_group(rp, entities):
-    """Bindings 0, 1, 8, 9: the shared ones plus every joint block and, per
-    instance in transform order, the entity's block index. Made again only when one of those buffers is new."""
-    rp._shadow_batch_buffers.upload_joint_blocks(rp._joints.block_of[entities])
+def _skinned_bind_group(rp, g, k, entities):
+    """Bindings 0, 1, 8, 9: layer k's light matrix and casters plus every joint block and, per instance in
+    transform order, the entity's block index. Made again only when one of those buffers is new."""
+    buffers = g.buffers
+    buffers.upload_joint_blocks(rp._joints.block_of[entities])
     joints_buf = rp._joints.ensure_buffer(rp._device)
-    buffers = rp._shadow_batch_buffers
     key = (buffers.transforms_buf, joints_buf, buffers.joint_blocks_buf)
-    kept = rp.__dict__.get("_shadow_skinned_group")
-    if kept is not None and kept[0] == key:
-        return kept[1]
+    if g.skinned_group is not None and g.skinned_group[0] == key:
+        return g.skinned_group[1]
     group = rp._device.create_bind_group(
         layout=rp._shadow_bind_layout_skinned,
         entries=[
-            {"binding": 0, "resource": {"buffer": rp._globals_buffer, "offset": 0, "size": 416}},
+            _lvp_entry(rp, k),
             {"binding": 1, "resource": {"buffer": buffers.transforms_buf, "offset": 0,
                                         "size": buffers.transforms_capacity}},
             {"binding": JOINTS_BINDING,
@@ -437,5 +539,5 @@ def _skinned_bind_group(rp, entities):
                           "size": buffers.joint_blocks_capacity}},
         ],
     )
-    rp._shadow_skinned_group = (key, group)
+    g.skinned_group = (key, group)
     return group

@@ -161,6 +161,19 @@ tighter box around one part of the square. The basin now throws a long shadow
 to the left; the water is a dark teal because that is the colour we gave it,
 and its roughness catches a band of sun along the far rim.
 
+One map stretched over a large scene spreads its texels thin: over a kilometre
+at 2048 texels, each texel is half a metre wide, and the shadow of a lamp post
+is a smear. `enable_shadows(cascades=3, shadow_distance=300.0)` gives the sun
+three maps instead. `cascade_splits` cuts the camera's view from its near
+plane to `shadow_distance` into three slices, short near the camera and long
+far from it, and `fit_cascade` fits a light box around each slice. The first
+box covers a few dozen metres, so the shadows at your feet are sharp, and the
+last one still reaches 300 m. Each box keeps its size when the camera turns and
+moves in whole texels, so shadow edges do not crawl while the camera moves.
+With cascades, the engine ignores `target`, `extent`, `auto_fit` and `bias`,
+and sets each cascade's bias from its own texel size. One shadow-pass draw
+per batch becomes one per batch and cascade.
+
 One convention to keep straight: material colours are decoded from sRGB, but
 light colours are not. `PointLight.get_data` and `DirectionalLight.get_data`
 divide the hex by 255 and use it as linear light, so a warm lamp is a little

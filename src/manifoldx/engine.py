@@ -1101,6 +1101,8 @@ class Engine:
         bias=0.005,
         pcf_radius=1,
         auto_fit=True,
+        cascades=1,
+        shadow_distance=None,
     ):
         """Enable directional shadow mapping for the sun set via set_sun().
 
@@ -1109,7 +1111,19 @@ class Engine:
         auto_fit: when True (default), the shadow frustum is fit to the scene's
         bounding sphere every frame and target/extent/near/far are ignored. Set
         False to drive the ortho box manually via target/extent/near/far.
+        cascades: how many maps of `resolution` squared share the camera's view,
+        1 to 4. With 1 (default) one map covers the box above. With more, the view
+        from the camera's near plane to `shadow_distance` splits into that many
+        slices, each with its own map, so shadows are sharp near the camera and
+        still reach far; target/extent/near/far/auto_fit and bias are then unused
+        (each cascade sets its bias from its texel size). Spot lights keep one map.
+        shadow_distance: how far from the camera cascades cast, in metres; default
+        the camera's far plane, at most 300.
         """
+        from manifoldx.shadow import MAX_CASCADES
+
+        if not 1 <= int(cascades) <= MAX_CASCADES:
+            raise ValueError(f"cascades must be 1 to {MAX_CASCADES}, got {cascades}")
         self._shadow_config = {
             "target": tuple(target),
             "extent": float(extent),
@@ -1119,6 +1133,8 @@ class Engine:
             "bias": float(bias),
             "pcf_radius": int(pcf_radius),
             "auto_fit": bool(auto_fit),
+            "cascades": int(cascades),
+            "shadow_distance": None if shadow_distance is None else float(shadow_distance),
         }
 
     @_deferred.deferred_in_pipeline

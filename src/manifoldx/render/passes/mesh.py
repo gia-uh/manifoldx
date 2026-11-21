@@ -268,6 +268,8 @@ def _lit_groups(rp, engine):
             entries=[
                 {"binding": 0, "resource": shadow_view},
                 {"binding": 1, "resource": rp._shadow_sampler},
+                {"binding": 2, "resource": {"buffer": rp._cascades_buffer, "offset": 0,
+                                            "size": rp._cascades_buffer.size}},
             ],
         ))
     return ibl_bg, rp._shadow_bind_group[1]
