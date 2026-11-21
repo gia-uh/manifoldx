@@ -29,6 +29,7 @@ class TextureHandle:
     sampler: Any            # wgpu.Sampler
     size: tuple[int, int]   # (width, height) in pixels
     source: Path | None = None  # the image file load_texture read; glTF export embeds it
+    layers: int = 0  # a texture_array's layers; 0 for a plain 2D texture
 
 
 class TextureRegistry:
@@ -188,3 +189,67 @@ def write_texture(engine, handle: TextureHandle, rgba: np.ndarray, origin=(0, 0)
         {"offset": 0, "bytes_per_row": w * 4, "rows_per_image": h},
         (w, h, 1),
     )
+
+
+def texture_array(engine, layers: int, size: int) -> TextureHandle:
+    """An empty array of `layers` square images of `size` pixels a side, sRGB with a full mip chain, for
+    write_layer to fill one layer at a time; sampled trilinearly, clamped at the edges. A material reads it
+    as a texture_2d_array (StandardMaterial's baked=)."""
+    device = getattr(engine, "_device", None)
+    if device is None:
+        raise RuntimeError("engine has no device yet; initialize the canvas before creating textures")
+    mips = int(size).bit_length()
+    texture = device.create_texture(
+        size=(size, size, layers),
+        format=wgpu.TextureFormat.rgba8unorm_srgb,
+        usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+        mip_level_count=mips,
+        sample_count=1,
+    )
+    view = texture.create_view(dimension=wgpu.TextureViewDimension.d2_array)
+    sampler = device.create_sampler(
+        mag_filter=wgpu.FilterMode.linear,
+        min_filter=wgpu.FilterMode.linear,
+        mipmap_filter=wgpu.MipmapFilterMode.linear,
+        address_mode_u=wgpu.AddressMode.clamp_to_edge,
+        address_mode_v=wgpu.AddressMode.clamp_to_edge,
+        max_anisotropy=MAX_ANISOTROPY,
+    )
+    registry = engine._texture_registry
+    handle = TextureHandle(id=registry.alloc_id(), texture=texture, view=view, sampler=sampler, size=(size, size),
+                           layers=int(layers))
+    registry.add(handle)
+    return handle
+
+
+def layer_mips(rgb: np.ndarray) -> list[np.ndarray]:
+    """An (n, n, 3|4) uint8 sRGB image as the RGBA levels write_layer takes: the image and its halvings to 1x1,
+    each a 2x2 box filter of the last (an odd side drops its last row or column). Pure numpy, so a
+    streamer's worker makes them off the frame."""
+    rgb = np.asarray(rgb, np.uint8)
+    if rgb.ndim != 3 or rgb.shape[0] != rgb.shape[1] or rgb.shape[2] not in (3, 4):
+        raise ValueError(f"layer_mips expects a square (n, n, 3|4) uint8 image, got {rgb.shape}")
+    level = np.full(rgb.shape[:2] + (4,), 255, np.uint8)
+    level[..., : rgb.shape[2]] = rgb
+    levels = [level]
+    while level.shape[0] > 1:
+        n = level.shape[0] // 2
+        q = level[: 2 * n, : 2 * n].astype(np.uint16).reshape(n, 2, n, 2, 4).sum(axis=(1, 3))
+        level = ((q + 2) // 4).astype(np.uint8)
+        levels.append(level)
+    return levels
+
+
+@_deferred.deferred_in_pipeline
+def write_layer(engine, handle: TextureHandle, layer: int, levels: list[np.ndarray]) -> None:
+    """Fill layer `layer` of a texture_array with `levels` (layer_mips of an image of the array's size)."""
+    if levels[0].shape[:2] != (handle.size[1], handle.size[0]):
+        raise ValueError(f"a {levels[0].shape[:2]} image does not fit a {handle.size} array")
+    for i, level in enumerate(levels[: handle.texture.mip_level_count]):
+        lh, lw = level.shape[:2]
+        engine._device.queue.write_texture(
+            {"texture": handle.texture, "mip_level": i, "origin": (0, 0, int(layer))},
+            np.ascontiguousarray(level, np.uint8).tobytes(),
+            {"offset": 0, "bytes_per_row": lw * 4, "rows_per_image": lh},
+            (lw, lh, 1),
+        )

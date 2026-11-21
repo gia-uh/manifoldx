@@ -19,7 +19,7 @@ from manifoldx.skinning import (
     JointStore,
     skin_shader,
 )
-from manifoldx.resources import TINTS_BINDING, detail_shader, fade_shader, tint_shader
+from manifoldx.resources import BAKED_BINDING, TINTS_BINDING, baked_shader, detail_shader, fade_shader, tint_shader
 from manifoldx.viz.materials import ColormapMaterial
 from manifoldx import counters
 
@@ -861,6 +861,10 @@ class RenderPipeline:
         detailed = bool(getattr(material, "detail", False))
         if detailed:
             material_subtype = material_subtype.removesuffix("-detail")
+        # And one with a baked image ("vcolor-baked", ...) samples it for its SURFACE_BAKED vertices.
+        baked = getattr(material, "baked", None) is not None
+        if baked:
+            material_subtype = material_subtype.removesuffix("-baked")
 
         if line:
             # 3 bindings: globals, transforms, material uniform.
@@ -1066,6 +1070,8 @@ class RenderPipeline:
                                               facade=(geometry_buffers or {}).get("has_facade", False))
             if material_subtype == "vcolor-tint":
                 shader_source = tint_shader(shader_source)
+            if baked:
+                shader_source = baked_shader(shader_source)
             if detailed:
                 shader_source = detail_shader(shader_source)
         else:
@@ -1247,7 +1253,25 @@ class RenderPipeline:
                             },
                         ]
                     )
-            if material_subtype == "vcolor-tint" or faded:
+            if baked:
+                bind_group_entries.extend(
+                    [
+                        {
+                            "binding": BAKED_BINDING,
+                            "visibility": wgpu.ShaderStage.FRAGMENT,
+                            "sampler": {"type": wgpu.SamplerBindingType.filtering},
+                        },
+                        {
+                            "binding": BAKED_BINDING + 1,
+                            "visibility": wgpu.ShaderStage.FRAGMENT,
+                            "texture": {
+                                "sample_type": wgpu.TextureSampleType.float,
+                                "view_dimension": wgpu.TextureViewDimension.d2_array,
+                            },
+                        },
+                    ]
+                )
+            if material_subtype == "vcolor-tint" or faded or baked:
                 bind_group_entries.append(
                     {
                         "binding": TINTS_BINDING,

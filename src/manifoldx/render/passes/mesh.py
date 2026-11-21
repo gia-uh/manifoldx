@@ -438,23 +438,29 @@ def _is_faded(subtype) -> bool:
     return isinstance(subtype, str) and (subtype == "fade" or subtype.endswith("-fade"))
 
 
+def _is_baked(subtype) -> bool:
+    return isinstance(subtype, str) and "-baked" in subtype
+
+
 def _reads_tints(subtype) -> bool:
-    return _is_tinted(subtype) or _is_faded(subtype)
+    return _is_tinted(subtype) or _is_faded(subtype) or _is_baked(subtype)
 
 
 def _upload_tints(rp, mesh_batches, entities):
     """The tints buffer, one (4,) row per drawn instance in the transforms' order (rgb the Tint, w the
-    Fade), written when its bytes changed; None when the layout holds no tinted or faded batch. Only
-    those batches' rows are gathered (an entity without a Tint keeps its colours, one without a Fade is
-    drawn whole); every other row is ones. A batch culled this frame still binds the buffer, so it is
-    kept, unwritten."""
+    Fade; x the Baked layer for a baked material, which takes no Tint), written when its bytes changed;
+    None when the layout holds no tinted, faded or baked batch. Only those batches' rows are gathered (an
+    entity without a Tint keeps its colours, one without a Fade is drawn whole, one without a Baked layer
+    draws its own colours); every other row is ones. A batch culled this frame still binds the buffer, so
+    it is kept, unwritten."""
     layout = mesh_batches.layout
     kinds = layout.__dict__.get("_tinted")
     if kinds is None:
         kinds = layout._tinted = (np.array([_is_tinted(k[2]) for k in layout.keys], bool),
-                                  np.array([_is_faded(k[2]) for k in layout.keys], bool))
-    tinted, faded = kinds
-    flags = tinted | faded
+                                  np.array([_is_faded(k[2]) for k in layout.keys], bool),
+                                  np.array([_is_baked(k[2]) for k in layout.keys], bool))
+    tinted, faded, baked = kinds
+    flags = tinted | faded | baked
     if not flags.any():
         return None
     bufs = rp._batch_buffers
@@ -463,7 +469,9 @@ def _upload_tints(rp, mesh_batches, entities):
             bufs.upload_tints(np.ones((1, 4), np.float32))
         return bufs.tints_buf
     out = np.ones((len(entities), 4), np.float32)
-    for name, kind, cols in (("Tint", tinted, slice(0, 3)), ("Fade", faded, 3)):
+    if baked.any():
+        out[np.repeat(baked, mesh_batches.counts), 0] = -1.0  # no layer until a Baked gives one
+    for name, kind, cols in (("Tint", tinted, slice(0, 3)), ("Fade", faded, 3), ("Baked", baked, 0)):
         values = rp._store._components.get(name)
         if values is None or not kind.any():
             continue

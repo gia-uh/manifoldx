@@ -1351,6 +1351,92 @@ def fade_shader(source: str) -> str:
 
 
 DETAIL_ASPHALT = 10  # surface id (vcolor.w) of asphalt for a StandardMaterial with detail=True
+SURFACE_BAKED = 12  # surface id of a vertex coloured by a baked image (StandardMaterial with baked=)
+
+
+def baked_columns(colors, uv) -> np.ndarray:
+    """The three colour columns of SURFACE_BAKED vertices: u and v in the baked image, and the vertex's own
+    sRGB colour packed as one integer (r * 65536 + g * 256 + b, exact in a float32), drawn when its entity
+    has no image."""
+    c = np.clip(np.round(np.asarray(colors, np.float64) * 255), 0, 255)
+    packed = c[:, 0] * 65536 + c[:, 1] * 256 + c[:, 2]
+    return np.c_[np.asarray(uv, np.float32), packed.astype(np.float32)]
+
+
+BAKED_BINDING = 4  # group(0): a baked material's sampler at 4 and texture_2d_array at 5
+
+# A baked image (StandardMaterial with baked=): a SURFACE_BAKED vertex carries its uv in vcolor.xy and its
+# own sRGB colour packed in vcolor.z; the instance's layer is the x of its row in the tints buffer, -1 for
+# none. Sampled with explicit gradients, so the branch on the surface id is free to be non-uniform.
+BAKED_WGSL = """
+@group(0) @binding(4) var baked_sampler: sampler;
+@group(0) @binding(5) var baked_tex: texture_2d_array<f32>;
+fn baked_own(packed: f32) -> vec3<f32> {
+    let p = u32(packed + 0.5);
+    let c = vec3<f32>(f32((p >> 16u) & 255u), f32((p >> 8u) & 255u), f32(p & 255u)) / 255.0;
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+"""
+
+
+def baked_shader(source: str) -> str:
+    """A vertex-colour StandardMaterial shader whose SURFACE_BAKED vertices take their albedo from the
+    instance's layer of a texture array (StandardMaterial with baked=): the layer is the x of the instance's
+    row in the tints buffer, passed flat to the fragment; an instance with layer -1 draws the vertices' own
+    colours."""
+    if f"@binding({TINTS_BINDING})" not in source:
+        source = source.replace(
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n",
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n"
+            f"@group(0) @binding({TINTS_BINDING}) var<storage, read> tints: array<vec4<f32>>;\n",
+            1,
+        )
+    out = (
+        source.replace(
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n",
+            "@group(0) @binding(3) var<uniform> light_data: LightData;\n" + BAKED_WGSL,
+            1,
+        )
+        .replace(
+            "    @location(1) world_pos:    vec3<f32>,\n",
+            "    @location(1) world_pos:    vec3<f32>,\n    @location(8) @interpolate(flat) layer: f32,\n",
+            1,
+        )
+        .replace(
+            "    out.world_normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);\n",
+            "    out.world_normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);\n"
+            "    out.layer = tints[in.instance].x;\n",
+            1,
+        )
+        .replace(
+            "    let sp_fw = length(fwidth(sp_proj));\n",
+            "    let sp_fw = length(fwidth(sp_proj));\n"
+            "    let bk_dx = dpdx(in.vcolor.xy);\n    let bk_dy = dpdy(in.vcolor.xy);\n",
+            1,
+        )
+        .replace(
+            "    let vertex_albedo = surface_albedo(",
+            "    let vertex_albedo_s = surface_albedo(",
+            1,
+        )
+        .replace(
+            "                                       i32(in.vcolor.w + 0.5), sp_proj, sp_fw);\n",
+            "                                       i32(in.vcolor.w + 0.5), sp_proj, sp_fw);\n"
+            f"    var vertex_albedo = vertex_albedo_s;\n"
+            f"    if (i32(in.vcolor.w + 0.5) == {SURFACE_BAKED}) {{\n"
+            "        if (in.layer >= 0.0) {\n"
+            "            vertex_albedo = textureSampleGrad(baked_tex, baked_sampler, in.vcolor.xy,\n"
+            "                                              i32(in.layer + 0.5), bk_dx, bk_dy).rgb * material.albedo;\n"
+            "        } else {\n"
+            "            vertex_albedo = baked_own(in.vcolor.z) * material.albedo;\n"
+            "        }\n"
+            "    }\n",
+            1,
+        )
+    )
+    if "vertex_albedo_s" not in out or "baked_tex" not in out:
+        raise ValueError("baked needs a vertex-colour StandardMaterial shader")
+    return out
 DETAIL_GROUND = 11  # surface id of bare ground and grass, likewise
 
 # Procedural detail (StandardMaterial with detail=True): value noise over the world's (x, z), a few octaves
@@ -1686,6 +1772,7 @@ class StandardMaterial(Material):
         tinted=False,
         faded=False,
         detail=False,
+        baked=None,
     ):
         from manifoldx.textures import TextureHandle
 
@@ -1730,6 +1817,12 @@ class StandardMaterial(Material):
         if detail and not vertex_colors:
             raise ValueError("detail needs vertex_colors=True")
         self.detail = bool(detail)
+        # baked (with vertex_colors): a texture_array; the SURFACE_BAKED vertices of an entity with a Baked
+        # layer take their albedo from that layer at their uv (see baked_columns), so each streamed node of
+        # one material wears its own image. The rest of the mesh draws as before.
+        if baked is not None and (not vertex_colors or tinted or not getattr(baked, "layers", 0)):
+            raise ValueError("baked needs vertex_colors=True, no tint, and a texture_array")
+        self.baked = baked
 
     @property
     def pipeline_subtype(self):
@@ -1737,6 +1830,8 @@ class StandardMaterial(Material):
             base = "textured"
         elif self.vertex_colors:
             base = "vcolor-tint" if self.tinted else "vcolor"
+            if self.baked is not None:
+                base += "-baked"
             if self.detail:
                 base += "-detail"
         else:
@@ -1755,6 +1850,8 @@ class StandardMaterial(Material):
         return self.mirror is None and self.opacity >= 1.0
 
     def get_texture_bindings(self):
+        if self.baked is not None:
+            return {BAKED_BINDING: self.baked}
         if self.albedo_map is None:
             return {}
         return {4: self.albedo_map}
@@ -1868,6 +1965,10 @@ def pack_vertices(geometry_obj: dict):
             interleaved[:, 6:9] = colors
             if "surfaces" in geometry_obj:  # the surface pattern id, 0 for none
                 interleaved[:, 9] = np.asarray(geometry_obj["surfaces"], dtype=np.float32)
+            if "baked_uv" in geometry_obj:  # SURFACE_BAKED vertices: uv in rg, their own colour packed in b
+                baked = interleaved[:, 9] == SURFACE_BAKED
+                interleaved[baked, 6:9] = baked_columns(geometry_obj["colors"][baked],
+                                                        np.asarray(geometry_obj["baked_uv"])[baked])
             if has_facade:  # bays along, floors up, building type, seed (StandardMaterial's facades)
                 interleaved[:, 10:14] = np.asarray(geometry_obj["facade"], dtype=np.float32).reshape(-1, 4)
             data = interleaved.tobytes()
