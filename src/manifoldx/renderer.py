@@ -55,41 +55,15 @@ def _scatter_target(fmt):
 
 
 MAX_BENDERS = 8  # the points swaying meshes part around (Engine.benders)
+CASCADES_BYTES = 320  # CASCADES_WGSL: 4 matrices, splits, texel sizes, box depths, count
+CASCADE_BLEND = 0.1  # the share of each cascade, at its far end, that blends into the next
 
-# Depth-only shadow-pass shader: transforms mesh geometry by the sun's
-# light_view_proj into the shadow map. No fragment stage (depth writes only).
-# Binds the shared Globals uniform (for light_view_proj) + a transforms storage.
+# Depth-only shadow-pass shader: transforms mesh geometry by one layer's light
+# view-projection into its layer of the shadow map. No fragment stage (depth writes
+# only). Binds that layer's matrix + a transforms storage.
 _SHADOW_SHADER = """
 struct Globals {
-    vp:              mat4x4<f32>,
-    view:            mat4x4<f32>,
-    proj:            mat4x4<f32>,
-    camera_pos:      vec3<f32>,
-    _pad0:           f32,
-    viewport_size:   vec2<f32>,
-    _pad1:           vec2<f32>,
-    ibl_intensity:   f32,
-    ibl_enabled:     u32,
-    _pad_ibl:        vec2<f32>,
-    light_view_proj: mat4x4<f32>,
-    sun_direction:   vec3<f32>,
-    _pad_sun0:       f32,
-    sun_color:       vec3<f32>,
-    sun_intensity:   f32,
-    shadow_enabled:  u32,
-    shadow_bias:     f32,
-    shadow_map_size: f32,
-    shadow_pcf_radius: u32,
-    spot_position:   vec3<f32>,
-    spot_range:      f32,
-    spot_direction:  vec3<f32>,
-    spot_cos_inner:  f32,
-    spot_color:      vec3<f32>,
-    spot_intensity:  f32,
-    spot_cos_outer:  f32,
-    shadow_caster:   u32,
-    _pad_spot0:      f32,
-    _pad_spot1:      f32,
+    light_view_proj: mat4x4<f32>,  // this layer's, from the shadow pass's own buffer
 };
 
 struct Transforms {
@@ -633,7 +607,11 @@ class RenderPipeline:
             format=wgpu.TextureFormat.depth24plus,
             usage=wgpu.TextureUsage.RENDER_ATTACHMENT | wgpu.TextureUsage.TEXTURE_BINDING,
         )
-        self._shadow_placeholder_view = _placeholder.create_view()
+        self._shadow_placeholder_view = _placeholder.create_view(dimension=wgpu.TextureViewDimension.d2_array)
+        # The sun's cascades for the Standard shader (CASCADES_WGSL): written by the shadow pass each frame.
+        self._cascades_buffer = device.create_buffer(
+            size=CASCADES_BYTES, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+        )
         self._shadow_bind_group_layout = device.create_bind_group_layout(
             entries=[
                 {
@@ -641,13 +619,18 @@ class RenderPipeline:
                     "visibility": wgpu.ShaderStage.FRAGMENT,
                     "texture": {
                         "sample_type": wgpu.TextureSampleType.depth,
-                        "view_dimension": wgpu.TextureViewDimension.d2,
+                        "view_dimension": wgpu.TextureViewDimension.d2_array,
                     },
                 },
                 {
                     "binding": 1,
                     "visibility": wgpu.ShaderStage.FRAGMENT,
                     "sampler": {"type": wgpu.SamplerBindingType.comparison},
+                },
+                {
+                    "binding": 2,
+                    "visibility": wgpu.ShaderStage.FRAGMENT,
+                    "buffer": {"type": wgpu.BufferBindingType.uniform},
                 },
             ]
         )
@@ -1528,6 +1511,33 @@ class RenderPipeline:
             near=cfg["near"],
             far=cfg["far"],
         )
+
+    def _sun_cascades(self, engine):
+        """The sun's cascades this frame: a list of (light view-projection, texel size, box depth) and
+        the view-space far distance of each, or None when one map covers the box (cascades=1, a spot
+        casting, or no sun)."""
+        cfg = getattr(engine, "_shadow_config", None)
+        if (cfg is None or cfg.get("cascades", 1) <= 1 or getattr(engine, "_sun", None) is None
+                or getattr(engine, "_spot", None) is not None):
+            return None
+        from manifoldx.shadow import cascade_splits, fit_cascade
+
+        camera = engine._camera
+        count = cfg["cascades"]
+        reach = cfg["shadow_distance"] or min(float(camera.far), 300.0)
+        splits = cascade_splits(camera.near, reach, count)
+        inv_view = np.linalg.inv(np.asarray(camera.get_view_matrix(), dtype=np.float64))
+        tan_half = float(np.tan(np.radians(camera.fov) * 0.5))
+        aspect = engine.w / max(engine.h, 1)
+        direction = np.asarray(engine._sun.direction, dtype=np.float64)
+        out, near = [], float(camera.near)
+        for k in range(count):
+            # Each slice starts where the previous one's blend does, so the blend samples inside it.
+            start = near if k == 0 else splits[k - 1] - CASCADE_BLEND * (splits[k - 1] - near)
+            out.append(fit_cascade(inv_view, tan_half, aspect, start, splits[k], direction,
+                                   cfg["resolution"], reach))
+            near = splits[k]
+        return out, splits
 
     def _bounds(self, engine, geom_id):
         """A sphere around a geometry's vertices, padded for a skinned one whose joints move them."""
