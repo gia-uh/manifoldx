@@ -39,17 +39,15 @@ def test_gpu_timings_off(monkeypatch):
 
 
 def test_gpu_timings_count_second_cameras_as_views():
-    import manifoldx as mx
+    from manifoldx.camera import Camera
 
     eng = _lit_scene("gpu-views")
     if "timestamp-query" not in eng._adapter.features:
         return
-    cam = mx.Camera() if hasattr(mx, "Camera") else None
-    from manifoldx.camera import Camera
-
     cam = Camera()
     cam.fit(radius=6.0, center=(0, 0, 0), azimuth=60, elevation=40)
     eng.render_to_texture(cam, (32, 32), live=True)
+    eng.render_to_texture(cam, (16, 16), live=True)  # two views: the first writes the begin, the last the end
     for _ in range(12):  # one frame in eight is measured, read two frames later
         _render_array(eng)
     t = eng.gpu_timings()

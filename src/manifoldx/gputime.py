@@ -53,10 +53,14 @@ class GpuTimer:
         if not self.measuring():
             return None
         k = PASSES.index(name)
+        writes = {"query_set": self.queries}
+        # an index left out is undefined to wgpu; given as None it would become 0
+        if begin:
+            writes["beginning_of_pass_write_index"] = 2 * k
         if end:
+            writes["end_of_pass_write_index"] = 2 * k + 1
             self.current.add(name)
-        return {"query_set": self.queries, "beginning_of_pass_write_index": 2 * k if begin else None,
-                "end_of_pass_write_index": 2 * k + 1 if end else None}
+        return writes if begin or end else None
 
     def resolve(self, encoder) -> None:
         """In the frame's last encoder, before it is submitted: copy a measured frame's timestamps out."""

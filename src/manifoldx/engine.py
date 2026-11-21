@@ -1736,10 +1736,7 @@ class Engine:
             readback.finish()
         timer = self._gpu_timer()
         if timer is not None and timer.pending is not None:
-            last = timer.read()
-            if last and timer.pending is None and counters.recording():
-                for name, ms in last.items():
-                    counters.metric(f"gpu_{name}_ms", ms)
+            timer.read()
 
         # Get the next frame's texture and create view; waiting here is vsync or the GPU behind
         acquiring = time.perf_counter()
