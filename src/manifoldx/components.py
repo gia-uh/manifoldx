@@ -437,6 +437,22 @@ class Tint(Component):
     rgb: Vector3 = (1.0, 1.0, 1.0)
 
 
+class Baked(Component):
+    """Which layer of its material's baked texture array this entity's SURFACE_BAKED vertices draw, per
+    instance; -1 (or no Baked) draws those vertices' own colours.
+
+    Only a StandardMaterial made with baked= reads it. QuadStreamer gives each node it draws with an image
+    a layer of its own, so every node of one material wears its own picture:
+
+        tex = texture_array(engine, layers=64, size=512)
+        mat = StandardMaterial("#ffffff", vertex_colors=True, baked=tex)
+        write_layer(engine, tex, 3, layer_mips(image))
+        engine.spawn(Mesh(node), Material(mat), Transform(pos=corner), Baked(layer=3))
+    """
+
+    layer: Float = -1.0
+
+
 class Fade(Component):
     """How much of this entity's mesh draws, per instance: 1 all of it (as without a Fade), 0 none.
 
