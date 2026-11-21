@@ -19,12 +19,14 @@ import numpy as np
 class SSAO:
     """Ambient occlusion from the depth buffer, at half resolution: corners and the foot of walls darken.
 
-    radius is in world metres; intensity 1 applies the occlusion fully; samples is 8, 16 or 32."""
+    radius is in world metres; intensity 1 applies the occlusion fully; power deepens it (the occlusion raised to
+    it); samples is up to 32."""
 
     radius: float = 1.0
     intensity: float = 1.0
     samples: int = 16
     bias: float = 0.03
+    power: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -139,7 +141,7 @@ struct Post {
     ssao: vec4<f32>,       // radius, intensity, samples, bias
     bloom: vec4<f32>,      // threshold, knee, intensity, -
     shafts: vec4<f32>,     // intensity, decay, density, visible
-    grade: vec4<f32>,      // saturation, contrast, vignette, -
+    grade: vec4<f32>,      // saturation, contrast, vignette, the occlusion's power
     flags: vec4<u32>,      // ssao, bloom, shafts, samples of the shafts
     sun_color: vec4<f32>,  // the sun's linear colour times its intensity, clamped to 1
     kernel: array<vec4<f32>, 32>,
@@ -201,7 +203,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let range = smoothstep(0.0, 1.0, radius / max(abs(p.z - sz), 1e-4));
         occ = occ + select(0.0, 1.0, sz >= s.z + u.ssao.w) * range;
     }
-    let ao = 1.0 - occ / f32(max(count, 1));
+    let ao = pow(1.0 - occ / f32(max(count, 1)), max(u.grade.w, 0.01));
     return vec4<f32>(ao, ao, ao, 1.0);
 }
 """
@@ -486,7 +488,7 @@ class PostPasses:
         data[36:40] = (s.radius, s.intensity, min(int(s.samples), 32), s.bias)
         data[40:44] = (b.threshold, b.knee, b.intensity, 0.0)
         data[44:48] = (sh.intensity, sh.decay, sh.density, visible)
-        data[48:52] = (g.saturation, g.contrast, g.vignette, 0.0)
+        data[48:52] = (g.saturation, g.contrast, g.vignette, s.power)
         flags = np.array([post.ssao is not None, post.bloom is not None, post.shafts is not None and visible > 0,
                           int(sh.samples)], np.uint32)
         data[52:56] = flags.view(np.float32)
