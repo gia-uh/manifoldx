@@ -60,6 +60,20 @@ class Grade:
 
 
 @dataclass(frozen=True)
+class Sky:
+    """The sky behind everything drawn, in place of the flat background: a gradient from horizon to zenith
+    (linear colours; horizon None takes the engine's background) and the sun's disk and halo far brighter than
+    anything lit, so bloom and light shafts start from it. sun_size is the disk's angular radius in degrees;
+    sun_intensity is how many times brighter than white the disk is."""
+
+    zenith: tuple = (0.18, 0.36, 0.78)
+    horizon: tuple | None = None
+    sun_size: float = 0.6
+    sun_intensity: float = 40.0
+    glow: float = 1.0
+
+
+@dataclass(frozen=True)
 class Post:
     """What runs after the main pass; None or False leaves an effect out."""
 
@@ -67,18 +81,19 @@ class Post:
     bloom: Bloom | None = None
     shafts: LightShafts | None = None
     grade: Grade | None = None
+    sky: Sky | None = None
     fxaa: bool = False
     _kernel_seed: int = field(default=7, repr=False)
 
     def active(self) -> bool:
-        return bool(self.ssao or self.bloom or self.shafts or self.grade or self.fxaa)
+        return bool(self.ssao or self.bloom or self.shafts or self.grade or self.sky or self.fxaa)
 
     def changed(self, **changes) -> "Post":
         """A copy with these fields set; True for an effect means its defaults."""
-        defaults = {"ssao": SSAO, "bloom": Bloom, "shafts": LightShafts, "grade": Grade}
+        defaults = {"ssao": SSAO, "bloom": Bloom, "shafts": LightShafts, "grade": Grade, "sky": Sky}
         for k, v in changes.items():
             if k not in defaults and k != "fxaa":
-                raise ValueError(f"unknown post effect {k!r}; known: ssao, bloom, shafts, grade, fxaa")
+                raise ValueError(f"unknown post effect {k!r}; known: ssao, bloom, shafts, grade, sky, fxaa")
             if v is True and k in defaults:
                 changes[k] = defaults[k]()
             elif v is False and k in defaults:
@@ -144,12 +159,42 @@ struct Post {
     grade: vec4<f32>,      // saturation, contrast, vignette, the occlusion's power
     flags: vec4<u32>,      // ssao, bloom, shafts, samples of the shafts
     sun_color: vec4<f32>,  // the sun's linear colour times its intensity, clamped to 1
+    inv_view: mat4x4<f32>, // camera to world
+    sun_dir: vec4<f32>,    // toward the sun, world; w 1 when there is a sun
+    zenith: vec4<f32>,
+    horizon: vec4<f32>,
+    sky: vec4<f32>,        // cos of the disk's radius, its intensity, the halo's strength, 1 when Sky is on
     kernel: array<vec4<f32>, 32>,
 };
 @group(0) @binding(0) var<uniform> u: Post;
+
+fn ray(uv: vec2<f32>) -> vec3<f32> {
+    let v = u.inv_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.5, 1.0);
+    return normalize((u.inv_view * vec4<f32>(normalize(v.xyz / v.w), 0.0)).xyz);
+}
+
+// The sun's disk and halo along a ray, unbounded: what makes the sky glare.
+fn sun_light(d: vec3<f32>) -> vec3<f32> {
+    if u.sun_dir.w <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let mu = dot(d, u.sun_dir.xyz);
+    let edge = 1.0 - u.sky.x;
+    let disk = smoothstep(u.sky.x - edge * 0.3, u.sky.x + edge * 0.3, mu) * u.sky.y;
+    let m = max(mu, 0.0);
+    let halo = (0.8 * pow(m, 900.0) + 0.35 * pow(m, 60.0) + 0.12 * pow(m, 6.0)) * u.sky.z;
+    let low = clamp(u.sun_dir.y * 8.0 + 1.0, 0.0, 1.0);  // set below the horizon
+    return u.sun_color.rgb * (disk + halo * 2.0) * low * select(1.0, 0.0, d.y < -0.01);
+}
+
+// The sky's gradient along a ray, in [0, 1].
+fn sky_base(d: vec3<f32>) -> vec3<f32> {
+    let t = clamp(d.y, 0.0, 1.0);
+    return mix(u.horizon.rgb, u.zenith.rgb, pow(t, 0.55));
+}
 """
 
-UNIFORM_BYTES = 64 * 2 + 16 + 16 * 6 + 16 * 32
+UNIFORM_BYTES = 64 * 2 + 16 + 16 * 6 + 64 + 16 * 4 + 16 * 32
 
 _SSAO = _VS + _UNIFORMS + """
 @group(0) @binding(1) var depth_tex: texture_depth_2d;
@@ -242,15 +287,26 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 _BRIGHT = _VS + _UNIFORMS + """
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var lin: sampler;
+@group(0) @binding(3) var depth_tex: texture_depth_2d;
+
+fn tap(uv: vec2<f32>) -> vec3<f32> {
+    let px = clamp(vec2<i32>(uv * u.size), vec2<i32>(0), vec2<i32>(u.size) - vec2<i32>(1));
+    var c = textureSampleLevel(src, lin, uv, 0.0).rgb;
+    if textureLoad(depth_tex, px, 0) <= 0.0 {
+        let d = ray(uv);
+        c = select(c, sky_base(d), u.sky.w > 0.0) + sun_light(d);
+    }
+    return min(c, vec3<f32>(64.0));
+}
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let px = 1.0 / vec2<f32>(textureDimensions(src));
     var c = vec3<f32>(0.0);
-    c = c + textureSampleLevel(src, lin, in.uv + vec2<f32>(-0.5, -0.5) * px, 0.0).rgb;
-    c = c + textureSampleLevel(src, lin, in.uv + vec2<f32>(0.5, -0.5) * px, 0.0).rgb;
-    c = c + textureSampleLevel(src, lin, in.uv + vec2<f32>(-0.5, 0.5) * px, 0.0).rgb;
-    c = c + textureSampleLevel(src, lin, in.uv + vec2<f32>(0.5, 0.5) * px, 0.0).rgb;
+    c = c + tap(in.uv + vec2<f32>(-0.5, -0.5) * px);
+    c = c + tap(in.uv + vec2<f32>(0.5, -0.5) * px);
+    c = c + tap(in.uv + vec2<f32>(-0.5, 0.5) * px);
+    c = c + tap(in.uv + vec2<f32>(0.5, 0.5) * px);
     c = c * 0.25;
     let br = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     let t = u.bloom.x;
@@ -301,21 +357,14 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 
 _SHAFTS = _VS + _UNIFORMS + """
 @group(0) @binding(1) var depth_tex: texture_depth_2d;
-@group(0) @binding(2) var scene: texture_2d<f32>;
-@group(0) @binding(3) var lin: sampler;
 
 fn lit(uv: vec2<f32>) -> vec3<f32> {
     let px = clamp(vec2<i32>(uv * u.size), vec2<i32>(0), vec2<i32>(u.size) - vec2<i32>(1));
     if textureLoad(depth_tex, px, 0) > 0.0 {
         return vec3<f32>(0.0);  // geometry blocks the sky
     }
-    let c = textureSampleLevel(scene, lin, uv, 0.0).rgb;
-    let a = vec2<f32>(u.size.x / u.size.y, 1.0);
-    let r = distance(uv * a, u.sun_uv * a);
-    // the sun's disk and halo as the source, whether or not the sky draws one, and the bright sky near it
-    let glow = exp(-r * r / 0.004) + 0.25 * exp(-r * r / 0.03);
-    let sky = max(dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)) - 0.6, 0.0) * exp(-r * r / 0.05);
-    return u.sun_color.rgb * glow + c * sky;
+    // the sun's disk and halo, HDR, wherever the sky shows
+    return min(sun_light(ray(uv)), vec3<f32>(16.0));
 }
 
 @fragment
@@ -333,7 +382,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         sum = sum + lit(uv) * fall;
         fall = fall * u.shafts.y;
     }
-    return vec4<f32>(sum * (6.0 / f32(max(n, 1))) * u.shafts.w, 1.0);
+    return vec4<f32>(sum * (1.0 / f32(max(n, 1))) * u.shafts.w, 1.0);
 }
 """
 
@@ -343,19 +392,28 @@ _COMPOSITE = _VS + _UNIFORMS + """
 @group(0) @binding(3) var ao_tex: texture_2d<f32>;
 @group(0) @binding(4) var bloom_tex: texture_2d<f32>;
 @group(0) @binding(5) var shafts_tex: texture_2d<f32>;
+@group(0) @binding(6) var depth_tex: texture_depth_2d;
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-    var c = textureLoad(scene, vec2<i32>(floor(in.pos.xy)), 0).rgb;
+    let px = vec2<i32>(floor(in.pos.xy));
+    var c = textureLoad(scene, px, 0).rgb;
+    if u.sky.w > 0.0 && textureLoad(depth_tex, px, 0) <= 0.0 {
+        let d = ray(in.uv);
+        let sun = sun_light(d);
+        c = sky_base(d) + vec3<f32>(1.0) - exp(-sun);
+    }
     if u.flags.x != 0u {
         c = c * mix(1.0, textureSampleLevel(ao_tex, lin, in.uv, 0.0).r, u.ssao.y);
     }
+    var add = vec3<f32>(0.0);
     if u.flags.y != 0u {
-        c = c + textureSampleLevel(bloom_tex, lin, in.uv, 0.0).rgb * u.bloom.z;
+        add = add + textureSampleLevel(bloom_tex, lin, in.uv, 0.0).rgb * u.bloom.z;
     }
     if u.flags.z != 0u {
-        c = c + textureSampleLevel(shafts_tex, lin, in.uv, 0.0).rgb * u.shafts.x;
+        add = add + textureSampleLevel(shafts_tex, lin, in.uv, 0.0).rgb * u.shafts.x;
     }
+    c = c + vec3<f32>(1.0) - exp(-add);  // added light saturates toward white rather than clipping
     let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     c = max(mix(vec3<f32>(lum), c, u.grade.x), vec3<f32>(0.0));
     let g = (sqrt(c) - 0.5) * u.grade.y + 0.5;
@@ -474,11 +532,12 @@ class PostPasses:
                                                               entries=entries)
         return self._groups[key]
 
-    def upload(self, post: Post, camera, sun):
+    def upload(self, post: Post, camera, sun, background=(0.0, 0.0, 0.0)):
         w, h = self.size
         proj = camera.get_projection_matrix(w / h, near=camera.near, far=camera.far).astype(np.float64)
         sun_u, sun_v, visible = sun_on_screen(camera, w / h, sun) if post.shafts else (0.5, 0.5, 0.0)
         s, b, sh, g = post.ssao or SSAO(), post.bloom or Bloom(), post.shafts or LightShafts(), post.grade or Grade()
+        sun = sun if sun is not None and float(sun.intensity) > 0 else None
         if self._kernel is None or self._kernel[0] != s.samples:
             self._kernel = (s.samples, ssao_kernel(min(int(s.samples), 32)))
         data = np.zeros(UNIFORM_BYTES // 4, np.float32)
@@ -496,7 +555,18 @@ class PostPasses:
             from manifoldx.resources import material_rgb
 
             data[56:59] = np.clip(material_rgb(sun.color) * min(float(sun.intensity), 1.0), 0.0, 1.0)
-        data[60:60 + 128] = self._kernel[1].ravel()
+            if np.max(data[56:59]) > 0:
+                data[56:59] /= np.max(data[56:59])  # the disk's colour; its brightness is Sky.sun_intensity
+        view = camera.get_view_matrix().astype(np.float64)
+        data[60:76] = np.linalg.inv(view).T.astype(np.float32).ravel()
+        if sun is not None:
+            to_sun = -np.asarray(sun.direction, float)
+            data[76:80] = (*(to_sun / (np.linalg.norm(to_sun) or 1.0)), 1.0)
+        sky = post.sky or Sky()
+        data[80:83] = sky.zenith
+        data[84:87] = sky.horizon if sky.horizon is not None else tuple(background)[:3]
+        data[88:92] = (np.cos(np.radians(sky.sun_size)), sky.sun_intensity, sky.glow, 1.0 if post.sky else 0.0)
+        data[92:92 + 128] = self._kernel[1].ravel()
         from manifoldx import counters
 
         counters.write_buffer(self.device.queue, self.ubuf, 0, data.tobytes())
@@ -511,10 +581,10 @@ class PostPasses:
         rp.draw(3)
         rp.end()
 
-    def run(self, post: Post, encoder, out_view, depth_view, camera, sun, timer=None):
+    def run(self, post: Post, encoder, out_view, depth_view, camera, sun, timer=None, background=(0.0, 0.0, 0.0)):
         """Draw the effects from self.scene and the depth into out_view (the swapchain's)."""
         self.depth_view = depth_view
-        shafts_on = self.upload(post, camera, sun)
+        shafts_on = self.upload(post, camera, sun, background)
         steps = []
         if post.ssao:
             p = self._pipeline("ssao", _SSAO, "r8unorm")
@@ -523,7 +593,7 @@ class PostPasses:
             steps.append((self.ao_blur, p, self._group("ssao_blur", p, ["u", depth_view, self.ao])))
         if post.bloom:
             p = self._pipeline("bright", _BRIGHT, self.HDR)
-            steps.append((self.down[0], p, self._group("bright", p, ["u", self.scene, self.lin])))
+            steps.append((self.down[0], p, self._group("bright", p, ["u", self.scene, self.lin, depth_view])))
             for k in (1, 2, 3):
                 p = self._pipeline("down", _DOWN, self.HDR)
                 steps.append((self.down[k], p, self._group(f"down{k}", p, [None, self.down[k - 1], self.lin])))
@@ -533,12 +603,12 @@ class PostPasses:
                 steps.append((self.up[k], p, self._group(f"up{k}", p, [None, low, self.lin, self.down[k]])))
         if shafts_on:
             p = self._pipeline("shafts", _SHAFTS, self.HDR)
-            steps.append((self.shafts, p, self._group("shafts", p, ["u", depth_view, self.scene, self.lin])))
+            steps.append((self.shafts, p, self._group("shafts", p, ["u", depth_view])))
         final = self.ldr if post.fxaa else out_view
         p = self._pipeline("composite", _COMPOSITE, self.fmt)
         ao = self.ao_blur if post.ssao else self.ao
         steps.append((final, p, self._group(f"composite{post.fxaa}", p,
-                                            ["u", self.scene, self.lin, ao, self.up[0], self.shafts])))
+                                            ["u", self.scene, self.lin, ao, self.up[0], self.shafts, depth_view])))
         if post.fxaa:
             p = self._pipeline("fxaa", _FXAA, self.fmt)
             steps.append((out_view, p, self._group("fxaa", p, [None, self.ldr, self.lin])))

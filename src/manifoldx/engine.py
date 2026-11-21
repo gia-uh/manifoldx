@@ -1817,7 +1817,7 @@ class Engine:
 
         if post is not None:  # the effects into the swapchain, then the GUI over them
             self._post_passes.run(post, command_encoder, texture_view, self._depth_texture_view, self._camera,
-                                  self._sun, timer)
+                                  self._sun, timer, self.background_color)
             gui_pass = command_encoder.begin_render_pass(
                 color_attachments=[{"view": texture_view, "resolve_target": None, "load_op": wgpu.LoadOp.load,
                                     "store_op": wgpu.StoreOp.store}],
