@@ -725,6 +725,18 @@ class QuadStreamer(_Uploads):
         self._shown_for, self._shown_landed, self._waiting = selected, landed, bool(wanted)
         self._quiet = not (self._queue or self._pass_started or self._pending or self._waiting)
 
+    def cancel(self) -> None:
+        """Drop every node queued to build: those being built land in the cache, and the next focus asks
+        again for what it needs. Call it before the camera jumps far (a teleport), so the workers do not
+        finish the old place's queue before the new place's first node."""
+        with self._lock:
+            self._todo = []
+            for n in [n for n in self._pending if self._pending[n].cancel()]:
+                del self._pending[n]
+                self._note("cancelled", n)
+        self._still = self._shown_for = None  # the next focus plans again, even at the same camera
+        self._quiet = False
+
     def _submit(self, n):
         """Start building node n; call it holding the lock."""
         self._pending[n] = fut = self._pool.submit(_pack, self.build, *n)

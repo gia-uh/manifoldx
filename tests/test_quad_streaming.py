@@ -549,6 +549,24 @@ def test_the_build_order_never_changes_what_is_drawn():
     assert drawn[0] == drawn[1] == drawn[2]
 
 
+def test_cancel_drops_the_queue_and_the_next_focus_asks_again():
+    s = faked(5, focus_radius=CELL)
+    s.engine.camera.set_pose((0.0, 2.0, 0.0), (10.0, 0.0, 0.0))
+    x, z, h = 3300.0, 3300.0, 2.0
+    s.focus(x, z, h)
+    assert s._todo and len(s._pool.jobs) > 1
+    running = next(iter(s._pool.jobs.values()))
+    running.set_running_or_notify_cancel()  # a worker has it: it cannot be cancelled
+    s.cancel()
+    assert not s._todo and list(s._pending.values()) == [running]
+    before = len(s._pool.submitted)
+    s._pool.finish()  # the running build lands, and submits nothing of the old queue after it
+    assert len(s._pool.submitted) == before
+    order = _build_order(s, x, z, h)  # the same camera asks again and settles as before
+    assert order and s.drawn() == set(s._selected)
+    s.close()
+
+
 def test_a_camera_looking_down_sees_every_way():
     s = faked(5)
     s.engine.camera.set_pose((0.0, 500.0, 0.0), (0.0, 0.0, 0.0))
