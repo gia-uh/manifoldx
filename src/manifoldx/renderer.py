@@ -1488,6 +1488,9 @@ class RenderPipeline:
         from manifoldx.shadow import compute_light_view_proj
 
         direction = np.asarray(sun.direction, dtype=np.float32)
+        fitted = self._sun_cascades(engine)
+        if fitted is not None:  # cascades: no whole-scene fit; the nearest cascade stands for the one map
+            return fitted[0][0][0]
 
         if cfg.get("auto_fit", True):
             bounds = self._scene_bounds(engine)

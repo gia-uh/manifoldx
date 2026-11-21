@@ -151,3 +151,14 @@ def test_one_cascade_draws_as_before():
     _frame(eng)
     count = np.frombuffer(eng._render_pipeline._cascades_bytes, np.uint32)[76]
     assert count == 0 and eng._render_pipeline._shadow_map.size[2] == 1
+
+
+def test_cascades_never_fit_the_whole_scene():
+    """With cascades the auto-fit over every mesh's bounds, costly in a city, never runs."""
+    eng = _kilometre(3, camera=(0.0, 6.0, 0.0))
+
+    def boom(engine):
+        raise AssertionError("scene bounds computed")
+
+    eng._render_pipeline._scene_bounds = boom
+    assert _shadowed(eng).max() > 20
