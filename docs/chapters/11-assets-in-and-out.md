@@ -399,6 +399,17 @@ costs nothing on the next `focus`. With `crossfade=0.3`, a node that gives way
 to finer ones stays drawn for 0.3 s, fading out while they fade in, so the
 level of detail changes without a pop (see `Fade`).
 
+A coarse node can look like the finer ones it stands for when it carries a
+picture of them. A `build` that returns `MeshData(..., albedo=image)`, an
+`(n, n, 3)` sRGB image of the node seen from above over its square, has it
+drawn on the vertices whose surface id is `SURFACE_BAKED` (12), sampled where
+each vertex stands in the square; the rest of the node keeps its colours. The
+streamer's material is made with `baked=texture_array(engine, layers, size)`,
+and each node drawn with an image gets a layer of that array of its own, given
+by a `Baked(layer=...)` component and given back when the node goes. When
+every layer is taken, a node draws its vertices' own colours until one frees.
+`layer_mips` and `write_layer` fill a layer by hand.
+
 To open the finished plaza in a window, install the `desktop` extra and end the
 program with `engine.run()`, which draws every frame until you close it.
 

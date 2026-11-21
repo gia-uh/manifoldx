@@ -37,6 +37,7 @@ import math
 import multiprocessing
 import os
 import time
+import functools
 import itertools
 import threading
 import weakref
@@ -61,15 +62,19 @@ class MeshData(NamedTuple):
     indices: np.ndarray  # u32[M]
     surfaces: np.ndarray | None = None  # i[N]: surface pattern ids (resources.SURFACE_PATTERNS)
     facade: np.ndarray | None = None  # f32[N, 4]: bays along, floors up, building type, seed (facade_albedo)
+    # u8[n, n, 3|4], sRGB: what the node holds seen from above over its square, x along the image's width and
+    # z down its height. QuadStreamer with a baked material draws it on the vertices of surface SURFACE_BAKED.
+    albedo: np.ndarray | None = None
 
 
 class _Cell:
     """A built cell: its geometry dict, and its packed bytes until they are on the GPU."""
 
-    __slots__ = ("geo", "info", "vbytes", "ibytes")
+    __slots__ = ("geo", "info", "vbytes", "ibytes", "levels")
 
-    def __init__(self, geo, info, vbytes, ibytes):
+    def __init__(self, geo, info, vbytes, ibytes, levels=None):
         self.geo, self.info, self.vbytes, self.ibytes = geo, info, vbytes, ibytes
+        self.levels = levels  # the baked image's RGBA mip chain (textures.layer_mips), or None
 
 
 def _started() -> None:
@@ -93,13 +98,14 @@ def _worker_start(parent: int, warm) -> None:
         warm()
 
 
-def _pack(build, *key):
-    """The worker's job: build cell (i, j), or node (L, a, b), and pack it for its GPU buffers."""
+def _pack(build, *key, side=None):
+    """The worker's job: build cell (i, j), or node (L, a, b), and pack it for its GPU buffers. `side` is
+    the node's side in metres, for the uv of a baked image."""
     with counters.worker_span("stream", key):
-        return _pack_now(build, key)
+        return _pack_now(build, key, side)
 
 
-def _pack_now(build, key):
+def _pack_now(build, key, side=None):
     data = build(*key)
     if data is None:
         return None
@@ -113,10 +119,17 @@ def _pack_now(build, key):
         geo["surfaces"] = np.asarray(data.surfaces, np.int32)
     if data.facade is not None:
         geo["facade"] = np.asarray(data.facade, np.float32)
+    levels = None
+    if getattr(data, "albedo", None) is not None and side and data.surfaces is not None:
+        from manifoldx.textures import layer_mips
+
+        geo["baked_uv"] = geo["positions"][:, [0, 2]] / np.float32(side)  # the node's square, seen from above
+        levels = layer_mips(data.albedo)
     vbytes, info = pack_vertices(geo)
+    geo.pop("baked_uv", None)
     if len(geo["positions"]):
         geo["bounds"] = vertex_bounds(geo["positions"])  # the frustum test reads it, not the frame
-    return _Cell(geo, info, vbytes, geo["indices"].tobytes())
+    return _Cell(geo, info, vbytes, geo["indices"].tobytes(), levels)
 
 
 _VECTOR_FROM = 256  # QuadStreamer computes distances with numpy from this many nodes up
@@ -188,13 +201,17 @@ class _Uploads:
         self.engine, self.build = engine, build
         self.uploads_per_frame = uploads_per_frame
         self.material = material
+        # A baked material's texture array: one layer per drawn node with an image, given back when it goes.
+        self._baked = getattr(material, "baked", None)
+        self._free_layers = list(range(getattr(self._baked, "layers", 0)))[::-1]
+        self._layers = {}  # EntityHandle index -> its layer
         self.upload_bytes_per_frame = max(4, int(upload_bytes_per_frame) // 4 * 4)
         self._pending = {}  # key -> Future
         self._lock = threading.RLock()  # _pending, also changed by QuadStreamer's done callbacks
         self._ready = {}  # key -> _Cell | None, built and kept
         self._gpu = {}  # key -> its upload: geometry id, buffers, bytes written, done
         self._drawn = {}  # key -> EntityHandle | None (None: an empty cell)
-        self._stats = {"built": 0, "uploaded": 0, "dropped": 0, "max_frame_ms": 0.0}
+        self._stats = {"built": 0, "uploaded": 0, "dropped": 0, "max_frame_ms": 0.0, "baked": 0, "unbaked": 0}
         self._last = None
         self._landed = 0  # uploads finished so far
         self._serial = next(_SERIAL)
@@ -301,14 +318,18 @@ class _Uploads:
         if cell is None:
             self._drawn[c] = None
             return
-        from manifoldx.components import Fade, Material, Mesh, Transform
+        from manifoldx.components import Baked, Fade, Material, Mesh, Transform
 
+        layer = self._take_layer(cell)
         self._drawn[c] = self.engine.spawn(
             Mesh(cell.geo),
             Material(self.material),
             Transform(pos=pos),
             *([Fade(value=0.0)] if getattr(self, "crossfade", None) else []),
+            *([Baked(layer=float(layer))] if self._baked is not None else []),
         )
+        if layer >= 0:
+            self._layers[self._drawn[c].index] = layer
         # Drawn before any device: its buffers come from the render pass, and are still ours to free.
         if c not in self._gpu:
             self._gpu[c] = {"id": self._drawn[c]._geometry_id, "done": True}
@@ -320,7 +341,33 @@ class _Uploads:
         handle = self._drawn.pop(c)
         self._note("undrawn", c)
         if handle is not None:
-            handle.destroy(free_geometry=False)
+            self._destroy(handle)
+
+    def _take_layer(self, cell) -> int:
+        """A free layer of the baked array holding cell's image, or -1: no image, or every layer taken (the
+        node then draws its vertices' own colours)."""
+        if cell.levels is None or not self._baking():
+            return -1
+        if not self._free_layers:
+            self._stats["unbaked"] += 1
+            return -1
+        from manifoldx.textures import write_layer
+
+        layer = self._free_layers.pop()
+        write_layer(self.engine, self._baked, layer, cell.levels)
+        self._stats["baked"] += 1
+        return layer
+
+    def _baking(self) -> bool:
+        """Whether drawn nodes get layers: a baked material, and a device to write them on."""
+        return self._baked is not None and self.engine._device is not None
+
+    def _destroy(self, handle):
+        """Destroy a drawn node's entity, keeping its geometry, and give its layer back."""
+        layer = self._layers.pop(handle.index, None)
+        if layer is not None:
+            self._free_layers.append(layer)
+        handle.destroy(free_geometry=False)
 
     def close(self) -> None:
         """Stop the worker and destroy every drawn cell."""
@@ -739,7 +786,8 @@ class QuadStreamer(_Uploads):
 
     def _submit(self, n):
         """Start building node n; call it holding the lock."""
-        self._pending[n] = fut = self._pool.submit(_pack, self.build, *n)
+        job = _pack if self._baked is None else functools.partial(_pack, side=self.cell * 2 ** n[0])
+        self._pending[n] = fut = self._pool.submit(job, self.build, *n)
         self._note("submitted", n)
         fut.add_done_callback(self._next)
 
@@ -759,7 +807,7 @@ class QuadStreamer(_Uploads):
             self._todo = []  # no done callback submits to a pool shut down
         for c, (handle, _, out) in list(self._fading.items()):
             if out:
-                handle.destroy(free_geometry=False)
+                self._destroy(handle)
         self._fading.clear()
         super().close()
 
@@ -901,7 +949,7 @@ class QuadStreamer(_Uploads):
             if not out:
                 self._set_fade(handle, 1.0)
                 continue
-            handle.destroy(free_geometry=False)  # still built: the cache frees it when it must
+            self._destroy(handle)  # still built: the cache frees it when it must
 
     def drawn(self) -> set[tuple[int, int, int]]:
         """The nodes drawn now, empty ones (build returned None) included; not those fading out."""
