@@ -182,6 +182,15 @@ The counts of one frame are a `Frame`: its counts, its spans and its metrics.
 Code that drives the engine itself can call `counters.start()`,
 `counters.take()` once a frame and `counters.stop()`.
 
+The split tells how long the CPU waited for the GPU, not what the GPU spent on
+each pass. `engine.gpu_timings()` does: the milliseconds of the second cameras'
+views, the shadow pass and the main pass, and their total, from timestamp
+queries. A `GpuTimer` (`manifoldx.gputime`) times one frame in eight and reads it
+two frames later, so it costs about a hundredth of a millisecond a frame. It
+returns None on an adapter without timestamps, such as the software rasterizer
+in CI, and with `MANIFOLDX_GPU_TIMINGS=0`. An app that wants the numbers in its
+run publishes them with `bench.metric`.
+
 ## The engine's steps and an app's own
 
 The engine's steps know nothing about what an app draws: `camera`, `fly` and

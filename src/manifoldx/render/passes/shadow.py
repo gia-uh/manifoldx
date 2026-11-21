@@ -295,7 +295,9 @@ def render_shadow_map(rp, engine, command_encoder):
         casters.bundle = None
     entries = casters.entries
 
+    timer = engine._gpu_timer()
     shadow_pass = command_encoder.begin_render_pass(
+        timestamp_writes=None if timer is None else timer.writes("shadow"),
         color_attachments=[],
         depth_stencil_attachment={
             "view": rp._shadow_map_view,
