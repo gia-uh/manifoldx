@@ -1643,6 +1643,11 @@ class RenderPipeline:
         # All other passes require alive entities and known components.
         self._render_scene_passes(engine, render_pass)
 
+        # Lines over the scene, a fixed width in screen pixels (engine.lines), under the GUI.
+        from manifoldx.render.passes import lines as _lines_pass
+
+        _lines_pass.render_lines_pass(self, engine, render_pass)
+
         # ---------------------------------------------------------------
         # Draw GUI pass — last in render order. Reads engine.gui directly;
         # no batches needed. No-op when engine.gui is empty.

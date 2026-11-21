@@ -487,6 +487,11 @@ class Engine:
 
         self.gui = _GuiRoot()
 
+        # Lines over the scene, a fixed width in screen pixels (manifoldx/lines.py).
+        from manifoldx.lines import Lines
+
+        self.lines = Lines()
+
         # GUI input bridge — routes pointer events through hit-test
         # and per-widget state. Subscribes to pointer_down/move/up at
         # construction; needs `self.gui` to already exist.
@@ -2062,7 +2067,9 @@ class Engine:
             self._environment = None
             self.fog_enabled = False
             self.gui = _GuiRoot()
+            lines_visible, self.lines.visible = self.lines.visible, False  # lines carry no ids
             rgb = self._draw_still(simulate=False).astype(np.int32)
+            self.lines.visible = lines_visible
         finally:
             mats[alive] = saved_mats
             self.store._alive[others] = True
