@@ -497,7 +497,9 @@ class PostPasses:
 
             data[56:59] = np.clip(material_rgb(sun.color) * min(float(sun.intensity), 1.0), 0.0, 1.0)
         data[60:60 + 128] = self._kernel[1].ravel()
-        self.device.queue.write_buffer(self.ubuf, 0, data.tobytes())
+        from manifoldx import counters
+
+        counters.write_buffer(self.device.queue, self.ubuf, 0, data.tobytes())
         return bool(flags[2])
 
     def _draw(self, encoder, target, pipeline, group, timer=None):
