@@ -1509,6 +1509,10 @@ class Engine:
             self._adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
             # indirect-first-instance lets the mesh pass replay one render bundle (render/passes/mesh.py)
             features = [f for f in ("indirect-first-instance",) if f in self._adapter.features]
+            from manifoldx import gputime
+
+            if gputime.wanted(self._adapter):  # GPU time per pass (gpu_timings)
+                features.append("timestamp-query")
             self._device = self._adapter.request_device_sync(required_features=features)
             self._owns_device = True
 
@@ -1730,6 +1734,12 @@ class Engine:
         readbacks, self._readbacks = self._readbacks, []
         for readback in readbacks:  # the GPU finished last frame's copies by now
             readback.finish()
+        timer = self._gpu_timer()
+        if timer is not None and timer.pending is not None:
+            last = timer.read()
+            if last and timer.pending is None and counters.recording():
+                for name, ms in last.items():
+                    counters.metric(f"gpu_{name}_ms", ms)
 
         # Get the next frame's texture and create view; waiting here is vsync or the GPU behind
         acquiring = time.perf_counter()
@@ -1762,6 +1772,7 @@ class Engine:
 
         # Create render pass with clear color and depth attachment
         render_pass = command_encoder.begin_render_pass(
+            timestamp_writes=None if timer is None else timer.writes("main"),
             color_attachments=[
                 {
                     "view": texture_view,
@@ -1785,6 +1796,8 @@ class Engine:
         # End render pass
         render_pass.end()
 
+        if timer is not None:
+            timer.resolve(command_encoder)
         # Submit command buffer
         self._device.queue.submit([command_encoder.finish()])
 
@@ -1905,8 +1918,9 @@ class Engine:
         if not views:
             return
         saved = (self._camera, self.w, self.h, self.fog_enabled)
+        timer = self._gpu_timer()
         try:
-            for view in views:
+            for i, view in enumerate(views):
                 view.pending = False
                 self._camera = view.camera
                 self.fog_enabled = saved[3] and view.fog
@@ -1914,6 +1928,8 @@ class Engine:
                 encoder = self._device.create_command_encoder()
                 bg = view.background or (*self.background_color, 1.0)
                 render_pass = encoder.begin_render_pass(
+                    timestamp_writes=None if timer is None else timer.writes("views", begin=i == 0,
+                                                                             end=i == len(views) - 1),
                     color_attachments=[{
                         "view": view.handle.view,
                         "resolve_target": None,
@@ -1939,6 +1955,26 @@ class Engine:
     # One frame is enough: shadows and IBL are complete on the first frame
     # (measured: identical output for 1, 2 and 3 frames, with shadows and with IBL).
     _STILL_FRAMES = 1
+
+    def _gpu_timer(self):
+        """The GPU timer (manifoldx.gputime) once the device can time passes, else None."""
+        timer = getattr(self, "_gpu_timer_obj", False)
+        if timer is False:
+            from manifoldx import gputime
+
+            device = getattr(self, "_device", None)
+            if device is None:
+                return None
+            ok = gputime.wanted(self._adapter) and "timestamp-query" in device.features
+            timer = self._gpu_timer_obj = gputime.GpuTimer(device) if ok else None
+        return timer
+
+    def gpu_timings(self) -> dict | None:
+        """The GPU time of the newest frame read back, in milliseconds per pass ("views" for all second
+        cameras together, "shadow", "main") and "total" from the first pass's start to the last's end; None
+        without timestamp queries on this adapter, with MANIFOLDX_GPU_TIMINGS=0, or before two frames."""
+        timer = self._gpu_timer()
+        return None if timer is None or timer.last is None else dict(timer.last)
 
     def render_frame(
         self, *, supersample: int = 2, pass_: str = "beauty", groups=None, dt: float = 1 / 30
