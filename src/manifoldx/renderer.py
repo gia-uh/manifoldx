@@ -1658,8 +1658,8 @@ class RenderPipeline:
 
         _shadow_pass.render_shadow_map(self, engine, command_encoder)
 
-    def render(self, engine, render_pass):
-        """Issue instanced draw calls into an active render pass."""
+    def render(self, engine, render_pass, gui: bool = True):
+        """Issue instanced draw calls into an active render pass; gui=False leaves the GUI for render_gui."""
         if not self._initialized or self._device is None:
             return
 
@@ -1676,6 +1676,11 @@ class RenderPipeline:
         # Draw GUI pass — last in render order. Reads engine.gui directly;
         # no batches needed. No-op when engine.gui is empty.
         # ---------------------------------------------------------------
+        if gui:
+            self.render_gui(engine, render_pass)
+
+    def render_gui(self, engine, render_pass):
+        """The GUI, last in render order. Reads engine.gui directly; a no-op when it is empty."""
         from manifoldx.render.passes import gui as _gui_pass
 
         _gui_pass.render_gui_pass(self, engine, render_pass)

@@ -313,6 +313,145 @@ class WaterMaterial(Material):
         return np.tile(np.array([*rgb, self.fresnel_power], dtype=np.float32), (n, 1))
 
 
+_SEA_SHADER = """
+struct Globals {
+    vp:              mat4x4<f32>,   // offset   0
+    view:            mat4x4<f32>,   // offset  64
+    proj:            mat4x4<f32>,   // offset 128
+    camera_pos:      vec3<f32>,     // offset 192
+    time:            f32,           // offset 204  (seconds, wraps every 64)
+    viewport_size:   vec2<f32>,     // offset 208
+    origin_mod:      vec2<f32>,     // offset 216  (the floating origin's x, z mod 256)
+    ibl_intensity:   f32,           // offset 224
+    ibl_enabled:     u32,           // offset 228
+    _pad_ibl:        vec2<f32>,     // offset 232
+    light_view_proj: mat4x4<f32>,   // offset 240
+    sun_direction:   vec3<f32>,     // offset 304
+    _pad_sun0:       f32,           // offset 316
+    sun_color:       vec3<f32>,     // offset 320
+    sun_intensity:   f32,           // offset 332
+    shadow_enabled:  u32,           // offset 336
+    shadow_bias:     f32,           // offset 340
+    shadow_map_size: f32,           // offset 344
+    shadow_pcf_radius: u32,         // offset 348
+    spot_position:   vec3<f32>,     // offset 352
+    spot_range:      f32,           // offset 364
+    spot_direction:  vec3<f32>,     // offset 368
+    spot_cos_inner:  f32,           // offset 380
+    spot_color:      vec3<f32>,     // offset 384
+    spot_intensity:  f32,           // offset 396
+    spot_cos_outer:  f32,           // offset 400
+    shadow_caster:   u32,           // offset 404  (0=none, 1=sun, 2=spot)
+    fog_start:       f32,           // offset 408
+    fog_end:         f32,           // offset 412
+    fog_color:       vec3<f32>,     // offset 416
+    fog_enabled:     u32,           // offset 428
+    benders:         array<vec4<f32>, 8>,  // offset 432  (x, z, radius, strength) in the render frame
+};
+struct Transforms { models: array<mat4x4<f32>> };
+struct SeaUniforms {
+    deep: vec4<f32>,     // rgb the deep water's colour, a the fresnel power
+    zenith: vec4<f32>,   // the sky's colour overhead, linear
+    horizon: vec4<f32>,  // the sky's colour at the horizon, linear
+    waves: vec4<f32>,    // height of the ripples' slopes, wavelength (m), speed, glitter strength
+};
+@group(0) @binding(0) var<uniform> globals: Globals;
+@group(0) @binding(1) var<storage, read> transforms: Transforms;
+@group(0) @binding(2) var<uniform> material: SeaUniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @builtin(instance_index) instance: u32,
+};
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_pos: vec3<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    let model = transforms.models[in.instance];
+    out.world_pos = (model * vec4<f32>(in.position, 1.0)).xyz;
+    out.position = globals.vp * vec4<f32>(out.world_pos, 1.0);
+    return out;
+}
+
+// The slope of a sum of travelling waves at p (metres, wrapped with the floating origin so it never jumps).
+fn ripples(p: vec2<f32>, t: f32) -> vec2<f32> {
+    var g = vec2<f32>(0.0);
+    let L = material.waves.y;
+    let dirs = array<vec2<f32>, 6>(vec2<f32>(1.0, 0.2), vec2<f32>(-0.4, 1.0), vec2<f32>(0.7, -0.7),
+                                   vec2<f32>(-1.0, -0.3), vec2<f32>(0.3, 0.95), vec2<f32>(0.9, 0.45));
+    let scale = array<f32, 6>(1.0, 0.61, 0.37, 0.23, 0.14, 0.09);
+    for (var i = 0; i < 6; i = i + 1) {
+        let d = normalize(dirs[i]);
+        let k = 6.2831853 / (L * scale[i]);
+        let w = sqrt(9.81 * k) * material.waves.z;
+        g = g + d * k * cos(dot(d, p) * k - w * t) * scale[i];
+    }
+    return g * material.waves.x;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let p = in.world_pos.xz + globals.origin_mod;
+    let dist = distance(globals.camera_pos, in.world_pos);
+    // far ripples average out before they shimmer: a pixel's footprint against the wavelength
+    let calm = exp(-dist / (material.waves.y * 25.0));
+    let slope = ripples(p, globals.time) * calm;
+    let N = normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
+    let V = normalize(globals.camera_pos - in.world_pos);
+    let sun = normalize(-globals.sun_direction);
+    let day = smoothstep(-0.05, 0.25, sun.y);
+    let deep = material.deep.rgb * (0.25 + 0.75 * day);
+    let fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), material.deep.a);
+    let R = reflect(-V, N);
+    let sky = mix(material.horizon.rgb, material.zenith.rgb, pow(clamp(R.y, 0.0, 1.0), 0.55));
+    var col = mix(deep, sky, fresnel);
+    // The sun's glitter: a broad lobe for the path on the water and a sharp one for the sparks in it.
+    let H = normalize(V + sun);
+    let nh = max(dot(N, H), 0.0);
+    let sc = globals.sun_color * clamp(globals.sun_intensity, 0.0, 3.0);
+    col = col + sc * (pow(nh, 220.0) * 6.0 + pow(nh, 2400.0) * 40.0) * material.waves.w * fresnel * 4.0;
+    if globals.fog_enabled != 0u {
+        let fd = clamp((dist - globals.fog_start) / (globals.fog_end - globals.fog_start), 0.0, 1.0);
+        col = mix(col, globals.fog_color, fd);
+    }
+    return vec4<f32>(min(col, vec3<f32>(1.0)), 1.0);
+}
+"""
+
+
+class SeaMaterial(Material):
+    """Open water under a sky: ripples from the clock, the sky reflected by a fresnel term, the sun's glitter
+    as a path of sparks toward it, and the fog. zenith and horizon are the sky's linear colours, which an app
+    sets each frame as its sky changes; waves are (slope, wavelength m, speed, glitter)."""
+
+    binding_slot = 0
+
+    def __init__(self, color=(0.02, 0.09, 0.16), fresnel_power: float = 5.0, zenith=(0.18, 0.36, 0.78),
+                 horizon=(0.6, 0.72, 0.85), waves=(0.02, 6.0, 1.0, 1.0)):
+        self.color = color
+        self.fresnel_power = fresnel_power
+        self.zenith = tuple(zenith)
+        self.horizon = tuple(horizon)
+        self.waves = tuple(waves)
+
+    @classmethod
+    def _compile(cls) -> str:
+        return _SEA_SHADER
+
+    @classmethod
+    def uniform_type(cls) -> Dict[str, str]:
+        return {"deep": "vec4<f32>", "zenith": "vec4<f32>", "horizon": "vec4<f32>", "waves": "vec4<f32>"}
+
+    def get_data(self, n: int, registry) -> np.ndarray:
+        row = np.array([*material_rgb(self.color), self.fresnel_power, *self.zenith[:3], 0.0,
+                        *self.horizon[:3], 0.0, *self.waves[:4]], dtype=np.float32)
+        return np.tile(row, (n, 1))
+
 _ATMO_SCATTER_SHADER = """
 struct Globals {
     vp: mat4x4<f32>, view: mat4x4<f32>, proj: mat4x4<f32>,

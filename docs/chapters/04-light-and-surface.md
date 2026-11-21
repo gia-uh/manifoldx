@@ -351,6 +351,31 @@ engine.camera.set_pose(position=(5.5, 3.2, 7.5), target=(0.0, 0.8, 0.0))
 Image.fromarray(engine.render_frame())
 ```
 
+## Effects after the frame
+
+Some of what makes a picture read as real happens after the lights are summed.
+Where a wall meets the paving, little sky reaches the corner; a bright lamp
+glows a little past its edge; edges that step from pixel to pixel crawl when
+the camera moves. `engine.set_post` adds these as passes over the finished
+frame. `SSAO` darkens corners from the depth buffer, `Bloom` spreads light
+past what is brighter than a threshold, `LightShafts` draws rays from the sun
+when it is in the frame, `Grade` sets saturation, contrast and a vignette, and
+`fxaa=True` smooths edges. Each takes its settings, or True for its defaults,
+and None to turn it off again; the GUI is drawn after them, unchanged.
+
+```python {run continue}
+from manifoldx.post import SSAO, Bloom, Grade
+
+engine.set_post(ssao=SSAO(radius=0.6), bloom=Bloom(threshold=0.7),
+                grade=Grade(saturation=1.1, contrast=1.05, vignette=0.25), fxaa=True)
+Image.fromarray(engine.render_frame())
+```
+
+The engine keeps what is in force as a `Post`, and its `PostPasses` hold the
+targets the effects draw into. They cost GPU time and almost no Python: about
+a dozen fullscreen passes, the occlusion at half the frame's size and the rays
+at a quarter. `engine.gpu_timings()` reports them as `post`.
+
 The finished program is `docs/examples/evening_light.py`: it builds the stone,
 the metal, the lamp and the spot, and draws the plaza at dusk and after dark.
 The next chapter adds the sky that the metal has been waiting to reflect, the
