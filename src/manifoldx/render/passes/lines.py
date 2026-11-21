@@ -18,7 +18,7 @@ struct Globals {
     viewport_size: vec2<f32>, _pad1: vec2<f32>,
 };
 struct Seg { a: vec4<f32>, b: vec4<f32>, color: vec4<f32> };
-struct Params { bias: f32, feather: f32, _p0: f32, _p1: f32 };
+struct Params { bias: f32, feather: f32, scale: f32, alpha: f32 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var<storage, read> segs: array<Seg>;
@@ -47,7 +47,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     var dir = vec2<f32>(1.0, 0.0);
     if (len > 1e-4) { dir = d / len; }
     let nrm = vec2<f32>(-dir.y, dir.x);
-    let half_w = s.a.w * 0.5 + params.feather;
+    let half_w = s.a.w * params.scale * 0.5 + params.feather;
     var ends = array<f32, 6>(0.0, 1.0, 1.0, 0.0, 1.0, 0.0);
     var sides = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
     let at_b = ends[vi] > 0.5;
@@ -61,7 +61,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     if (ca.w < eps && cb.w < eps) { out.pos = vec4<f32>(0.0, 0.0, -1.0, 1.0); }  // all behind: clipped away
     out.across = side * half_w;
     out.half_w = half_w;
-    out.color = s.color;
+    out.color = vec4<f32>(s.color.rgb, s.color.a * params.alpha);
     return out;
 }
 
@@ -110,13 +110,11 @@ def render_lines_pass(rp, engine, render_pass) -> None:
         return
     pipeline, bgl = _pipeline(rp, engine)
     device = rp._device
-    gpu = rp.__dict__.setdefault("_line_layers", {})  # key -> (version, buffer, capacity, bind group, globals)
+    gpu = rp.__dict__.setdefault("_line_layers", {})  # key -> (version, buffer, capacity, group, globals, uniform)
     for key in [k for k in gpu if k not in lines.layers]:
-        gpu.pop(key)[1].destroy()
-    params = np.array([lines.bias, lines.feather, 0.0, 0.0], np.float32)
-    if rp.__dict__.get("_line_params") is None:
-        rp._line_params = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
-    counters.write_buffer(device.queue, rp._line_params, 0, params.tobytes())
+        old = gpu.pop(key)
+        old[1].destroy()
+        old[5].destroy()
     render_pass.set_pipeline(pipeline)
     for key, data in lines.layers.items():
         if not len(data):
@@ -125,24 +123,30 @@ def render_lines_pass(rp, engine, render_pass) -> None:
         have = gpu.get(key)
         if have is not None and have[4] is not rp._globals_buffer:  # the globals were made again: a new group
             have[1].destroy()
+            have[5].destroy()
             gpu.pop(key)
             have = None
         if have is None or have[0] != version:
             if have is None or have[2] < data.nbytes:
                 if have is not None:
                     have[1].destroy()
+                    have[5].destroy()
                 size = max(data.nbytes, 48)
                 buf = device.create_buffer(size=size, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
+                uni = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
                 group = device.create_bind_group(layout=bgl, entries=[
                     {"binding": 0, "resource": {"buffer": rp._globals_buffer, "offset": 0, "size": 240}},
                     {"binding": 1, "resource": {"buffer": buf, "offset": 0, "size": size}},
-                    {"binding": 2, "resource": {"buffer": rp._line_params, "offset": 0, "size": 16}},
+                    {"binding": 2, "resource": {"buffer": uni, "offset": 0, "size": 16}},
                 ])
-                have = (version, buf, size, group, rp._globals_buffer)
+                have = (version, buf, size, group, rp._globals_buffer, uni)
             else:
-                have = (version, have[1], have[2], have[3], have[4])
+                have = (version, *have[1:])
             counters.write_buffer(device.queue, have[1], 0, data.tobytes())
             gpu[key] = have
+        scale, alpha = lines.looks.get(key, (1.0, 1.0))
+        counters.write_buffer(device.queue, have[5], 0,
+                              np.array([lines.bias, lines.feather, scale, alpha], np.float32).tobytes())
         render_pass.set_bind_group(0, have[3], [], 0, 0)
         counters.add("draws")
         render_pass.draw(6, len(data), 0, 0)

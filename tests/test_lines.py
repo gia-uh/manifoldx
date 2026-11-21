@@ -41,3 +41,14 @@ def test_a_removed_layer_is_not_drawn():
     e.render_frame(supersample=1)
     e.lines.remove("road")
     assert _red_rows(e.render_frame(supersample=1)) == 0
+
+
+def test_a_layers_look_scales_its_widths_without_setting_it_again():
+    e = _engine(10.0)
+    e.render_frame(supersample=1)
+    version = e.lines.versions["road"]
+    e.lines.look("road", scale=2.0)
+    img = e.render_frame(supersample=1)
+    assert 11 <= _red_rows(img) <= 13 and e.lines.versions["road"] == version
+    e.lines.look("road", alpha=0.0)
+    assert _red_rows(e.render_frame(supersample=1)) == 0
