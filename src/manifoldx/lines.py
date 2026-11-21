@@ -40,23 +40,22 @@ class Lines:
         packed[:, 0:3], packed[:, 4:7] = a, b
         packed[:, 3] = np.broadcast_to(np.asarray(width, np.float32), (n,))
         packed[:, 8:12] = np.broadcast_to(np.asarray(color, np.float32), (n, 4))
-        self.layers[key] = packed
-        self.versions[key] = self.versions.get(key, 0) + 1
+        # Copied, never changed in place: the frame being drawn walks the dicts it took while systems set the next.
+        self.versions = {**self.versions, key: self.versions.get(key, 0) + 1}
+        self.layers = {**self.layers, key: packed}
 
     def look(self, key: str, scale: float = 1.0, alpha: float = 1.0) -> None:
         """Draw the layer `key` with every width times `scale` and every alpha times `alpha`; a camera that zooms
         changes these each frame at no upload. A layer set later keeps the look its key had."""
-        self.looks[key] = (float(scale), float(alpha))
+        self.looks = {**self.looks, key: (float(scale), float(alpha))}
 
     def remove(self, key: str) -> None:
-        self.layers.pop(key, None)
-        self.versions.pop(key, None)
-        self.looks.pop(key, None)
+        self.layers = {k: v for k, v in self.layers.items() if k != key}
+        self.versions = {k: v for k, v in self.versions.items() if k != key}
+        self.looks = {k: v for k, v in self.looks.items() if k != key}
 
     def clear(self) -> None:
-        self.layers.clear()
-        self.versions.clear()
-        self.looks.clear()
+        self.layers, self.versions, self.looks = {}, {}, {}
 
     def __len__(self) -> int:
         return sum(len(v) for v in self.layers.values())

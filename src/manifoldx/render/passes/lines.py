@@ -108,18 +108,19 @@ def render_lines_pass(rp, engine, render_pass) -> None:
     lines = getattr(engine, "lines", None)
     if lines is None or not lines.visible or not lines.layers or rp._globals_buffer is None:
         return
+    layers, versions, looks = lines.layers, lines.versions, lines.looks  # this frame's: set() replaces them
     pipeline, bgl = _pipeline(rp, engine)
     device = rp._device
     gpu = rp.__dict__.setdefault("_line_layers", {})  # key -> (version, buffer, capacity, group, globals, uniform)
-    for key in [k for k in gpu if k not in lines.layers]:
+    for key in [k for k in gpu if k not in layers]:
         old = gpu.pop(key)
         old[1].destroy()
         old[5].destroy()
     render_pass.set_pipeline(pipeline)
-    for key, data in lines.layers.items():
+    for key, data in layers.items():
         if not len(data):
             continue
-        version = lines.versions.get(key, 0)
+        version = versions.get(key, 0)
         have = gpu.get(key)
         if have is not None and have[4] is not rp._globals_buffer:  # the globals were made again: a new group
             have[1].destroy()
@@ -144,7 +145,7 @@ def render_lines_pass(rp, engine, render_pass) -> None:
                 have = (version, *have[1:])
             counters.write_buffer(device.queue, have[1], 0, data.tobytes())
             gpu[key] = have
-        scale, alpha = lines.looks.get(key, (1.0, 1.0))
+        scale, alpha = looks.get(key, (1.0, 1.0))
         counters.write_buffer(device.queue, have[5], 0,
                               np.array([lines.bias, lines.feather, scale, alpha], np.float32).tobytes())
         render_pass.set_bind_group(0, have[3], [], 0, 0)
