@@ -26,7 +26,7 @@ from pathlib import Path
 
 from manifoldx.bench import micro
 
-SUITES = ["frame", "ecs", "compute", "skinning", "modeling", "loaders", "web", "trace", "startup", "streaming"]
+SUITES = ["frame", "ecs", "compute", "skinning", "modeling", "loaders", "web", "trace", "startup", "streaming", "audio"]
 ROOT = Path(__file__).resolve().parent.parent
 
 

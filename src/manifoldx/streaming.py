@@ -27,7 +27,8 @@ leaves `ready_radius` is dropped, its buffers freed and its data forgotten.
 `workers="thread"` builds in one background thread; `"process"` builds in one
 worker process, which shares no GIL with the frame but needs a picklable,
 importable `build` (a top-level function, with the engine set up under
-`if __name__ == "__main__":`) and ships each MeshData back over IPC.
+`if __name__ == "__main__":`) and ships each MeshData back over IPC. `workers=Builders(...)` hands it
+workers started earlier (see Builders).
 """
 
 from __future__ import annotations
@@ -148,6 +149,39 @@ def _streamer_engine(args, kwargs):
     return args[0].engine
 
 
+class Builders:
+    """The workers that build a streamer's cells, started on their own: `count` threads or spawned processes,
+    each running `warm()` first when given.
+
+    A streamer makes its own when it is made. Make them yourself to start them earlier, before what the
+    streamer needs exists (the app's data loading in the main process, its window opening), and hand them to
+    the streamer as `workers=`: it uses them and stops them on close(), like its own. Builders no streamer
+    took are stopped by close(), which may be called more than once.
+
+        builders = Builders(3, "process", warm=load_world)   # first thing: they load while the app does
+        world = load_world_here()
+        streamer = QuadStreamer(engine, ..., workers=builders)
+    """
+
+    def __init__(self, count: int = 1, workers: str = "thread", warm: Callable[[], None] | None = None):
+        if workers == "thread":
+            self.pool = ThreadPoolExecutor(max_workers=count, initializer=warm)
+        elif workers == "process":
+            self.pool = ProcessPoolExecutor(
+                max_workers=count, mp_context=multiprocessing.get_context("spawn"),
+                initializer=_worker_start, initargs=(os.getpid(), warm),
+            )
+        else:
+            raise ValueError(f'workers must be "thread" or "process", got {workers!r}')
+        self.count = count
+        for _ in range(count):  # start the workers now: they warm up while the app loads, not at the first cell
+            self.pool.submit(_started)
+
+    def close(self) -> None:
+        """Stop the workers; a build running finishes first."""
+        self.pool.shutdown(wait=False, cancel_futures=True)
+
+
 class _Uploads:
     """What both streamers share: the worker, the GPU uploads in slices, drawing and freeing by key.
 
@@ -157,17 +191,9 @@ class _Uploads:
 
     def _start(self, engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material, builders=1,
                warm=None):
-        if workers == "thread":
-            self._pool = ThreadPoolExecutor(max_workers=builders, initializer=warm)
-        elif workers == "process":
-            self._pool = ProcessPoolExecutor(
-                max_workers=builders, mp_context=multiprocessing.get_context("spawn"),
-                initializer=_worker_start, initargs=(os.getpid(), warm),
-            )
-        else:
-            raise ValueError(f'workers must be "thread" or "process", got {workers!r}')
-        for _ in range(builders):  # start the workers now: they warm up while the app loads, not at the first cell
-            self._pool.submit(_started)
+        if not isinstance(workers, Builders):
+            workers = Builders(builders, workers, warm)
+        self._pool, self.builders = workers.pool, workers.count
         if material is None:
             from manifoldx.resources import StandardMaterial
 
@@ -371,7 +397,7 @@ class Streamer(_Uploads):
         ready_radius: int = 2,
         uploads_per_frame: int = 2,
         upload_bytes_per_frame: int = 2 << 20,
-        workers: str = "thread",
+        workers: str | Builders = "thread",
         material=None,
         turn: tuple[int, int] = (0, 1),
         warm: Callable[[], None] | None = None,
@@ -470,9 +496,13 @@ class QuadStreamer(_Uploads):
     pass settles, the next starts only after the camera moves `move` metres (cell / 8 by default) or its fov,
     far plane or viewport changes, or tau does, and the nodes keep their order till then. A game may
     change `tau` while it runs, to trade detail for frame time. The nodes picked are built by `builders`
-    workers, with `in_flight` (twice builders) jobs at most submitted: each time one finishes, the node with
-    the most error on screen still to build goes next. They are uploaded within `upload_bytes_per_frame`,
-    in the same order. The workers start when the streamer is made, each running `warm()` first when given,
+    workers, with `in_flight` (twice builders) jobs at most submitted: each time one finishes, the next
+    goes. The nodes within `focus_radius` metres of the camera (two cells by default) go first, then those in
+    its view (seen from above: in the horizontal field of view, or under a camera that looks down), then the
+    rest, which it needs only once it turns; a node goes with its siblings, by its parent's square, since a
+    drawn parent gives way only to all four. Within each of these, the node with the most error on screen
+    goes first, so a coarse level still comes before the finer one under it. Only the order changes, never
+    which nodes are drawn. They are uploaded within `upload_bytes_per_frame`, in the same order. The workers start when the streamer is made, each running `warm()` first when given,
     so what a build loads once per worker loads while the app starts.
 
     The view sharpens a level at a time: a drawn node gives way to its children as soon as every one of
@@ -505,7 +535,7 @@ class QuadStreamer(_Uploads):
         tau: float = 6.0,
         merge: float = 1.5,
         upload_bytes_per_frame: int = 2 << 20,
-        workers: str = "thread",
+        workers: str | Builders = "thread",
         material=None,
         builders: int = 1,
         refine_ms: float | None = 2.0,
@@ -513,6 +543,7 @@ class QuadStreamer(_Uploads):
         warm: Callable[[], None] | None = None,
         cache: int = 256,
         crossfade: float | None = None,
+        focus_radius: float | None = None,
     ):
         if crossfade and material is None:
             from manifoldx.resources import StandardMaterial
@@ -521,7 +552,7 @@ class QuadStreamer(_Uploads):
         if crossfade and not getattr(material, "faded", False):
             raise ValueError("crossfade needs a StandardMaterial made with faded=True")
         self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders, warm)
-        self.in_flight, self.cache = 2 * builders, int(cache)
+        self.in_flight, self.cache = 2 * self.builders, int(cache)
         self._todo: list = []  # the nodes to build next, most error on screen last
         self.crossfade = float(crossfade) if crossfade else None
         self._fading: dict = {}  # node -> (handle, started, out): drawn while it fades in, or out once undrawn
@@ -529,6 +560,7 @@ class QuadStreamer(_Uploads):
         self.exists, self.error, self.tau, self.merge = exists, error, float(tau), float(merge)
         self.refine_ms = refine_ms
         self.move = self.cell / 8 if move is None else float(move)
+        self.focus_radius = 2 * self.cell if focus_radius is None else float(focus_radius)
         self._pass_at = None  # the camera the last pass started at
         self._sel, self._sel_at = None, None  # the nodes to draw, nearest first, and the camera they were for
         self._shown_for, self._shown_landed = None, -1  # the selection and uploads the drawn set was last made for
@@ -740,6 +772,18 @@ class QuadStreamer(_Uploads):
         self._shown_for, self._shown_landed, self._waiting = selected, landed, bool(wanted)
         self._quiet = not (self._queue or self._pass_started or self._pending or self._waiting)
 
+    def cancel(self) -> None:
+        """Drop every node queued to build: those being built land in the cache, and the next focus asks
+        again for what it needs. Call it before the camera jumps far (a teleport), so the workers do not
+        finish the old place's queue before the new place's first node."""
+        with self._lock:
+            self._todo = []
+            for n in [n for n in self._pending if self._pending[n].cancel()]:
+                del self._pending[n]
+                self._note("cancelled", n)
+        self._still = self._shown_for = None  # the next focus plans again, even at the same camera
+        self._quiet = False
+
     def _submit(self, n):
         """Start building node n; call it holding the lock."""
         job = _pack if self._baked is None else functools.partial(_pack, side=self.cell * 2 ** n[0])
@@ -832,8 +876,35 @@ class QuadStreamer(_Uploads):
             focal = self.engine.h / (2.0 * math.tan(math.radians(cam.fov) / 2.0))
             d = self._distances(wanted, x, z, height)
             err = np.array([self.error(n[0]) for n in wanted]) * focal / d
-            wanted = [wanted[k] for k in np.argsort(-err, kind="stable")]
+            wanted = [wanted[k] for k in np.lexsort((-err, self._tiers(wanted, x, z, height)))]
         return show, wanted, parked
+
+    def _tiers(self, nodes, x, z, height) -> np.ndarray:
+        """Each node's turn to build: 0 near the camera, 1 in its view, 2 the rest. A node takes its parent's
+        square's turn, so four siblings build together: a drawn parent gives way only to all four."""
+        top = self.levels
+        family = [(L + 1, a >> 1, b >> 1) if L < top else (L, a, b) for L, a, b in nodes]
+        return np.where(self._distances(family, x, z, 0.0) <= self.focus_radius, 0,
+                        np.where(self._in_view(family, x, z, height), 1, 2))
+
+    def _in_view(self, nodes, x, z, height) -> np.ndarray:
+        """Whether each node's square reaches into the camera's view, seen from above: within the horizontal
+        field of view round the way the camera looks, or under it (within `height` metres of the point below
+        it, which a camera looking down sees). A camera looking straight down sees every way."""
+        cam = self.engine.camera
+        fx, fz = float(cam.target[0] - cam.position[0]), float(cam.target[2] - cam.position[2])
+        flat = math.hypot(fx, fz)
+        if flat < 1e-6 * max(float(np.linalg.norm(cam.target - cam.position)), 1e-9):
+            return np.ones(len(nodes), bool)
+        half = math.atan(math.tan(math.radians(cam.fov) / 2.0) * self.engine.w / max(self.engine.h, 1))
+        x0, z0, side = self._boxes(nodes)
+        vx, vz = x0 + side / 2 - x, z0 + side / 2 - z
+        dist = np.hypot(vx, vz)
+        r = side * (0.5 * math.sqrt(2.0))
+        cos = (vx * fx + vz * fz) / (np.maximum(dist, 1e-9) * flat)
+        angle = np.arccos(np.clip(cos, -1.0, 1.0))
+        reach = np.arcsin(np.clip(r / np.maximum(dist, 1e-9), 0.0, 1.0))
+        return (dist <= r) | (dist - r <= height) | (angle <= half + reach)
 
     @_deferred.deferred_in_pipeline(find=_streamer_engine)
     def _draw(self, c, pos):
@@ -897,4 +968,4 @@ class QuadStreamer(_Uploads):
         return {**self._stats, "held": len(self._ready) + len(self._pending), "by_level": by_level}
 
 
-__all__ = ["MeshData", "QuadStreamer", "Streamer"]
+__all__ = ["Builders", "MeshData", "QuadStreamer", "Streamer"]

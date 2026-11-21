@@ -295,6 +295,56 @@ def test_workers_start_and_warm_up_when_the_streamer_is_made(workers):
         s.close()
 
 
+def _gone(pid, within=60.0):
+    """Whether process pid ends within `within` seconds. Read from /proc: the pool's own thread reaps its
+    workers, and Process.is_alive() then reports a reaped worker as alive. A worker still starting on a
+    loaded host reads its stop only once it is up."""
+    t = time.perf_counter()
+    while time.perf_counter() - t < within:
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True
+        except FileNotFoundError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.mark.parametrize("workers", ["thread", "process"])
+def test_builders_started_before_the_engine_build_for_the_streamer_and_stop_with_it(workers):
+    from manifoldx.streaming import Builders
+
+    builders = Builders(1, workers, warm=warm_up)  # before any engine, as an app does first thing
+    procs = list(builders.pool._processes.values()) if workers == "process" else []
+    assert procs or builders.pool._threads  # started at once
+    engine = _offscreen_engine()
+    s = Streamer(engine, cell=8.0, build=build_if_warmed, radius=0, ready_radius=0, workers=builders)
+    try:
+        assert s._pool is builders.pool
+        for _ in range(400):
+            s.focus(4.0, 4.0)
+            engine._draw_frame()
+            if (0, 0) in s.drawn() and not s._pending:
+                break
+            time.sleep(0.005)
+        assert s._drawn[(0, 0)] is not None  # built by the warmed workers handed in
+    finally:
+        s.close()
+    assert all(_gone(p.pid) for p in procs)  # the streamer's close stopped the workers it was given
+    builders.close()  # again, from the app: does nothing
+
+
+def test_builders_no_streamer_took_stop_on_close():
+    from manifoldx.streaming import Builders
+
+    builders = Builders(2, "process")
+    procs = list(builders.pool._processes.values())
+    assert len(procs) == 2
+    builders.close()
+    assert all(_gone(p.pid) for p in procs)
+
+
 def test_a_new_engine_resolves_wgpu_types_in_the_background():
     import subprocess
     import sys

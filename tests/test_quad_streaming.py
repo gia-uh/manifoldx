@@ -464,9 +464,116 @@ def test_builds_go_by_error_on_screen_a_few_at_a_time():
             s._pool.finish(keep=lambda n: n != first)
     assert s._quiet and s.drawn() == set(s._selected)
     f = focal(s)
-    err = [s.error(n[0]) * f / s._distance(n, x, z, h) for n in s._pool.submitted if n in s._selected]
-    assert err == sorted(err, reverse=True)  # the selected nodes went most error on screen first
+    picked = [n for n in s._pool.submitted if n in s._selected]
+    tier = list(s._tiers(picked, x, z, h))
+    err = [s.error(n[0]) * f / s._distance(n, x, z, h) for n in picked]
+    keys = [(t, -e) for t, e in zip(tier, err)]
+    assert keys == sorted(keys)  # near first, then in view, then the rest; each most error on screen first
     assert len(s._pool.submitted) == len(set(s._pool.submitted))  # none built twice
+    s.close()
+
+
+def _build_order(s, x, z, h):
+    """Run the streamer at one camera, one build finishing a frame, till it settles; the nodes it built, in order."""
+    for _ in range(2000):
+        s.focus(x, z, h)
+        if s._quiet:
+            break
+        first = next(iter(s._pool.jobs), None)
+        if first is not None:
+            s._pool.finish(keep=lambda n: n != first)
+    assert s._quiet and s.drawn() == set(s._selected)
+    return [n for n in s._pool.submitted if n in s._selected]
+
+
+def test_near_nodes_build_first_then_the_view_then_behind():
+    s = faked(5, focus_radius=CELL)
+    s.engine.camera.set_pose((0.0, 2.0, 0.0), (10.0, 0.0, 0.0))  # looking east, along +x
+    x, z, h = 3300.0, 3300.0, 2.0  # in the middle of 32 x 32 cells
+    order = _build_order(s, x, z, h)
+    near = [k for k, n in enumerate(order) if s._distance(n, x, z, 0.0) <= CELL]
+    ahead = [k for k, n in enumerate(order)  # straight ahead: in view through the window's narrow width
+             if s._box(n)[0] > x + 400 and s._box(n)[1] <= z < s._box(n)[1] + s._box(n)[2]]
+    behind = [k for k, n in enumerate(order) if s._box(n)[0] + s._box(n)[2] < x - 400]
+    assert near and ahead and behind
+    assert max(near) < min(ahead + behind)  # every node within the radius before any other
+    assert max(ahead) < min(behind)  # what the camera looks at before what is behind it
+    s.close()
+
+
+def test_a_near_node_goes_before_a_far_one_with_more_error_on_screen():
+    radius = 2000.0  # level-0 nodes near its edge show about 3 px; level-1 nodes past it, about 4 px
+    s = faked(5, focus_radius=radius)
+    s.engine.camera.set_pose((0.0, 2.0, 0.0), (10.0, 0.0, 0.0))
+    x, z, h = 3300.0, 3300.0, 2.0
+    order = _build_order(s, x, z, h)
+    f = focal(s)
+    err = {n: s.error(n[0]) * f / s._distance(n, x, z, h) for n in order}
+    near = [n for n, t in zip(order, s._tiers(order, x, z, h)) if t == 0]  # within the radius, by family
+    assert all(m in near for m in order if s._distance(m, x, z, 0.0) <= radius)
+    passed = [n for n in order if n not in near and err[n] > min(err[m] for m in near)]
+    assert passed  # by error on screen alone, these far nodes would have gone before a near one
+    assert all(order.index(m) < order.index(n) for m in near for n in passed)
+    s.close()
+
+
+def test_the_nodes_near_the_camera_show_long_before_the_rest():
+    s = faked(5, focus_radius=CELL)
+    s.engine.camera.set_pose((0.0, 2.0, 0.0), (10.0, 0.0, 0.0))
+    x, z, h = 3200.0, 3200.0, 2.0  # on a corner shared by nodes of every level: half their siblings behind
+    frames, shown = 0, None
+    for _ in range(2000):
+        s.focus(x, z, h)
+        near = [n for n in s._selected if s._distance(n, x, z, 0.0) <= CELL]
+        if shown is None and near and all(n in s.drawn() for n in near):
+            shown = frames
+        if s._quiet:
+            break
+        first = next(iter(s._pool.jobs), None)
+        if first is not None:
+            s._pool.finish(keep=lambda n: n != first)
+        frames += 1
+    assert s._quiet and shown is not None
+    assert shown < frames / 15  # near nodes and their siblings first: drawn long before the view is whole
+    s.close()
+
+
+def test_the_build_order_never_changes_what_is_drawn():
+    drawn = []
+    for radius in (0.0, CELL, 1e9):
+        s = faked(5, focus_radius=radius)
+        s.engine.camera.set_pose((0.0, 2.0, 0.0), (10.0, 0.0, 0.0))
+        _build_order(s, 3300.0, 3300.0, 2.0)
+        drawn.append(s.drawn())
+        s.close()
+    assert drawn[0] == drawn[1] == drawn[2]
+
+
+def test_cancel_drops_the_queue_and_the_next_focus_asks_again():
+    s = faked(5, focus_radius=CELL)
+    s.engine.camera.set_pose((0.0, 2.0, 0.0), (10.0, 0.0, 0.0))
+    x, z, h = 3300.0, 3300.0, 2.0
+    s.focus(x, z, h)
+    assert s._todo and len(s._pool.jobs) > 1
+    running = next(iter(s._pool.jobs.values()))
+    running.set_running_or_notify_cancel()  # a worker has it: it cannot be cancelled
+    s.cancel()
+    assert not s._todo and list(s._pending.values()) == [running]
+    before = len(s._pool.submitted)
+    s._pool.finish()  # the running build lands, and submits nothing of the old queue after it
+    assert len(s._pool.submitted) == before
+    order = _build_order(s, x, z, h)  # the same camera asks again and settles as before
+    assert order and s.drawn() == set(s._selected)
+    s.close()
+
+
+def test_a_camera_looking_down_sees_every_way():
+    s = faked(5)
+    s.engine.camera.set_pose((0.0, 500.0, 0.0), (0.0, 0.0, 0.0))
+    assert s._in_view(list(s._cut or [(5, 0, 0)]), 3300.0, 3300.0, 500.0).all()
+    s.engine.camera.set_pose((0.0, 2.0, 0.0), (10.0, 0.0, 0.0))
+    seen = s._in_view([(0, 30, 16), (0, 2, 16)], 3300.0, 3300.0, 2.0)  # 2.7 km ahead, 2.7 km behind
+    assert list(seen) == [True, False]
     s.close()
 
 
