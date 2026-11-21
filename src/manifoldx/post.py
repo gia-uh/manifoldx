@@ -69,7 +69,7 @@ class Sky:
     zenith: tuple = (0.18, 0.36, 0.78)
     horizon: tuple | None = None
     sun_size: float = 0.6
-    sun_intensity: float = 40.0
+    sun_intensity: float = 24.0
     glow: float = 1.0
 
 
@@ -296,7 +296,7 @@ fn tap(uv: vec2<f32>) -> vec3<f32> {
         let d = ray(uv);
         c = select(c, sky_base(d), u.sky.w > 0.0) + sun_light(d);
     }
-    return min(c, vec3<f32>(64.0));
+    return min(c, vec3<f32>(16.0));
 }
 
 @fragment
