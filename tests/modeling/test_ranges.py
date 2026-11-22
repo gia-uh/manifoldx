@@ -7,6 +7,7 @@ import pytest
 
 from manifoldx.modeling.assets.bus import BusParams, build_bus, coach
 from manifoldx.modeling.assets.car import CarParams, build_car
+from manifoldx.modeling.assets.human import HumanParams, build_human
 from manifoldx.modeling.assets.cycle import (
     CycleParams,
     bicycle,
@@ -41,6 +42,7 @@ CASES = [
         build_cycle,
         (bicycle, cycle_rickshaw, cargo_tricycle, motorcycle, electric_moto),
     ),
+    (HumanParams, build_human, ()),
 ]
 IDS = [case[0].__name__ for case in CASES]
 

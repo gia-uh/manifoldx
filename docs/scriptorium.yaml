@@ -29,6 +29,7 @@ files:
   - chapters/15-models-from-drawings.md
   - chapters/16-using-every-core.md
   - chapters/17-a-car-that-drives.md
+  - chapters/19-people-on-the-street.md
 
 outputs:
   site:
