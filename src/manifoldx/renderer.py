@@ -1445,7 +1445,7 @@ class RenderPipeline:
             full = mats.reshape(-1, 1, 4, 4)  # (N, 1, 4, 4) row-major model matrices
             if js is not None:
                 # The mirror holds joint matrices transposed (column-major).
-                joint_mats = self._joints.mirror[self._joints.block_of[entities]][:, js]
+                joint_mats = self._joints.current(entities)[:, js]
                 full = full @ joint_mats.transpose(0, 1, 3, 2)  # (N, K, 4, 4)
             world = corners @ full.transpose(0, 1, 3, 2)  # (N, K, 8, 4): point @ M.T per box
             w = (world[..., :3] / world[..., 3:4]).reshape(-1, 3)
