@@ -201,6 +201,14 @@ Behind `set_joints`, the engine's `JointStore` keeps a block of `MAX_JOINTS`
 humanoid's 15 joints fit comfortably. `Engine.set_joints` poses many skinned
 entities in one call.
 
+A crowd that repeats a motion need not send matrices at all. `Engine.bake_poses`
+keeps a clip of poses, (K, J, 4, 4), as K shared blocks on the GPU and returns
+its id; `Engine.set_pose_frames(indices, clip, positions)` points each entity at
+a position from 0 to K - 1 in a clip, and the shader blends the two frames
+around it. Each entity then costs one 32-bit number a frame, and any number of
+entities can play the same clip at their own phase. Calling `set_joints` on an
+entity gives it its own pose again. Chapter 19 bakes walking cycles this way.
+
 The humanoid package gives volumes, not a baked skinned mesh, so the chapter
 builds one. A `Part` already says which joint moves it and what ellipsoid it
 is; we place a unit sphere at every part in a neutral pose, tag its vertices

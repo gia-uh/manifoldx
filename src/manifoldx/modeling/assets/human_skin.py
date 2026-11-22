@@ -21,11 +21,17 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from manifoldx.modeling.assets.human_sections import SectionTable, resample
+from manifoldx.modeling.assets.human_sections import SectionTable, resample, shoulder_rows
 from manifoldx.modeling.assets.vehicle import orient_outward
 
 LEVELS = {0: (16, 1), 1: (8, 2), 2: (6, 4)}  # K, station step
-SHOULDER = {16: (5, 5), 8: (3, 3), 6: (2, 3)}  # K -> (C columns, R rows)
+
+
+def shoulder(k: int) -> tuple[int, int]:
+    """(C columns, R rows) of a shoulder opening at K = `k`, so its boundary 2C + 2R - 4 has K vertices."""
+    r = shoulder_rows(k)
+    return k // 2 + 2 - r, r
+
 TORSO, LEG_L, LEG_R, FOOT_L, FOOT_R, ARM_L, ARM_R, HEAD, BRIDGE = range(9)
 REGION_OF = {
     "torso": TORSO,
@@ -101,21 +107,34 @@ def _aligned(loop_pos, ring_pos):
 _ALIGN = {}
 
 
-def _alignment(level):
-    """How each stitch's ring is turned, fixed per level from the female table so every body shares the faces."""
-    if level not in _ALIGN:
+def _alignment(k, step):
+    """How each stitch's ring is turned, fixed per resolution from the female table so every body shares the faces."""
+    if (k, step) not in _ALIGN:
         from manifoldx.modeling.assets.human_sections import load_table
 
         found = {}
-        skin(load_table("female"), level, _found=found)
-        _ALIGN[level] = found
-    return _ALIGN[level]
+        skin(load_table("female"), k=k, step=step, _found=found)
+        _ALIGN[k, step] = found
+    return _ALIGN[k, step]
 
 
-def skin(table: SectionTable, level: int = 0, _found: dict | None = None) -> Skin:
-    """Loft `table` at `level` into a closed skin; its faces depend only on the level."""
-    k, step = LEVELS[level]
-    align = _alignment(level) if _found is None else None
+def skin(
+    table: SectionTable,
+    level: int = 0,
+    *,
+    k: int | None = None,
+    step: int | None = None,
+    _found: dict | None = None,
+) -> Skin:
+    """Loft `table` at `level` (or at K = `k` radii per ring, one station in `step`) into a closed skin.
+
+    Its faces depend only on the resolution, never on the table.
+    """
+    if k is None:
+        k, step = LEVELS[level]
+    if k < 6 or k % 2:
+        raise ValueError(f"k: {k} must be even and at least 6")
+    align = _alignment(k, step) if _found is None else None
 
     def aligned(key, loop_pos, ring_pos):
         if _found is not None:
@@ -135,7 +154,7 @@ def skin(table: SectionTable, level: int = 0, _found: dict | None = None) -> Ski
     arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(cs, axis=0), axis=1))]
     y = cs[:, 1]
     rows = np.flatnonzero((y >= t.axilla_y - 1e-6) & (y <= t.acromion_y + 1e-6))
-    c_cols, r_rows = SHOULDER[k]
+    c_cols, r_rows = shoulder(k)
     assert len(rows) == r_rows, (len(rows), r_rows)
     r0 = rows[0]
     first = k // 2 - (c_cols - 1) // 2

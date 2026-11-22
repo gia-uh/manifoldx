@@ -219,11 +219,18 @@ class _Writer:
 
             attrs["COLOR_0"] = self.b.accessor(srgb_to_linear(np.asarray(geo["colors"], np.float32)),
                                                target=ARRAY_BUFFER)
-        if "joints" in geo:  # rigid skinning: one joint per vertex, weight 1
+        if "joints" in geo:  # rigid: one joint, weight 1; blended: two joints, weights (w, 1 - w)
+            j = np.asarray(geo["joints"])
             joints = np.zeros((len(pos), 4), np.uint8)
-            joints[:, 0] = np.asarray(geo["joints"])
             weights = np.zeros((len(pos), 4), np.float32)
-            weights[:, 0] = 1.0
+            if j.ndim == 1:
+                joints[:, 0] = j
+                weights[:, 0] = 1.0
+            else:
+                w = np.asarray(geo["weights"], np.float32)
+                joints[:, :2] = j
+                weights[:, 0], weights[:, 1] = w, 1.0 - w
+                weights[joints[:, 0] == joints[:, 1], :2] = (1.0, 0.0)  # one joint twice: weight it once
             attrs["JOINTS_0"] = self.b.accessor(joints, target=ARRAY_BUFFER)
             attrs["WEIGHTS_0"] = self.b.accessor(weights, target=ARRAY_BUFFER)
         indices = None
