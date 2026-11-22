@@ -163,3 +163,57 @@ def far_walk(engine, p):
 
 
 far_walk.check(origin_max_m=250, phase="far")  # 101 m measured at smoke size; 900 km without the origin
+
+
+@bench.scenario("humans", params={"n": 500, "levels": "on"}, sizes={"smoke": 20, "full": None})
+def humans(engine, p):
+    """n walking figures in rows 3 to 60 m away; levels "on" picks level and pose rate by distance, "off" poses
+    every figure at level 0 each frame. 24 built bodies per level are shared; each walker has its own phase."""
+    from manifoldx.humanoid.cycles import cadence, cycle_angles, pose_matrices, root_offset, snap_phase, update_every
+    from manifoldx.modeling.assets.human import HumanParams, build_human
+    from manifoldx.modeling.assets.human_dress import Outfit
+
+    g = np.random.default_rng(5)
+    bodies = [HumanParams.sample(i) for i in range(24)]
+    outfit = Outfit()
+    levels = (0, 1, 2) if p.levels == "on" else (0,)
+    figures = {(b, lv): build_human(bodies[b], outfit=outfit, level=lv) for b in range(24) for lv in levels}
+    geometry = {k: f.mesh.to_geometry() for k, f in figures.items()}
+    skin = StandardMaterial("#ffffff", roughness=0.7, vertex_colors=True)
+    dist = np.linspace(3.0, 60.0, p.n)
+    walkers = []
+    for i in range(p.n):
+        level = (0 if dist[i] < 8 else 1 if dist[i] < 20 else 2) if p.levels == "on" else 0
+        f = figures[(i % 24, level)]
+        speed = float(g.uniform(1.1, 1.6))
+        h = engine.spawn(Mesh(geometry[(i % 24, level)]), Material(skin),
+                         Transform(pos=(float(g.uniform(-15, 15)), 0.0, float(dist[i]))))
+        walkers.append([h, f, level, speed, cadence("walk", speed, f.params), float(g.random())])
+    engine.camera.set_pose(position=(0.0, 2.0, -2.0), target=(0.0, 1.0, 20.0))
+    cache, clock = {}, {"frame": 0}
+
+    @engine.system
+    def walk(q: mx.Query[Transform], dt: float):
+        frame = clock["frame"]
+        clock["frame"] = frame + 1
+        due, poses = [], []
+        with bench.span("pose"):
+            for w in walkers:
+                h, f, level, speed, rate, phase = w
+                w[5] = phase = (phase + rate * dt) % 1.0
+                if frame % update_every(level):
+                    continue
+                phase = snap_phase(phase, level)
+                key = (id(f), phase, round(speed, 1)) if level == 2 else None
+                m = cache.get(key) if key else None
+                if m is None:
+                    m = pose_matrices(f, cycle_angles("walk", phase, speed, f.params), root_offset("walk", phase, speed, f.params))
+                    if key:
+                        cache[key] = m
+                due.append(h.index)
+                poses.append(m)
+        with bench.span("upload"):
+            engine.set_joints(due, np.stack(poses))
+        bench.metric("posed", len(due))
+
+    return None, [bench.hold(frames=5), bench.mark("walk"), bench.hold(frames=60)]

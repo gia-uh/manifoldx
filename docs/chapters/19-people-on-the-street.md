@@ -131,3 +131,38 @@ for level in (0, 1, 2):
     print("level", level, len(build_human(p, level=level).mesh.faces), "faces")
 print("level 0 at detail 2:", len(build_human(HumanParams(detail=2.0)).mesh.faces), "faces")
 ```
+
+## Walking, running and crossing
+
+`manifoldx.humanoid.cycles` moves a built figure. `cycle_angles(kind, phase, speed, params)` gives every joint's
+flex, abduct and twist at a phase of an `"idle"`, `"walk"`, `"run"` or `"cross"` cycle, in the convention of
+`humanoid.solve`: zero is the limbs straight down and the spine up. `root_offset` is the pelvis's bob and sway,
+`cadence` the cycles per second, and `pose_matrices(figure, angles, offset)` the 19 skinning matrices that
+`engine.set_joints` takes. At `rest_angles(figure)` they are the identity; `rest_skeleton(params)` gives the
+same joints without building a mesh.
+
+```python {run continue}
+import numpy as np
+from manifoldx.humanoid.cycles import cadence, cycle_angles, pose_matrices, rest_angles, root_offset
+
+walker = build_human(person, level=1)
+print("rest is the identity:", np.allclose(pose_matrices(walker, rest_angles(walker)), np.eye(4), atol=1e-6))
+for kind, speed in (("walk", 1.4), ("run", 3.5)):
+    print(kind, round(cadence(kind, speed, person), 2), "cycles a second")
+angles = cycle_angles("walk", 0.25, 1.4, person)
+mats = pose_matrices(walker, angles, root_offset("walk", 0.25, 1.4, person))
+print(mats.shape, "hip flex", round(angles["hip_l"]["flex"]), "knee flex", round(angles["knee_l"]["flex"]))
+```
+
+A stride is 0.83 statures at 1.4 m/s and grows with the square root of the speed up to 1.2 statures; an elder's
+is 0.85 of it, so an elder at the same speed steps faster. The legs are solved, not keyed: each foot is planted
+for part of the cycle while the root moves `speed` metres a second, and the hip and knee angles come from where
+the ankle must be, so a planted foot stays within a few millimetres of where it landed. The arms swing against the
+legs, the pelvis turns a little, and `"cross"` is a walk whose head turns 45 degrees each way once a cycle; the
+caller switches to `"walk"` once the street is checked.
+
+Far figures cost less. `update_every(level)` poses level 0 every frame and level 1 every second frame, and
+`snap_phase(phase, 2)` holds a level 2 figure on one of eight key poses per cycle, so many far figures share a
+few cached matrices; a level 2 figure is built rigid, each vertex following one joint.
+`examples/humans.py` walks 50 sampled people along a street with the three levels by distance, and the `humans`
+bench scenario times 500 of them with the levels on and off.
