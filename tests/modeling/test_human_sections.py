@@ -1,0 +1,172 @@
+"""A base body read into a section table: rings along each chain, a head grid, the rest joints."""
+
+from functools import lru_cache
+
+import numpy as np
+import pytest
+
+from manifoldx.modeling import skeleton
+from manifoldx.modeling.assets.human_sections import (
+    CHAINS,
+    HEAD,
+    K,
+    load_table,
+    read_sections,
+    resample,
+    save_table,
+)
+
+LEG_RADIUS = 0.06
+ARM_ANGLE = np.radians(40)
+
+
+@lru_cache(maxsize=None)
+def _capsule_body(stature: float = 1.70):
+    """An A-pose figure of round cones, 1.70 m tall, facing +Z: legs of constant radius, arms 40 degrees out."""
+    d = np.array([np.sin(ARM_ANGLE), -np.cos(ARM_ANGLE), 0.0])
+    j = {"pelvis": (0, 0.88, 0), "chest": (0, 1.28, 0), "neck": (0, 1.45, 0), "head": (0, 1.60, 0)}
+    r = {"pelvis": 0.15, "chest": 0.14, "neck": 0.05, "head": 0.10}
+    bones = [("pelvis", "chest"), ("chest", "neck"), ("neck", "head")]
+    for s, side in (("l", 1), ("r", -1)):
+        sh = np.array([side * 0.20, 1.34, 0.0])
+        dd = d * [side, 1, 1]
+        j |= {
+            f"hip_{s}": (side * 0.09, 0.84, 0),
+            f"knee_{s}": (side * 0.09, 0.48, 0),
+            f"ankle_{s}": (side * 0.09, 0.08, 0),
+            f"toe_{s}": (side * 0.09, 0.04, 0.17),
+            f"shoulder_{s}": tuple(sh),
+            f"elbow_{s}": tuple(sh + dd * 0.30),
+            f"wrist_{s}": tuple(sh + dd * 0.56),
+            f"tip_{s}": tuple(sh + dd * 0.72),
+        }
+        r |= {
+            f"hip_{s}": LEG_RADIUS,
+            f"knee_{s}": LEG_RADIUS,
+            f"ankle_{s}": LEG_RADIUS,
+            f"toe_{s}": 0.04,
+            f"shoulder_{s}": 0.045,
+            f"elbow_{s}": 0.04,
+            f"wrist_{s}": 0.03,
+            f"tip_{s}": 0.025,
+        }
+        bones += [
+            ("pelvis", f"hip_{s}"),
+            (f"hip_{s}", f"knee_{s}"),
+            (f"knee_{s}", f"ankle_{s}"),
+            (f"ankle_{s}", f"toe_{s}"),
+            ("chest", f"shoulder_{s}"),
+            (f"shoulder_{s}", f"elbow_{s}"),
+            (f"elbow_{s}", f"wrist_{s}"),
+            (f"wrist_{s}", f"tip_{s}"),
+        ]
+    names = list(j)
+    mesh = skeleton.skin(
+        [j[n] for n in names],
+        [r[n] for n in names],
+        [(names.index(a), names.index(b)) for a, b in bones],
+        step=0.008,
+        blend=0.02,
+    )
+    pos = mesh.positions.astype(np.float64)
+    pos[:, 2] *= -1  # an image-to-mesh model's figure faces -Z; read_sections turns it round
+    pos[:, 0] *= -1
+    return pos, mesh.faces.astype(np.int64)
+
+
+def _with_inner_shell_and_debris(pos, faces):
+    c = pos.mean(0)
+    inner = c + (pos - c) * 0.9
+    box = np.array([[x, y, z] for x in (0, 0.02) for y in (0, 0.02) for z in (0, 0.02)], float)
+    bf = np.array(
+        [
+            [0, 1, 3],
+            [0, 3, 2],
+            [4, 6, 7],
+            [4, 7, 5],
+            [0, 4, 5],
+            [0, 5, 1],
+            [2, 3, 7],
+            [2, 7, 6],
+            [0, 2, 6],
+            [0, 6, 4],
+            [1, 5, 7],
+            [1, 7, 3],
+        ]
+    )
+    parts = [
+        (pos, faces),
+        (inner, faces[:, ::-1]),
+        (box + [0.6, 1.5, 0.0], bf),
+        (box + [-0.6, 0.2, 0.3], bf),
+    ]
+    out_p, out_f, n = [], [], 0
+    for p, f in parts:
+        out_p.append(p)
+        out_f.append(f + n)
+        n += len(p)
+    return np.concatenate(out_p), np.concatenate(out_f)
+
+
+@lru_cache(maxsize=None)
+def _table():
+    return read_sections(*_capsule_body(), stature=1.70)
+
+
+def test_chain_shapes():
+    t = _table()
+    assert {n: len(c.t) for n, c in t.chains.items()} == CHAINS
+    assert all(c.r.shape == (CHAINS[n], K) for n, c in t.chains.items())
+    assert t.head_r.shape == HEAD and len(t.joints) == 19
+
+
+def test_radii_match_capsules():
+    mid = _table().chains["leg_l"].r[12]
+    assert abs(mid.mean() - LEG_RADIUS) < 0.004 and mid.std() < 0.003
+
+
+def test_turned_to_face_plus_z():
+    t = _table()
+    assert t.joints["toe_l"][2] > t.joints["ankle_l"][2] + 0.04  # toes point to +Z
+    assert t.joints["shoulder_l"][0] > 0  # the figure's left is +X
+
+
+def test_heights_in_order():
+    t = _table()
+    assert 0.40 * 1.70 < t.crotch_y < t.axilla_y < t.acromion_y < 0.90 * 1.70
+
+
+def test_reads_outer_shell():
+    pos, faces = _with_inner_shell_and_debris(*_capsule_body())
+    b = read_sections(pos, faces, stature=1.70)
+    assert np.allclose(_table().chains["torso"].r, b.chains["torso"].r, atol=2e-3)
+
+
+def test_round_trip(tmp_path):
+    t = _table()
+    save_table(t, tmp_path / "t.npz")
+    u = load_table(tmp_path / "t.npz")
+    assert np.array_equal(t.chains["arm_l"].r, u.chains["arm_l"].r)
+    assert np.array_equal(t.head_r, u.head_r) and u.crotch_y == t.crotch_y
+    assert all(np.array_equal(t.joints[n], u.joints[n]) for n in t.joints)
+
+
+@pytest.mark.parametrize("body", ["female", "male"])
+def test_packaged_tables(body):
+    t = load_table(body)
+    assert {n: len(c.t) for n, c in t.chains.items()} == CHAINS and t.head_r.shape == HEAD
+
+
+def test_resample_levels():
+    t = load_table("female")
+    assert resample(t, 8, 2).chains["torso"].r.shape == (20, 8)
+    assert resample(t, 6, 4).chains["leg_l"].r.shape == (6, 6)
+    assert resample(t, 16, 1).chains["arm_r"].r.shape == (28, 16)
+
+
+@pytest.mark.parametrize("k, step, rows", [(16, 1, 5), (8, 2, 3), (6, 4, 3)])
+def test_torso_keeps_shoulder_rows(k, step, rows):
+    t = resample(load_table("female"), k, step)
+    torso = t.chains["torso"]
+    y = torso.start[1] + (torso.end[1] - torso.start[1]) * torso.t
+    assert ((y >= t.axilla_y - 1e-6) & (y <= t.acromion_y + 1e-6)).sum() == rows
