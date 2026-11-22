@@ -438,23 +438,35 @@ def _resolution(level: int, detail: float) -> tuple[int, int]:
     return k, int(np.clip(round(1 / detail), 1, 4))
 
 
+def _body_table(params: HumanParams) -> SectionTable:
+    """The section table `params` describe: variants blended, thinned, scaled to stature, legs and spine set."""
+    t = _blended(params)
+    t = _thinner(t, params)
+    t = _scaled(t, params.stature / t.stature)
+    t = _legs(t, params.leg_ratio)
+    return _spine_on_torso(t)
+
+
+def rest_skeleton(params: HumanParams) -> dict:
+    """The 19 rest joint positions of the figure `params` build, at any level."""
+    t = _body_table(params)
+    return _widen(np.zeros((0, 3)), np.zeros(0, int), t, _rest_joints(t), params.shoulders, params.hips)[1]
+
+
 def build_human(params: HumanParams, outfit=None, level: int = 0) -> Figure:
     """The figure `params` describes at `level` (0 near, 1 mid, 2 far), feet on y = 0, facing +Z."""
     params.validate()
     if level not in LEVELS:
         raise ValueError(f"level: {level!r} is not one of {tuple(LEVELS)}")
-    t = _blended(params)
-    t = _thinner(t, params)
-    t = _scaled(t, params.stature / t.stature)
-    t = _legs(t, params.leg_ratio)
-    t = _spine_on_torso(t)
+    t = _body_table(params)
     k, step = _resolution(level, params.detail)
     s = skin(t, k=k, step=step)
     pairs, weights = _weights(s, _rest_joints(t))  # from the lofted rings, before smoothing moves them
     s = _smoothed(s, level)
-    joints = {n: np.asarray(t.joints[n], float) for n in JOINTS}
-    joints["head"] = np.asarray(t.head_center, float)
-    pos, joints = _widen(s.positions, s.region, t, joints, params.shoulders, params.hips)
+    pos, joints = _widen(s.positions, s.region, t, _rest_joints(t), params.shoulders, params.hips)
+    if level == 2:  # far figures skin rigidly: each vertex follows its heavier joint
+        pairs = np.where((weights >= 0.5)[:, None], pairs, pairs[:, ::-1])
+        weights = np.ones_like(weights)
     colors = np.broadcast_to(np.array(SKIN_TONES[params.skin], np.float32), pos.shape).copy()
     mesh = Mesh(positions=pos.astype(np.float32), faces=s.faces, colors=colors, joints=pairs, weights=weights)
     parts = {}
