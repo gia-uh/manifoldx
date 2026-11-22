@@ -177,15 +177,22 @@ class JointStore:
         b = self.mirror[np.minimum(block + 1, len(self.mirror) - 1)]
         return a + f * (b - a)
 
-    def bake(self, frames: np.ndarray) -> int:
+    def bake(self, frames: np.ndarray, at: int | None = None) -> int:
         """Store (K, J, 4, 4) row-major poses as K consecutive shared blocks; return the first block.
 
         The blocks are numbered at once, so the caller can `play` them; the write is deferred with the engine.
+        With `at`, the poses overwrite the clip baked there, which must have K frames too: a caller that
+        replaces clips (a crowd renewing its bodies) reuses their blocks instead of growing the table.
         """
         frames = np.asarray(frames, dtype=np.float32)
         if frames.ndim != 4 or frames.shape[2:] != (4, 4) or not 1 <= frames.shape[1] <= MAX_JOINTS or len(frames) < 1:
             raise ValueError(f"bake expects (K, J, 4, 4) poses with 1 <= J <= {MAX_JOINTS}, got {frames.shape}")
         k = len(frames)
+        if at is not None:
+            if self._clips.get(int(at)) != k:
+                raise ValueError(f"bake: {at} is not a baked clip of {k} frames")
+            self._write_clip(int(at), frames)
+            return int(at)
         first = self._next
         if first + k > FRAME_MASK:
             raise ValueError(f"joint blocks: {first + k} is over the {FRAME_MASK} a frame index can hold")

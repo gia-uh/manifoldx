@@ -165,7 +165,8 @@ Posing a figure in Python takes under a millisecond, too slow for hundreds every
 its cycles. `bake_cycle(figure, kind, speed, frames=32)` gives a cycle's poses with the first repeated at the
 end; `Engine.bake_poses` keeps them on the GPU, and each frame `Engine.set_pose_frames` points every walker at
 phase times 32 of its clip, the GPU blending the two frames around it. The skeleton is the same at every
-level, so one clip serves a body near and far.
+level, so one clip serves a body near and far. Clips are never freed: a crowd that keeps building new bodies
+bakes each new clip into one nobody plays any more with `bake_poses(frames, into=clip)`.
 
 ```python {run continue}
 clip = bake_cycle(walker, "walk", 1.4, frames=32)
