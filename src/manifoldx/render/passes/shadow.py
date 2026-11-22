@@ -521,7 +521,7 @@ def _skinned_bind_group(rp, g, k, entities):
     """Bindings 0, 1, 8, 9: layer k's light matrix and casters plus every joint block and, per instance in
     transform order, the entity's block index. Made again only when one of those buffers is new."""
     buffers = g.buffers
-    buffers.upload_joint_blocks(rp._joints.block_of[entities])
+    buffers.upload_joint_blocks(rp._joints.gpu_blocks(entities))
     joints_buf = rp._joints.ensure_buffer(rp._device)
     key = (buffers.transforms_buf, joints_buf, buffers.joint_blocks_buf)
     if g.skinned_group is not None and g.skinned_group[0] == key:
