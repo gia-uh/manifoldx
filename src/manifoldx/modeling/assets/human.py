@@ -126,6 +126,7 @@ class Figure:
     joints: dict  # rest positions, the 19 names in JOINTS order
     parents: dict
     rings: dict  # each chain's ring vertex indices into mesh.positions (-1 where the shoulders open)
+    parts: dict  # each garment's vertex indices (top, bottom, waist, shoes, hair, hat), where it has shape
 
 
 # ---------------------------------------------------------------------------------------------- the table
@@ -428,6 +429,11 @@ def build_human(params: HumanParams, outfit=None, level: int = 0) -> Figure:
     pos, joints = _widen(s.positions, s.region, t, joints, params.shoulders, params.hips)
     colors = np.broadcast_to(np.array(SKIN_TONES[params.skin], np.float32), pos.shape).copy()
     mesh = Mesh(positions=pos.astype(np.float32), faces=s.faces, colors=colors, joints=pairs, weights=weights)
-    return Figure(params, level, mesh, joints, dict(PARENTS), dict(s.ring))
+    parts = {}
+    if outfit is not None:
+        from manifoldx.modeling.assets.human_dress import dress
+
+        mesh, parts = dress(mesh, s, joints, outfit, level, SKIN_TONES[params.skin])
+    return Figure(params, level, mesh, joints, dict(PARENTS), dict(s.ring), parts)
 
 

@@ -95,6 +95,30 @@ for seed, p in enumerate(crowd):
     print(seed, f"{p.stature:.2f} m, build {p.build:.2f}, weight {p.weight:.2f}, {p.age}, {p.skin}")
 ```
 
+## Clothes, hair and a face
+
+`build_human(params, outfit)` dresses the figure in an `Outfit`: a top with sleeves as a fraction of the arm,
+trousers, shorts or a skirt down a fraction of the leg, shoes, sandals or boots, a hair style, a cap or a brimmed
+hat, their colours and an optional stripe across the top. Up close a garment is the body's own vertices over its
+span, pushed out by its looseness and painted, so the skin under it is gone and the faces stay the same; a skirt,
+a bun and a brim are closed shells of their own. The face is painted: eyes, brows and a mouth a darker shade of
+the skin.
+
+```python {run continue}
+from manifoldx.modeling.assets.human_dress import Outfit
+
+outfit = Outfit(top="shirt", sleeves=1.0, bottom="skirt", bottom_length=0.55, hair="bun",
+                top_color="#2e86c1", bottom_color="#5d4037")
+dressed = build_human(person, outfit)
+print(len(dressed.mesh.faces), "faces, garments:", {k: len(v) for k, v in dressed.parts.items()})
+far = build_human(person, outfit, level=1)
+print("level 1:", len(far.mesh.faces), "faces, garments with shape:", sorted(far.parts))
+```
+
+Every vertex of a dressed figure still has two joints and a weight, so it poses the same way: the skirt follows
+the hips at its waist and the knees at its hem. Farther away the garments are only painted on the skin; hair and
+hats keep their shape at level 1 and become paint at level 2.
+
 ## Three levels
 
 A person near the camera needs more faces than one across the street. `level` picks one of three resolutions,
