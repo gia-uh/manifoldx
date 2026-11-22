@@ -306,14 +306,16 @@ def _rays(positions, faces, origin, dirs) -> np.ndarray:
 
 
 def _torso_ts(n, t_axilla, t_acromion, rows) -> np.ndarray:
-    """n station fractions with exactly `rows` of them from axilla to acromion, the rest spread below and above."""
-    first, last = 0.0, 1.0
+    """n station fractions: `rows` of them from axilla to acromion, three quarters of the rest below, a quarter above.
+
+    The counts depend only on n and rows, so every body puts its shoulder rows at the same ring indices.
+    """
     rest = n - rows
-    below = max(1, round(rest * (t_axilla - first) / ((t_axilla - first) + (last - t_acromion))))
+    below = round(rest * 0.75)
     above = rest - below
-    lo = np.linspace(first, t_axilla, below + 1)[:-1]
+    lo = np.linspace(0.0, t_axilla, below + 1)[:-1]
     mid = np.linspace(t_axilla, t_acromion, rows)
-    hi = np.linspace(t_acromion, last, above + 1)[1:]
+    hi = np.linspace(t_acromion, 1.0, above + 1)[1:]
     return np.r_[lo, mid, hi]
 
 
