@@ -66,8 +66,10 @@ PARENTS = {
     },
 }
 VARIANTS = ("heavy", "muscular", "elder")
+SMOOTH = {0: 6, 1: 3, 2: 0}
+STITCH_SMOOTH = 0.6  # how far the crotch stitch follows the smoothing  # Taubin iterations of the lofted skin by level: rings and stitches lose their facets
 BLEND = {  # metres over which a joint takes over from its parent, on each side of it
-    "shoulder": 0.12,
+    "shoulder": 0.16,
     "hip": 0.08,
     "elbow": 0.05,
     "knee": 0.09,
@@ -79,7 +81,7 @@ BLEND = {  # metres over which a joint takes over from its parent, on each side 
     "toe": 0.02,
     "head": 0.04,
 }
-ROOT = {"shoulder": 0.08, "hip": 0.0}  # a limb's root joint blends this far past the limb's first ring
+ROOT = {"shoulder": 0.12, "hip": 0.0}  # a limb's root joint blends this far past the limb's first ring
 
 
 @dataclass
@@ -404,6 +406,31 @@ def _widen(pos, region, t: SectionTable, joints: dict, shoulders: float, hips: f
     return pos, joints
 
 
+def _rest_joints(t: SectionTable) -> dict:
+    joints = {n: np.asarray(t.joints[n], float) for n in JOINTS}
+    joints["head"] = np.asarray(t.head_center, float)
+    return joints
+
+
+def _smoothed(s, level: int):
+    """The lofted skin after SMOOTH[level] Taubin steps; soles stay on the ground and the crotch stitch in place."""
+    if not SMOOTH[level]:
+        return s
+    from manifoldx.modeling.skeleton import taubin
+
+    smoothed = taubin(Mesh(positions=s.positions, faces=s.faces), iterations=SMOOTH[level]).positions
+    smoothed[:, 1] = np.maximum(smoothed[:, 1], 0.0)
+    # The crotch stitch keeps its lofted place: smoothed, its small faces fold when a hip turns.
+    stitch = np.r_[
+        np.flatnonzero(s.region == BRIDGE),
+        np.asarray(s.ring["torso"][0]),
+        np.asarray(s.ring["leg_l"][0]),
+        np.asarray(s.ring["leg_r"][0]),
+    ]
+    smoothed[stitch] = s.positions[stitch] + STITCH_SMOOTH * (smoothed[stitch] - s.positions[stitch])
+    return replace(s, positions=smoothed)
+
+
 def _resolution(level: int, detail: float) -> tuple[int, int]:
     if level:
         return LEVELS[level]
@@ -423,9 +450,10 @@ def build_human(params: HumanParams, outfit=None, level: int = 0) -> Figure:
     t = _spine_on_torso(t)
     k, step = _resolution(level, params.detail)
     s = skin(t, k=k, step=step)
+    pairs, weights = _weights(s, _rest_joints(t))  # from the lofted rings, before smoothing moves them
+    s = _smoothed(s, level)
     joints = {n: np.asarray(t.joints[n], float) for n in JOINTS}
     joints["head"] = np.asarray(t.head_center, float)
-    pairs, weights = _weights(s, joints)
     pos, joints = _widen(s.positions, s.region, t, joints, params.shoulders, params.hips)
     colors = np.broadcast_to(np.array(SKIN_TONES[params.skin], np.float32), pos.shape).copy()
     mesh = Mesh(positions=pos.astype(np.float32), faces=s.faces, colors=colors, joints=pairs, weights=weights)

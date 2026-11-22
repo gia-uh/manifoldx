@@ -29,6 +29,7 @@ from manifoldx.modeling.assets.vehicle import ParamsRanges, choice, orient_outwa
 from manifoldx.modeling.mesh import Mesh
 
 SHELL = 255  # the region of a garment shell's vertices
+RELAX = 8  # Taubin steps that unfold a garment pushed into a crease
 HEM = 0.002  # metres a garment stands off the skin beyond its looseness
 SKIRT_RINGS = {0: 8, 1: 5, 2: 3}
 SHELL_LAT = {0: 6, 1: 4, 2: 3}
@@ -74,7 +75,37 @@ class _Dressing:
         self.parts: dict[str, list] = {}
 
     def push(self, verts, by):
-        self.pos[verts] += self.normals[verts] * np.asarray(by, float).reshape(-1, 1)
+        by = np.broadcast_to(np.asarray(by, float), (len(verts),))
+        self.pos[verts] += self.normals[verts] * by[:, None]
+        self.pushed = np.union1d(getattr(self, "pushed", np.zeros(0, np.int64)), verts)
+        if not hasattr(self, "push_by"):
+            self.rest, self.push_by = self.pos.copy(), np.zeros(len(self.pos))
+            self.rest[verts] -= self.normals[verts] * by[:, None]
+        self.push_by[verts] = by
+
+    def relax(self, iterations=RELAX, lam=0.5, mu=-0.53):
+        """Taubin steps on the pushed vertices only: where an offset folded in a crease, it unfolds."""
+        moved = getattr(self, "pushed", None)
+        if moved is None or not len(moved) or not iterations:
+            return
+        f = self.faces[0]
+        a = np.concatenate([f[:, 0], f[:, 1], f[:, 2]])
+        b = np.concatenate([f[:, 1], f[:, 2], f[:, 0]])
+        n = len(self.normals)
+        mask = np.zeros(n, bool)
+        mask[moved] = True
+        deg = np.bincount(np.r_[a, b], minlength=n).astype(float)
+        for i in range(2 * iterations):
+            p = self.pos[:n]
+            acc = np.zeros((n, 3))
+            np.add.at(acc, a, p[b])
+            np.add.at(acc, b, p[a])
+            step = (lam if i % 2 == 0 else mu) * (acc / np.maximum(deg, 1)[:, None] - p)
+            self.pos[:n][mask] += step[mask]
+        # Never closer to the skin than half the push.
+        off = np.einsum("ij,ij->i", self.pos[moved] - self.rest[moved], self.normals[moved])
+        short = np.maximum(0.5 * self.push_by[moved] - off, 0.0)
+        self.pos[moved] += self.normals[moved] * short[:, None]
 
     def paint(self, verts, rgb):
         self.colors[verts] = rgb
@@ -247,6 +278,7 @@ def dress(mesh: Mesh, sk: Skin, joints: dict, outfit: Outfit, level: int, tone) 
                 d.pos[shoe, 1] = np.maximum(d.pos[shoe, 1], 0.0)
                 d.mark("shoes", shoe)
 
+    d.relax()
     _head(d, joints, idx, outfit, level, k, tone)
     return d.mesh()
 

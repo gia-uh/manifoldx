@@ -51,15 +51,13 @@ def _colour_share(f, hex_colour):
 
 
 def _min_signed_distance(f, region, to="body"):
-    """Smallest distance of a garment vertex outside the undressed body, along the nearest body vertex's normal."""
+    """Smallest offset of a garment vertex from the body vertex it replaced, along that vertex's normal."""
     assert to == "body"
     body = build_human(f.params, None, f.level).mesh.recompute_normals()
-    bp, bn = body.positions.astype(float), body.normals.astype(float)
-    worst = np.inf
-    for p in f.mesh.positions[f.parts[region]].astype(float):
-        i = int(np.argmin(((bp - p) ** 2).sum(1)))
-        worst = min(worst, float((p - bp[i]) @ bn[i]))
-    return worst
+    v = f.parts[region]
+    v = v[v < len(body.positions)]
+    d = f.mesh.positions[v].astype(float) - body.positions[v].astype(float)
+    return float(np.einsum("ij,ij->i", d, body.normals[v].astype(float)).min())
 
 
 @pytest.mark.parametrize("level", [0, 1, 2])
@@ -119,3 +117,29 @@ def test_face_is_painted_at_level_zero():
 
 def test_no_outfit_is_the_bare_figure():
     assert np.array_equal(_build(HumanParams(), None).mesh.faces, build_human(HumanParams()).mesh.faces)
+
+
+def _sharp(mesh, faces):
+    """Edges between two of `faces` whose normals differ by more than 90 degrees: a crease."""
+    p = mesh.positions.astype(float)
+    n = np.cross(p[faces[:, 1]] - p[faces[:, 0]], p[faces[:, 2]] - p[faces[:, 0]])
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+    e = np.sort(faces[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2), axis=1)
+    owner = np.repeat(np.arange(len(faces)), 3)
+    o = np.lexsort((e[:, 1], e[:, 0]))
+    e, owner = e[o], owner[o]
+    same = (e[1:] == e[:-1]).all(1)
+    return int(((n[owner[:-1][same]] * n[owner[1:][same]]).sum(1) < 0).sum())
+
+
+@pytest.mark.parametrize("params", [HumanParams(), HumanParams(build=0, weight=1.4), HumanParams(build=1, weight=1.5)])
+def test_garments_add_no_crease(params):
+    """Pushed out of a crease (the crotch, under a belly), trousers come out smoother than the skin they cover."""
+    bare, f = _build(params), _build(params, Outfit(bottom="trousers"))
+    n = len(bare.mesh.positions)
+    inside = np.zeros(n, bool)
+    for v in f.parts.values():
+        inside[v[v < n]] = True
+    faces = bare.mesh.faces.astype(np.int64)
+    faces = faces[inside[faces].all(1)]
+    assert _sharp(f.mesh, faces) <= _sharp(bare.mesh, faces)
