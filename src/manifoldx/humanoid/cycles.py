@@ -198,12 +198,14 @@ def _gait(kind: str, speed: float, params: HumanParams) -> dict:
     run = kind == "run"
     if kind == "idle":
         return {"plant": 1.0, "reach": 0.0, "lift": 0.0, "bob": 0.0}
-    plant = 0.15 if run else 0.25
+    plant = 0.22 if run else 0.25
+    size = params.stature / 1.7
     return {
         "plant": plant,
         "reach": plant * _stride(kind, speed, params) / 2,
-        "lift": (0.30 if run else 0.07) * params.stature / 1.7,
+        "lift": (0.28 if run else 0.07) * size,
         "bob": 0.05 if run else 0.02,
+        "run": run,
     }
 
 
@@ -214,9 +216,14 @@ def _foot(g: dict, u: float) -> tuple[float, float]:
         return 0.0, 0.0
     if u < p:
         return a * (1 - 2 * u / p), 0.0
+    s, stride = (u - p) / (1 - p), 2 * a / p
+    if g["run"]:
+        # Running, the foot leaves the ground at once and stays behind, heel up toward the buttock, while the
+        # thigh swings through; it comes forward late, low, the shin straightening as it lands.
+        z = -a * math.cos(math.pi * s * s)
+        return z, g["lift"] * math.sin(math.pi * s**0.6)
     # Swinging, the foot covers a stride in world space along a smoothstep, so it lifts off and lands at rest;
     # it clears the ground early in the swing, so the knee straightens before the foot reaches forward.
-    s, stride = (u - p) / (1 - p), 2 * a / p
     ahead = stride * s * s * (3 - 2 * s) - (1 - p) * stride * s
     return -a + ahead, g["lift"] * math.sin(math.pi * s**0.7)
 
@@ -227,8 +234,10 @@ def _centre(joints, s: str, g: dict) -> float:
 
 
 def _bob(kind: str, phase: float, g: dict) -> float:
-    """Highest at mid-stance, twice per cycle."""
-    return g["bob"] * 0.5 * (1 + math.cos(4 * math.pi * (phase - g["plant"] / 2)))
+    """Twice per cycle: walking, highest at mid-stance over the straight leg; running, lowest there and
+    highest in flight."""
+    wave = math.cos(4 * math.pi * (phase - g["plant"] / 2))
+    return g["bob"] * 0.5 * (1 - wave if g.get("run") else 1 + wave)
 
 
 def _sway(kind: str, phase: float) -> float:

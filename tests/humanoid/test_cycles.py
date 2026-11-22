@@ -158,3 +158,31 @@ def test_bake_cycle_loops_and_matches_the_poses():
     assert np.allclose(clip[-1], clip[0], atol=1e-5)
     want = pose_matrices(f, cycle_angles("walk", 5 / 16, 1.4, p), root_offset("walk", 5 / 16, 1.4, p))
     assert np.allclose(clip[5], want, atol=1e-6)
+
+
+def _ankle_behind_and_lift(kind, speed, p):
+    """Per phase: how far the left ankle is behind the left hip (m) and its lift above standing height (m)."""
+    f = _figure(p)
+    rest_y = f.joints["ankle_l"][1]
+    out = []
+    for ph in np.linspace(0, 1, 64, endpoint=False):
+        mats = pose_matrices(f, cycle_angles(kind, ph, speed, p), root_offset(kind, ph, speed, p))
+        ankle, hip = _world(f, mats, "ankle_l"), _world(f, mats, "hip_l")
+        out.append((hip[2] - ankle[2], ankle[1] - rest_y))
+    return np.array(out)
+
+
+def test_run_kicks_the_heel_up_behind():
+    """Running, the foot rises behind the body after toe-off: while it is still 15 cm behind the hip it is
+    already 15 cm up, rather than trailing low behind in a lunge."""
+    track = _ankle_behind_and_lift("run", 3.5, HumanParams())
+    swing = track[track[:, 1] > 0.01]
+    assert swing[swing[:, 0] > 0.15, 1].max() > 0.15
+
+
+def test_run_is_highest_in_flight():
+    p = HumanParams()
+    y = np.array([root_offset("run", ph, 3.5, p)[1] for ph in np.linspace(0, 1, 64, endpoint=False)])
+    stance = y[: int(64 * 0.1)]  # the left foot lands at phase 0
+    flight = y[int(64 * 0.38) : int(64 * 0.45)]
+    assert flight.mean() > stance.mean() + 0.02
