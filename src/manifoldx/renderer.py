@@ -1423,9 +1423,9 @@ class RenderPipeline:
                     continue
                 pos = np.asarray(geom["positions"], dtype=np.float32).reshape(-1, 3)
                 if "joints" in geom:
-                    joints = np.asarray(geom["joints"])
+                    joints = np.asarray(geom["joints"]).reshape(len(pos), -1)  # a blended vertex is in both boxes
                     js = np.unique(joints)
-                    boxes = (js, np.stack([_box_corners(pos[joints == j]) for j in js]))
+                    boxes = (js, np.stack([_box_corners(pos[(joints == j).any(1)]) for j in js]))
                 else:
                     boxes = (None, _box_corners(pos)[None])
                 cache[geom_id] = boxes
@@ -1445,7 +1445,7 @@ class RenderPipeline:
             full = mats.reshape(-1, 1, 4, 4)  # (N, 1, 4, 4) row-major model matrices
             if js is not None:
                 # The mirror holds joint matrices transposed (column-major).
-                joint_mats = self._joints.mirror[self._joints.block_of[entities]][:, js]
+                joint_mats = self._joints.current(entities)[:, js]
                 full = full @ joint_mats.transpose(0, 1, 3, 2)  # (N, K, 4, 4)
             world = corners @ full.transpose(0, 1, 3, 2)  # (N, K, 8, 4): point @ M.T per box
             w = (world[..., :3] / world[..., 3:4]).reshape(-1, 3)

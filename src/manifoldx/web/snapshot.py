@@ -338,7 +338,7 @@ def ecs_bytes(engine) -> tuple[dict, bytes]:
     joints = engine._render_pipeline._joints
     poses = [
         {"entity": int(i), "at": block(joints.pose(int(i), MAX_JOINTS).astype("<f4").tobytes())}
-        for i in np.flatnonzero(store._alive[:hw] & (joints.block_of[:hw] != 0))
+        for i in np.flatnonzero(store._alive[:hw] & ((joints.block_of[:hw] != 0) | (joints.frame_of[:hw] != 0)))
     ]
     header = {
         "max_entities": int(store.max_entities),

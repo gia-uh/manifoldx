@@ -22,7 +22,19 @@ from manifoldx.modeling.assets.human_sections import (
     load_table,
     shoulder_rows,
 )
-from manifoldx.modeling.assets.human_skin import ARM_L, ARM_R, LEG_L, LEG_R, LEVELS, TORSO, skin
+from manifoldx.modeling.assets.human_skin import (
+    ARM_L,
+    ARM_R,
+    BRIDGE,
+    FOOT_L,
+    FOOT_R,
+    HEAD,
+    LEG_L,
+    LEG_R,
+    LEVELS,
+    TORSO,
+    skin,
+)
 from manifoldx.modeling.assets.vehicle import ParamsRanges, choice, rng
 from manifoldx.modeling.mesh import Mesh
 
@@ -54,6 +66,22 @@ PARENTS = {
     },
 }
 VARIANTS = ("heavy", "muscular", "elder")
+SMOOTH = {0: 6, 1: 3, 2: 0}
+STITCH_SMOOTH = 0.6  # how far the crotch stitch follows the smoothing  # Taubin iterations of the lofted skin by level: rings and stitches lose their facets
+BLEND = {  # metres over which a joint takes over from its parent, on each side of it
+    "shoulder": 0.16,
+    "hip": 0.08,
+    "elbow": 0.05,
+    "knee": 0.09,
+    "wrist": 0.03,
+    "ankle": 0.03,
+    "neck": 0.04,
+    "spine": 0.06,
+    "chest": 0.06,
+    "toe": 0.02,
+    "head": 0.04,
+}
+ROOT = {"shoulder": 0.12, "hip": 0.0}  # a limb's root joint blends this far past the limb's first ring
 
 
 @dataclass
@@ -100,6 +128,7 @@ class Figure:
     joints: dict  # rest positions, the 19 names in JOINTS order
     parents: dict
     rings: dict  # each chain's ring vertex indices into mesh.positions (-1 where the shoulders open)
+    parts: dict  # each garment's vertex indices (top, bottom, waist, shoes, hair, hat), where it has shape
 
 
 # ---------------------------------------------------------------------------------------------- the table
@@ -238,6 +267,108 @@ def _spine_on_torso(t: SectionTable) -> SectionTable:
     return replace(t, joints=joints)
 
 
+# ----------------------------------------------------------------------------------------------- the weights
+
+
+def _blend_along(coord, before, stops):
+    """Joint pairs and weights along one coordinate: `before` drives up to the first stop, each stop after it.
+
+    `stops` is [(joint index, position, blend length)] in increasing position. Within a stop's blend length the
+    vertex takes the stop's joint with weight 0.5 + (coord - position) / (2 * length), its parent the rest.
+    """
+    n = len(coord)
+    drivers = [before] + [j for j, _, _ in stops]
+    seg = np.searchsorted([p for _, p, _ in stops], coord, side="right")
+    a = np.array(drivers)[seg]
+    pairs = np.stack([a, a], 1)
+    w = np.ones(n)
+    best = np.full(n, np.inf)
+    for k, (j, p, length) in enumerate(stops):
+        d = coord - p
+        near = (np.abs(d) < length) & (np.abs(d) < best)
+        best[near] = np.abs(d[near])
+        pairs[near] = [j, drivers[k]]
+        w[near] = 0.5 + d[near] / (2 * length)
+    return pairs, w
+
+
+def _arc_of(point, centres, stations):
+    """The station of the point on the polyline of ring centres nearest `point` (before its start: negative)."""
+    best = (np.inf, 0.0)
+    for i in range(len(centres) - 1):
+        a, b = centres[i], centres[i + 1]
+        seg = b - a
+        t = (point - a) @ seg / max(seg @ seg, 1e-12)
+        if i == 0:
+            t = min(t, 1.0)
+        elif i == len(centres) - 2:
+            t = max(t, 0.0)
+        else:
+            t = np.clip(t, 0.0, 1.0)
+        dist = np.linalg.norm(a + t * seg - point)
+        if dist < best[0]:
+            best = (dist, stations[i] + t * (stations[i + 1] - stations[i]))
+    return best[1]
+
+
+def _weights(sk, joints) -> tuple[np.ndarray, np.ndarray]:
+    """Two joints per vertex of `sk` and the first one's weight."""
+    idx = {n: i for i, n in enumerate(JOINTS)}
+    n = len(sk.positions)
+    pairs = np.full((n, 2), idx["pelvis"])
+    w = np.ones(n)
+    y = sk.positions[:, 1].astype(float)
+
+    def stop(name):
+        return idx[name], BLEND[name.rsplit("_", 1)[0] if name[-2:] in ("_l", "_r") else name]
+
+    # Torso and head by height: pelvis, then spine, chest, neck, and the head from the neck's top ring up.
+    top = sk.positions[np.asarray(sk.ring["torso"][-1]), 1].mean()
+    body = (sk.region == TORSO) | (sk.region == HEAD)
+    stops = [(*stop(j)[:1], joints[j][1], stop(j)[1]) for j in ("spine", "chest", "neck")]
+    stops.append((idx["head"], top, BLEND["head"]))
+    pairs[body], w[body] = _blend_along(y[body], idx["pelvis"], stops)
+
+    # Limbs along their stations; each starts from its root joint's parent.
+    limbs = {
+        ARM_L: ("arm_l", "chest", ("shoulder_l", "elbow_l", "wrist_l")),
+        ARM_R: ("arm_r", "chest", ("shoulder_r", "elbow_r", "wrist_r")),
+        LEG_L: ("leg_l", "pelvis", ("hip_l", "knee_l", "ankle_l")),
+        LEG_R: ("leg_r", "pelvis", ("hip_r", "knee_r", "ankle_r")),
+        FOOT_L: ("foot_l", "ankle_l", ("toe_l",)),
+        FOOT_R: ("foot_r", "ankle_r", ("toe_r",)),
+    }
+    for region, (chain, before, names) in limbs.items():
+        mask = sk.region == region
+        rings = [np.asarray(r) for r in sk.ring[chain]]
+        centres = np.stack([sk.positions[r].mean(0) for r in rings]).astype(float)
+        stations = np.array([sk.station[r[0]] for r in rings], float)
+        at = [_arc_of(joints[j], centres, stations) for j in names]
+        root = names[0].rsplit("_", 1)[0]
+        if root in ROOT:  # the root sits inside the torso: blend across the stitch instead
+            at[0] = stations[0] + ROOT[root]
+        stops = [(idx[j], a, stop(j)[1]) for j, a in zip(names, at)]
+        pairs[mask], w[mask] = _blend_along(sk.station[mask].astype(float), idx[before], stops)
+
+    # Below each hip the torso shares it, up to half at the crotch ring, fading to nothing at the midline, so
+    # the crotch stitch bends with the leg.
+    low = (sk.region == TORSO) | (sk.region == BRIDGE)
+    bottom = sk.positions[np.asarray(sk.ring["torso"][0]), 1].mean()
+    x = sk.positions[:, 0].astype(float)
+    for s, side in (("l", 1), ("r", -1)):
+        hy = joints[f"hip_{s}"][1]
+        share = 0.5 * np.clip((hy - y) / max(hy - bottom, 1e-6), 0, 1) * np.clip(x * side / 0.04, 0, 1)
+        m = low & (share > 0)
+        pairs[m] = [idx[f"hip_{s}"], idx["pelvis"]]
+        w[m] = share[m]
+        leg = (sk.region == (LEG_L if s == "l" else LEG_R)) & (pairs[:, 1] == idx["pelvis"])
+        # Its top ring's midline vertices stay with the pelvis, the fade gone 6 cm down the leg.
+        fade = np.clip(x[leg] * side / 0.04, 0, 1)
+        down = np.clip((sk.station[leg] - sk.station[np.asarray(sk.ring[f"leg_{s}"][0])].min()) / 0.06, 0, 1)
+        w[leg] *= fade + (1 - fade) * down
+    return pairs.astype(np.uint32), w.astype(np.float32)
+
+
 # ------------------------------------------------------------------------------------------------- the build
 
 
@@ -275,6 +406,31 @@ def _widen(pos, region, t: SectionTable, joints: dict, shoulders: float, hips: f
     return pos, joints
 
 
+def _rest_joints(t: SectionTable) -> dict:
+    joints = {n: np.asarray(t.joints[n], float) for n in JOINTS}
+    joints["head"] = np.asarray(t.head_center, float)
+    return joints
+
+
+def _smoothed(s, level: int):
+    """The lofted skin after SMOOTH[level] Taubin steps; soles stay on the ground and the crotch stitch in place."""
+    if not SMOOTH[level]:
+        return s
+    from manifoldx.modeling.skeleton import taubin
+
+    smoothed = taubin(Mesh(positions=s.positions, faces=s.faces), iterations=SMOOTH[level]).positions
+    smoothed[:, 1] = np.maximum(smoothed[:, 1], 0.0)
+    # The crotch stitch keeps its lofted place: smoothed, its small faces fold when a hip turns.
+    stitch = np.r_[
+        np.flatnonzero(s.region == BRIDGE),
+        np.asarray(s.ring["torso"][0]),
+        np.asarray(s.ring["leg_l"][0]),
+        np.asarray(s.ring["leg_r"][0]),
+    ]
+    smoothed[stitch] = s.positions[stitch] + STITCH_SMOOTH * (smoothed[stitch] - s.positions[stitch])
+    return replace(s, positions=smoothed)
+
+
 def _resolution(level: int, detail: float) -> tuple[int, int]:
     if level:
         return LEVELS[level]
@@ -282,23 +438,42 @@ def _resolution(level: int, detail: float) -> tuple[int, int]:
     return k, int(np.clip(round(1 / detail), 1, 4))
 
 
+def _body_table(params: HumanParams) -> SectionTable:
+    """The section table `params` describe: variants blended, thinned, scaled to stature, legs and spine set."""
+    t = _blended(params)
+    t = _thinner(t, params)
+    t = _scaled(t, params.stature / t.stature)
+    t = _legs(t, params.leg_ratio)
+    return _spine_on_torso(t)
+
+
+def rest_skeleton(params: HumanParams) -> dict:
+    """The 19 rest joint positions of the figure `params` build, at any level."""
+    t = _body_table(params)
+    return _widen(np.zeros((0, 3)), np.zeros(0, int), t, _rest_joints(t), params.shoulders, params.hips)[1]
+
+
 def build_human(params: HumanParams, outfit=None, level: int = 0) -> Figure:
     """The figure `params` describes at `level` (0 near, 1 mid, 2 far), feet on y = 0, facing +Z."""
     params.validate()
     if level not in LEVELS:
         raise ValueError(f"level: {level!r} is not one of {tuple(LEVELS)}")
-    t = _blended(params)
-    t = _thinner(t, params)
-    t = _scaled(t, params.stature / t.stature)
-    t = _legs(t, params.leg_ratio)
-    t = _spine_on_torso(t)
+    t = _body_table(params)
     k, step = _resolution(level, params.detail)
     s = skin(t, k=k, step=step)
-    joints = {n: np.asarray(t.joints[n], float) for n in JOINTS}
-    joints["head"] = np.asarray(t.head_center, float)
-    pos, joints = _widen(s.positions, s.region, t, joints, params.shoulders, params.hips)
+    pairs, weights = _weights(s, _rest_joints(t))  # from the lofted rings, before smoothing moves them
+    s = _smoothed(s, level)
+    pos, joints = _widen(s.positions, s.region, t, _rest_joints(t), params.shoulders, params.hips)
+    if level == 2:  # far figures skin rigidly: each vertex follows its heavier joint
+        pairs = np.where((weights >= 0.5)[:, None], pairs, pairs[:, ::-1])
+        weights = np.ones_like(weights)
     colors = np.broadcast_to(np.array(SKIN_TONES[params.skin], np.float32), pos.shape).copy()
-    mesh = Mesh(positions=pos.astype(np.float32), faces=s.faces, colors=colors)
-    return Figure(params, level, mesh, joints, dict(PARENTS), dict(s.ring))
+    mesh = Mesh(positions=pos.astype(np.float32), faces=s.faces, colors=colors, joints=pairs, weights=weights)
+    parts = {}
+    if outfit is not None:
+        from manifoldx.modeling.assets.human_dress import dress
+
+        mesh, parts = dress(mesh, s, joints, outfit, level, SKIN_TONES[params.skin])
+    return Figure(params, level, mesh, joints, dict(PARENTS), dict(s.ring), parts)
 
 

@@ -12,7 +12,8 @@ import numpy as np
 
 import manifoldx as mx
 from manifoldx import bench
-from manifoldx.components import Material, Mesh, Transform
+from manifoldx.components import Component, Material, Mesh, Transform
+from manifoldx.types import Vector3
 from manifoldx.resources import StandardMaterial, cube
 
 AT = (51_200.0, 51_200.0)  # the middle of the quad streaming plain
@@ -163,3 +164,82 @@ def far_walk(engine, p):
 
 
 far_walk.check(origin_max_m=250, phase="far")  # 101 m measured at smoke size; 900 km without the origin
+
+
+class Stroll(Component):
+    v: Vector3  # m/s along the ground
+
+
+@bench.scenario("humans", params={"n": 500, "levels": "on", "pose": "gpu"}, sizes={"smoke": 20, "full": None})
+def humans(engine, p):
+    """n walking figures in rows 3 to 60 m away, 24 bodies at three walking speeds shared among them.
+
+    pose "gpu": each body and speed is a baked 32-frame clip, every walker plays its own phase of it and the
+    GPU blends two frames; "cpu": every figure is posed in Python each frame it is due (levels "on" picks the
+    level and pose rate by distance, "off" poses every figure at level 0 each frame).
+    """
+    from manifoldx.humanoid.cycles import (bake_cycle, cadence, cycle_angles, pose_matrices, root_offset,
+                                           snap_phase, update_every)
+    from manifoldx.modeling.assets.human import HumanParams, build_human
+    from manifoldx.modeling.assets.human_dress import Outfit
+
+    g = np.random.default_rng(5)
+    bodies = [HumanParams.sample(i) for i in range(24)]
+    speeds = (1.2, 1.4, 1.6)
+    levels = (0, 1, 2) if p.levels == "on" else (0,)
+    figures = {(b, lv): build_human(bodies[b], outfit=Outfit(), level=lv) for b in range(24) for lv in levels}
+    geometry = {k: f.mesh.to_geometry() for k, f in figures.items()}
+    skin = StandardMaterial("#ffffff", roughness=0.7, vertex_colors=True)
+    dist = np.linspace(3.0, 60.0, p.n)
+    level = np.where(dist < 8, 0, np.where(dist < 20, 1, 2)) if p.levels == "on" else np.zeros(p.n, int)
+    body = np.arange(p.n) % 24
+    speed_k = g.integers(len(speeds), size=p.n)
+    speed = np.array(speeds)[speed_k]
+    rate = np.array([cadence("walk", speed[i], bodies[body[i]]) for i in range(p.n)])
+    phase = g.random(p.n)
+    index = np.empty(p.n, np.int64)
+    for i in range(p.n):
+        h = engine.spawn(Mesh(geometry[(int(body[i]), int(level[i]))]), Material(skin),
+                         Transform(pos=(float(g.uniform(-15, 15)), 0.0, float(dist[i]))),
+                         Stroll(v=(float(speed[i]), 0.0, 0.0)))
+        index[i] = h.index
+    engine.camera.set_pose(position=(0.0, 2.0, -2.0), target=(0.0, 1.0, 20.0))
+    frames = 32
+    if p.pose == "gpu":
+        with bench.span("bake"):
+            clips = {(b, k): engine.bake_poses(bake_cycle(figures[(b, 0)], "walk", speeds[k], frames))
+                     for b in range(24) for k in range(len(speeds))}
+        clip = np.array([clips[(int(body[i]), int(speed_k[i]))] for i in range(p.n)])
+    cache, clock = {}, {"frame": 0}
+
+    @engine.system
+    def walk(q: mx.Query[Transform, Stroll], dt: float):
+        q[Transform].pos += q[Stroll].v * dt
+        phase[:] = (phase + rate * dt) % 1.0
+        frame = clock["frame"]
+        clock["frame"] = frame + 1
+        with bench.span("pose"):
+            if p.pose == "gpu":
+                engine.set_pose_frames(index, clip, phase * frames)
+                bench.metric("posed", p.n)
+                return
+            due, poses = [], []
+            for i in range(p.n):
+                lv = int(level[i])
+                if frame % update_every(lv):
+                    continue
+                f = figures[(int(body[i]), lv)]
+                ph = snap_phase(float(phase[i]), lv)
+                key = (id(f), ph, int(speed_k[i])) if lv == 2 else None
+                m = cache.get(key) if key else None
+                if m is None:
+                    m = pose_matrices(f, cycle_angles("walk", ph, speed[i], f.params), root_offset("walk", ph, speed[i], f.params))
+                    if key:
+                        cache[key] = m
+                due.append(index[i])
+                poses.append(m)
+        with bench.span("upload"):
+            engine.set_joints(due, np.stack(poses))
+        bench.metric("posed", len(due))
+
+    return None, [bench.hold(frames=5), bench.mark("walk"), bench.hold(frames=60)]

@@ -68,7 +68,9 @@ def test_stature():
 
 def test_build_ends_are_the_tables():
     f = _build(build=0.0, stature=1.63, weight=1, muscle=1, shoulders=1, hips=1, leg_ratio=1)
-    assert np.allclose(f.mesh.positions, skin(load_table("female")).positions, atol=2e-3)
+    from manifoldx.modeling.assets.human import _smoothed
+
+    assert np.allclose(f.mesh.positions, _smoothed(skin(load_table("female")), 0).positions, atol=2e-3)
 
 
 def test_extreme_corners():
@@ -141,3 +143,20 @@ def test_detail_scales_level_zero():
 def test_sample_is_mostly_adults():
     elders = sum(HumanParams.sample(s).age == "elder" for s in range(400))
     assert 70 < elders < 130  # a quarter
+
+
+def _dihedral_p95(mesh):
+    p, f = mesh.positions.astype(float), mesh.faces.astype(np.int64)
+    n = np.cross(p[f[:, 1]] - p[f[:, 0]], p[f[:, 2]] - p[f[:, 0]])
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+    e = np.sort(f[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2), axis=1)
+    owner = np.repeat(np.arange(len(f)), 3)
+    o = np.lexsort((e[:, 1], e[:, 0]))
+    e, owner = e[o], owner[o]
+    same = (e[1:] == e[:-1]).all(1)
+    cos = (n[owner[:-1][same]] * n[owner[1:][same]]).sum(1)
+    return float(np.percentile(np.degrees(np.arccos(np.clip(cos, -1, 1))), 95))
+
+
+def test_level_zero_is_smooth():  # neighbouring faces meet gently: the rings and stitches show no facets
+    assert _dihedral_p95(_build().mesh) < 40

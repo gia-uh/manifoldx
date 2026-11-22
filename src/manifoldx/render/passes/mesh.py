@@ -157,7 +157,7 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
     def joint_buffers():
         # Block index per instance, in the same order as the transforms, uploaded once per frame.
         if "bufs" not in joints:
-            rp._batch_buffers.upload_joint_blocks(rp._joints.block_of[entities])
+            rp._batch_buffers.upload_joint_blocks(rp._joints.gpu_blocks(entities))
             joints["bufs"] = (rp._joints.ensure_buffer(rp._device), rp._batch_buffers.joint_blocks_buf)
         return joints["bufs"]
 
