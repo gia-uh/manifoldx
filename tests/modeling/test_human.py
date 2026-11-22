@@ -136,3 +136,8 @@ def test_sample_is_reproducible():
 def test_detail_scales_level_zero():
     assert len(_build(detail=2.0).mesh.faces) > len(_build().mesh.faces)
     assert len(_build(detail=0.5).mesh.faces) < len(_build().mesh.faces)
+
+
+def test_sample_is_mostly_adults():
+    elders = sum(HumanParams.sample(s).age == "elder" for s in range(400))
+    assert 70 < elders < 130  # a quarter

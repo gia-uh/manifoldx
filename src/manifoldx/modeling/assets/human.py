@@ -73,7 +73,7 @@ class HumanParams(ParamsRanges):
 
     @classmethod
     def sample(cls, seed: int) -> HumanParams:
-        """A plausible person: stature around 1.63 m or 1.75 m by build, the rest within the middle of its range."""
+        """A plausible person: stature around 1.63 m or 1.75 m by build, one in four old, the rest mid-range."""
         g = np.random.default_rng(seed)
         spec = cls.ranges()
 
@@ -87,7 +87,7 @@ class HumanParams(ParamsRanges):
             stature=round(stature, 3),
             build=build,
             **{n: middle(n) for n in ("weight", "muscle", "shoulders", "hips", "leg_ratio")},
-            age=str(g.choice(spec["age"]["choices"])),
+            age="elder" if g.random() < 0.25 else "adult",
             skin=str(g.choice(spec["skin"]["choices"])),
         )
 
