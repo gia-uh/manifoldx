@@ -1488,6 +1488,31 @@ def tint_shader(source: str) -> str:
     )
 
 
+PALETTE_BINDING = 11  # group(0) storage: array<vec4<f32>>, PALETTE_SLOTS rows per instance, in the transforms' order
+PALETTE_SLOTS = 8  # colours in a Palette
+PALETTE_SURFACE = 32  # surface id of a vertex in palette slot 0; slot k is PALETTE_SURFACE + k
+
+
+def palette_shader(source: str) -> str:
+    """A vertex-colour shader whose vertices of surface PALETTE_SURFACE + k take slot k of their instance's
+    palette times their own colour (StandardMaterial with paletted=True); other vertices keep their colour."""
+    return source.replace(
+        "@group(0) @binding(3) var<uniform> light_data: LightData;\n",
+        "@group(0) @binding(3) var<uniform> light_data: LightData;\n"
+        f"@group(0) @binding({PALETTE_BINDING}) var<storage, read> palettes: array<vec4<f32>>;\n",
+        1,
+    ).replace(
+        "    out.vcolor = in.color;\n",
+        f"    let pslot = i32(in.color.w + 0.5) - {PALETTE_SURFACE};\n"
+        "    var pcolor = in.color.xyz;\n"
+        f"    if (pslot >= 0 && pslot < {PALETTE_SLOTS}) {{\n"
+        f"        pcolor = pcolor * palettes[in.instance * {PALETTE_SLOTS}u + u32(pslot)].xyz;\n"
+        "    }\n"
+        "    out.vcolor = vec4<f32>(pcolor, in.color.w);\n",
+        1,
+    )
+
+
 # A 4x4 Bayer matrix and the screen-door test of a Fade (StandardMaterial with faded=True, and the shadow
 # pass): a fade f in 0..1 keeps the pixels whose threshold is under f, so f of them draw; a negative fade
 # keeps the complementary pixels, so one entity at -(1 - t) and another at t cover every pixel once.
@@ -1963,6 +1988,7 @@ class StandardMaterial(Material):
         faded=False,
         detail=False,
         baked=None,
+        paletted=False,
     ):
         from manifoldx.textures import TextureHandle
 
@@ -1999,6 +2025,11 @@ class StandardMaterial(Material):
         if tinted and not vertex_colors:
             raise ValueError("tinted needs vertex_colors=True")
         self.tinted = bool(tinted)
+        # paletted (with vertex_colors): the vertices of surface PALETTE_SURFACE + k take colour k of their
+        # entity's Palette times their own colour, so one geometry dresses each instance differently.
+        if paletted and (not vertex_colors or tinted or baked is not None):
+            raise ValueError("paletted needs vertex_colors=True, no tint and no baked image")
+        self.paletted = bool(paletted)
         # faded: each entity's Fade component (1 drawn, 0 gone) drops that share of its pixels against a
         # 4x4 pattern, in its shadow too, so a level of detail can give way to another without a pop.
         self.faded = bool(faded)
@@ -2019,7 +2050,7 @@ class StandardMaterial(Material):
         if self.albedo_map is not None:
             base = "textured"
         elif self.vertex_colors:
-            base = "vcolor-tint" if self.tinted else "vcolor"
+            base = "vcolor-tint" if self.tinted else "vcolor-palette" if self.paletted else "vcolor"
             if self.baked is not None:
                 base += "-baked"
             if self.detail:
