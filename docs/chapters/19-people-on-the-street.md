@@ -177,3 +177,32 @@ second frame, and `snap_phase(phase, 2)` holds a level 2 figure on one of eight 
 figure is built rigid, each vertex following one joint. `examples/humans.py` walks 50 sampled people along a
 street with baked cycles and the three levels by distance, and the `humans` bench scenario times 500 of them
 posed either way.
+
+## A crowd in many colours
+
+A crowd shares a few figure meshes, and a mesh's vertex colours dress every walker on it alike. A dressed
+figure also records each vertex's palette slot: `figure.slots` indexes `SLOTS` (skin, top, bottom, stripe,
+shoes, hair, hat) and `figure.shades` says how dark the vertex is against its slot, 0.6 for a sole under its shoe
+and a darker skin for the face. `figure.paletted_geometry()` writes the slots as surface ids and the shades as a
+grey vertex colour, and a `StandardMaterial(paletted=True)` colours each vertex with its entity's `Palette`
+entry for the slot, times the shade. Each walker then draws its own outfit from the same mesh, in the same
+instanced draw, and the palette composes with baked clips and `faded=True`. `figure.palette()` gives the colours
+the figure was dressed in, which draw it as its vertex colours do.
+
+```python {run continue}
+from manifoldx.modeling.assets.human_dress import SLOTS
+
+print(SLOTS)
+own = dressed.palette()
+print("vertex colours are palette times shade:",
+      np.allclose(dressed.mesh.colors, own[dressed.slots] * dressed.shades[:, None], atol=1e-6))
+geo = dressed.paletted_geometry()
+print("surface ids", sorted({int(s) for s in geo["surfaces"]}))
+```
+
+A spawn gives each walker its colours as eight sRGB columns, `c0` to `c7`, by slot:
+
+```python
+mat = StandardMaterial("#ffffff", vertex_colors=True, paletted=True, faded=True)
+engine.spawn(Mesh(geo), Material(mat), Transform(pos=spots), Palette(c1=shirts, c2=trousers), n=len(spots))
+```

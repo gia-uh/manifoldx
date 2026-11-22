@@ -19,7 +19,8 @@ from manifoldx.skinning import (
     JointStore,
     skin_shader,
 )
-from manifoldx.resources import BAKED_BINDING, TINTS_BINDING, baked_shader, detail_shader, fade_shader, tint_shader
+from manifoldx.resources import (BAKED_BINDING, PALETTE_BINDING, TINTS_BINDING, baked_shader, detail_shader, fade_shader,
+                                 palette_shader, tint_shader)
 from manifoldx.viz.materials import ColormapMaterial
 from manifoldx import counters
 
@@ -144,6 +145,8 @@ class _BatchBuffers:
         self.joint_blocks_capacity = 0
         self.tints_buf = None
         self.tints_capacity = 0
+        self.palettes_buf = None
+        self.palettes_capacity = 0
         self._transforms_key = None  # (entities, cache version) of what transforms_buf holds, if known
 
     def upload_transforms_for(self, entities: "np.ndarray", cache: "TransformCache", build) -> None:
@@ -190,6 +193,18 @@ class _BatchBuffers:
             )
             self.tints_capacity = n_bytes
         counters.write_buffer(self._device.queue, self.tints_buf, 0, data.tobytes())
+
+    def upload_palettes(self, data: "np.ndarray"):
+        """Upload (N * PALETTE_SLOTS, 4) float32 palette rows, PALETTE_SLOTS per instance in the transforms' order."""
+        n_bytes = data.nbytes
+        if self.palettes_buf is None or self.palettes_capacity < n_bytes:
+            n_bytes = max(n_bytes, -(-(self.palettes_capacity * 3 // 2) // 16) * 16)
+            self.palettes_buf = self._device.create_buffer(
+                size=n_bytes,
+                usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+            )
+            self.palettes_capacity = n_bytes
+        counters.write_buffer(self._device.queue, self.palettes_buf, 0, data.tobytes())
 
     def upload_scalar_values(self, data: "np.ndarray"):
         n_bytes = data.nbytes
@@ -1048,11 +1063,13 @@ class RenderPipeline:
         )
         if is_textured:
             shader_source = material._compile(textured=True)
-        elif material_subtype in ("vcolor", "vcolor-tint"):
+        elif material_subtype in ("vcolor", "vcolor-tint", "vcolor-palette"):
             shader_source = material._compile(vertex_colors=True,
                                               facade=(geometry_buffers or {}).get("has_facade", False))
             if material_subtype == "vcolor-tint":
                 shader_source = tint_shader(shader_source)
+            if material_subtype == "vcolor-palette":
+                shader_source = palette_shader(shader_source)
             if baked:
                 shader_source = baked_shader(shader_source)
             if detailed:
@@ -1262,6 +1279,14 @@ class RenderPipeline:
                         "buffer": {"type": wgpu.BufferBindingType.read_only_storage},
                     }
                 )
+            if material_subtype == "vcolor-palette":
+                bind_group_entries.append(
+                    {
+                        "binding": PALETTE_BINDING,
+                        "visibility": wgpu.ShaderStage.VERTEX,
+                        "buffer": {"type": wgpu.BufferBindingType.read_only_storage},
+                    }
+                )
             if skinned:
                 bind_group_entries.extend(
                     {
@@ -1316,7 +1341,7 @@ class RenderPipeline:
                         "shader_location": 2,
                     }
                 )
-            elif material_subtype in ("vcolor", "vcolor-tint"):
+            elif material_subtype in ("vcolor", "vcolor-tint", "vcolor-palette"):
                 vertex_attributes.append(
                     {
                         "format": wgpu.VertexFormat.float32x4,  # colour + surface id
