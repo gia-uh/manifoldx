@@ -12,13 +12,13 @@ from __future__ import annotations
 import math
 import numpy as np
 
-from manifoldx.humanoid import _quat as q
 from manifoldx.modeling.assets.human import PARENTS, HumanParams, rest_skeleton
 from manifoldx.modeling.assets.human_sections import JOINTS
 
 KINDS = ("idle", "walk", "run", "cross")
 KEY_PHASES = 8  # level 2 snaps its phase to this many poses per cycle
 REACH = 0.995  # of the leg's length a planted leg may stretch
+ARM_DOWN = 8.0  # degrees a hanging arm stands off the body; the table's A-pose is ~45
 CROSS_TURN = 45.0  # degrees the neck turns each way while crossing
 
 _SPINE = ("pelvis", "spine", "chest", "neck", "head")
@@ -26,6 +26,38 @@ _CHILD = {"spine": "chest", "chest": "neck", "neck": "head"}  # the pelvis keeps
 for _s in "lr":
     _CHILD |= {f"shoulder_{_s}": f"elbow_{_s}", f"elbow_{_s}": f"wrist_{_s}", f"hip_{_s}": f"knee_{_s}",
                f"knee_{_s}": f"ankle_{_s}", f"ankle_{_s}": f"toe_{_s}"}
+
+
+def _axis(axis: int, degrees: float) -> tuple:
+    """Quaternion (x, y, z, w) of `degrees` about axis 0, 1 or 2."""
+    h = math.radians(degrees) / 2
+    v = [0.0, 0.0, 0.0, math.cos(h)]
+    v[axis] = math.sin(h)
+    return tuple(v)
+
+
+def _mul(a, b) -> tuple:
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
+
+
+def _matrix(r) -> np.ndarray:
+    x, y, z, w = r
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+
+
+def _rotate(r, v) -> np.ndarray:
+    return _matrix(r) @ np.asarray(v, float)
 
 
 def _side(name: str) -> int:
@@ -46,24 +78,24 @@ def _zero_direction(name: str) -> np.ndarray:
 
 def _local(name: str, a: dict) -> np.ndarray:
     side = _side(name)
-    r = q.axis_angle((0, 0, 1), a.get("abduct", 0.0) * side + a.get("lean", 0.0))
-    r = q.mul(r, q.axis_angle((1, 0, 0), a.get("flex", 0.0) * _flex_sign(name)))
-    return q.mul(r, q.axis_angle((0, 1, 0), a.get("twist", 0.0) * side))
+    r = _axis(2, a.get("abduct", 0.0) * side + a.get("lean", 0.0))
+    r = _mul(r, _axis(0, a.get("flex", 0.0) * _flex_sign(name)))
+    return _mul(r, _axis(1, a.get("twist", 0.0) * side))
 
 
-def _inverse(r) -> np.ndarray:
-    return np.array([-r[0], -r[1], -r[2], r[3]])
+def _inverse(r) -> tuple:
+    return (-r[0], -r[1], -r[2], r[3])
 
 
 def _swing(u, v) -> np.ndarray:
     """The shortest rotation taking unit u to unit v."""
     r = np.r_[np.cross(u, v), 1.0 + np.dot(u, v)]
-    return r / np.linalg.norm(r)
+    return tuple(r / np.linalg.norm(r))
 
 
 def _angles_of(name: str, r) -> dict:
     """flex, abduct and twist whose local rotation (Rz . Rx . Ry) is the quaternion r."""
-    m = q.to_matrix(r)
+    m = _matrix(r)
     flex = math.degrees(math.asin(float(np.clip(m[2, 1], -1, 1))))
     twist = math.degrees(math.atan2(-m[2, 0], m[2, 2]))
     abduct = math.degrees(math.atan2(-m[0, 1], m[1, 1]))
@@ -76,14 +108,14 @@ def _rest_from_joints(joints: dict) -> tuple[dict, dict]:
     angles, world = {}, {}
     for name in JOINTS:
         parent = PARENTS[name]
-        frame = world[parent] if parent else np.array([0.0, 0.0, 0.0, 1.0])
+        frame = world[parent] if parent else (0.0, 0.0, 0.0, 1.0)
         if name in _CHILD:
             bone = np.asarray(joints[_CHILD[name]], float) - np.asarray(joints[name], float)
-            local = _swing(_zero_direction(name), q.rotate(_inverse(frame), bone / np.linalg.norm(bone)))
+            local = _swing(_zero_direction(name), _rotate(_inverse(frame), bone / np.linalg.norm(bone)))
         else:  # head, wrist, toe: no bone of their own, they carry on their parent's
-            local = np.array([0.0, 0.0, 0.0, 1.0])
+            local = (0.0, 0.0, 0.0, 1.0)
         angles[name] = _angles_of(name, local)
-        world[name] = q.mul(frame, _local(name, angles[name]))
+        world[name] = _mul(frame, _local(name, angles[name]))
     return angles, world
 
 
@@ -101,9 +133,9 @@ def _forward(joints: dict, rest_world: dict, angles: dict, offset) -> tuple[dict
             pos[name] = np.asarray(joints[name], float) + offset
             rot[name] = local
         else:
-            turn = q.mul(rot[parent], _inverse(rest_world[parent]))
-            pos[name] = pos[parent] + q.rotate(turn, np.asarray(joints[name], float) - joints[parent])
-            rot[name] = q.mul(rot[parent], local)
+            turn = _mul(rot[parent], _inverse(rest_world[parent]))
+            pos[name] = pos[parent] + _rotate(turn, np.asarray(joints[name], float) - joints[parent])
+            rot[name] = _mul(rot[parent], local)
     return pos, rot
 
 
@@ -112,13 +144,13 @@ def pose_matrices(figure, angles: dict, offset=None) -> np.ndarray:
 
     `offset` moves the pelvis (``root_offset``); the caller's transform carries the figure along the ground.
     """
-    rest, rest_world = _rest_from_joints(figure.joints)
+    rest, rest_world = _cached(("figure", repr(figure.params)), lambda: _rest_from_joints(figure.joints))
     full = {n: angles.get(n, rest[n]) for n in JOINTS}
     offset = np.zeros(3) if offset is None else np.asarray(offset, float)
     pos, rot = _forward(figure.joints, rest_world, full, offset)
     mats = np.tile(np.eye(4), (len(JOINTS), 1, 1))
     for i, name in enumerate(JOINTS):
-        r = q.to_matrix(q.mul(rot[name], _inverse(rest_world[name])))
+        r = _matrix(_mul(rot[name], _inverse(rest_world[name])))
         mats[i, :3, :3] = r
         mats[i, :3, 3] = pos[name] - r @ np.asarray(figure.joints[name], float)
     return mats.astype(np.float32)
@@ -178,6 +210,8 @@ def _gait(kind: str, speed: float, params: HumanParams) -> dict:
 def _foot(g: dict, u: float) -> tuple[float, float]:
     """Ankle z relative to its rest and lift above it, at `u` of the cycle since this foot was planted."""
     a, p = g["reach"], g["plant"]
+    if p >= 1:  # standing: the foot never leaves its rest
+        return 0.0, 0.0
     if u < p:
         return a * (1 - 2 * u / p), 0.0
     # Swinging, the foot covers a stride in world space along a smoothstep, so it lifts off and lands at rest;
@@ -242,9 +276,9 @@ def _leg(s: str, kind: str, phase: float, speed: float, params, pelvis: dict, of
     target = np.asarray(joints[f"ankle_{s}"], float) + (0.0, lift, _centre(joints, s, g) + dz)
 
     rot_pelvis = _local("pelvis", pelvis)
-    turn = q.mul(rot_pelvis, _inverse(world["pelvis"]))
-    hip = np.asarray(joints["pelvis"], float) + offset + q.rotate(turn, joints[f"hip_{s}"] - joints["pelvis"])
-    t = q.rotate(_inverse(rot_pelvis), target - hip)
+    turn = _mul(rot_pelvis, _inverse(world["pelvis"]))
+    hip = np.asarray(joints["pelvis"], float) + offset + _rotate(turn, joints[f"hip_{s}"] - joints["pelvis"])
+    t = _rotate(_inverse(rot_pelvis), target - hip)
     gamma = math.atan2(t[0], -t[1])  # the leg plane's tilt about z
     c, sn = math.cos(-gamma), math.sin(-gamma)
     y, z = sn * t[0] + c * t[1], t[2]
@@ -258,13 +292,18 @@ def _leg(s: str, kind: str, phase: float, speed: float, params, pelvis: dict, of
     hip_a = {"flex": -math.degrees(theta), "abduct": math.degrees(gamma) * side, "twist": 0.0}
     knee_a = {"flex": math.degrees(beta), "abduct": 0.0, "twist": 0.0}
     # The foot keeps its rest turn relative to the pelvis: flat on the ground while the pelvis is upright.
-    shin = q.mul(rot_pelvis, q.mul(_local(f"hip_{s}", hip_a), _local(f"knee_{s}", knee_a)))
-    foot = q.mul(turn, world[f"ankle_{s}"])
-    return {f"hip_{s}": hip_a, f"knee_{s}": knee_a, f"ankle_{s}": _angles_of(f"ankle_{s}", q.mul(_inverse(shin), foot))}
+    shin = _mul(rot_pelvis, _mul(_local(f"hip_{s}", hip_a), _local(f"knee_{s}", knee_a)))
+    foot = _mul(turn, world[f"ankle_{s}"])
+    return {f"hip_{s}": hip_a, f"knee_{s}": knee_a, f"ankle_{s}": _angles_of(f"ankle_{s}", _mul(_inverse(shin), foot))}
 
 
 def _plus(a: dict, **d) -> dict:
     return {k: a.get(k, 0.0) + d.get(k, 0.0) for k in ("flex", "abduct", "twist")}
+
+
+def _arm(rest: dict, heavy: float, flex: float) -> dict:
+    """The arm hanging ARM_DOWN off the body (wider when heavy) rather than in the table's A-pose."""
+    return {"flex": rest.get("flex", 0.0) + flex, "abduct": ARM_DOWN + heavy, "twist": rest.get("twist", 0.0)}
 
 
 def cycle_angles(kind: str, phase: float, speed: float, params: HumanParams) -> dict[str, dict[str, float]]:
@@ -278,7 +317,7 @@ def cycle_angles(kind: str, phase: float, speed: float, params: HumanParams) -> 
     if kind == "idle":
         out["chest"] = _plus(rest["chest"], flex=1.5 * math.sin(w))
         for s in "lr":
-            out[f"shoulder_{s}"] = _plus(rest[f"shoulder_{s}"], abduct=heavy, flex=1.0 * math.sin(w))
+            out[f"shoulder_{s}"] = _arm(rest[f"shoulder_{s}"], heavy, flex=1.0 * math.sin(w))
             out[f"elbow_{s}"] = _plus(rest[f"elbow_{s}"], flex=8.0)
     else:
         swing = math.cos(w)  # +1 when the left leg reaches forward
@@ -286,7 +325,7 @@ def cycle_angles(kind: str, phase: float, speed: float, params: HumanParams) -> 
         out["spine"] = _plus(rest["spine"], twist=5.0 * swing, flex=10.0 if run else 0.0)
         arm, elbow = (45.0, 90.0) if run else (20.0, 22.5)
         for s, sign in (("l", -1), ("r", 1)):
-            out[f"shoulder_{s}"] = _plus(rest[f"shoulder_{s}"], flex=sign * arm * swing, abduct=heavy)
+            out[f"shoulder_{s}"] = _arm(rest[f"shoulder_{s}"], heavy, flex=sign * arm * swing)
             bend = elbow if run else elbow + 7.5 * sign * swing  # 15 behind, 30 in front
             out[f"elbow_{s}"] = _plus(rest[f"elbow_{s}"], flex=bend)
     if kind == "cross":

@@ -140,3 +140,10 @@ def test_levels_in_motion():
 def test_far_level_is_rigid():
     m = _figure(HumanParams(), level=2).mesh
     assert np.all(m.weights == 1)
+
+
+@pytest.mark.parametrize("kind", ["idle", "walk"])
+def test_angles_are_finite_at_the_wrap(kind):
+    """(phase - 0.5) % 1 rounds to 1.0 just below a half cycle; no foot may divide by zero there."""
+    a = cycle_angles(kind, float(np.nextafter(0.5, 0.0)), 1.4, HumanParams())
+    assert all(np.isfinite(v) for joint in a.values() for v in joint.values())
