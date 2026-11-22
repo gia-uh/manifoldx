@@ -195,8 +195,10 @@ class EntityHandle:
         elif bufs.get("has_uvs"):
             inter[:, 6:8] = geo["uvs"]
         if bufs.get("has_joints"):
-            joints = geo["joints"] if "joints" in geo else orig["joints"]
-            inter[:, bufs["joints_offset"] // 4] = np.asarray(joints, dtype=np.uint32).view(
+            from manifoldx.skinning import pack_joints
+
+            src = geo if "joints" in geo else orig
+            inter[:, bufs["joints_offset"] // 4] = pack_joints(src["joints"], src.get("weights")).view(
                 np.float32
             )
         counters.write_buffer(self._engine._device.queue, bufs["vertex_buffer"], 0, inter.tobytes())

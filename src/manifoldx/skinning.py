@@ -1,6 +1,7 @@
-"""Rigid GPU skinning: per-entity joint blocks and the skinned vertex-shader transform.
+"""GPU skinning: per-entity joint blocks and the skinned vertex-shader transform.
 
-A skinned geometry carries one joint index per vertex. Each posed entity owns a
+A skinned geometry carries one joint index per vertex (rigid), or two and a weight (blended): a vertex moves by
+w * M[a] + (1 - w) * M[b]. Both travel in one 32-bit attribute (`pack_joints`). Each posed entity owns a
 block of MAX_JOINTS matrices in one storage buffer; the mesh pass uploads a
 block index per instance, and the vertex shader moves position and normal by
 joint_mats[block * MAX_JOINTS + joint] before the material's own code runs.
@@ -23,11 +24,51 @@ _BLOCK_BYTES = MAX_JOINTS * 64
 _IDENTITY_BLOCK = np.tile(np.eye(4, dtype=np.float32), (MAX_JOINTS, 1, 1))
 
 
+def pack_joints(joints, weights=None) -> np.ndarray:
+    """(N,) or (N, 2) joint indices and (N,) weights of the first -> (N,) uint32.
+
+    Bits 0-7 hold joint a, 8-15 joint b, 16-31 round(weight_a * 65535). (N,) joints pack as a = b, weight 1.
+    """
+    j = np.asarray(joints, dtype=np.uint32)
+    if j.ndim == 1:
+        a, b, w = j, j, np.ones(len(j))
+    else:
+        a, b = j[:, 0], j[:, 1]
+        w = np.ones(len(j)) if weights is None else np.asarray(weights, dtype=np.float64)
+    bits = np.round(np.clip(w, 0.0, 1.0) * 65535).astype(np.uint32)
+    return (a & 255) | ((b & 255) << 8) | (bits << 16)
+
+
+def unpack_joints(packed) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The inverse of `pack_joints`: joint a, joint b and the weight of a."""
+    p = np.asarray(packed, dtype=np.uint32)
+    return p & 255, (p >> 8) & 255, (p >> 16).astype(np.float32) / 65535
+
+
+def validate_weights(weights, joints: np.ndarray) -> np.ndarray | None:
+    """Return the weights of a blended mesh's first joints as (N,) float32, or raise ValueError.
+
+    Rigid (N,) joints take no weights; (N, 2) joints need one weight in [0, 1] per vertex.
+    """
+    if joints.ndim == 1:
+        if weights is not None:
+            raise ValueError("weights need joints of shape (N, 2); rigid (N,) joints take none")
+        return None
+    if weights is None:
+        raise ValueError("joints of shape (N, 2) need weights of shape (N,)")
+    w = np.asarray(weights, dtype=np.float32)
+    if w.shape != (len(joints),):
+        raise ValueError(f"weights must have shape ({len(joints)},), got {w.shape}")
+    if len(w) and (w.min() < 0 or w.max() > 1):
+        raise ValueError(f"weights must be in [0, 1], got [{w.min()}, {w.max()}]")
+    return np.ascontiguousarray(w)
+
+
 def validate_joints(joints, n_vertices: int) -> np.ndarray:
-    """Return joints as (N,) uint32 or raise ValueError."""
+    """Return joints as (N,) or (N, 2) uint32 or raise ValueError."""
     j = np.asarray(joints)
-    if j.ndim != 1 or len(j) != n_vertices:
-        raise ValueError(f"joints must have shape ({n_vertices},), got {j.shape}")
+    if j.ndim not in (1, 2) or len(j) != n_vertices or (j.ndim == 2 and j.shape[1] != 2):
+        raise ValueError(f"joints must have shape ({n_vertices},) or ({n_vertices}, 2), got {j.shape}")
     if not np.issubdtype(j.dtype, np.integer):
         raise ValueError(f"joints must be integers, got dtype {j.dtype}")
     if len(j) and (j.min() < 0 or j.max() >= MAX_JOINTS):
@@ -40,11 +81,11 @@ def joint_count(geometry: dict) -> int:
     return int(np.max(geometry["joints"])) + 1
 
 
-def append_joint_column(interleaved: np.ndarray, joints) -> np.ndarray:
-    """(N, k) float32 vertex rows -> (N, k + 1), the last column the uint32 joint bits."""
+def append_joint_column(interleaved: np.ndarray, joints, weights=None) -> np.ndarray:
+    """(N, k) float32 vertex rows -> (N, k + 1), the last column the packed joint bits (`pack_joints`)."""
     out = np.empty((len(interleaved), interleaved.shape[1] + 1), dtype=np.float32)
     out[:, :-1] = interleaved
-    out[:, -1] = np.asarray(joints, dtype=np.uint32).view(np.float32)
+    out[:, -1] = pack_joints(joints, weights).view(np.float32)
     return out
 
 
@@ -148,6 +189,12 @@ _SKIN_WGSL = f"""
 fn skin_matrix(instance: u32, joint: u32) -> mat4x4<f32> {{
     return skin_joints[skin_blocks[instance] * {MAX_JOINTS}u + joint];
 }}
+
+// The packed joint attribute: joint a in bits 0-7, joint b in 8-15, a's weight in 16-31.
+fn skin_blend(instance: u32, packed: u32) -> mat4x4<f32> {{
+    let w = f32(packed >> 16u) / 65535.0;
+    return w * skin_matrix(instance, packed & 255u) + (1.0 - w) * skin_matrix(instance, (packed >> 8u) & 255u);
+}}
 """
 
 _STRUCT = re.compile(r"struct VertexInput\s*\{(?P<body>.*?)\};", re.S)
@@ -203,7 +250,7 @@ fn skin_normal_matrix(m: mat4x4<f32>) -> mat3x3<f32> {{
 
 fn skin_vertex(v: VertexInput) -> VertexInput {{
     var o = v;
-    let m = skin_matrix(v.{instance.group(1)}, v.joint);
+    let m = skin_blend(v.{instance.group(1)}, v.joint);
     o.position = (m * vec4<f32>(v.position, 1.0)).xyz;
 {normal}    return o;
 }}
@@ -230,6 +277,6 @@ def skin_shadow_shader(source: str) -> str:
     args = args.rstrip() + f",\n           @location({JOINT_LOCATION}) joint: u32"
     body = (
         f"fn vs_main({args}){entries[0].group('ret')}{{\n"
-        f"    let position = (skin_matrix({instance.group(1)}, joint) * vec4<f32>(position_raw, 1.0)).xyz;"
+        f"    let position = (skin_blend({instance.group(1)}, joint) * vec4<f32>(position_raw, 1.0)).xyz;"
     )
     return source[: entries[0].start()] + body + source[entries[0].end():] + _SKIN_WGSL

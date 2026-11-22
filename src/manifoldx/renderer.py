@@ -1423,9 +1423,9 @@ class RenderPipeline:
                     continue
                 pos = np.asarray(geom["positions"], dtype=np.float32).reshape(-1, 3)
                 if "joints" in geom:
-                    joints = np.asarray(geom["joints"])
+                    joints = np.asarray(geom["joints"]).reshape(len(pos), -1)  # a blended vertex is in both boxes
                     js = np.unique(joints)
-                    boxes = (js, np.stack([_box_corners(pos[joints == j]) for j in js]))
+                    boxes = (js, np.stack([_box_corners(pos[(joints == j).any(1)]) for j in js]))
                 else:
                     boxes = (None, _box_corners(pos)[None])
                 cache[geom_id] = boxes

@@ -2187,15 +2187,15 @@ def pack_vertices(geometry_obj: dict):
             buffers["has_uvs"] = False
             buffers["has_colors"] = False
 
-        # Skinned geometry: one uint32 joint index after the floats above,
-        # so every other attribute keeps its offset.
+        # Skinned geometry: one uint32 of packed joints (skinning.pack_joints) after
+        # the floats above, so every other attribute keeps its offset.
         buffers["has_joints"] = "joints" in geometry_obj
         if buffers["has_joints"]:
             from manifoldx.skinning import append_joint_column, validate_joints
 
             joints = validate_joints(geometry_obj["joints"], len(positions))
             rows = np.frombuffer(data, dtype=np.float32).reshape(len(positions), -1)
-            data = append_joint_column(rows, joints).tobytes()
+            data = append_joint_column(rows, joints, geometry_obj.get("weights")).tobytes()
             buffers["joints_offset"] = buffers["stride"]
             buffers["stride"] += 4
 
