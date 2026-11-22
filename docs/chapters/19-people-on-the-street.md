@@ -143,7 +143,7 @@ same joints without building a mesh.
 
 ```python {run continue}
 import numpy as np
-from manifoldx.humanoid.cycles import cadence, cycle_angles, pose_matrices, rest_angles, root_offset
+from manifoldx.humanoid.cycles import bake_cycle, cadence, cycle_angles, pose_matrices, rest_angles, root_offset
 
 walker = build_human(person, level=1)
 print("rest is the identity:", np.allclose(pose_matrices(walker, rest_angles(walker)), np.eye(4), atol=1e-6))
@@ -161,8 +161,19 @@ the ankle must be, so a planted foot stays within a few millimetres of where it 
 legs, the pelvis turns a little, and `"cross"` is a walk whose head turns 45 degrees each way once a cycle; the
 caller switches to `"walk"` once the street is checked.
 
-Far figures cost less. `update_every(level)` poses level 0 every frame and level 1 every second frame, and
-`snap_phase(phase, 2)` holds a level 2 figure on one of eight key poses per cycle, so many far figures share a
-few cached matrices; a level 2 figure is built rigid, each vertex following one joint.
-`examples/humans.py` walks 50 sampled people along a street with the three levels by distance, and the `humans`
-bench scenario times 500 of them with the levels on and off.
+Posing a figure in Python takes under a millisecond, too slow for hundreds every frame, so a crowd bakes
+its cycles. `bake_cycle(figure, kind, speed, frames=32)` gives a cycle's poses with the first repeated at the
+end; `Engine.bake_poses` keeps them on the GPU, and each frame `Engine.set_pose_frames` points every walker at
+phase times 32 of its clip, the GPU blending the two frames around it. The skeleton is the same at every
+level, so one clip serves a body near and far.
+
+```python {run continue}
+clip = bake_cycle(walker, "walk", 1.4, frames=32)
+print(clip.shape, "first and last frame equal:", np.allclose(clip[0], clip[-1], atol=1e-5))
+```
+
+When a caller poses on the CPU instead, `update_every(level)` poses level 0 every frame and level 1 every
+second frame, and `snap_phase(phase, 2)` holds a level 2 figure on one of eight key poses per cycle; a level 2
+figure is built rigid, each vertex following one joint. `examples/humans.py` walks 50 sampled people along a
+street with baked cycles and the three levels by distance, and the `humans` bench scenario times 500 of them
+posed either way.

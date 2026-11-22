@@ -336,6 +336,15 @@ def cycle_angles(kind: str, phase: float, speed: float, params: HumanParams) -> 
     return out
 
 
+def bake_cycle(figure, kind: str, speed: float, frames: int = 32) -> np.ndarray:
+    """(frames + 1, 19, 4, 4) skinning matrices over one cycle, the first again at the end, for
+    ``Engine.bake_poses``: an entity at phase φ plays position φ * frames, blended on the GPU."""
+    p = figure.params
+    phases = np.arange(frames + 1) / frames % 1.0
+    return np.stack([pose_matrices(figure, cycle_angles(kind, ph, speed, p), root_offset(kind, ph, speed, p))
+                     for ph in phases])
+
+
 # --------------------------------------------------------------------------------------- levels in motion
 
 

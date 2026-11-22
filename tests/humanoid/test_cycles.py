@@ -5,6 +5,7 @@ import pytest
 
 from manifoldx.humanoid.cycles import (
     KEY_PHASES,
+    bake_cycle,
     cadence,
     cycle_angles,
     pose_matrices,
@@ -147,3 +148,13 @@ def test_angles_are_finite_at_the_wrap(kind):
     """(phase - 0.5) % 1 rounds to 1.0 just below a half cycle; no foot may divide by zero there."""
     a = cycle_angles(kind, float(np.nextafter(0.5, 0.0)), 1.4, HumanParams())
     assert all(np.isfinite(v) for joint in a.values() for v in joint.values())
+
+
+def test_bake_cycle_loops_and_matches_the_poses():
+    p = HumanParams()
+    f = _figure(p)
+    clip = bake_cycle(f, "walk", 1.4, frames=16)
+    assert clip.shape == (17, 19, 4, 4)
+    assert np.allclose(clip[-1], clip[0], atol=1e-5)
+    want = pose_matrices(f, cycle_angles("walk", 5 / 16, 1.4, p), root_offset("walk", 5 / 16, 1.4, p))
+    assert np.allclose(clip[5], want, atol=1e-6)

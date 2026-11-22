@@ -2,9 +2,10 @@
 
 Each figure is a `HumanParams.sample` dressed in a seeded outfit and built at the level its row's
 distance from the camera picks: level 0 nearer than 8 m, level 1 nearer than 20 m, level 2 beyond.
-Rows run across the view; a figure walks its row along x and wraps at the ends. Every frame a
-system advances each figure's phase by its cadence, poses the figures `update_every(level)` says
-are due (level 2 holds one of eight key phases per cycle, shared through a cache) and moves them.
+Rows run across the view; a figure walks its row along x and wraps at the ends. Each figure's
+cycle is baked once into a 32-frame clip the GPU keeps (`bake_cycle`, `Engine.bake_poses`); every
+frame a system advances the phases and points each figure at its frame (`set_pose_frames`), and
+the GPU blends the two frames around it, so no matrices are computed or uploaded while they walk.
 
     uv run python examples/humans.py
     uv run python examples/humans.py --render --duration 4 --output humans.mp4
@@ -16,7 +17,7 @@ import numpy as np
 
 import manifoldx as mx
 from manifoldx.components import Material, Mesh, Transform
-from manifoldx.humanoid.cycles import cadence, cycle_angles, pose_matrices, root_offset, snap_phase, update_every
+from manifoldx.humanoid.cycles import bake_cycle, cadence
 from manifoldx.modeling import Mesh as Shape
 from manifoldx.modeling.assets.human import HumanParams, build_human
 from manifoldx.modeling.assets.human_dress import Outfit
@@ -75,17 +76,6 @@ class Person:
         self.handle = None
 
 
-def matrices(p: Person, phase: float, cache: dict) -> np.ndarray:
-    key = (id(p), phase) if p.level == 2 else None
-    if key in cache:
-        return cache[key]
-    m = pose_matrices(p.figure, cycle_angles(p.kind, phase, p.speed, p.params),
-                      root_offset(p.kind, phase, p.speed, p.params))
-    if key:
-        cache[key] = m
-    return m
-
-
 engine = mx.Engine("People on a street", width=960, height=540)
 engine.set_lights([PointLight(color="#fff2e0", intensity=40.0, position=(0.0, 8.0, 2.0))])
 engine.set_sun(DirectionalLight(color="#fff6e8", intensity=2.5, direction=(-0.4, -0.8, 0.45)))
@@ -93,7 +83,7 @@ engine.camera.set_pose(position=(0.0, 2.2, -1.5), target=(0.0, 1.0, 14.0))
 RNG = np.random.default_rng(19)
 people = [Person(i, RNG) for i in range(PEOPLE)]
 geometries = {id(p): p.figure.mesh.to_geometry() for p in people}
-clock = {"frame": 0, "cache": {}}
+FRAMES = 32  # poses baked per cycle
 
 
 @engine.on("startup")
@@ -104,13 +94,11 @@ def place(_payload):
     for p in people:
         p.handle = engine.spawn(Mesh(geometries[id(p)]), Material(skin),
                                 Transform(pos=(p.x, 0.0, p.z), rot=Transform.rotation(y=p.heading * math.pi / 2)))
+        p.clip = engine.bake_poses(bake_cycle(p.figure, p.kind, p.speed, FRAMES))
 
 
 @engine.system
 def step(q: mx.Query[Transform], dt: float):
-    frame = clock["frame"]
-    clock["frame"] = frame + 1
-    due, poses = [], []
     for p in people:
         p.phase = (p.phase + p.rate * dt) % 1.0
         if p.kind != "idle":
@@ -118,11 +106,8 @@ def step(q: mx.Query[Transform], dt: float):
             if abs(p.x) > HALF:
                 p.x -= p.heading * 2 * HALF
             p.handle.transform.pos = (p.x, 0.0, p.z)
-        if frame % update_every(p.level) == 0:
-            due.append(p.handle.index)
-            poses.append(matrices(p, snap_phase(p.phase, p.level), clock["cache"]))
-    if due:
-        engine.set_joints(due, np.stack(poses))
+    engine.set_pose_frames([p.handle.index for p in people], [p.clip for p in people],
+                           [p.phase * FRAMES for p in people])
 
 
 if __name__ == "__main__":
