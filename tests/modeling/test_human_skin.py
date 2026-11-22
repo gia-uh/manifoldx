@@ -68,3 +68,11 @@ def test_rings_index_the_chains():
     s = _skin("female", 1)
     assert s.ring["arm_l"].shape == (14, 8) and s.ring["leg_r"].shape == (12, 8)
     assert (s.ring["arm_l"] >= 0).all()
+
+
+@pytest.mark.parametrize("body", ["female", "male"])
+@pytest.mark.parametrize("level", sorted(LEVELS))
+def test_no_degenerate_faces(body, level):
+    s = _skin(body, level)
+    a, b, c = (s.positions[s.faces[:, i]].astype(float) for i in range(3))
+    assert (np.linalg.norm(np.cross(b - a, c - a), axis=1) > 1e-10).all()

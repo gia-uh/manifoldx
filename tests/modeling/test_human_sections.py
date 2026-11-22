@@ -155,10 +155,13 @@ def test_round_trip(tmp_path):
     assert all(np.array_equal(t.joints[n], u.joints[n]) for n in t.joints)
 
 
-@pytest.mark.parametrize("body", ["female", "male"])
+@pytest.mark.parametrize(
+    "body", ["female", "male"] + [f"{b}_{v}" for b in ("female", "male") for v in ("heavy", "muscular", "elder")]
+)
 def test_packaged_tables(body):
     t = load_table(body)
     assert {n: len(c.t) for n, c in t.chains.items()} == CHAINS and t.head_r.shape == HEAD
+    assert (t.head_r > 0.01).all() and all((c.r.mean(1) > 0.002).all() for c in t.chains.values())
 
 
 def test_resample_levels():

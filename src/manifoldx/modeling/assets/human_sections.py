@@ -54,11 +54,12 @@ JOINTS = (
     "ankle_r",
     "toe_r",
 )
-SHOULDER_ROWS = {
-    16: 5,
-    8: 3,
-    6: 3,
-}  # torso rings from axilla to acromion, by K (see human_skin's shoulder stitch)
+
+
+def shoulder_rows(k: int) -> int:
+    """Torso rings from axilla to acromion at K = `k` (see human_skin's shoulder stitch): 5 at 16, 3 at 8 and 6."""
+    return max(3, round(5 * k / 16))
+
 DATA = Path(__file__).parent / "data"
 
 
@@ -280,8 +281,8 @@ def _read_chain(positions, faces, start, end, ts, ref, side=0) -> Chain:
                 best = (key, p2)
         if best is not None:
             best = (best[0][1], best[1])
-        if best is None or best[0] > 0.15:
-            continue
+        if best is None or best[0] > 0.15 or np.ptp(best[1], axis=0).max() < 2e-3:
+            continue  # nothing near, or a cut through a lone tip vertex
         c[i], r[i] = _ring(best[1])
         near, ok[i] = c[i], True
     if not ok.any():
@@ -373,7 +374,7 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
         faces,
         np.array([0.0, crotch + gap, 0.0]),
         np.array([0.0, neck_y, 0.0]),
-        _torso_ts(CHAINS["torso"], t_ax, t_ac, SHOULDER_ROWS[K]),
+        _torso_ts(CHAINS["torso"], t_ax, t_ac, shoulder_rows(K)),
         np.array([1.0, 0, 0]),
     )
     knee_y, ankle_y = fr["knee_height"] * h, 0.045 * h
@@ -463,7 +464,7 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
         -1,
     ).reshape(-1, 3)
     head_faces = faces[(positions[faces][:, :, 1] > neck_y - 0.02 * h).all(1)]
-    head_r = _rays(positions, head_faces, hc, dirs).reshape(HEAD)
+    head_r = _fill_grid(_rays(positions, head_faces, hc, dirs).reshape(HEAD), 0.01 * h)
 
     joints |= {
         "pelvis": np.array([0.0, fr["trochanter_height"] * h, 0.0]),
@@ -476,6 +477,23 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
     return SectionTable(
         float(stature), chains, hc, head_r, joints, float(crotch), float(axilla), float(acromion)
     )
+
+
+def _fill_grid(r, least):
+    """Radii a ray missed (below `least`) filled down each longitude, then around each row, from those it hit."""
+    r = r.copy()
+    rows, cols = np.arange(r.shape[0]), np.arange(r.shape[1])
+    for j in cols:
+        ok = r[:, j] >= least
+        if ok.any() and not ok.all():
+            r[~ok, j] = np.interp(rows[~ok], rows[ok], r[ok, j])
+    for i in rows:
+        ok = r[i] >= least
+        if not ok.all():
+            n = len(cols)
+            xs = np.r_[cols[ok] - n, cols[ok], cols[ok] + n]
+            r[i, ~ok] = np.interp(cols[~ok], xs, np.tile(r[i, ok], 3))
+    return r
 
 
 def _binned_chain(points, start, end, n, ref) -> Chain:
@@ -533,8 +551,9 @@ def save_table(table: SectionTable, path) -> None:
 
 
 def load_table(body: str | os.PathLike) -> SectionTable:
-    """A packaged table ("female" or "male") or one saved at a path."""
-    path = DATA / f"human_{body}.npz" if body in ("female", "male") else Path(body)
+    """A packaged table ("female", "male", or a variant such as "male_heavy") or one saved at a path."""
+    packaged = DATA / f"human_{body}.npz"
+    path = packaged if packaged.exists() else Path(body)
     z = np.load(path)
     chains = {}
     for name in CHAINS:
@@ -580,7 +599,7 @@ def resample(table: SectionTable, k: int, step: int) -> SectionTable:
             t_ax = (table.axilla_y - ch.start[1]) / (ch.end[1] - ch.start[1])
             t_ac = (table.acromion_y - ch.start[1]) / (ch.end[1] - ch.start[1])
             assert y(t_ax) <= y(t_ac)
-            ts = _torso_ts(n, t_ax, t_ac, SHOULDER_ROWS[k])
+            ts = _torso_ts(n, t_ax, t_ac, shoulder_rows(k))
         else:
             ts = np.linspace(ch.t[0], ch.t[-1], n)
         chains[name] = _resample_stations(ch, ts)
