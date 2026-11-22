@@ -195,8 +195,10 @@ class EntityHandle:
         elif bufs.get("has_uvs"):
             inter[:, 6:8] = geo["uvs"]
         if bufs.get("has_joints"):
-            joints = geo["joints"] if "joints" in geo else orig["joints"]
-            inter[:, bufs["joints_offset"] // 4] = np.asarray(joints, dtype=np.uint32).view(
+            from manifoldx.skinning import pack_joints
+
+            src = geo if "joints" in geo else orig
+            inter[:, bufs["joints_offset"] // 4] = pack_joints(src["joints"], src.get("weights")).view(
                 np.float32
             )
         counters.write_buffer(self._engine._device.queue, bufs["vertex_buffer"], 0, inter.tobytes())
@@ -1465,6 +1467,21 @@ class Engine:
                     "set_joints needs an entity whose geometry has joints (Mesh(joints=...))"
                 )
         self._render_pipeline._joints.set_many(idx, m)
+
+    def bake_poses(self, frames) -> int:
+        """Keep a clip of (K, J, 4, 4) poses on the GPU, shared by every entity that plays it; returns its id.
+
+        A looping cycle bakes its first pose again as the last frame, so position K - 1 equals 0.
+        """
+        return self._render_pipeline._joints.bake(frames)
+
+    def set_pose_frames(self, indices, clip, positions):
+        """Draw entities `indices` at `positions` (frames, 0 to K - 1) of the baked `clip` (one or one each).
+
+        The GPU blends frame floor(p) with the next, so moving a crowd costs one u32 per entity a frame and
+        no matrices; `set_joints` on an entity gives it its own pose again.
+        """
+        self._render_pipeline._joints.play(indices, clip, positions)
 
     @_deferred.deferred_in_pipeline
     def set_material(self, entity, material) -> None:

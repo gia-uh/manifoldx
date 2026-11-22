@@ -42,12 +42,17 @@ class Mesh:
     normals: np.ndarray | None = None  # (N, 3) float32, lazily computed
     uvs: np.ndarray | None = None      # (N, 2) float32, optional
     colors: np.ndarray | None = None   # (N, 3) float32, optional per-vertex RGB in sRGB, like hex colours
-    joints: np.ndarray | None = None   # (N,) uint32, optional joint per vertex (skinning)
+    joints: np.ndarray | None = None   # (N,) or (N, 2) uint32, optional joint(s) per vertex (skinning)
+    weights: np.ndarray | None = None  # (N,) float32, the first joint's weight when joints is (N, 2)
 
     def __post_init__(self):
         if self.joints is not None:
-            from manifoldx.skinning import validate_joints
-            object.__setattr__(self, "joints", validate_joints(self.joints, len(self.positions)))
+            from manifoldx.skinning import validate_joints, validate_weights
+            joints = validate_joints(self.joints, len(self.positions))
+            object.__setattr__(self, "joints", joints)
+            object.__setattr__(self, "weights", validate_weights(self.weights, joints))
+        elif self.weights is not None:
+            raise ValueError("weights need joints of shape (N, 2)")
 
     def with_positions(self, positions: np.ndarray) -> "Mesh":
         """Return a copy with new positions; normals are invalidated."""
@@ -99,6 +104,8 @@ class Mesh:
             geo["colors"] = np.ascontiguousarray(mesh.colors, dtype=np.float32)
         if mesh.joints is not None:
             geo["joints"] = mesh.joints
+        if mesh.weights is not None:
+            geo["weights"] = mesh.weights
         return geo
 
     def to_gltf(self, path, material=None):
@@ -130,6 +137,7 @@ class Mesh:
             uvs=None if uvs is None else np.ascontiguousarray(uvs, dtype=np.float32),
             colors=None if colors is None else np.ascontiguousarray(colors, dtype=np.float32),
             joints=joints,
+            weights=geo.get("weights"),
         )
 
     def with_colors(self, colors: np.ndarray) -> "Mesh":

@@ -1,13 +1,14 @@
 """Read a base body GLB into a humanoid section table (see src/manifoldx/modeling/assets/data/HUMAN.md).
 
 Usage: uv run python scripts/human_sections.py BODY.glb OUT.npz --stature 1.63 --body female
+       [--landmarks-from src/manifoldx/modeling/assets/data/human_female.npz]   (for a variant)
 """
 
 import argparse
 
 import numpy as np
 
-from manifoldx.modeling.assets.human_sections import read_sections, save_table
+from manifoldx.modeling.assets.human_sections import load_table, read_sections, save_table
 from manifoldx.trace.gltf_read import parse_glb
 
 _TYPES = {
@@ -96,9 +97,16 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--stature", type=float, required=True)
     ap.add_argument("--body", choices=("female", "male"), required=True)
+    ap.add_argument(
+        "--landmarks-from", help="a variant's base table: its crotch and axilla heights are kept"
+    )
     a = ap.parse_args()
     positions, faces = read_glb_mesh(a.glb)
-    table = read_sections(positions, faces, a.stature, a.body)
+    landmarks = None
+    if a.landmarks_from:
+        base = load_table(a.landmarks_from)
+        landmarks = (base.crotch_y, base.axilla_y)
+    table = read_sections(positions, faces, a.stature, a.body, landmarks)
     save_table(table, a.out)
     print(
         f"{a.out}: crotch {table.crotch_y:.3f} m, axilla {table.axilla_y:.3f} m, acromion {table.acromion_y:.3f} m"

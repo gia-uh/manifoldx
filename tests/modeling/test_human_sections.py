@@ -7,6 +7,7 @@ import pytest
 
 from manifoldx.modeling import skeleton
 from manifoldx.modeling.assets.human_sections import (
+    _read_chain,
     CHAINS,
     HEAD,
     K,
@@ -21,20 +22,23 @@ ARM_ANGLE = np.radians(40)
 
 
 @lru_cache(maxsize=None)
-def _capsule_body(stature: float = 1.70):
+def _capsule_body(stature: float = 1.70, pelvis: float = 0.15, leg_x: float = 0.09, arm_deg: float = 40):
     """An A-pose figure of round cones, 1.70 m tall, facing +Z: legs of constant radius, arms 40 degrees out."""
-    d = np.array([np.sin(ARM_ANGLE), -np.cos(ARM_ANGLE), 0.0])
+    d = np.array([np.sin(np.radians(arm_deg)), -np.cos(np.radians(arm_deg)), 0.0])
     j = {"pelvis": (0, 0.88, 0), "chest": (0, 1.28, 0), "neck": (0, 1.45, 0), "head": (0, 1.60, 0)}
-    r = {"pelvis": 0.15, "chest": 0.14, "neck": 0.05, "head": 0.10}
+    r = {"pelvis": pelvis, "chest": 0.14, "neck": 0.05, "head": 0.10}
     bones = [("pelvis", "chest"), ("chest", "neck"), ("neck", "head")]
+    if pelvis > 0.15:  # a wide hip and belly band, as tall as a heavy body's
+        j["belly"], r["belly"] = (0, 1.08, 0), pelvis
+        bones += [("pelvis", "belly"), ("belly", "chest")]
     for s, side in (("l", 1), ("r", -1)):
         sh = np.array([side * 0.20, 1.34, 0.0])
         dd = d * [side, 1, 1]
         j |= {
-            f"hip_{s}": (side * 0.09, 0.84, 0),
-            f"knee_{s}": (side * 0.09, 0.48, 0),
-            f"ankle_{s}": (side * 0.09, 0.08, 0),
-            f"toe_{s}": (side * 0.09, 0.04, 0.17),
+            f"hip_{s}": (side * leg_x, 0.84, 0),
+            f"knee_{s}": (side * leg_x, 0.48, 0),
+            f"ankle_{s}": (side * leg_x, 0.08, 0),
+            f"toe_{s}": (side * leg_x, 0.04, 0.17),
             f"shoulder_{s}": tuple(sh),
             f"elbow_{s}": tuple(sh + dd * 0.30),
             f"wrist_{s}": tuple(sh + dd * 0.56),
@@ -151,10 +155,13 @@ def test_round_trip(tmp_path):
     assert all(np.array_equal(t.joints[n], u.joints[n]) for n in t.joints)
 
 
-@pytest.mark.parametrize("body", ["female", "male"])
+@pytest.mark.parametrize(
+    "body", ["female", "male"] + [f"{b}_{v}" for b in ("female", "male") for v in ("heavy", "muscular", "elder")]
+)
 def test_packaged_tables(body):
     t = load_table(body)
     assert {n: len(c.t) for n, c in t.chains.items()} == CHAINS and t.head_r.shape == HEAD
+    assert (t.head_r > 0.01).all() and all((c.r.mean(1) > 0.002).all() for c in t.chains.values())
 
 
 def test_resample_levels():
@@ -170,3 +177,48 @@ def test_torso_keeps_shoulder_rows(k, step, rows):
     torso = t.chains["torso"]
     y = torso.start[1] + (torso.end[1] - torso.start[1]) * torso.t
     assert ((y >= t.axilla_y - 1e-6) & (y <= t.acromion_y + 1e-6)).sum() == rows
+
+
+def test_arm_axis_ignores_wide_hips():
+    """Hips wider than the shoulders must not pull the arm's axis toward them."""
+    t = read_sections(*_capsule_body(pelvis=0.30), stature=1.70)
+    for s, side in (("l", 1), ("r", -1)):
+        arm = t.chains[f"arm_{s}"]
+        d = (arm.end - arm.start) / np.linalg.norm(arm.end - arm.start)
+        true = np.array([side * np.sin(ARM_ANGLE), -np.cos(ARM_ANGLE), 0.0])
+        assert np.degrees(np.arccos(d @ true)) < 4
+
+
+def test_chain_stays_on_its_own_limb():
+    """From a ring where two legs join, a chain follows the leg its axis runs through, not the nearer loop."""
+    j = [(0.07, 1.0, 0), (0.07, 0.0, 0), (-0.09, 1.0, 0), (-0.09, 0.0, 0)]
+    mesh = skeleton.skin(j, [0.05, 0.05, 0.08, 0.08], [(0, 1), (2, 3), (0, 2)], step=0.008, blend=0.02)
+    pos, faces = mesh.positions.astype(np.float64), mesh.faces.astype(np.int64)
+    ch = _read_chain(
+        pos, faces, np.array([0.07, 0.99, 0.0]), np.array([0.07, 0.1, 0.0]), np.linspace(0, 1, 12),
+        np.array([1.0, 0, 0]),
+    )
+    assert (ch.centres()[3:, 0] > 0.04).all()
+
+
+def _landmarks():
+    return _table().crotch_y, _table().axilla_y
+
+
+def test_touching_thighs_read_as_two_legs():
+    """With the base body's crotch, each leg keeps its own half of a cut where the thighs touch."""
+    t = read_sections(*_capsule_body(leg_x=0.05), stature=1.70, landmarks=_landmarks())
+    assert abs(t.crotch_y - _table().crotch_y) < 1e-9
+    for s, side in (("l", 1), ("r", -1)):
+        leg = t.chains[f"leg_{s}"]
+        assert (leg.centres()[:4, 0] * side > 0).all()
+        assert leg.r[:4].mean() < 1.4 * LEG_RADIUS
+
+
+def test_arms_against_the_belly_stay_out_of_the_torso():
+    """Below the axilla a torso cut that runs into an arm keeps the torso alone."""
+    t = read_sections(*_capsule_body(pelvis=0.30, arm_deg=25), stature=1.70, landmarks=_landmarks())
+    torso = t.chains["torso"]
+    y = torso.start[1] + (torso.end[1] - torso.start[1]) * torso.t
+    near = (y > 1.0) & (y < t.axilla_y - 0.02)
+    assert near.any() and torso.r[near].max() < 0.34

@@ -54,11 +54,12 @@ JOINTS = (
     "ankle_r",
     "toe_r",
 )
-SHOULDER_ROWS = {
-    16: 5,
-    8: 3,
-    6: 3,
-}  # torso rings from axilla to acromion, by K (see human_skin's shoulder stitch)
+
+
+def shoulder_rows(k: int) -> int:
+    """Torso rings from axilla to acromion at K = `k` (see human_skin's shoulder stitch): 5 at 16, 3 at 8 and 6."""
+    return max(3, round(5 * k / 16))
+
 DATA = Path(__file__).parent / "data"
 
 
@@ -261,7 +262,8 @@ def _fill(values, ok):
     return out
 
 
-def _read_chain(positions, faces, start, end, ts, ref, side=0) -> Chain:
+def _read_chain(positions, faces, start, end, ts, ref, keep=None) -> Chain:
+    """Rings along an axis from plane cuts; `keep` (points -> mask) drops points of a cut that belong elsewhere."""
     axis = end - start
     u, v = _frame(axis, ref)
     n = len(ts)
@@ -270,14 +272,20 @@ def _read_chain(positions, faces, start, end, ts, ref, side=0) -> Chain:
     unit = axis / np.linalg.norm(axis)
     for i, t in enumerate(ts):
         o = start + axis * t
+        # A loop the axis runs through wins over the nearest one: from a ring where two limbs join, the
+        # nearest loop below can be the other limb.
         best = None
         for loop in _slice(positions, faces, o, unit):
             p2 = np.c_[(loop - o) @ u, (loop - o) @ v]
-            dist = np.linalg.norm(p2.mean(0) - near)
-            if best is None or dist < best[0]:
-                best = (dist, p2)
-        if best is None or best[0] > 0.15:
-            continue
+            key = (not _inside((0.0, 0.0), p2), np.linalg.norm(p2.mean(0) - near))
+            if keep is not None:
+                p2 = p2[keep(loop)]
+            if len(p2) >= 3 and (best is None or key < best[0]):
+                best = (key, p2)
+        if best is not None:
+            best = (best[0][1], best[1])
+        if best is None or best[0] > 0.15 or np.ptp(best[1], axis=0).max() < 2e-3:
+            continue  # nothing near, or a cut through a lone tip vertex
         c[i], r[i] = _ring(best[1])
         near, ok[i] = c[i], True
     if not ok.any():
@@ -306,18 +314,31 @@ def _rays(positions, faces, origin, dirs) -> np.ndarray:
 
 
 def _torso_ts(n, t_axilla, t_acromion, rows) -> np.ndarray:
-    """n station fractions with exactly `rows` of them from axilla to acromion, the rest spread below and above."""
-    first, last = 0.0, 1.0
+    """n station fractions: `rows` of them from axilla to acromion, three quarters of the rest below, a quarter above.
+
+    The counts depend only on n and rows, so every body puts its shoulder rows at the same ring indices.
+    """
     rest = n - rows
-    below = max(1, round(rest * (t_axilla - first) / ((t_axilla - first) + (last - t_acromion))))
+    below = round(rest * 0.75)
     above = rest - below
-    lo = np.linspace(first, t_axilla, below + 1)[:-1]
+    lo = np.linspace(0.0, t_axilla, below + 1)[:-1]
     mid = np.linspace(t_axilla, t_acromion, rows)
-    hi = np.linspace(t_acromion, last, above + 1)[1:]
+    hi = np.linspace(t_acromion, 1.0, above + 1)[1:]
     return np.r_[lo, mid, hi]
 
 
 # ----------------------------------------------------------------------------------------------- the reading
+
+
+def _near_arms(points, axes, axilla, reach):
+    """Points below the axilla within `reach` of an arm's axis (an arm resting on the torso's side)."""
+    out = np.zeros(len(points), bool)
+    for shoulder, d in axes:
+        rel = points - shoulder
+        along = rel @ d
+        dist = np.linalg.norm(rel - np.outer(along, d), axis=1)
+        out |= (along > 0) & (dist < reach)
+    return out & (points[:, 1] < axilla)
 
 
 def _central_loops(positions, faces, y, half_width):
@@ -325,8 +346,14 @@ def _central_loops(positions, faces, y, half_width):
     return [lp for lp in loops if abs(lp[:, 0].mean()) < half_width]
 
 
-def read_sections(positions, faces, stature: float, body: str = "female") -> SectionTable:
-    """Read a base body (an A-pose figure facing -Z, as image-to-mesh models emit it) into a section table."""
+def read_sections(
+    positions, faces, stature: float, body: str = "female", landmarks: tuple | None = None
+) -> SectionTable:
+    """Read a base body (an A-pose figure facing -Z, as image-to-mesh models emit it) into a section table.
+
+    `landmarks` is (crotch, axilla) in metres, from the base body a variant was drawn from: touching thighs or arms
+    resting on a belly fool the scans for them, and weight does not move them.
+    """
     positions, faces = _weld(np.asarray(positions, float), np.asarray(faces, np.int64))
     positions, faces = _outer_shell(positions, faces)
     positions = positions * [-1, 1, -1]  # turn round to face +Z
@@ -339,16 +366,16 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
     h = stature
 
     # Crotch: scanning up, the first height where the two legs' loops have merged into one.
-    crotch = None
-    for y in np.arange(0.30 * h, 0.62 * h, 0.002 * h):
+    crotch = None if landmarks is None else landmarks[0]
+    for y in [] if landmarks else np.arange(0.30 * h, 0.62 * h, 0.002 * h):
         if len(_central_loops(positions, faces, y, 0.2 * h)) == 1:
             crotch = y
             break
     if crotch is None:
         raise ValueError("no crotch found: the legs never join")
     # Axilla: scanning up from the waist, the first height where torso and both arms are one loop.
-    axilla = None
-    for y in np.arange(fr["waist_height"] * h, 0.9 * h, 0.002 * h):
+    axilla = None if landmarks is None else landmarks[1]
+    for y in [] if landmarks else np.arange(fr["waist_height"] * h, 0.9 * h, 0.002 * h):
         if len(_slice(positions, faces, np.array([0.0, y, 0.0]), np.array([0.0, 1.0, 0.0]))) == 1:
             axilla = y
             break
@@ -362,16 +389,8 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
     gap = 0.006 * h
     t_ax = (axilla - (crotch + gap)) / (neck_y - (crotch + gap))
     t_ac = (acromion - (crotch + gap)) / (neck_y - (crotch + gap))
-    chains["torso"] = _read_chain(
-        positions,
-        faces,
-        np.array([0.0, crotch + gap, 0.0]),
-        np.array([0.0, neck_y, 0.0]),
-        _torso_ts(CHAINS["torso"], t_ax, t_ac, SHOULDER_ROWS[K]),
-        np.array([1.0, 0, 0]),
-    )
     knee_y, ankle_y = fr["knee_height"] * h, 0.045 * h
-    joints = {}
+    joints, arm_axes = {}, []
     for s, side in (("l", 1), ("r", -1)):
         near_knee = positions[
             (np.abs(positions[:, 1] - 0.29 * h) < 0.01 * h)
@@ -389,7 +408,13 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
         b = a + line * (ankle_y - a[1])
         start = a + line * (crotch - gap - a[1])
         chains[f"leg_{s}"] = _read_chain(
-            positions, faces, start, b, np.linspace(0, 1, CHAINS["leg_l"]), np.array([1.0, 0, 0])
+            positions,
+            faces,
+            start,
+            b,
+            np.linspace(0, 1, CHAINS["leg_l"]),
+            np.array([1.0, 0, 0]),
+            keep=lambda q, side=side: q[:, 0] * side > -0.002 * h,  # where thighs touch, its own half
         )
         # Foot: rings around an axis along +Z at a quarter of the ankle height, binned from the foot's vertices.
         foot = positions[
@@ -402,17 +427,26 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
         fx = foot[:, 0].mean()
         fs, fe = np.array([fx, fy, z0]), np.array([fx, fy, z1])
         chains[f"foot_{s}"] = _binned_chain(foot, fs, fe, CHAINS["foot_l"], np.array([1.0, 0, 0]))
-        # Arm: the principal axis of the vertices beyond the shoulder.
+        # Arm: the principal axis of the vertices beyond the shoulder near the line from the axilla to the
+        # farthest point out (the hand), refined twice; hips or a belly wider than the shoulders stay out.
         shoulder_x = fr["biacromial_breadth"] / 2 * h
-        arm = positions[
+        beyond = positions[
             (positions[:, 0] * side > shoulder_x + 0.02 * h) & (positions[:, 1] > crotch)
         ]
-        centre = arm.mean(0)
-        _, vecs = np.linalg.eigh(np.cov((arm - centre).T))
-        d = vecs[:, -1] * (1 if vecs[0, -1] * side > 0 else -1)
+        centre = np.array([side * shoulder_x, axilla, 0.0])
+        d = beyond[np.argmax(beyond[:, 0] * side)] - centre
+        d /= np.linalg.norm(d)
+        for _ in range(3):
+            rel = beyond - centre
+            along = rel @ d
+            arm = beyond[(np.linalg.norm(rel - np.outer(along, d), axis=1) < 0.08 * h)]
+            centre = arm.mean(0)
+            _, vecs = np.linalg.eigh(np.cov((arm - centre).T))
+            d = vecs[:, -1] * (1 if vecs[0, -1] * side > 0 else -1)
         tip = arm[np.argmax((arm - centre) @ d)]
         shoulder = centre + d * ((side * shoulder_x - centre[0]) / d[0])
         arm_start = shoulder + d * 0.04 * h
+        arm_axes.append((shoulder, d))
         chains[f"arm_{s}"] = _read_chain(
             positions,
             faces,
@@ -432,6 +466,15 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
             f"toe_{s}": np.array([fx, fy, z0 + 0.7 * (z1 - z0)]),
         }
 
+    chains["torso"] = _read_chain(
+        positions,
+        faces,
+        np.array([0.0, crotch + gap, 0.0]),
+        np.array([0.0, neck_y, 0.0]),
+        _torso_ts(CHAINS["torso"], t_ax, t_ac, shoulder_rows(K)),
+        np.array([1.0, 0, 0]),
+        keep=lambda q: ~_near_arms(q, arm_axes, axilla, 0.05 * h),
+    )
     # Head: radii from its centre by latitude and longitude, its bottom row at the neck's top station.
     chin = 0.87 * h
     head_pts = positions[positions[:, 1] > chin]
@@ -449,7 +492,7 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
         -1,
     ).reshape(-1, 3)
     head_faces = faces[(positions[faces][:, :, 1] > neck_y - 0.02 * h).all(1)]
-    head_r = _rays(positions, head_faces, hc, dirs).reshape(HEAD)
+    head_r = _fill_grid(_rays(positions, head_faces, hc, dirs).reshape(HEAD), 0.01 * h)
 
     joints |= {
         "pelvis": np.array([0.0, fr["trochanter_height"] * h, 0.0]),
@@ -462,6 +505,23 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
     return SectionTable(
         float(stature), chains, hc, head_r, joints, float(crotch), float(axilla), float(acromion)
     )
+
+
+def _fill_grid(r, least):
+    """Radii a ray missed (below `least`) filled down each longitude, then around each row, from those it hit."""
+    r = r.copy()
+    rows, cols = np.arange(r.shape[0]), np.arange(r.shape[1])
+    for j in cols:
+        ok = r[:, j] >= least
+        if ok.any() and not ok.all():
+            r[~ok, j] = np.interp(rows[~ok], rows[ok], r[ok, j])
+    for i in rows:
+        ok = r[i] >= least
+        if not ok.all():
+            n = len(cols)
+            xs = np.r_[cols[ok] - n, cols[ok], cols[ok] + n]
+            r[i, ~ok] = np.interp(cols[~ok], xs, np.tile(r[i, ok], 3))
+    return r
 
 
 def _binned_chain(points, start, end, n, ref) -> Chain:
@@ -519,8 +579,9 @@ def save_table(table: SectionTable, path) -> None:
 
 
 def load_table(body: str | os.PathLike) -> SectionTable:
-    """A packaged table ("female" or "male") or one saved at a path."""
-    path = DATA / f"human_{body}.npz" if body in ("female", "male") else Path(body)
+    """A packaged table ("female", "male", or a variant such as "male_heavy") or one saved at a path."""
+    packaged = DATA / f"human_{body}.npz"
+    path = packaged if packaged.exists() else Path(body)
     z = np.load(path)
     chains = {}
     for name in CHAINS:
@@ -566,7 +627,7 @@ def resample(table: SectionTable, k: int, step: int) -> SectionTable:
             t_ax = (table.axilla_y - ch.start[1]) / (ch.end[1] - ch.start[1])
             t_ac = (table.acromion_y - ch.start[1]) / (ch.end[1] - ch.start[1])
             assert y(t_ax) <= y(t_ac)
-            ts = _torso_ts(n, t_ax, t_ac, SHOULDER_ROWS[k])
+            ts = _torso_ts(n, t_ax, t_ac, shoulder_rows(k))
         else:
             ts = np.linspace(ch.t[0], ch.t[-1], n)
         chains[name] = _resample_stations(ch, ts)
