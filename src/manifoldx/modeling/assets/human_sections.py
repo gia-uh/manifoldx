@@ -270,12 +270,16 @@ def _read_chain(positions, faces, start, end, ts, ref, side=0) -> Chain:
     unit = axis / np.linalg.norm(axis)
     for i, t in enumerate(ts):
         o = start + axis * t
+        # A loop the axis runs through wins over the nearest one: from a ring where two limbs join, the
+        # nearest loop below can be the other limb.
         best = None
         for loop in _slice(positions, faces, o, unit):
             p2 = np.c_[(loop - o) @ u, (loop - o) @ v]
-            dist = np.linalg.norm(p2.mean(0) - near)
-            if best is None or dist < best[0]:
-                best = (dist, p2)
+            key = (not _inside((0.0, 0.0), p2), np.linalg.norm(p2.mean(0) - near))
+            if best is None or key < best[0]:
+                best = (key, p2)
+        if best is not None:
+            best = (best[0][1], best[1])
         if best is None or best[0] > 0.15:
             continue
         c[i], r[i] = _ring(best[1])
@@ -404,14 +408,22 @@ def read_sections(positions, faces, stature: float, body: str = "female") -> Sec
         fx = foot[:, 0].mean()
         fs, fe = np.array([fx, fy, z0]), np.array([fx, fy, z1])
         chains[f"foot_{s}"] = _binned_chain(foot, fs, fe, CHAINS["foot_l"], np.array([1.0, 0, 0]))
-        # Arm: the principal axis of the vertices beyond the shoulder.
+        # Arm: the principal axis of the vertices beyond the shoulder near the line from the axilla to the
+        # farthest point out (the hand), refined twice; hips or a belly wider than the shoulders stay out.
         shoulder_x = fr["biacromial_breadth"] / 2 * h
-        arm = positions[
+        beyond = positions[
             (positions[:, 0] * side > shoulder_x + 0.02 * h) & (positions[:, 1] > crotch)
         ]
-        centre = arm.mean(0)
-        _, vecs = np.linalg.eigh(np.cov((arm - centre).T))
-        d = vecs[:, -1] * (1 if vecs[0, -1] * side > 0 else -1)
+        centre = np.array([side * shoulder_x, axilla, 0.0])
+        d = beyond[np.argmax(beyond[:, 0] * side)] - centre
+        d /= np.linalg.norm(d)
+        for _ in range(3):
+            rel = beyond - centre
+            along = rel @ d
+            arm = beyond[(np.linalg.norm(rel - np.outer(along, d), axis=1) < 0.08 * h)]
+            centre = arm.mean(0)
+            _, vecs = np.linalg.eigh(np.cov((arm - centre).T))
+            d = vecs[:, -1] * (1 if vecs[0, -1] * side > 0 else -1)
         tip = arm[np.argmax((arm - centre) @ d)]
         shoulder = centre + d * ((side * shoulder_x - centre[0]) / d[0])
         arm_start = shoulder + d * 0.04 * h

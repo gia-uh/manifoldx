@@ -7,6 +7,7 @@ import pytest
 
 from manifoldx.modeling import skeleton
 from manifoldx.modeling.assets.human_sections import (
+    _read_chain,
     CHAINS,
     HEAD,
     K,
@@ -21,12 +22,15 @@ ARM_ANGLE = np.radians(40)
 
 
 @lru_cache(maxsize=None)
-def _capsule_body(stature: float = 1.70):
+def _capsule_body(stature: float = 1.70, pelvis: float = 0.15):
     """An A-pose figure of round cones, 1.70 m tall, facing +Z: legs of constant radius, arms 40 degrees out."""
     d = np.array([np.sin(ARM_ANGLE), -np.cos(ARM_ANGLE), 0.0])
     j = {"pelvis": (0, 0.88, 0), "chest": (0, 1.28, 0), "neck": (0, 1.45, 0), "head": (0, 1.60, 0)}
-    r = {"pelvis": 0.15, "chest": 0.14, "neck": 0.05, "head": 0.10}
+    r = {"pelvis": pelvis, "chest": 0.14, "neck": 0.05, "head": 0.10}
     bones = [("pelvis", "chest"), ("chest", "neck"), ("neck", "head")]
+    if pelvis > 0.15:  # a wide hip and belly band, as tall as a heavy body's
+        j["belly"], r["belly"] = (0, 1.08, 0), pelvis
+        bones += [("pelvis", "belly"), ("belly", "chest")]
     for s, side in (("l", 1), ("r", -1)):
         sh = np.array([side * 0.20, 1.34, 0.0])
         dd = d * [side, 1, 1]
@@ -170,3 +174,25 @@ def test_torso_keeps_shoulder_rows(k, step, rows):
     torso = t.chains["torso"]
     y = torso.start[1] + (torso.end[1] - torso.start[1]) * torso.t
     assert ((y >= t.axilla_y - 1e-6) & (y <= t.acromion_y + 1e-6)).sum() == rows
+
+
+def test_arm_axis_ignores_wide_hips():
+    """Hips wider than the shoulders must not pull the arm's axis toward them."""
+    t = read_sections(*_capsule_body(pelvis=0.30), stature=1.70)
+    for s, side in (("l", 1), ("r", -1)):
+        arm = t.chains[f"arm_{s}"]
+        d = (arm.end - arm.start) / np.linalg.norm(arm.end - arm.start)
+        true = np.array([side * np.sin(ARM_ANGLE), -np.cos(ARM_ANGLE), 0.0])
+        assert np.degrees(np.arccos(d @ true)) < 4
+
+
+def test_chain_stays_on_its_own_limb():
+    """From a ring where two legs join, a chain follows the leg its axis runs through, not the nearer loop."""
+    j = [(0.07, 1.0, 0), (0.07, 0.0, 0), (-0.09, 1.0, 0), (-0.09, 0.0, 0)]
+    mesh = skeleton.skin(j, [0.05, 0.05, 0.08, 0.08], [(0, 1), (2, 3), (0, 2)], step=0.008, blend=0.02)
+    pos, faces = mesh.positions.astype(np.float64), mesh.faces.astype(np.int64)
+    ch = _read_chain(
+        pos, faces, np.array([0.07, 0.99, 0.0]), np.array([0.07, 0.1, 0.0]), np.linspace(0, 1, 12),
+        np.array([1.0, 0, 0]),
+    )
+    assert (ch.centres()[3:, 0] > 0.04).all()
