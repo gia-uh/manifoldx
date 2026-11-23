@@ -141,7 +141,7 @@ pre .c{color:var(--faint)}
   <div class="stat"><div class="v">0</div><div class="k">frames over 33 ms with a 300 ms async system (S-a: both loops)</div></div>
   <div class="stat"><div class="v">0</div><div class="k">source lines an existing app must change</div></div>
   <div class="stat"><div class="v">&lt;1 s</div><div class="k">Python phase of a web reload; #164 measures 3.07 s today</div></div>
-  <div class="stat"><div class="v">4×</div><div class="k">floor for a native cell builder over Python</div></div>
+  <div class="stat"><div class="v">0.99 ms</div><div class="k">to apply a 20k-row command over 100k (S-d)</div></div>
 </div>
 
 <h2 id="s01"><span class="n">01</span>What this delivers</h2>
@@ -153,7 +153,7 @@ pre .c{color:var(--faint)}
   <li><b>Large sets move as IR, not as rows.</b> Python builds selections and commands; Rust evaluates them when applied. Reading rows into Python is explicit, and the bench reports it.</li>
 </ul>
 <p>This is a migration, not a rewrite of the public surface. An app written today keeps its imports, its components, its decorators and its numpy arrays.</p>
-<div class="note"><p><b>The spikes are in.</b> S-a says no: on 3.14t a 300 ms CPU-bound Python system at 2 Hz moved neither the current engine nor the Rust loop (p99 1.03× and 1.00×, zero late frames). S-b says yes, with a caveat: a native cell builder is 25.4× faster than the loop-shaped Python builder and uses 20.6% of the process-pool memory, with identical bytes and a safe capsule; a vectorized numpy builder closes the gap to 2.1× on a regular grid. S-b2 added a street graph, BFS and variable lots: the floor moved to 2.8×, not to 4×. S-c says the store survives and the native build is 840 ms, but the desktop reloader already reloads the same app in 84 ms; the 3.07 s that matters is the web reload (#164). The case is native irregular work, memory, the boundary and the web dev loop, not the frame loop or the desktop reload, and the 4× claim holds only against the current loop builder.</p></div>
+<div class="note"><p><b>The spikes are in.</b> S-a says no: on 3.14t a 300 ms CPU-bound Python system at 2 Hz moved neither the current engine nor the Rust loop (p99 1.03× and 1.00×, zero late frames). S-b says yes, with a caveat: a native cell builder is 25.4× faster than the loop-shaped Python builder and uses 20.6% of the process-pool memory, with identical bytes and a safe capsule; a vectorized numpy builder closes the gap to 2.1× on a regular grid. S-b2 added a street graph, BFS and variable lots: the floor moved to 2.8×, not to 4×. S-c says the store survives and the native build is 840 ms, but the desktop reloader already reloads the same app in 84 ms; the 3.07 s that matters is the web reload (#164). S-d is a clean pass: a Python system decides over 100k rows in 0.036 ms without reading one, and the command applies in 0.99 ms while the frame holds 60 Hz. The case is native irregular work, memory, the boundary, the web dev loop and the IR seam, not the frame loop or the desktop reload, and the 4× claim holds only against the current loop builder.</p></div>
 
 <h2 id="s02"><span class="n">02</span>The wager, stated honestly</h2>
 <p>Most of what used to justify Rust is now solvable without it. The design has to say what is left, or it should not be built.</p>
@@ -162,11 +162,11 @@ pre .c{color:var(--faint)}
   <tbody>
     <tr><td>GIL contention</td><td>The free-threaded build plus pipelined frames already keeps most Python systems off the frame (#262, #260). S-a measured it: a 300 ms async Python system moved neither loop.</td><td class="why">A frame lane that never calls Python at all, so a GC pause or a GIL build cannot reach it. A Rust loop with Python sync systems still waits for them.</td></tr>
     <tr><td>Per-entity cost</td><td>Kernels compiled to WGSL compute cover the vectorizable work, and GPU-driven rendering plus caches cover the draw path.</td><td class="why">Irregular CPU work that neither numpy vectorizes nor the GPU wants: cell generation, road and traffic graphs, spatial indexes, broad-phase collision, contact solvers. Shared-memory threads instead of one 2.5 GB process per province.</td></tr>
-    <tr><td>Command evaluation</td><td>Python applies commands directly, row by row or in numpy batches.</td><td class="why">A small IR evaluator in Rust that applies a command over fresh columns at the sync point.</td></tr>
+    <tr><td>Command evaluation</td><td>Python applies commands directly, row by row or in numpy batches.</td><td class="why">A small IR evaluator in Rust that applies a command over fresh columns at the sync point. S-d measured 0.036 ms to build and enqueue, 0.48–0.99 ms to apply over 100k, and zero rows read.</td></tr>
     <tr><td>Two runtimes</td><td>The web target is a second implementation over three.js.</td><td class="why">One core compiled to native and to wasm, with Python as the desktop authoring layer.</td></tr>
   </tbody>
 </table>
-<div class="note"><p><b>The stop rule, after the spikes.</b> S-a failed: the frame already holds under async Python. S-b passed: 25.4× over the loop builder, 20.6% of the pool memory, identical bytes, a safe boundary, with a 2.1× floor against vectorized numpy. S-b2's irregular cell moved the floor to 2.8×, so the general 4× claim is still open. S-c passed: the store survives ten reloads in 0.79 ms, the native build is 840 ms, but the current desktop reloader already does 84 ms; the web reload's 3.07 s is the number the store has to remove. The migration continues on the current-code speed, memory and boundary; a per-feature facade cell is the next test if 4× against the best Python is the bar, and the web reload needs an end-to-end measurement.</p></div>
+<div class="note"><p><b>The stop rule, after the spikes.</b> S-a failed: the frame already holds under async Python. S-b passed: 25.4× over the loop builder, 20.6% of the pool memory, identical bytes, a safe boundary, with a 2.1× floor against vectorized numpy. S-b2's irregular cell moved the floor to 2.8×, so the general 4× claim is still open. S-c passed: the store survives ten reloads in 0.79 ms, the native build is 840 ms, but the current desktop reloader already does 84 ms; the web reload's 3.07 s is the number the store has to remove. S-d passed cleanly: 0.036 ms to decide over 100k rows, 0.99 ms to apply, zero rows read, p99 16.674 ms. The migration continues on the current-code speed, memory, boundary and IR seam; a per-feature facade cell is the next test if 4× against the best Python is the bar, and the web reload needs an end-to-end measurement.</p></div>
 
 <h2 id="s03"><span class="n">03</span>Three lanes</h2>
 <p>Every piece of work belongs to exactly one lane. When a feature is unclear, the lane decides its rules.</p>
@@ -414,9 +414,11 @@ fn build_cell(req: &amp;CellRequest, out: &amp;mut Output) -&gt; Result&lt;()&gt
 <div class="card">
 <h4>S-d · selections and commands over 100k rows</h4>
 <p><b>Hypothesis.</b> Python can decide over 100k entities by building IR only, at a cost that fits a 60 Hz frame.</p>
-<p><b>Method.</b> <code>examples/crowd_kernels.py</code>: 100k agents, five kernels, one async system that selects 20% of them and issues <code>set</code> and <code>spawn</code> commands. Count rows read into Python (must be zero), measure command apply time and p99 frame.</p>
-<p><b>Pass.</b> Zero rows read in the async system; commands apply in ≤ 1 ms per batch at 100k; p99 frame ≤ 16.7 ms on the reference machine.</p>
-<p><b>Cost.</b> 3–4 days. <b>Blocks.</b> The API freeze, not the loop.</p>
+<p><b>Method.</b> <code>benchmarks/spikes/s_d_ir.py</code> over <code>crates/spike-s-d</code>: 100k agents in eight f32 columns, five Rust kernels, and a Python system at 2 Hz that builds <code>select("speed", "&lt;", 2.0)</code>, enqueues a <code>set</code> and a <code>spawn</code>, and reads no row. A Rust loop paces 600 frames at 60 Hz, calls the system every 30 frames and applies its commands at the boundary; apply time is measured inside Rust. The naive path, <code>read_speeds()</code>, is measured for contrast.</p>
+<p><b>Result: pass.</b> The selection matches 20,000 of 100,000. The Python decision costs <b>0.036 ms</b>; reading the same column into Python costs 12.46 ms. The commands apply in <b>0.482 ms p50 and 0.990 ms p99/max</b> over 20 batches. The frame holds p50 16.667 ms, <b>p99 16.674 ms</b>, max 18.89 ms, zero frames over 33 ms. Zero rows read; 20 sets, 20 spawns, 32,360 rows affected; 100,800 entities at the end.</p>
+<p><b>What it means.</b> The zero-row rule works, and the apply fits the frame. The selection is fresh at apply time because the command carries the spec, not an index list. The five kernels are fixed Rust loops and the store has no secondary indexes, so every batch scans 100k rows; an index can only lower the 0.99 ms.</p>
+<p><b>Evidence.</b> <code>know-how/rust-core-s-d.md</code>, <code>benchmarks/spikes/s_d_results.json</code>.</p>
+<p><b>Done</b> 2026-11-23. <b>Blocks.</b> The API freeze; the loop is not affected.</p>
 </div>
 
 <h2 id="s10"><span class="n">10</span>The branch and the delivery</h2>

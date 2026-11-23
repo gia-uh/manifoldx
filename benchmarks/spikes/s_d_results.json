@@ -1,0 +1,58 @@
+{
+  "config": {
+    "python": "3.14.4",
+    "free_threaded": true,
+    "cpus": 4,
+    "loadavg": [
+      1.28125,
+      0.8759765625,
+      0.650390625
+    ],
+    "frames": 600,
+    "every": 30
+  },
+  "selection": {
+    "column": "speed",
+    "op": "<",
+    "value": 2.0,
+    "matched": 20000
+  },
+  "contrast": {
+    "read_speeds_ms": 12.46102200821042
+  },
+  "periods": {
+    "p50": 16.666666499999998,
+    "p99": 16.674088,
+    "max": 18.886783
+  },
+  "periods_over_33": 0,
+  "applies": {
+    "p50": 0.000224,
+    "p99": 0.5214329999999999,
+    "max": 0.9895520000000001
+  },
+  "batches": {
+    "count": 20,
+    "p50": 0.48224500000000003,
+    "p99": 0.9895520000000001,
+    "max": 0.9895520000000001
+  },
+  "asyncs": {
+    "p50": 0.035663,
+    "p99": 0.06633,
+    "max": 0.06633
+  },
+  "commands": {
+    "sets": 20,
+    "spawns": 20,
+    "affected": 32360,
+    "rows_read": 0,
+    "entities": 100800
+  },
+  "wall_s": 10.000142606906593,
+  "passes": {
+    "zero_rows_read": true,
+    "apply_p99_under_1ms": true,
+    "frame_p99_under_16_7ms": true
+  }
+}

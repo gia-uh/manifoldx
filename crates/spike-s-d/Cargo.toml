@@ -1,0 +1,17 @@
+[package]
+name = "manifoldx-spike-sd"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "_spike_sd"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module"] }
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 1
