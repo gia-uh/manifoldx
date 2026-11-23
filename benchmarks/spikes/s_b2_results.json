@@ -1,0 +1,223 @@
+{
+  "config": {
+    "python": "3.14.4",
+    "free_threaded": true,
+    "cpus": 4,
+    "loadavg": [
+      0.431640625,
+      0.53076171875,
+      0.44677734375
+    ],
+    "repeats": 20
+  },
+  "comparisons": [
+    {
+      "seed": 0,
+      "rows": false,
+      "meshes": [],
+      "loop": {
+        "rows": true,
+        "meshes": [
+          {
+            "material": 0,
+            "positions": true,
+            "positions_count": 34980,
+            "normals": true,
+            "normals_count": 34980,
+            "indices": true,
+            "indices_count": 17490
+          },
+          {
+            "material": 1,
+            "positions": true,
+            "positions_count": 212760,
+            "normals": true,
+            "normals_count": 212760,
+            "indices": true,
+            "indices_count": 106380
+          }
+        ],
+        "same": true
+      },
+      "numpy": {
+        "rows": true,
+        "meshes": [
+          {
+            "material": 0,
+            "positions": true,
+            "positions_count": 34980,
+            "normals": true,
+            "normals_count": 34980,
+            "indices": true,
+            "indices_count": 17490
+          },
+          {
+            "material": 1,
+            "positions": true,
+            "positions_count": 212760,
+            "normals": true,
+            "normals_count": 212760,
+            "indices": true,
+            "indices_count": 106380
+          }
+        ],
+        "same": true
+      },
+      "same": true
+    },
+    {
+      "seed": 7,
+      "rows": false,
+      "meshes": [],
+      "loop": {
+        "rows": true,
+        "meshes": [
+          {
+            "material": 0,
+            "positions": true,
+            "positions_count": 34992,
+            "normals": true,
+            "normals_count": 34992,
+            "indices": true,
+            "indices_count": 17496
+          },
+          {
+            "material": 1,
+            "positions": true,
+            "positions_count": 212688,
+            "normals": true,
+            "normals_count": 212688,
+            "indices": true,
+            "indices_count": 106344
+          }
+        ],
+        "same": true
+      },
+      "numpy": {
+        "rows": true,
+        "meshes": [
+          {
+            "material": 0,
+            "positions": true,
+            "positions_count": 34992,
+            "normals": true,
+            "normals_count": 34992,
+            "indices": true,
+            "indices_count": 17496
+          },
+          {
+            "material": 1,
+            "positions": true,
+            "positions_count": 212688,
+            "normals": true,
+            "normals_count": 212688,
+            "indices": true,
+            "indices_count": 106344
+          }
+        ],
+        "same": true
+      },
+      "same": true
+    },
+    {
+      "seed": 12345,
+      "rows": false,
+      "meshes": [],
+      "loop": {
+        "rows": true,
+        "meshes": [
+          {
+            "material": 0,
+            "positions": true,
+            "positions_count": 34992,
+            "normals": true,
+            "normals_count": 34992,
+            "indices": true,
+            "indices_count": 17496
+          },
+          {
+            "material": 1,
+            "positions": true,
+            "positions_count": 213192,
+            "normals": true,
+            "normals_count": 213192,
+            "indices": true,
+            "indices_count": 106596
+          }
+        ],
+        "same": true
+      },
+      "numpy": {
+        "rows": true,
+        "meshes": [
+          {
+            "material": 0,
+            "positions": true,
+            "positions_count": 34992,
+            "normals": true,
+            "normals_count": 34992,
+            "indices": true,
+            "indices_count": 17496
+          },
+          {
+            "material": 1,
+            "positions": true,
+            "positions_count": 213192,
+            "normals": true,
+            "normals_count": 213192,
+            "indices": true,
+            "indices_count": 106596
+          }
+        ],
+        "same": true
+      },
+      "same": true
+    }
+  ],
+  "timing": {
+    "python_loop": {
+      "p50": 110.06308789364994,
+      "min": 98.90324110165238,
+      "p95": 141.25011302530766
+    },
+    "python_numpy": {
+      "p50": 15.179770067334175,
+      "min": 13.992146123200655,
+      "p95": 17.485551070421934
+    },
+    "native_wall": {
+      "p50": 5.463385721668601,
+      "min": 4.603925626724958,
+      "p95": 14.327752869576216
+    },
+    "native_inside": {
+      "p50": 4.389078,
+      "min": 4.07364
+    },
+    "speedup_vs_loop": 20.145582519850894,
+    "speedup_vs_numpy": 2.778454760594506
+  },
+  "memory": {
+    "pool": {
+      "kind": "pool",
+      "parent_kb": 27432,
+      "workers_kb": [
+        64896,
+        64768
+      ],
+      "total_kb": 157100
+    },
+    "rust": {
+      "kind": "rust",
+      "total_kb": 32356
+    },
+    "ratio": 0.20595798854232972,
+    "passes_25pct": true
+  },
+  "passes": {
+    "bytes_identical": true,
+    "speed_4x_vs_loop": true,
+    "speed_4x_vs_numpy": false,
+    "memory_25pct": true
+  }
+}

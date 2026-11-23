@@ -154,6 +154,174 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "build_cell_v2",
         capsule(py, build_cell_c, c"manifoldx.builder.v2")?,
     )?;
+    m.add(
+        "build_cell_irregular",
+        capsule(py, build_cell_irregular_c, manifoldx_sdk::BUILDER_NAME)?,
+    )?;
     m.add("sdk_version", "1")?;
     Ok(())
+}
+
+// --- S-b2: the irregular cell -------------------------------------------------
+
+const MAX_DIST: u32 = u32::MAX;
+
+fn hash_edge(i: usize, j: usize, dir: u64, seed: u64) -> u64 {
+    (i as u64)
+        .wrapping_mul(73_856_093)
+        .wrapping_add((j as u64).wrapping_mul(19_349_663))
+        .wrapping_add(dir.wrapping_mul(83_492_791))
+        .wrapping_add(seed)
+}
+
+fn hash_block(i: usize, j: usize, seed: u64) -> u64 {
+    (i as u64)
+        .wrapping_mul(83_492_791)
+        .wrapping_add((j as u64).wrapping_mul(73_856_093))
+        .wrapping_add(seed)
+}
+
+fn build_cell_irregular_impl(req: &CellRequest, out: &mut Output) -> Result<(), String> {
+    if !(req.size > 0.0) {
+        return Err(format!("size must be positive, got {}", req.size));
+    }
+    let n = (req.size / BLOCK) as usize;
+    let size = req.size;
+    let nodes = n + 1;
+    let index = |i: usize, j: usize| i * nodes + j;
+
+    // The graph: a street grid with a ninth of its edges missing.
+    let mut adjacency: Vec<Vec<u32>> = vec![Vec::new(); nodes * nodes];
+    let mut horizontal = Vec::with_capacity(n * nodes);
+    let mut vertical = Vec::with_capacity(nodes * n);
+    for i in 0..nodes {
+        for j in 0..nodes {
+            if i < n && hash_edge(i, j, 0, req.seed) % 9 != 0 {
+                let a = index(i, j);
+                let b = index(i + 1, j);
+                adjacency[a].push(b as u32);
+                adjacency[b].push(a as u32);
+                horizontal.push((i, j));
+            }
+            if j < n && hash_edge(i, j, 1, req.seed) % 9 != 0 {
+                let a = index(i, j);
+                let b = index(i, j + 1);
+                adjacency[a].push(b as u32);
+                adjacency[b].push(a as u32);
+                vertical.push((i, j));
+            }
+        }
+    }
+
+    // BFS from the centre; the distance reaches building heights and lamp rows.
+    let mut dist = vec![MAX_DIST; nodes * nodes];
+    let centre = index(n / 2, n / 2);
+    dist[centre] = 0;
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(centre);
+    while let Some(node) = queue.pop_front() {
+        let d = dist[node];
+        for &neighbour in &adjacency[node] {
+            let neighbour = neighbour as usize;
+            if dist[neighbour] == MAX_DIST {
+                dist[neighbour] = d + 1;
+                queue.push_back(neighbour);
+            }
+        }
+    }
+
+    // Roads: one quad per surviving edge, horizontal first, then vertical.
+    let y = 0.02_f32;
+    let mut rp = Vec::with_capacity((horizontal.len() + vertical.len()) * 12);
+    let mut rn = Vec::with_capacity((horizontal.len() + vertical.len()) * 12);
+    let mut ri = Vec::with_capacity((horizontal.len() + vertical.len()) * 6);
+    for &(i, j) in &horizontal {
+        let x0 = i as f32 * BLOCK;
+        let x1 = (i + 1) as f32 * BLOCK;
+        let z = j as f32 * BLOCK;
+        face(
+            &mut rp, &mut rn, &mut ri,
+            [[x0, y, z - HALF], [x1, y, z - HALF], [x1, y, z + HALF], [x0, y, z + HALF]],
+            [0.0, 1.0, 0.0],
+        );
+    }
+    for &(i, j) in &vertical {
+        let x = i as f32 * BLOCK;
+        let z0 = j as f32 * BLOCK;
+        let z1 = (j + 1) as f32 * BLOCK;
+        face(
+            &mut rp, &mut rn, &mut ri,
+            [[x - HALF, y, z0], [x + HALF, y, z0], [x + HALF, y, z1], [x - HALF, y, z1]],
+            [0.0, 1.0, 0.0],
+        );
+    }
+    out.mesh(&rp, &rn, &ri, 0);
+
+    // Lots: four per block, kept by the block's hash, block-major inside each lot index.
+    let mut bp = Vec::new();
+    let mut bn = Vec::new();
+    let mut bi = Vec::new();
+    for k in 0..4usize {
+        for i in 0..n {
+            for j in 0..n {
+                let h = hash_block(i, j, req.seed);
+                if h % 13 == 0 || (h >> (k + 8)) & 1 == 0 {
+                    continue;
+                }
+                let d = match dist[index(i, j)] {
+                    MAX_DIST => 0,
+                    value => value,
+                };
+                let height = 4.0 + ((d.wrapping_add(((h >> (4 * k)) & 31) as u32)) % 28) as f32;
+                let qx = (k % 2) as f32;
+                let qz = (k / 2) as f32;
+                let x0 = i as f32 * BLOCK + qx * 12.5 + 1.5;
+                let x1 = x0 + 9.5;
+                let z0 = j as f32 * BLOCK + qz * 12.5 + 1.5;
+                let z1 = z0 + 9.5;
+
+                face(&mut bp, &mut bn, &mut bi,
+                     [[x0, 0.0, z0], [x1, 0.0, z0], [x1, 0.0, z1], [x0, 0.0, z1]], [0.0, -1.0, 0.0]);
+                face(&mut bp, &mut bn, &mut bi,
+                     [[x0, height, z0], [x1, height, z0], [x1, height, z1], [x0, height, z1]], [0.0, 1.0, 0.0]);
+                face(&mut bp, &mut bn, &mut bi,
+                     [[x0, 0.0, z0], [x0, height, z0], [x0, height, z1], [x0, 0.0, z1]], [-1.0, 0.0, 0.0]);
+                face(&mut bp, &mut bn, &mut bi,
+                     [[x1, 0.0, z0], [x1, height, z0], [x1, height, z1], [x1, 0.0, z1]], [1.0, 0.0, 0.0]);
+                face(&mut bp, &mut bn, &mut bi,
+                     [[x0, 0.0, z0], [x1, 0.0, z0], [x1, height, z0], [x0, height, z0]], [0.0, 0.0, -1.0]);
+                face(&mut bp, &mut bn, &mut bi,
+                     [[x0, 0.0, z1], [x1, 0.0, z1], [x1, height, z1], [x0, height, z1]], [0.0, 0.0, 1.0]);
+            }
+        }
+    }
+    out.mesh(&bp, &bn, &bi, 1);
+
+    // Lamps: one row of 16 bytes (x, z, kind, BFS distance) per reachable node every third step.
+    let mut rows = Vec::new();
+    for i in 0..nodes {
+        for j in 0..nodes {
+            let d = dist[index(i, j)];
+            if d == MAX_DIST || d % 3 != 0 {
+                continue;
+            }
+            rows.extend_from_slice(&(i as f32 * BLOCK).to_le_bytes());
+            rows.extend_from_slice(&(j as f32 * BLOCK).to_le_bytes());
+            rows.extend_from_slice(&1_u32.to_le_bytes());
+            rows.extend_from_slice(&d.to_le_bytes());
+        }
+    }
+    out.spawn(0, &rows, 16);
+
+    let _ = size;
+    Ok(())
+}
+
+unsafe extern "C" fn build_cell_irregular_c(req: *const CellRequest, out: *mut BuildOutput) -> i32 {
+    if req.is_null() || out.is_null() {
+        return 3;
+    }
+    let req = unsafe { &*req };
+    let mut output = unsafe { Output::new(out) };
+    guarded(&mut output, |output| build_cell_irregular_impl(req, output))
 }
