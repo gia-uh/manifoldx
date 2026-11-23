@@ -66,6 +66,36 @@ because the per-entity work is real, the numpy code allocates large temporaries,
 and the native side can parallelize. It does not rescue the frame loop or the
 renderer, but it is a strong, concrete case for native kernels.
 
+## Full frame, after integration
+
+The native step is now the examples' path when the extension is built, with the
+numpy path behind `MANIFOLDX_NUMPY=1`:
+
+- `src/manifoldx/native.py` loads a packaged `manifoldx._native`, or the local
+  `crates/spike-nbody-boids/target/release/lib_spike_nb.so`, or nothing.
+- `examples/nbody.py` and `examples/boids.py` call it when present; `NBODY_N` and
+  `BOIDS_N` set the size. The native step writes a copy and the example applies the
+  delta through the ECS (`query[Transform].pos += pos - current`), so the store
+  still versions the update.
+- `tests/test_native_steps.py` compares nbody with numpy and smoke-tests boids; it
+  skips when the extension is not built.
+
+Full headless frames (`benchmarks/spikes/s_nbody_boids_frame.py`), 800×600
+offscreen, median of 10 frames (5 at 2,000), 4 vCPUs:
+
+| workload | N | numpy frame / update | native frame / update | update speed-up | frame speed-up |
+|---|---:|---:|---:|---:|---:|
+| nbody | 500 | 112.57 / 34.32 ms | 81.17 / 1.90 ms | **18.1×** | 1.39× |
+| nbody | 2,000 | 830.47 / 607.94 ms | 223.03 / 12.07 ms | **50.4×** | 3.72× |
+| boids | 300 | 42.66 / 26.66 ms | 18.86 / 1.37 ms | **19.5×** | 2.26× |
+| boids | 2,000 | 1177.59 / 1126.61 ms | 83.86 / 4.63 ms | **243×** | 14.0× |
+
+The frame includes the offscreen canvas draw and its GPU wait on llvmpipe, which
+is why the frame speed-up is smaller than the update speed-up. On a real GPU the
+canvas wait shrinks and the update share dominates, so the frame improvement
+should approach the update numbers. At 2,000 bodies the examples are unusable in
+numpy (0.8–1.2 s per frame) and fit a frame natively on the update side.
+
 ## Caveats
 
 - No rendering or GPU upload in the timing; the examples' full frames add that.

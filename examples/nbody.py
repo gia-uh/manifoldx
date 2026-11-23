@@ -4,13 +4,17 @@ Pure-numpy vectorized all-pairs gravity. No Python loops in the hot path.
 See examples/gas.py for a collision-based simulation.
 """
 
+import os
+
 import manifoldx as mx
 import numpy as np
 
 from manifoldx.components import Transform, Mesh, Material
+from manifoldx.native import load as load_native
 from manifoldx.resources import sphere, PhongMaterial
 
-NUM_BODIES = 500
+NATIVE = load_native()  # the native step, when the extension is built; MANIFOLDX_NUMPY=1 forces numpy
+NUM_BODIES = int(os.environ.get("NBODY_N", "500"))
 G = 20.0  # gravitational constant
 SOFTENING = 0.05  # prevents singularities at close range
 MAX_SPEED = 20.0  # velocity clamp
@@ -42,9 +46,13 @@ velocities = np.zeros((NUM_BODIES, 3), dtype=np.float32)
 def nbody_gravity(query: mx.Query[Transform], dt: float):
     global velocities
     pos = query[Transform].pos.data
-    accel = mx.physics.gravity(pos, masses=masses, G=G, softening=SOFTENING)
-    velocities += accel * dt
-    query[Transform].pos += velocities * dt
+    if NATIVE is not None:
+        NATIVE.nbody_step(pos, velocities, masses, dt, G, SOFTENING)
+        query[Transform].pos += pos - query[Transform].pos.data
+    else:
+        accel = mx.physics.gravity(pos, masses=masses, G=G, softening=SOFTENING)
+        velocities += accel * dt
+        query[Transform].pos += velocities * dt
 
 
 if __name__ == "__main__":

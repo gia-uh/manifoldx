@@ -5,14 +5,19 @@
 Pure-numpy vectorized — no Python loops in the hot path.
 """
 
+import os
+
 import manifoldx as mx
 import numpy as np
 
 from manifoldx.components import Transform, Mesh, Material
+from manifoldx.native import load as load_native
 from manifoldx.resources import sphere, PhongMaterial
 
+NATIVE = load_native()  # the native step, when the extension is built; MANIFOLDX_NUMPY=1 forces numpy
+
 # ── Simulation parameters ───────────────────────────────────────
-NUM_BOIDS = 300
+NUM_BOIDS = int(os.environ.get("BOIDS_N", "300"))
 NUM_PREDATORS = 3
 PERCEPTION_SQ = 4.0**2  # squared boid perception radius
 FEAR_RADIUS_SQ = 10.0**2  # predator detection range (very wide)
@@ -70,6 +75,11 @@ def boids_physics(query: mx.Query[Transform], dt: float):
     all_pos = query[Transform].pos.data  # (N+P, 3)
     pos = all_pos[:NUM_BOIDS]  # (N, 3)
     pred_pos = all_pos[NUM_BOIDS:]  # (P, 3)
+
+    if NATIVE is not None:
+        NATIVE.boids_step(pos, boid_vel, pred_pos, pred_dir, dt)
+        query[Transform].pos += all_pos - query[Transform].pos.data
+        return
 
     # ── Boid-boid interactions ──────────────────────────────────
     diff = pos[np.newaxis, :, :] - pos[:, np.newaxis, :]  # (N, N, 3)
