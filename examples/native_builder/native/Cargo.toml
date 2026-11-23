@@ -1,0 +1,13 @@
+[package]
+name = "native-cell"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module"] }
+manifoldx-sdk = { path = "../../../crates/manifoldx-sdk" }

@@ -1,0 +1,158 @@
+{
+  "config": {
+    "python": "3.14.4",
+    "free_threaded": true,
+    "cpus": 4,
+    "loadavg": [
+      0.59521484375,
+      0.6728515625,
+      0.60107421875
+    ],
+    "repeats": 20
+  },
+  "comparisons": [
+    {
+      "seed": 0,
+      "meshes": [
+        {
+          "material": 0,
+          "positions": true,
+          "normals": true,
+          "indices": true,
+          "vertices": 328,
+          "indices_count": 492
+        },
+        {
+          "material": 1,
+          "positions": true,
+          "normals": true,
+          "indices": true,
+          "vertices": 34944,
+          "indices_count": 52416
+        }
+      ],
+      "rows": true,
+      "same": true
+    },
+    {
+      "seed": 7,
+      "meshes": [
+        {
+          "material": 0,
+          "positions": true,
+          "normals": true,
+          "indices": true,
+          "vertices": 328,
+          "indices_count": 492
+        },
+        {
+          "material": 1,
+          "positions": true,
+          "normals": true,
+          "indices": true,
+          "vertices": 34872,
+          "indices_count": 52308
+        }
+      ],
+      "rows": true,
+      "same": true
+    },
+    {
+      "seed": 12345,
+      "meshes": [
+        {
+          "material": 0,
+          "positions": true,
+          "normals": true,
+          "indices": true,
+          "vertices": 328,
+          "indices_count": 492
+        },
+        {
+          "material": 1,
+          "positions": true,
+          "normals": true,
+          "indices": true,
+          "vertices": 34944,
+          "indices_count": 52416
+        }
+      ],
+      "rows": true,
+      "same": true
+    }
+  ],
+  "timing": {
+    "python_loop": {
+      "p50": 46.13962979055941,
+      "min": 40.5479078181088,
+      "p95": 57.181069161742926
+    },
+    "python_numpy": {
+      "p50": 3.844956634566188,
+      "min": 3.505624830722809,
+      "p95": 5.220608320087194
+    },
+    "native_wall": {
+      "p50": 1.8141320906579494,
+      "min": 1.5739141963422298,
+      "p95": 2.241251990199089
+    },
+    "native_inside": {
+      "p50": 1.5943015,
+      "min": 1.3778
+    },
+    "speedup_vs_loop": 25.433445573318473,
+    "speedup_vs_numpy": 2.119446899355437
+  },
+  "memory": {
+    "pool": {
+      "kind": "pool",
+      "parent_kb": 27576,
+      "workers_kb": [
+        52700,
+        52700
+      ],
+      "total_kb": 132972
+    },
+    "rust": {
+      "kind": "rust",
+      "total_kb": 27344
+    },
+    "ratio": 0.20563727702072618,
+    "passes_25pct": true
+  },
+  "failures": {
+    "opens_good": true,
+    "panic": {
+      "raised": true,
+      "message": "native builder failed (code 2): panic: boom from the native builder",
+      "mentions_panic": true
+    },
+    "after_panic_still_works": true,
+    "wrong_version": {
+      "raised": true,
+      "message": "builder capsule is not named manifoldx.builder.v1: it was compiled against another SDK version"
+    },
+    "opaque_pointer_accepted": true,
+    "non_capsules": {
+      "tested": 9,
+      "rejected": 9
+    },
+    "fuzz_objects": {
+      "tested": 10000,
+      "rejected": 10000
+    },
+    "fuzz_capsules": {
+      "tested": 1000,
+      "rejected": 1000
+    },
+    "passes": true
+  },
+  "passes": {
+    "bytes_identical": true,
+    "speed_4x_vs_loop": true,
+    "speed_4x_vs_numpy": false,
+    "memory_25pct": true,
+    "failures": true
+  }
+}
