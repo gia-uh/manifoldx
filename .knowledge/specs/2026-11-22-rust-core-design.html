@@ -138,7 +138,7 @@ pre .c{color:var(--faint)}
 <p class="lede">The frame stops depending on Python: a Rust loop, a Rust store and scheduler, and a versioned C boundary for a game's own native code. Python keeps the API, the unrestricted systems and the whole dev lane. This page fixes the four spikes, the branch model, and the numbers that decide when <code>main</code> moves.</p>
 
 <div class="stats">
-  <div class="stat"><div class="v">1.05×</div><div class="k">p99 frame budget while a Python system takes 300 ms</div></div>
+  <div class="stat"><div class="v">0</div><div class="k">frames over 33 ms with a 300 ms async system (S-a: both loops)</div></div>
   <div class="stat"><div class="v">0</div><div class="k">source lines an existing app must change</div></div>
   <div class="stat"><div class="v">&lt;1 s</div><div class="k">save to first new frame, Python edit</div></div>
   <div class="stat"><div class="v">4×</div><div class="k">floor for a native cell builder over Python</div></div>
@@ -153,13 +153,14 @@ pre .c{color:var(--faint)}
   <li><b>Large sets move as IR, not as rows.</b> Python builds selections and commands; Rust evaluates them when applied. Reading rows into Python is explicit, and the bench reports it.</li>
 </ul>
 <p>This is a migration, not a rewrite of the public surface. An app written today keeps its imports, its components, its decorators and its numpy arrays.</p>
+<div class="note"><p><b>S-a has already narrowed the case.</b> On the free-threaded build, a 300 ms CPU-bound Python system at 2 Hz moved neither the current engine nor the Rust loop (p99 1.03× and 1.00×, zero late frames). Async Python is not what Rust fixes here. The migration now rests on S-b, the native irregular work; the loop only guarantees a frame lane that never calls Python.</p></div>
 
 <h2 id="s02"><span class="n">02</span>The wager, stated honestly</h2>
 <p>Most of what used to justify Rust is now solvable without it. The design has to say what is left, or it should not be built.</p>
 <table class="tbl">
   <thead><tr><th>Problem</th><th>Without a Rust core</th><th>What is left</th></tr></thead>
   <tbody>
-    <tr><td>GIL contention</td><td>The free-threaded build plus pipelined frames already keeps most Python systems off the frame (#262, #260).</td><td class="why">A loop that never needs the GIL, so a 300 ms Python or native job cannot delay a frame even when the interpreter stalls.</td></tr>
+    <tr><td>GIL contention</td><td>The free-threaded build plus pipelined frames already keeps most Python systems off the frame (#262, #260). S-a measured it: a 300 ms async Python system moved neither loop.</td><td class="why">A frame lane that never calls Python at all, so a GC pause or a GIL build cannot reach it. A Rust loop with Python sync systems still waits for them.</td></tr>
     <tr><td>Per-entity cost</td><td>Kernels compiled to WGSL compute cover the vectorizable work, and GPU-driven rendering plus caches cover the draw path.</td><td class="why">Irregular CPU work that neither numpy vectorizes nor the GPU wants: cell generation, road and traffic graphs, spatial indexes, broad-phase collision, contact solvers. Shared-memory threads instead of one 2.5 GB process per province.</td></tr>
     <tr><td>Command evaluation</td><td>Python applies commands directly, row by row or in numpy batches.</td><td class="why">A small IR evaluator in Rust that applies a command over fresh columns at the sync point.</td></tr>
     <tr><td>Two runtimes</td><td>The web target is a second implementation over three.js.</td><td class="why">One core compiled to native and to wasm, with Python as the desktop authoring layer.</td></tr>
@@ -383,9 +384,10 @@ fn build_cell(req: &amp;CellRequest, out: &amp;mut Output) -&gt; Result&lt;()&gt
 <div class="card">
 <h4>S-a · the frame under a slow async system</h4>
 <p><b>Hypothesis.</b> A Rust loop keeps p99 frame time flat while a Python async system takes 300 ms, and the current pipelined free-threaded engine does not do so reliably.</p>
-<p><b>Method.</b> <code>examples/slow_async.py</code>: one system at <code>hz=2</code> that sleeps 300 ms and allocates 50 MB per run, plus a 100 ms GC pause injected every second. Measure p99 and the count of frames over 33 ms on the reference machine, three runs, against the same app on the current engine in pipelined mode.</p>
-<p><b>Pass.</b> Rust p99 ≤ 1.05× the no-op baseline and 0 frames over 33 ms; and the current engine shows a measurable penalty (≥ 10% p99 or ≥ 1% of frames over 33 ms) that the Rust loop removes. If the current engine already passes, S-a is a <i>no</i>: record it and lean the case on S-b.</p>
-<p><b>Cost.</b> 3–4 days. <b>Blocks.</b> The whole migration.</p>
+<p><b>Method.</b> <code>benchmarks/spikes/s_a_frame.py</code>: three loops (Rust with a no-op sync callback, Rust with no Python callback, the current engine pipelined headless) in three modes (base, a 2 Hz job that burns 300 ms of CPU and allocates 50 MB, and that job plus a 125–160 ms forced GC pause every second). Three runs of six seconds at 60 Hz, 1080 frames each.</p>
+<p><b>Result: no.</b> The async job moved neither loop: p99 1.00× on Rust and 1.03× on the current engine, zero frames over 33 ms. The GC pause moved both; Rust with a Python sync callback still lost 42 frames of 1080 (p99 51.75 ms) against 48 on the current engine (p99 95.93 ms). Only the loop with no Python callback stayed at 1.00× and zero late frames. The current engine already passes the async half, so S-a fails its own gate and the case rests on S-b.</p>
+<p><b>Evidence.</b> <code>know-how/rust-core-s-a.md</code>, <code>benchmarks/spikes/s_a_results.json</code>.</p>
+<p><b>Done</b> 2026-11-23. <b>Blocks.</b> Nothing now; S-b decides the migration.</p>
 </div>
 
 <div class="card">
@@ -431,7 +433,7 @@ fn build_cell(req: &amp;CellRequest, out: &amp;mut Output) -&gt; Result&lt;()&gt
 <p>This is the first real merge. It changes no user's default. It happens when the branch passes all of these:</p>
 
 <div class="gate"><div class="id">GW-1</div><div><p><b>Parity.</b> <code>make test</code> and <code>manifoldx bench check</code> pass on both engines, from one suite, with no skip added for the core and no test excluded by engine. All 45 examples and 5 demos run in the smoke matrix; rendered images match within 2% of pixels over tolerance.</p></div><div class="nn">0 failures</div></div>
-<div class="gate"><div class="id">GW-2</div><div><p><b>Frame stability.</b> No-op baseline p99 ≤ 1.05× the Python engine on the same interpreter. With the S-a async system: p99 ≤ 1.05× baseline and 0 frames over 33 ms. With a 100 ms GC pause: 0 frames over 33 ms. With 100k entities and five kernels: p99 ≤ 16.7 ms on the reference machine.</p></div><div class="nn">p99 ≤ 1.05×</div></div>
+<div class="gate"><div class="id">GW-2</div><div><p><b>Frame stability.</b> No-op baseline p99 ≤ 1.05× the Python engine on the same interpreter. With the S-a async system: p99 ≤ 1.05× baseline and 0 frames over 33 ms (S-a showed the current engine already holds this; the core must not regress it). With a GC pause, the frame lane must have no Python callback, or the gate accepts the one-frame cost and measures it. With 100k entities and five kernels: p99 ≤ 16.7 ms on the reference machine.</p></div><div class="nn">p99 ≤ 1.05×</div></div>
 <div class="gate"><div class="id">GW-3</div><div><p><b>Zero-change compatibility.</b> Examples, demos and two external apps run without source edits; a diff of their trees shows no change beyond an optional import. numpy in and out keeps its semantics: no copy on input, at most one on output. Wheels build and install for the supported Linux and macOS targets, on both the GIL and free-threaded interpreters.</p></div><div class="nn">0 edits</div></div>
 <div class="gate"><div class="id">GW-4</div><div><p><b>Dev loop.</b> Python edit to first new frame p50 &lt; 1.0 s and p95 &lt; 1.5 s on the 117-mesh app (#164 measures 3.1–3.5 s today). Native incremental reload p50 &lt; 5 s; full build &lt; 60 s. Ten reloads keep entity and mesh counts and grow RSS by less than 5%.</p></div><div class="nn">&lt;1 s</div></div>
 <div class="gate"><div class="id">GW-5</div><div><p><b>Native SDK.</b> <code>examples/native_builder/</code> builds with one command and matches the Python builder byte for byte; ≥ 4× faster and ≤ 25% of the process-pool memory. Wrong version, null pointer and panic each produce a clear Python error; the fuzz corpus finds no crash.</p></div><div class="nn">4× · 25%</div></div>
