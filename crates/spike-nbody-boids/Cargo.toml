@@ -1,0 +1,19 @@
+[package]
+name = "manifoldx-spike-nbody-boids"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "_spike_nb"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module"] }
+numpy = "0.30"
+rayon = "1.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

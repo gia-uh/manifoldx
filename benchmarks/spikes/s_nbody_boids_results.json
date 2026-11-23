@@ -1,0 +1,101 @@
+{
+  "config": {
+    "python": "3.14.4",
+    "free_threaded": true,
+    "cpus": 4,
+    "loadavg": [
+      0.828125,
+      0.564453125,
+      0.43994140625
+    ],
+    "steps": 10
+  },
+  "correctness": {
+    "nbody": true,
+    "boids": true,
+    "nbody_error": 1.1920928955078125e-07,
+    "boids_error": 1.1920928955078125e-07
+  },
+  "rows": [
+    {
+      "workload": "nbody",
+      "n": 500,
+      "numpy_ms": 32.33787044882774,
+      "native_ms": 0.8814421016722918,
+      "speedup": 36.68745841329295,
+      "default": true
+    },
+    {
+      "workload": "nbody",
+      "n": 1000,
+      "numpy_ms": 110.040039755404,
+      "native_ms": 2.7085309848189354,
+      "speedup": 40.627203591972254,
+      "default": false
+    },
+    {
+      "workload": "nbody",
+      "n": 2000,
+      "numpy_ms": 440.8417413942516,
+      "native_ms": 10.48553315922618,
+      "speedup": 42.04285415914752,
+      "default": false
+    },
+    {
+      "workload": "nbody",
+      "n": 5000,
+      "numpy_ms": null,
+      "native_ms": 51.77916376851499,
+      "speedup": null,
+      "default": false
+    },
+    {
+      "workload": "nbody",
+      "n": 10000,
+      "numpy_ms": null,
+      "native_ms": 239.88223681226373,
+      "speedup": null,
+      "default": false
+    },
+    {
+      "workload": "boids",
+      "n": 300,
+      "numpy_ms": 17.631693510338664,
+      "native_ms": 0.32255775295197964,
+      "speedup": 54.66212902643689,
+      "default": true
+    },
+    {
+      "workload": "boids",
+      "n": 1000,
+      "numpy_ms": 209.91551433689892,
+      "native_ms": 1.0925179813057184,
+      "speedup": 192.13918482698037,
+      "default": false
+    },
+    {
+      "workload": "boids",
+      "n": 2000,
+      "numpy_ms": 754.6939910389483,
+      "native_ms": 3.451100317761302,
+      "speedup": 218.6821365797073,
+      "default": false
+    },
+    {
+      "workload": "boids",
+      "n": 5000,
+      "numpy_ms": null,
+      "native_ms": 12.910554185509682,
+      "speedup": null,
+      "default": false
+    },
+    {
+      "workload": "boids",
+      "n": 10000,
+      "numpy_ms": null,
+      "native_ms": 53.748951526358724,
+      "speedup": null,
+      "default": false
+    }
+  ]
+}

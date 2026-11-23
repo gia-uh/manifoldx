@@ -421,6 +421,17 @@ fn build_cell(req: &amp;CellRequest, out: &amp;mut Output) -&gt; Result&lt;()&gt
 <p><b>Done</b> 2026-11-23. <b>Blocks.</b> The API freeze; the loop is not affected.</p>
 </div>
 
+<div class="card">
+<h4>S-e · the nbody and boids examples</h4>
+<p><b>Hypothesis.</b> The simulation examples' numpy hot loops improve when they run natively.</p>
+<p><b>Method.</b> <code>benchmarks/spikes/s_nbody_boids.py</code> over <code>crates/spike-nbody-boids</code>: the examples' own math, numpy against pyo3 + numpy + rayon. nbody is the same all-pairs gravity with <code>max(dist, softening)</code>; boids uses a uniform grid at the 4 m perception radius. Ten steps after two warm-ups, no rendering, 4 vCPUs; correctness within 1.2e-7.</p>
+<p><b>Result: pass, largest margin.</b> nbody 32.34 → 0.88 ms at 500 bodies (<b>36.7×</b>), 110.04 → 2.71 at 1,000 (<b>40.6×</b>), 440.84 → 10.49 at 2,000 (<b>42.0×</b>). boids 17.63 → 0.32 ms at 300 (<b>54.7×</b>), 209.92 → 1.09 at 1,000 (<b>192×</b>), 754.69 → 3.45 at 2,000 (<b>219×</b>). The native step reaches 10,000 bodies at 240 ms/step (nbody) and 54 ms/step (boids); numpy was skipped there for memory.</p>
+<p><b>What it means.</b> At their default sizes both examples already miss 16.7 ms in numpy; the native steps fit. The nbody win is the same algorithm: no N×N×3 temporaries and four cores, 37–42×. The boids win is part grid, part native, so its 55–219× is not all apples to apples. This is the native per-entity workload the core is for, and a stronger case than the cell builder's 2.8× against vectorized numpy.</p>
+<p><b>Caveats.</b> No rendering or upload; the boids comparison is native grid against numpy all-pairs; four vCPUs on a shared host; the pyo3 call is included in the native time.</p>
+<p><b>Evidence.</b> <code>know-how/rust-core-s-e.md</code>, <code>benchmarks/spikes/s_nbody_boids_results.json</code>.</p>
+<p><b>Done</b> 2026-11-23. <b>Blocks.</b> Nothing; it supports the kernel and native-system case.</p>
+</div>
+
 <h2 id="s10"><span class="n">10</span>The branch and the delivery</h2>
 <p><code>main</code> keeps shipping. <code>rust-core</code> is an integration branch, not a fork of the product.</p>
 <ul>
