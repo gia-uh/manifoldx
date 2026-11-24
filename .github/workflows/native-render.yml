@@ -19,7 +19,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      MANIFOLDX_SOURCE_SHA: ${{ github.sha }}
+      # On a pull_request event github.sha is the synthetic merge commit.
+      # Evidence must name the reviewed head, which is what the artifact runs.
+      MANIFOLDX_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
       - uses: actions/checkout@v4
 
