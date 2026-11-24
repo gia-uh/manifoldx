@@ -68,13 +68,13 @@
 <div class="meta">
   <div><span>Engine Python</span> <a href="https://github.com/gia-uh/manifoldx/tree/b03be6e2c0279ea7100ce27143cf2436e9c10a54">b03be6e2c0279ea7100ce27143cf2436e9c10a54</a></div>
   <div><span>Contravía</span> <a href="https://github.com/apiad/contravia/tree/72b9669fc9e85ea24eedf6433095292e8e5e0f5d">72b9669fc9e85ea24eedf6433095292e8e5e0f5d</a></div>
-  <div><span>Rust core branch</span> <a href="https://github.com/gia-uh/manifoldx/tree/24ec3356e3257215bfefb6f6ff632a5493451371">24ec3356e3257215bfefb6f6ff632a5493451371</a></div>
+  <div><span>Rust core branch</span> <a href="https://github.com/gia-uh/manifoldx/tree/5ccb70affd6e9b31cacd8906bb8109c832a94692">5ccb70affd6e9b31cacd8906bb8109c832a94692</a>; includes #356 and #357, Python runtime source unchanged</div>
   <div><span>Date</span> 2026-11-24</div>
 </div>
 
 <section id="scope">
 <h2>Scope and method</h2>
-<p>This inventory extends the completed <a href="https://github.com/gia-uh/manifoldx/blob/bebf22c440edff49c03f32069c1cb93b5bdcccab/.knowledge/analysis/2026-11-24-ecs-contract-inventory.html">ECS contract inventory</a> and does not repeat its findings. It covers every place in the pinned Contravía tree that reaches one of the six runtime areas, plus the engine contract each reach depends on.</p>
+<p>This inventory extends the completed <a href="https://github.com/gia-uh/manifoldx/blob/5ccb70affd6e9b31cacd8906bb8109c832a94692/.knowledge/analysis/2026-11-24-ecs-contract-inventory.html">ECS contract inventory</a> and does not repeat its findings. It covers every place in the pinned Contravía tree that reaches one of the six runtime areas, plus the engine contract each reach depends on.</p>
 <ul>
   <li><strong>Systematic scan.</strong> 252 pinned Contravía <code>.py</code> files were parsed with Python's <code>ast</code> module; 223 import lines name <code>manifoldx</code> or a submodule. Attribute chains rooted at <code>engine</code>, <code>self.engine</code>, <code>mx</code>, and explicit private names were collected, then checked against 598 pinned engine <code>.py</code> files and 324 engine test files.</li>
   <li><strong>Call and impact checks.</strong> <code>aegis map repo</code>, <code>aegis map callers</code> and <code>aegis map impact</code> were run on the pinned engine tree for public definitions such as <code>Engine.render_to_texture</code>, <code>Engine.on</code>, <code>Engine.system</code>, <code>Streamer.focus</code>, <code>QuadStreamer.focus</code> and <code>Audio.close</code>. Counts from that tool are name-level and include engine tests; they were used to widen the search, not as proof of contract.</li>
@@ -171,7 +171,7 @@
 <td><span class="tag priv">private</span> <code>engine._geometry_registry.release(id)</code> and <code>engine.store._components["Baked"/"Fade"]</code>.</td>
 <td><a href="https://github.com/apiad/contravia/blob/72b9669fc9e85ea24eedf6433095292e8e5e0f5d/contravia/people.py#L205">people.py:205</a>; <a href="https://github.com/apiad/contravia/blob/72b9669fc9e85ea24eedf6433095292e8e5e0f5d/contravia/game.py#L297">game.py:297</a>; <a href="https://github.com/gia-uh/manifoldx/blob/b03be6e2c0279ea7100ce27143cf2436e9c10a54/src/manifoldx/resources.py#L2320">GeometryRegistry.release at resources.py:2320</a>.</td>
 <td><code>release</code> destroys vertex and index buffers and bumps the registry version. The game calls it when a retired figure is dropped. <code>_show_hlod</code> writes the raw <code>Baked</code> column; Forest, Graveyard and Crowd write raw <code>Fade</code>. These are already recorded in the ECS inventory.</td>
-<td>Phase 2 and 4. Existing evidence: <a href="https://github.com/gia-uh/manifoldx/blob/bebf22c440edff49c03f32069c1cb93b5bdcccab/.knowledge/analysis/2026-11-24-ecs-contract-inventory.html">ECS inventory</a>. Gap: private release is an adaptation point, not approval to break public aliases.</td>
+<td>Phase 2 and 4. Existing evidence: <a href="https://github.com/gia-uh/manifoldx/blob/5ccb70affd6e9b31cacd8906bb8109c832a94692/.knowledge/analysis/2026-11-24-ecs-contract-inventory.html">ECS inventory</a>. Gap: private release is an adaptation point, not approval to break public aliases.</td>
 </tr>
 <tr>
 <td><span class="tag pub">public</span> <code>set_sun</code>, <code>set_post</code>, <code>set_environment</code>, <code>enable_shadows</code>, and materials; <span class="tag priv">private</span> <code>EnvironmentMap._precompute</code> and <code>._computed</code>.</td>
