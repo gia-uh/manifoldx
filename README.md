@@ -78,6 +78,32 @@ uv add manifold-gfx[offline]      # Video rendering
 
 **Note:** Install with `[desktop]` for interactive rendering, `[offline]` for video output, or `[all]` for both.
 
+## Native core (in progress)
+
+A Rust runtime is being built under `crates/`, delivered in small phases on the
+`rust-core` branch (the migration plan of 2026-11-24). Phase 0 ships the
+packaging only:
+
+- `crates/manifoldx-core` — the runtime core; it must stay free of any Python
+  dependency.
+- `crates/manifoldx-python` — the PyO3 bindings, built into the
+  `manifold-gfx` wheel as one extension, `manifoldx._core_native`.
+- `crates/manifoldx-sdk` — the native SDK for out-of-process builders.
+- The `crates/spike-*` experiments keep their own manifests and locks, and are
+  excluded from the workspace.
+
+The runtime is **not implemented yet**: `manifoldx._core_native.bootstrap()`
+reports that from the Rust side, and no engine code path uses the extension.
+
+Build and verify the wheel:
+
+```bash
+make native-build    # build the manifold-gfx wheel with maturin into dist/
+make native-check    # fmt, clippy and tests for the workspace crates
+make native-verify   # install the wheel in a fresh venv, smoke it, then the
+                     # negative control: extension removed, smoke must fail
+```
+
 ## The guide
 
 The documentation is a book in [`docs/`](docs/) that follows one project, a

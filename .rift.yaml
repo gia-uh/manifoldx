@@ -78,6 +78,14 @@ rules:
       in: "docs/chapters/*.md"
       as: word
 
+  - name: "every production workspace crate is named in the README"
+    extract:
+      file: "Cargo.toml"
+      yaml_keys: "workspace.members"
+    require:
+      in: "README.md"
+      as: mention
+
   - name: "every class in manifoldx.viz is named in the docs"
     extract:
       file: "src/manifoldx/viz/**/*.py"
