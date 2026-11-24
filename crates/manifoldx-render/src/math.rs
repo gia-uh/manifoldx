@@ -175,7 +175,8 @@ mod tests {
         let c = m.to_columns();
         assert_eq!(c[0], 1.0);
         assert_eq!(c[1], 5.0);
+        assert_eq!(c[3], 13.0);
         assert_eq!(c[4], 2.0);
-        assert_eq!(c[12], 13.0);
+        assert_eq!(c[12], 4.0);
     }
 }
