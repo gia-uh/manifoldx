@@ -378,10 +378,17 @@ fn run_normal_check(options: &Options, started: Instant) -> Result<(), String> {
                 "corrupt-normal negative still matched the corrected normal: actual {actual:?}, \
                  expected {expected_correct:?}"
             ))
-        } else {
+        } else if delta_legacy <= NORMAL_CHECK_TOLERANCE {
             NormalCheck::ExpectedFailure(format!(
-                "corrupt normal rejected: actual {actual:?} is {delta_correct} from corrected \
-                 {expected_correct:?} and {delta_legacy} from old-formula {expected_legacy:?}"
+                "corrupt normal reproduced the old-formula pixel and the positive check rejected \
+                 it: actual {actual:?} is {delta_correct} from corrected {expected_correct:?} and \
+                 {delta_legacy} from old-formula {expected_legacy:?}"
+            ))
+        } else {
+            NormalCheck::Fail(format!(
+                "corrupt-normal negative did not reproduce the old-formula pixel: actual {actual:?} \
+                 is {delta_correct} from corrected {expected_correct:?} and {delta_legacy} from \
+                 old-formula {expected_legacy:?}"
             ))
         }
     } else if delta_correct <= NORMAL_CHECK_TOLERANCE
