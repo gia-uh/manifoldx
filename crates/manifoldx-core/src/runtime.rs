@@ -843,7 +843,7 @@ mod tests {
             .unwrap();
         let mut sim = Sim::new(test_car()).unwrap();
         sim.set_ground(Ground::flat(0.0, 1.0).unwrap());
-        sim.place(0.0, 0.0, 0.0, 0.0);
+        sim.place(0.0, 0.0, 0.0, 0.0).unwrap();
         let columns = VehicleColumns {
             position,
             rotation,
@@ -922,7 +922,7 @@ mod tests {
             .unwrap();
         let mut sim = Sim::new(test_car()).unwrap();
         sim.set_ground(Ground::flat(0.0, 1.0).unwrap());
-        sim.place(0.0, 0.0, 0.0, 0.0);
+        sim.place(0.0, 0.0, 0.0, 0.0).unwrap();
         let mut runtime = Runtime::with_vehicle(
             w,
             VehicleColumns {

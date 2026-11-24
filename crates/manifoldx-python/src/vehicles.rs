@@ -305,11 +305,9 @@ impl PyVehicleSim {
     }
 
     /// Put the car at rest at `(x, y, z)` facing `yaw`, on the level nearest `y`.
+    /// Non-finite input is a `ValueError` and leaves the state unchanged.
     fn place(&self, x: f64, y: f64, z: f64, yaw: f64) -> PyResult<()> {
-        self.with(|sim| {
-            sim.place(x, y, z, yaw);
-            Ok(())
-        })
+        self.with(|sim| sim.place(x, y, z, yaw).map_err(PyValueError::new_err))
     }
 
     /// Prepare bounded controls for the next direct steps.

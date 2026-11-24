@@ -294,10 +294,10 @@ impl Sim {
     }
 
     /// Put the car at rest at `(x, y, z)` facing `yaw`, its wheels on the level
-    /// nearest `y`.
-    pub fn place(&mut self, x: f64, y: f64, z: f64, yaw: f64) {
+    /// nearest `y`. Non-finite input is rejected before the state changes.
+    pub fn place(&mut self, x: f64, y: f64, z: f64, yaw: f64) -> Result<(), String> {
         if !(x.is_finite() && y.is_finite() && z.is_finite() && yaw.is_finite()) {
-            return;
+            return Err("place coordinates and yaw must be finite".into());
         }
         let rotation = [0.0, (yaw / 2.0).sin(), 0.0, (yaw / 2.0).cos()];
         let (ax, ay, az) = rotation_columns(rotation);
@@ -335,6 +335,7 @@ impl Sim {
         self.state.brake_scale.fill(1.0);
         self.state.extra_brake.fill(0.0);
         self.state.forward = ax;
+        Ok(())
     }
 
     /// Advance one fixed 1/120 s step with the last controls.
@@ -1087,8 +1088,31 @@ mod tests {
     fn flat_sim() -> Sim {
         let mut sim = Sim::new(test_car()).unwrap();
         sim.set_ground(Ground::flat(0.0, 1.0).unwrap());
-        sim.place(0.0, 0.0, 0.0, 0.0);
+        sim.place(0.0, 0.0, 0.0, 0.0).unwrap();
         sim
+    }
+
+    #[test]
+    fn place_rejects_non_finite_inputs_before_mutating() {
+        let mut sim = flat_sim();
+        sim.step_many(12).unwrap();
+        let before = format!("{:?}", sim.snapshot());
+        let finite = [1.0, 0.5, -2.0, 0.25];
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for axis in 0..4 {
+                let mut args = finite;
+                args[axis] = bad;
+                let result = sim.place(args[0], args[1], args[2], args[3]);
+                assert!(result.is_err(), "place accepted {bad} at axis {axis}");
+                assert_eq!(
+                    format!("{:?}", sim.snapshot()),
+                    before,
+                    "place mutated state after rejecting {bad} at axis {axis}"
+                );
+            }
+        }
+        sim.place(4.0, 0.0, 0.0, 0.0).unwrap();
+        assert!((sim.snapshot().position[0] - 4.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1160,7 +1184,7 @@ mod tests {
     #[test]
     fn coasting_stays_straight_and_side_slip_stops() {
         let mut sim = flat_sim();
-        sim.place(0.0, 0.0, 0.0, 0.0);
+        sim.place(0.0, 0.0, 0.0, 0.0).unwrap();
         sim.step_many(120).unwrap();
         sim.set_controls(Controls::new(0.0, 0.0, 0.0, 0.0).unwrap())
             .unwrap();
@@ -1188,7 +1212,7 @@ mod tests {
         sim.set_ground(
             Ground::profile(vec![(-200.0, 10.0), (200.0, -10.0)], vec![], 0.0, None, 1.0).unwrap(),
         );
-        sim.place(0.0, 0.0, 0.0, 0.0);
+        sim.place(0.0, 0.0, 0.0, 0.0).unwrap();
         sim.step_many(360).unwrap();
         assert!(
             sim.snapshot().velocity[0] > 0.5,
@@ -1209,14 +1233,14 @@ mod tests {
         .unwrap();
         let mut above = Sim::new(test_car()).unwrap();
         above.set_ground(ground.clone());
-        above.place(10.0, 6.0, 0.0, 0.0);
+        above.place(10.0, 6.0, 0.0, 0.0).unwrap();
         above.step_many(120).unwrap();
         assert!((above.snapshot().ground_y[0] - 6.0).abs() < 1e-9);
         assert!(above.snapshot().velocity.iter().map(|v| v * v).sum::<f64>() < 0.05 * 0.05);
 
         let mut below = Sim::new(test_car()).unwrap();
         below.set_ground(ground);
-        below.place(10.0, 0.0, 0.0, 0.0);
+        below.place(10.0, 0.0, 0.0, 0.0).unwrap();
         below.step_many(120).unwrap();
         assert!(below.snapshot().ground_y[0].abs() < 1e-9);
         assert!(below.snapshot().velocity.iter().map(|v| v * v).sum::<f64>() < 0.05 * 0.05);
@@ -1241,7 +1265,7 @@ mod tests {
             )
             .unwrap(),
         );
-        sim.place(0.0, 0.0, 0.0, 0.0);
+        sim.place(0.0, 0.0, 0.0, 0.0).unwrap();
         sim.set_controls(Controls::new(0.0, 1.0, 0.0, 0.0).unwrap())
             .unwrap();
         sim.step_many(960).unwrap();
@@ -1286,7 +1310,7 @@ mod tests {
         }
         let mut sim = Sim::new(spec).unwrap();
         sim.set_ground(Ground::flat(0.0, 1.0).unwrap());
-        sim.place(0.0, 0.0, 0.0, 0.0);
+        sim.place(0.0, 0.0, 0.0, 0.0).unwrap();
         sim.set_controls(Controls::new(0.0, 1.0, 0.0, 0.0).unwrap())
             .unwrap();
         sim.step_many(480).unwrap();
