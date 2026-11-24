@@ -10,6 +10,7 @@
 //! nothing downstream can mistake it for a working native runtime.
 
 pub mod ecs;
+pub mod runtime;
 
 /// The runtime's name, as the bindings' bootstrap reports it.
 pub const RUNTIME_NAME: &str = "manifoldx-core";

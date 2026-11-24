@@ -8,7 +8,7 @@ name: Native
 
 on:
   pull_request:
-    branches: [rust-core]
+    branches: [rust-core, feat/native-component-store]
 
 jobs:
   native:

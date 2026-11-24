@@ -92,14 +92,17 @@ packaging only:
 - The `crates/spike-*` experiments keep their own manifests and locks, and are
   excluded from the workspace.
 
-The runtime is **not implemented yet**: `manifoldx._core_native.bootstrap()`
-reports that from the Rust side, and no engine code path uses the extension.
-Two private slices exist for installed-wheel evidence: `_EntitySlots` (fixed
-capacity identities, reservations and generations) and `_NativeWorld` (explicit
-`f32`/`u32` component schemas, membership, validated bulk updates and owned
-readback). See [`docs/rust-core/entity-slots.md`](docs/rust-core/entity-slots.md)
-and [`docs/rust-core/component-store.md`](docs/rust-core/component-store.md).
-Neither is the public ECS, a Python reference backend or an Engine activation.
+Engine bootstrap remains unsupported. The explicit `NativeRuntime` now owns
+and executes a native World on its calling thread, with bounded commands and
+owned readback from separate producers. Its integration system is native CPU
+work, with no renderer or physics claim. See the
+[native execution contract](docs/rust-core/runtime.html) and runnable
+[`examples/native_runtime.py`](examples/native_runtime.py).
+
+The private `_EntitySlots` and `_NativeWorld` provide fixed-capacity identities,
+explicit `f32`/`u32` schemas, membership and atomic bulk mutations. See
+[entity slots](docs/rust-core/entity-slots.md) and
+[component storage](docs/rust-core/component-store.md).
 
 Build and verify the wheel:
 

@@ -440,6 +440,36 @@ impl Column {
     }
 }
 
+/// Borrowed native rows from two distinct float columns of equal width.
+/// Only rows carrying both components are visited. No allocation or readback.
+pub struct F32Rows<'a> {
+    target: &'a mut [f32],
+    source: &'a [f32],
+    target_members: &'a [u64],
+    source_members: &'a [u64],
+    width: usize,
+}
+
+impl F32Rows<'_> {
+    /// Visit the intersection in ascending slot order and return its row count.
+    pub fn for_each(&mut self, mut visit: impl FnMut(&mut [f32], &[f32])) -> usize {
+        let mut count = 0;
+        for (slot, (target, source)) in self
+            .target
+            .chunks_exact_mut(self.width)
+            .zip(self.source.chunks_exact(self.width))
+            .enumerate()
+        {
+            let bit = 1u64 << (slot % 64);
+            if self.target_members[slot / 64] & self.source_members[slot / 64] & bit != 0 {
+                visit(target, source);
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
 /// A fixed-capacity component World built on [`EntitySlots`].
 #[derive(Debug)]
 pub struct World {
@@ -451,6 +481,41 @@ pub struct World {
 }
 
 impl World {
+    /// Lend two distinct, equally wide non-marker f32 columns to a native kernel.
+    /// Dead rows never carry membership; callers cannot retain the borrow.
+    pub fn f32_rows(&mut self, target: usize, source: usize) -> Result<F32Rows<'_>, &'static str> {
+        if target == source {
+            return Err("native columns must be distinct");
+        }
+        let t = self.columns.get(target).ok_or("unknown target column")?;
+        let s = self.columns.get(source).ok_or("unknown source column")?;
+        if t.schema.element != ElementType::F32
+            || s.schema.element != ElementType::F32
+            || t.schema.width == 0
+            || t.schema.width != s.schema.width
+        {
+            return Err("native columns require equal nonzero f32 widths");
+        }
+        self.version += 1;
+        let (t, s) = if target < source {
+            let (left, right) = self.columns.split_at_mut(source);
+            (&mut left[target], &right[0])
+        } else {
+            let (left, right) = self.columns.split_at_mut(target);
+            (&mut right[0], &left[source])
+        };
+        let (ColumnData::F32(target), ColumnData::F32(source)) = (&mut t.data, &s.data) else {
+            unreachable!()
+        };
+        Ok(F32Rows {
+            target,
+            source,
+            target_members: &t.members,
+            source_members: &s.members,
+            width: t.schema.width as usize,
+        })
+    }
+
     /// Allocate the fixed slot table and an empty schema.
     pub fn new(capacity: u32) -> Result<Self, WorldError> {
         Ok(Self {
