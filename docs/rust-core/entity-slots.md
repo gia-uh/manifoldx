@@ -78,5 +78,5 @@ allocator domain against the real Python `EntityStore`.
 No growth, components, queries, facade, pointers, NumPy arrays, renderer,
 scheduler, Engine activation or SDK redesign. The bootstrap still reports
 `runtime: not implemented`, and `MANIFOLDX_CORE=rust` still refuses to construct
-an Engine. Phase 1 is not closed by this slice; component storage and the facade
-come next.
+an Engine. Phase 1a does not close phase 1; component storage is the next
+private slice, described in [`component-store.md`](component-store.md).

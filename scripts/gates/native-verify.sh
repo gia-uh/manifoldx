@@ -84,8 +84,20 @@ run_entity_slots() {
     echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
     return "$status"
 }
+run_component_world() {
+    local label="$1" status
+    if "$VENVPY" -I "$HERE/native-component-world.py" >"$SCRATCH/$label.log" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
 run_smoke smoke-before
 run_entity_slots entity-slots-before
+run_component_world component-world-before
 "$VENVPY" -I "$HERE/native-selection-smoke.py" installed
 SO="$("$VENVPY" -c 'import manifoldx._core_native as m; print(m.__file__)')"
 mv "$SO" "$SO.gate-removed"
@@ -100,9 +112,15 @@ if run_entity_slots entity-slots-missing; then
 fi
 grep -q 'the installed extension has a module spec' "$SCRATCH/entity-slots-missing.log" \
     || fail "entity slot gate failed for a reason other than the missing extension"
+if run_component_world component-world-missing; then
+    fail "component world gate passed with _core_native removed"
+fi
+grep -q 'compiled extension' "$SCRATCH/component-world-missing.log" \
+    || fail "component world gate failed for a reason other than the missing extension"
 "$VENVPY" -I "$HERE/native-selection-smoke.py" missing
 mv "$SO.gate-removed" "$SO"
 run_smoke smoke-restored
 run_entity_slots entity-slots-restored
+run_component_world component-world-restored
 "$VENVPY" -I "$HERE/native-selection-smoke.py" installed
 echo "native-verify: passed for $PYVER/$ABI (installed -> missing -> restored)"

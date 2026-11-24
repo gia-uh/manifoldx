@@ -94,6 +94,12 @@ packaging only:
 
 The runtime is **not implemented yet**: `manifoldx._core_native.bootstrap()`
 reports that from the Rust side, and no engine code path uses the extension.
+Two private slices exist for installed-wheel evidence: `_EntitySlots` (fixed
+capacity identities, reservations and generations) and `_NativeWorld` (explicit
+`f32`/`u32` component schemas, membership, validated bulk updates and owned
+readback). See [`docs/rust-core/entity-slots.md`](docs/rust-core/entity-slots.md)
+and [`docs/rust-core/component-store.md`](docs/rust-core/component-store.md).
+Neither is the public ECS, a Python reference backend or an Engine activation.
 
 Build and verify the wheel:
 
