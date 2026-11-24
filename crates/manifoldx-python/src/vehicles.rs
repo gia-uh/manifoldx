@@ -342,23 +342,24 @@ impl PyVehicleSim {
         Ok(out)
     }
 
-    /// An owned copy of every solver output.
+    /// An owned copy of every solver output. The state is copied under one
+    /// brief lock; Python objects are built after it is released.
     fn snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        self.with(|sim| snapshot_dict(py, &sim.snapshot()))
+        let state = self.with(|sim| Ok(sim.snapshot()))?;
+        snapshot_dict(py, &state)
     }
 
-    /// The body's position and quaternion.
+    /// The body's position and quaternion. Copied under one brief lock;
+    /// Python objects are built after it is released.
     fn pose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        self.with(|sim| {
-            let (position, rotation) = sim.pose();
-            PyTuple::new(
-                py,
-                [
-                    PyTuple::new(py, position)?.into_any(),
-                    PyTuple::new(py, rotation)?.into_any(),
-                ],
-            )
-        })
+        let (position, rotation) = self.with(|sim| Ok(sim.pose()))?;
+        PyTuple::new(
+            py,
+            [
+                PyTuple::new(py, position)?.into_any(),
+                PyTuple::new(py, rotation)?.into_any(),
+            ],
+        )
     }
 }
 
@@ -554,17 +555,21 @@ impl PyVehicleRuntime {
     }
 
     /// Owned final solver state of the active simulation, without callbacks.
+    /// The state is copied under one brief lock; Python objects are built
+    /// after it is released.
     fn snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let guard = self
-            .runtime
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("vehicle runtime lock poisoned"))?;
-        let runtime = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("runtime is running or closed"))?;
-        let state = runtime
-            .vehicle_state()
-            .ok_or_else(|| PyRuntimeError::new_err("runtime has no vehicle"))?;
+        let state = {
+            let guard = self
+                .runtime
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("vehicle runtime lock poisoned"))?;
+            let runtime = guard
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("runtime is running or closed"))?;
+            runtime
+                .vehicle_state()
+                .ok_or_else(|| PyRuntimeError::new_err("runtime has no vehicle"))?
+        };
         snapshot_dict(py, &state)
     }
 
