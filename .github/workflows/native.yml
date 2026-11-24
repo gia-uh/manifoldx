@@ -1,0 +1,42 @@
+# The rust-core branch carries the Rust migration, and its PRs run focused
+# checks instead of the whole suite: the phase-0 native gates. These are
+# blocking — the installed-wheel smoke and the missing-extension negative
+# control fail the PR when they fail. The full suite (test.yml) still runs
+# on main and release branches; main-parity for rust-core stays a
+# coordinator decision until the phase-0 policy adds it.
+name: Native
+
+on:
+  pull_request:
+    branches: [rust-core]
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust with rustfmt and clippy
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.14t'
+
+      - name: Install dependencies
+        run: uv sync --locked --group native --group dev
+
+      - name: Check the workspace crates
+        run: make native-check
+
+      - name: Build the wheel for the free-threaded interpreter
+        run: make native-build NATIVE_PYTHON=python3.14t
+
+      - name: Verify the installed wheel (smoke and negative control)
+        run: make native-verify NATIVE_PYTHON=python3.14t NATIVE_DIST=dist
+
+      - name: Packaging contracts
+        run: uv run --no-sync pytest tests/core -q
+
+      - name: Rift coverage
+        run: uvx --from git+https://github.com/apiad/rift@v0.9.0 rift check .
