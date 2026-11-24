@@ -11,6 +11,7 @@
 
 pub mod ecs;
 pub mod runtime;
+pub mod vehicles;
 
 /// The runtime's name, as the bindings' bootstrap reports it.
 pub const RUNTIME_NAME: &str = "manifoldx-core";

@@ -6,6 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::ecs::{ColumnData, ComponentReadout, EntityId, World};
+use crate::vehicles::{Controls, Sim, DT};
 
 /// Maximum owned input or selected readback bytes per operation.
 pub const MAX_COMMAND_BYTES: usize = 4 * 1024 * 1024;
@@ -26,19 +27,49 @@ pub enum Command {
         component: usize,
         ids: Vec<EntityId>,
     },
+    /// Replace the attached vehicle's bounded controls at this command's FIFO
+    /// boundary. It is rejected when the runtime has no vehicle.
+    Controls {
+        steer: f64,
+        throttle: f64,
+        brake: f64,
+        handbrake: f64,
+    },
 }
 impl Command {
     fn rows(&self) -> usize {
         match self {
             Self::Update { ids, .. } | Self::Read { ids, .. } | Self::Destroy(ids) => ids.len(),
+            Self::Controls { .. } => 0,
         }
     }
     fn bytes(&self) -> usize {
         self.rows() * 16
             + match self {
                 Self::Update { data, .. } => data.byte_len(),
+                Self::Controls { .. } => 4 * std::mem::size_of::<f64>(),
                 _ => 0,
             }
+    }
+    fn valid_controls(&self) -> bool {
+        match self {
+            Self::Controls {
+                steer,
+                throttle,
+                brake,
+                handbrake,
+            } => {
+                steer.is_finite()
+                    && (-1.0..=1.0).contains(steer)
+                    && throttle.is_finite()
+                    && (0.0..=1.0).contains(throttle)
+                    && brake.is_finite()
+                    && (0.0..=1.0).contains(brake)
+                    && handbrake.is_finite()
+                    && (0.0..=1.0).contains(handbrake)
+            }
+            _ => true,
+        }
     }
 }
 
@@ -87,6 +118,12 @@ pub struct Stats {
     pub max_frame_ns: u64,
     pub paced_ns: u64,
     pub wall_ns: u64,
+    /// Fixed vehicle substeps executed by the attached native system.
+    pub vehicle_steps: u64,
+    /// Time inside the vehicle solver only.
+    pub vehicle_ns: u64,
+    /// Time publishing the vehicle pose into the World.
+    pub publish_ns: u64,
     /// First apply rejection or fatal execution failure, retained after outcomes are taken.
     pub first_error: Option<String>,
 }
@@ -104,6 +141,7 @@ struct Shared {
     capacity: usize,
     max_rows: usize,
     read_row_bytes: Vec<usize>,
+    has_vehicle: bool,
 }
 /// Cloneable producer handle; owns no World and launches no worker.
 #[derive(Clone)]
@@ -120,7 +158,9 @@ impl Control {
                 .unwrap_or(usize::MAX),
             _ => 0,
         };
-        if command.bytes() > MAX_COMMAND_BYTES
+        if !command.valid_controls()
+            || (matches!(command, Command::Controls { .. }) && !self.0.has_vehicle)
+            || command.bytes() > MAX_COMMAND_BYTES
             || output_bytes > MAX_COMMAND_BYTES
             || command.rows() > self.0.max_rows
             || matches!(&command,
@@ -186,6 +226,21 @@ impl Control {
     }
 }
 
+/// The four `f32` columns the native vehicle system publishes each frame.
+#[derive(Clone, Copy, Debug)]
+pub struct VehicleColumns {
+    pub position: usize,
+    pub rotation: usize,
+    pub velocity: usize,
+    pub angular: usize,
+}
+
+struct VehicleSystem {
+    sim: Sim,
+    columns: VehicleColumns,
+    entity: EntityId,
+}
+
 /// Owns the actual World, not a copy. Run it on the intended OS/main thread.
 /// Dropping it stops admission and cancels pending work; there is no join.
 pub struct Runtime {
@@ -194,6 +249,7 @@ pub struct Runtime {
     position: usize,
     velocity: usize,
     batches_per_frame: usize,
+    vehicle: Option<VehicleSystem>,
 }
 impl Runtime {
     /// Validate the fixed native system and queue limits before taking ownership.
@@ -252,6 +308,7 @@ impl Runtime {
             capacity,
             max_rows,
             read_row_bytes: world.schemas().map(|s| 17 + s.width as usize * 4).collect(),
+            has_vehicle: false,
         }));
         Ok(Self {
             world: Some(world),
@@ -259,15 +316,115 @@ impl Runtime {
             position,
             velocity,
             batches_per_frame,
+            vehicle: None,
+        })
+    }
+    /// Validate a World with the four pose columns one vehicle publishes into.
+    pub fn validate_vehicle(
+        world: &World,
+        columns: VehicleColumns,
+        entity: EntityId,
+    ) -> Result<(), &'static str> {
+        let position = world
+            .schema(columns.position)
+            .ok_or("unknown position column")?;
+        let rotation = world
+            .schema(columns.rotation)
+            .ok_or("unknown rotation column")?;
+        let velocity = world
+            .schema(columns.velocity)
+            .ok_or("unknown velocity column")?;
+        let angular = world
+            .schema(columns.angular)
+            .ok_or("unknown angular column")?;
+        if position.element != crate::ecs::ElementType::F32
+            || rotation.element != crate::ecs::ElementType::F32
+            || velocity.element != crate::ecs::ElementType::F32
+            || angular.element != crate::ecs::ElementType::F32
+        {
+            return Err("vehicle pose columns must be f32");
+        }
+        if position.width != 3 || rotation.width != 4 || velocity.width != 3 || angular.width != 3 {
+            return Err("vehicle pose columns must be width 3, 4, 3 and 3");
+        }
+        let indices = [
+            columns.position,
+            columns.rotation,
+            columns.velocity,
+            columns.angular,
+        ];
+        if (1..indices.len()).any(|i| indices[..i].contains(&indices[i])) {
+            return Err("vehicle pose columns must be distinct");
+        }
+        for index in indices {
+            if !world
+                .is_member(index, entity)
+                .map_err(|_| "invalid vehicle entity")?
+            {
+                return Err("vehicle entity must carry every pose column");
+            }
+        }
+        Ok(())
+    }
+    /// Validate and take ownership for one vehicle stepped by the fixed native
+    /// system. Caller must first call `validate_vehicle` with these arguments.
+    pub fn with_vehicle(
+        world: World,
+        columns: VehicleColumns,
+        sim: Sim,
+        entity: EntityId,
+        capacity: usize,
+        max_rows: usize,
+        batches_per_frame: usize,
+    ) -> Result<Self, Box<(World, &'static str)>> {
+        if capacity == 0 || max_rows == 0 || batches_per_frame == 0 {
+            return Err(Box::new((world, "runtime limits must be positive")));
+        }
+        if let Err(error) = Self::validate_vehicle(&world, columns, entity) {
+            return Err(Box::new((world, error)));
+        }
+        let control = Control(Arc::new(Shared {
+            state: Mutex::new(State {
+                phase: Phase::Ready,
+                stop: false,
+                next: 1,
+                queue: VecDeque::new(),
+                outcomes: VecDeque::new(),
+                stats: Stats::default(),
+            }),
+            wake: Condvar::new(),
+            capacity,
+            max_rows,
+            read_row_bytes: world.schemas().map(|s| 17 + s.width as usize * 4).collect(),
+            has_vehicle: true,
+        }));
+        Ok(Self {
+            world: Some(world),
+            control,
+            position: columns.position,
+            velocity: columns.velocity,
+            batches_per_frame,
+            vehicle: Some(VehicleSystem {
+                sim,
+                columns,
+                entity,
+            }),
         })
     }
     pub fn control(&self) -> Control {
         self.control.clone()
     }
+    /// Owned copy of the attached vehicle's current state, if there is one.
+    pub fn vehicle_state(&self) -> Option<crate::vehicles::Snapshot> {
+        self.vehicle.as_ref().map(|vehicle| vehicle.sim.snapshot())
+    }
     /// Fixed simulation dt; pacing only adds wall time and never changes dt.
     pub fn run(&mut self, frames: u64, dt: f32, pace: Option<Duration>) -> Result<Stats, String> {
         if frames == 0 || !dt.is_finite() || dt <= 0.0 {
             return Err("frames and finite dt must be positive".into());
+        }
+        if self.vehicle.is_some() && (dt as f64 - DT).abs() > 1e-6 {
+            return Err("a vehicle runtime steps at the fixed 120 Hz dt".into());
         }
         {
             let mut s = self
@@ -307,6 +464,7 @@ impl Runtime {
         let world = self.world.as_mut().unwrap();
         for frame in 0..frames {
             let begin = Instant::now();
+            let mut pending_controls = None;
             // Hold the queue lock while selecting this boundary, so later admissions
             // cannot slip into an already selected boundary. Results use same credits.
             {
@@ -332,6 +490,20 @@ impl Runtime {
                         Command::Read { component, ids } => {
                             world.read_component(component, Some(&ids)).map(Some)
                         }
+                        Command::Controls {
+                            steer,
+                            throttle,
+                            brake,
+                            handbrake,
+                        } => {
+                            pending_controls = Some(Controls {
+                                steer,
+                                throttle,
+                                brake,
+                                handbrake,
+                            });
+                            Ok(None)
+                        }
                     }
                     .map_err(|e| e.to_string());
                     match &result {
@@ -356,16 +528,64 @@ impl Runtime {
                     });
                 }
             }
-            let native_start = Instant::now();
-            let rows = world
-                .f32_rows(self.position, self.velocity)
-                .expect("validated fixed schema")
-                .for_each(|p, v| {
-                    for (p, v) in p.iter_mut().zip(v) {
-                        *p += *v * dt;
+            let is_vehicle = self.vehicle.is_some();
+            let mut publish_error = None;
+            let (native_ns, rows, vehicle_ns, publish_ns) = if let Some(vehicle) =
+                self.vehicle.as_mut()
+            {
+                if let Some(controls) = pending_controls {
+                    vehicle
+                        .sim
+                        .set_controls(controls)
+                        .expect("admitted controls stay valid");
+                }
+                let native_start = Instant::now();
+                vehicle.sim.step();
+                let vehicle_ns = nanos(native_start.elapsed());
+                let publish_start = Instant::now();
+                let (position, rotation) = vehicle.sim.pose();
+                let velocity = vehicle.sim.velocity();
+                let angular = vehicle.sim.angular();
+                let entity = [vehicle.entity];
+                let rows = [
+                    (
+                        vehicle.columns.position,
+                        position.iter().map(|value| *value as f32).collect(),
+                    ),
+                    (
+                        vehicle.columns.rotation,
+                        rotation.iter().map(|value| *value as f32).collect(),
+                    ),
+                    (
+                        vehicle.columns.velocity,
+                        velocity.iter().map(|value| *value as f32).collect(),
+                    ),
+                    (
+                        vehicle.columns.angular,
+                        angular.iter().map(|value| *value as f32).collect(),
+                    ),
+                ];
+                for (component, data) in rows {
+                    if let Err(error) = world.update_rows(component, &entity, ColumnData::F32(data))
+                    {
+                        publish_error = Some(error.to_string());
+                        break;
                     }
-                });
-            let native_ns = nanos(native_start.elapsed());
+                }
+                let publish_ns = nanos(publish_start.elapsed());
+                (vehicle_ns + publish_ns, 1, vehicle_ns, publish_ns)
+            } else {
+                let native_start = Instant::now();
+                let rows = world
+                    .f32_rows(self.position, self.velocity)
+                    .expect("validated fixed schema")
+                    .for_each(|p, v| {
+                        for (p, v) in p.iter_mut().zip(v) {
+                            *p += *v * dt;
+                        }
+                    });
+                (nanos(native_start.elapsed()), rows, 0, 0)
+            };
             let frame_ns = nanos(begin.elapsed());
             let mut s = self
                 .control
@@ -377,6 +597,16 @@ impl Runtime {
             s.stats.native_steps += 1;
             s.stats.rows_integrated += rows as u64;
             s.stats.native_ns += native_ns;
+            if let Some(error) = publish_error {
+                if s.stats.first_error.is_none() {
+                    s.stats.first_error = Some(error);
+                }
+            }
+            if is_vehicle {
+                s.stats.vehicle_steps += 1;
+                s.stats.vehicle_ns += vehicle_ns;
+                s.stats.publish_ns += publish_ns;
+            }
             s.stats.frame_ns += frame_ns;
             s.stats.max_frame_ns = s.stats.max_frame_ns.max(frame_ns);
             if let Some(period) = pace {
@@ -576,6 +806,163 @@ mod tests {
         assert!(r.run(1, f32::NAN, None).is_err());
         assert_eq!(r.control().phase(), Phase::Ready);
         assert_eq!(r.run(1, 1., None).unwrap().frames, 1);
+    }
+
+    #[test]
+    fn vehicle_system_steps_at_the_fixed_dt_and_publishes_pose() {
+        use crate::vehicles::sim::test_car;
+        use crate::vehicles::{Ground, Sim, DT};
+
+        let mut w = World::new(2).unwrap();
+        let position = w.register("position", ElementType::F32, 3).unwrap();
+        let rotation = w.register("rotation", ElementType::F32, 4).unwrap();
+        let velocity = w.register("velocity", ElementType::F32, 3).unwrap();
+        let angular = w.register("angular", ElementType::F32, 3).unwrap();
+        let ids = w
+            .spawn(
+                1,
+                &[
+                    ComponentPayload {
+                        component: position,
+                        data: ColumnData::F32(vec![0.0; 3]),
+                    },
+                    ComponentPayload {
+                        component: rotation,
+                        data: ColumnData::F32(vec![0.0, 0.0, 0.0, 1.0]),
+                    },
+                    ComponentPayload {
+                        component: velocity,
+                        data: ColumnData::F32(vec![0.0; 3]),
+                    },
+                    ComponentPayload {
+                        component: angular,
+                        data: ColumnData::F32(vec![0.0; 3]),
+                    },
+                ],
+            )
+            .unwrap();
+        let mut sim = Sim::new(test_car()).unwrap();
+        sim.set_ground(Ground::flat(0.0, 1.0).unwrap());
+        sim.place(0.0, 0.0, 0.0, 0.0);
+        let columns = VehicleColumns {
+            position,
+            rotation,
+            velocity,
+            angular,
+        };
+        let mut runtime = Runtime::with_vehicle(w, columns, sim, ids[0], 8, 8, 8).unwrap();
+        let control = runtime.control();
+        assert_eq!(
+            control.submit(Command::Controls {
+                steer: 0.0,
+                throttle: 1.0,
+                brake: 0.0,
+                handbrake: 0.0,
+            }),
+            Admission::Admitted(1)
+        );
+        assert!(matches!(
+            control.submit(Command::Controls {
+                steer: 2.0,
+                throttle: 1.0,
+                brake: 0.0,
+                handbrake: 0.0,
+            }),
+            Admission::Error(_)
+        ));
+        let stats = runtime.run(120, DT as f32, None).unwrap();
+        assert_eq!(stats.vehicle_steps, 120);
+        assert!(stats.vehicle_ns > 0);
+        assert!(stats.publish_ns > 0);
+        assert!(control.take().unwrap().result.is_ok());
+        let w = runtime.into_world();
+        let ColumnData::F32(position) = w.read_component(position, Some(&ids)).unwrap().data else {
+            panic!("position must stay f32");
+        };
+        assert!(position[0] > 0.1, "{position:?}");
+        let ColumnData::F32(rotation) = w.read_component(rotation, Some(&ids)).unwrap().data else {
+            panic!("rotation must stay f32");
+        };
+        let norm: f32 = rotation.iter().map(|value| value * value).sum();
+        assert!((norm - 1.0).abs() < 1e-4, "{norm}");
+    }
+
+    #[test]
+    fn invalid_vehicle_dt_and_a_destroyed_target_write_nothing() {
+        use crate::vehicles::sim::test_car;
+        use crate::vehicles::{Ground, Sim, DT};
+
+        let mut w = World::new(2).unwrap();
+        let position = w.register("position", ElementType::F32, 3).unwrap();
+        let rotation = w.register("rotation", ElementType::F32, 4).unwrap();
+        let velocity = w.register("velocity", ElementType::F32, 3).unwrap();
+        let angular = w.register("angular", ElementType::F32, 3).unwrap();
+        let ids = w
+            .spawn(
+                1,
+                &[
+                    ComponentPayload {
+                        component: position,
+                        data: ColumnData::F32(vec![1.0; 3]),
+                    },
+                    ComponentPayload {
+                        component: rotation,
+                        data: ColumnData::F32(vec![0.0, 0.0, 0.0, 1.0]),
+                    },
+                    ComponentPayload {
+                        component: velocity,
+                        data: ColumnData::F32(vec![0.0; 3]),
+                    },
+                    ComponentPayload {
+                        component: angular,
+                        data: ColumnData::F32(vec![0.0; 3]),
+                    },
+                ],
+            )
+            .unwrap();
+        let mut sim = Sim::new(test_car()).unwrap();
+        sim.set_ground(Ground::flat(0.0, 1.0).unwrap());
+        sim.place(0.0, 0.0, 0.0, 0.0);
+        let mut runtime = Runtime::with_vehicle(
+            w,
+            VehicleColumns {
+                position,
+                rotation,
+                velocity,
+                angular,
+            },
+            sim,
+            ids[0],
+            8,
+            8,
+            8,
+        )
+        .unwrap();
+        assert!(runtime.run(120, 1.0 / 60.0, None).is_err());
+        let control = runtime.control();
+        control.submit(Command::Destroy(vec![ids[0]]));
+        let stats = runtime.run(1, DT as f32, None).unwrap();
+        assert_eq!(stats.vehicle_steps, 1);
+        assert!(stats.first_error.is_some());
+        assert!(stats.publish_ns > 0);
+        let w = runtime.into_world();
+        assert_eq!(w.alive_count(), 0);
+        assert!(w.read_component(position, Some(&ids)).is_err());
+    }
+
+    #[test]
+    fn controls_are_rejected_without_a_vehicle() {
+        let (r, _) = setup(4, 4);
+        let c = r.control();
+        assert!(matches!(
+            c.submit(Command::Controls {
+                steer: 0.0,
+                throttle: 0.0,
+                brake: 0.0,
+                handbrake: 0.0,
+            }),
+            Admission::Error(_)
+        ));
     }
 
     #[test]
