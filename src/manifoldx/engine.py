@@ -408,6 +408,9 @@ class Engine:
         pipelined: bool | None = None,
         smooth_dt: bool = True,
     ):
+        from manifoldx._core import _validate_engine_core
+
+        _validate_engine_core()
         _warm_wgpu_types()
         self.title = title
         self.h = height

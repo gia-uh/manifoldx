@@ -79,3 +79,21 @@ engine.run()
 
 The basin is one entity among two. The next chapter fills the plaza with
 people, hundreds of them, and moves them every frame without a Python loop.
+## Selecting the engine core during the migration
+
+The default Engine still uses Python. `MANIFOLDX_CORE=python` selects that same
+runtime; an unset or empty value also means Python. Values are case-sensitive;
+any other value except `rust` raises `ValueError` before Engine initialization.
+
+`MANIFOLDX_CORE=rust` requires the production `manifoldx._core_native` extension
+from a native `manifold-gfx` wheel (build one with `make native-build`). Missing
+or unloadable extensions raise `ImportError` with the original cause. The
+installed Rust bootstrap currently reports `runtime: not implemented`, so
+Engine raises `NotImplementedError` before GPU setup, state, ECS, scheduler or
+renderer construction. There is no Python runtime fallback for this selection.
+The separate `manifoldx.native` spike kernels retain their existing behavior.
+
+The blocking `make native-verify` gate checks startup selection on an installed
+wheel outside the checkout, removes the real extension, verifies that Python
+remains usable while Rust fails, then restores it and verifies the unsupported
+runtime error again. These are startup checks, not entity parity tests.

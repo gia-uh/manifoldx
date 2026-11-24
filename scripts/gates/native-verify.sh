@@ -74,6 +74,7 @@ run_smoke() {
     return "$status"
 }
 run_smoke smoke-before
+"$VENVPY" -I "$HERE/native-selection-smoke.py" installed
 SO="$("$VENVPY" -c 'import manifoldx._core_native as m; print(m.__file__)')"
 mv "$SO" "$SO.gate-removed"
 [ ! -e "$SO" ] && [ -f "$SO.gate-removed" ] || fail "ineffective removal: $SO"
@@ -82,6 +83,8 @@ if run_smoke smoke-removed; then
 fi
 grep -qx 'FAIL: manifoldx._core_native is not installed in the venv' "$SCRATCH/smoke-removed.log" \
     || fail "ordinary smoke failed for a reason other than missing _core_native"
+"$VENVPY" -I "$HERE/native-selection-smoke.py" missing
 mv "$SO.gate-removed" "$SO"
 run_smoke smoke-restored
+"$VENVPY" -I "$HERE/native-selection-smoke.py" installed
 echo "native-verify: passed for $PYVER/$ABI (installed -> missing -> restored)"
