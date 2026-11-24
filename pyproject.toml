@@ -37,8 +37,17 @@ svg = ["thorvg-python>=1.1.3"]
 audio = ["sounddevice>=0.5"]
 all = ["manifold-gfx[desktop,offline,viz,svg,audio]"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/manifoldx"]
+[tool.maturin]
+# A maturin mixed project over the existing src/manifoldx package
+# (https://www.maturin.rs/project_layout.html): the whole package ships in
+# the manifold-gfx wheel, plus one compiled extension inside it. The name
+# differs from the _native module the spike loader in manifoldx.native looks
+# for, so the nbody/boids spikes keep working beside it. The runtime is not
+# implemented yet; the extension's bootstrap says so from the Rust side.
+python-source = "src"
+module-name = "manifoldx._core_native"
+manifest-path = "crates/manifoldx-python/Cargo.toml"
+features = ["pyo3/extension-module"]
 
 [tool.ruff]
 line-length = 100
@@ -49,8 +58,8 @@ select = ["E", "F", "I"]
 ignore = ["E501", "F401", "I001", "F841", "E721"]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.11,<2"]
+build-backend = "maturin"
 
 [dependency-groups]
 browser = [
@@ -66,6 +75,10 @@ dev = [
 ]
 docs = [
     "scriptorium",
+]
+# The native-wheel gate: maturin to build the wheel (make native-build).
+native = [
+    "maturin>=1.11,<2",
 ]
 
 [tool.manifoldx.bench]

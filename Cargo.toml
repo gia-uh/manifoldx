@@ -1,0 +1,19 @@
+# The production Cargo workspace: the runtime core, its Python bindings and
+# the SDK. The spike crates under crates/spike-* keep their own manifests,
+# locks and build commands (they are regression experiments, not part of the
+# build graph), so they are excluded rather than members; a crate inside this
+# directory that is neither a member nor excluded would fail its own build.
+[workspace]
+resolver = "2"
+members = [
+    "crates/manifoldx-core",
+    "crates/manifoldx-python",
+    "crates/manifoldx-sdk",
+]
+exclude = [
+    "crates/spike-s-a",
+    "crates/spike-s-b",
+    "crates/spike-s-c",
+    "crates/spike-s-d",
+    "crates/spike-nbody-boids",
+]

@@ -1,4 +1,5 @@
-.PHONY: help test format lint run clean install bench docs docs-test docs-check
+.PHONY: help test format lint run clean install bench docs docs-test docs-check \
+	native-check native-build native-verify
 
 help:
 	@echo "ManifoldX Makefile"
@@ -12,6 +13,9 @@ help:
 	@echo "  make bench    - Run benchmark suites (ARGS=\"frame --against main\")"
 	@echo "  make docs     - Render the guide to docs/site with every block executed"
 	@echo "  make docs-check - The docs gate: render, tangle, examples, rift coverage"
+	@echo "  make native-check  - fmt, clippy and tests for the workspace crates"
+	@echo "  make native-build  - Build the manifold-gfx wheel with maturin"
+	@echo "  make native-verify - Build, install in a fresh venv, smoke, negative control"
 	@echo "  make clean    - Clean build artifacts"
 
 install:
@@ -28,6 +32,29 @@ lint:
 
 bench:
 	uv run python -m benchmarks $(ARGS)
+
+# The native-wheel gate (migration phase 0). NATIVE_PYTHON selects the
+# interpreter the wheel is built for and installed against (python3.14 for
+# the GIL build, python3.14t for the free-threaded one); NATIVE_DIST is the
+# wheel output directory. CARGO_TARGET_DIR defaults in-tree; point it at a
+# disk with room when the checkout's filesystem is tight.
+NATIVE_PYTHON ?= python3.14
+NATIVE_DIST ?= dist
+
+native-check:
+	cargo fmt --check
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo test --workspace
+
+native-build:
+	uv run --group native --locked maturin build --release -i $(NATIVE_PYTHON) --out $(NATIVE_DIST)
+
+# Build the wheel, install it in a fresh venv, run the smoke gate from
+# outside the checkout, then the negative control: with the extension
+# renamed inside that disposable venv the smoke must fail, and restored it
+# must pass again.
+native-verify: native-build
+	bash scripts/gates/native-verify.sh $(NATIVE_PYTHON) $(NATIVE_DIST)
 
 run:
 	@if [ -z "$(EXAMPLE)" ]; then \

@@ -129,6 +129,29 @@ class Figure:
     parents: dict
     rings: dict  # each chain's ring vertex indices into mesh.positions (-1 where the shoulders open)
     parts: dict  # each garment's vertex indices (top, bottom, waist, shoes, hair, hat), where it has shape
+    slots: np.ndarray  # (N,) int8: each vertex's palette slot, an index into human_dress.SLOTS
+    shades: np.ndarray  # (N,) float32: its colour over its slot's (a sole 0.6 of its shoe), 1 for most
+
+    def palette(self) -> np.ndarray:
+        """(PALETTE_SLOTS, 3) sRGB: the colour this figure wears in each slot, white where it has none; a
+        Palette of these colours draws its paletted_geometry as its own vertex colours draw."""
+        from manifoldx.resources import PALETTE_SLOTS
+
+        out = np.ones((PALETTE_SLOTS, 3), np.float32)
+        full = np.flatnonzero(self.shades == 1.0)
+        slots, first = np.unique(self.slots[full], return_index=True)
+        out[slots] = self.mesh.colors[full[first]]
+        return out
+
+    def paletted_geometry(self) -> dict:
+        """The mesh's geometry for a StandardMaterial(paletted=True): each vertex is surface PALETTE_SURFACE +
+        its slot, and its colour is its shade in grey, so each instance's Palette colours its parts."""
+        from manifoldx.resources import PALETTE_SURFACE
+
+        geo = self.mesh.to_geometry()
+        geo["colors"] = np.repeat(self.shades[:, None], 3, 1).astype(np.float32)
+        geo["surfaces"] = (PALETTE_SURFACE + self.slots).astype(np.float32)
+        return geo
 
 
 # ---------------------------------------------------------------------------------------------- the table
@@ -469,11 +492,11 @@ def build_human(params: HumanParams, outfit=None, level: int = 0) -> Figure:
         weights = np.ones_like(weights)
     colors = np.broadcast_to(np.array(SKIN_TONES[params.skin], np.float32), pos.shape).copy()
     mesh = Mesh(positions=pos.astype(np.float32), faces=s.faces, colors=colors, joints=pairs, weights=weights)
-    parts = {}
+    parts, slots, shades = {}, np.zeros(len(pos), np.int8), np.ones(len(pos), np.float32)  # all skin
     if outfit is not None:
         from manifoldx.modeling.assets.human_dress import dress
 
-        mesh, parts = dress(mesh, s, joints, outfit, level, SKIN_TONES[params.skin])
-    return Figure(params, level, mesh, joints, dict(PARENTS), dict(s.ring), parts)
+        mesh, parts, slots, shades = dress(mesh, s, joints, outfit, level, SKIN_TONES[params.skin])
+    return Figure(params, level, mesh, joints, dict(PARENTS), dict(s.ring), parts, slots, shades)
 
 

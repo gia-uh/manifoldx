@@ -25,6 +25,19 @@ def test_bake_returns_consecutive_shared_blocks():
     assert s.bake(_clip()) == first + 2
 
 
+def test_bake_at_overwrites_a_clip_of_the_same_length():
+    s = JointStore(8)
+    first = s.bake(_clip())
+    after = s._next
+    again = _clip()[::-1].copy()
+    assert s.bake(again, at=first) == first and s._next == after  # no new blocks
+    assert np.allclose(s.mirror[first, :2].transpose(0, 2, 1), again[0])
+    with pytest.raises(ValueError, match="frames"):
+        s.bake(_clip()[:1], at=first)
+    with pytest.raises(ValueError, match="frames"):
+        s.bake(_clip(), at=first + 1)
+
+
 def test_frames_pack_block_and_fraction():
     s = JointStore(8)
     first = s.bake(_clip())

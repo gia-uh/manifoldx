@@ -143,3 +143,18 @@ def test_garments_add_no_crease(params):
     faces = bare.mesh.faces.astype(np.int64)
     faces = faces[inside[faces].all(1)]
     assert _sharp(f.mesh, faces) <= _sharp(bare.mesh, faces)
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_each_vertex_wears_its_slot_colour_times_its_shade(level):
+    from manifoldx.modeling.assets.human_dress import SLOTS
+
+    f = _build(HumanParams(), Outfit(top="shirt", bottom="skirt", shoes="boots", hair="bun", hat="brim",
+                                     stripe=(0.4, 0.5, "#aa2222")), level)
+    assert len(f.slots) == len(f.shades) == len(f.mesh.positions)
+    want = f.palette()[f.slots] * f.shades[:, None]
+    assert np.allclose(f.mesh.colors, want, atol=1e-6)
+    worn = {SLOTS[s] for s in np.unique(f.slots)}
+    assert {"skin", "top", "bottom", "stripe", "shoes", "hat"} | ({"hair"} if level < 2 else set()) <= worn
+    geo = f.paletted_geometry()
+    assert np.allclose(geo["colors"][:, 0], f.shades) and geo["surfaces"].min() >= 32

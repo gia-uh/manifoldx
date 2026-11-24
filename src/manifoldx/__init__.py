@@ -6,7 +6,7 @@ from manifoldx import backends
 from manifoldx.types import Vector3, Vector4, Float, Color
 from manifoldx.ecs import EntityStore, ComponentView
 from manifoldx.systems import Query
-from manifoldx.components import Transform, Mesh, Material, Colors, Layer, Tint, Fade
+from manifoldx.components import Transform, Mesh, Material, Colors, Layer, Tint, Fade, Palette
 from manifoldx.camera import Camera
 from manifoldx.input import KeyEvent, PointerEvent, WheelEvent, ResizeEvent
 from manifoldx.resources import cube, sphere, plane, basic, phong, standard
@@ -103,6 +103,7 @@ __all__ = [
     "Transform",
     "Layer",
     "Tint",
+    "Palette",
     "Fade",
     "Mesh",
     "Material",
