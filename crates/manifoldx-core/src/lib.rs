@@ -9,6 +9,8 @@
 //! an installable wheel whose extension reports this crate's real state, so
 //! nothing downstream can mistake it for a working native runtime.
 
+pub mod ecs;
+
 /// The runtime's name, as the bindings' bootstrap reports it.
 pub const RUNTIME_NAME: &str = "manifoldx-core";
 
