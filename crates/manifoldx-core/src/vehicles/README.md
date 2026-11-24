@@ -65,8 +65,8 @@ pose-publication ms/frame for one car. The negative control removes tyre grip
 and requires the acceleration assertion to fail.
 
 A measured run of the installed wheel (Linux x86_64, free-threaded CPython
-3.14t) printed 3,492 fixed substeps, 0.0066 ms/substep for the solver and
-0.0012 ms/substep for pose publication, with pacing reported separately. These
+3.14t) printed 3,492 fixed substeps, 0.0067 ms/substep for the solver and
+0.0014 ms/substep for pose publication, with pacing reported separately. These
 are measurements of this solver on that host, not an FPS claim.
 
 `make native-check` covers formatting, clippy and the Rust tests, including the
