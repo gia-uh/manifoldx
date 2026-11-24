@@ -1,0 +1,56 @@
+# Compile and package the first native mesh renderer slice at an exact SHA.
+# The runner has no GPU; the uploaded binary is executed offscreen on the
+# GPU host, which is where the render evidence comes from.
+name: Native renderer
+
+on:
+  pull_request:
+    branches: [rust-core]
+    paths:
+      - 'crates/manifoldx-render/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/native-render.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      MANIFOLDX_SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust with rustfmt and clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format the renderer crate
+        run: cargo fmt -p manifoldx-render -- --check
+
+      - name: Clippy the renderer crate
+        run: cargo clippy -p manifoldx-render --all-targets -- -D warnings
+
+      - name: Test the renderer crate
+        # The offscreen test skips itself when the runner exposes no Vulkan
+        # adapter; the standalone binary is the hardware evidence path.
+        run: cargo test -p manifoldx-render
+
+      - name: Build the release scene binary
+        run: |
+          cargo build -p manifoldx-render --release --bin native-scene
+          strip target/release/native-scene
+          sha256sum target/release/native-scene > target/release/native-scene.sha256
+
+      - name: Upload the exact-SHA binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-scene
+          path: |
+            target/release/native-scene
+            target/release/native-scene.sha256
+          if-no-files-found: error
+          retention-days: 7

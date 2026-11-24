@@ -1,0 +1,23 @@
+[package]
+name = "manifoldx-render"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "manifoldx_render"
+path = "src/lib.rs"
+
+[[bin]]
+name = "native-scene"
+path = "src/bin/native-scene.rs"
+
+[dependencies]
+bytemuck = "=1.25.2"
+manifoldx-core = { path = "../manifoldx-core" }
+pollster = "=0.4.0"
+# The same pinned graphics stack the baseline native surface probe used.
+# The renderer owns one device/queue pair; no Python or wgpu-py handle crosses
+# this boundary. Vulkan is the Linux target; other backends arrive with the
+# platform slices.
+wgpu = { version = "=29.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }

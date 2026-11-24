@@ -8,6 +8,7 @@ resolver = "2"
 members = [
     "crates/manifoldx-core",
     "crates/manifoldx-python",
+    "crates/manifoldx-render",
     "crates/manifoldx-sdk",
 ]
 exclude = [
