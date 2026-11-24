@@ -73,7 +73,19 @@ run_smoke() {
     echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
     return "$status"
 }
+run_entity_slots() {
+    local label="$1" status
+    if "$VENVPY" -I "$HERE/native-entity-slots.py" >"$SCRATCH/$label.log" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
 run_smoke smoke-before
+run_entity_slots entity-slots-before
 "$VENVPY" -I "$HERE/native-selection-smoke.py" installed
 SO="$("$VENVPY" -c 'import manifoldx._core_native as m; print(m.__file__)')"
 mv "$SO" "$SO.gate-removed"
@@ -83,8 +95,14 @@ if run_smoke smoke-removed; then
 fi
 grep -qx 'FAIL: manifoldx._core_native is not installed in the venv' "$SCRATCH/smoke-removed.log" \
     || fail "ordinary smoke failed for a reason other than missing _core_native"
+if run_entity_slots entity-slots-missing; then
+    fail "entity slot gate passed with _core_native removed"
+fi
+grep -q 'the installed extension has a module spec' "$SCRATCH/entity-slots-missing.log" \
+    || fail "entity slot gate failed for a reason other than the missing extension"
 "$VENVPY" -I "$HERE/native-selection-smoke.py" missing
 mv "$SO.gate-removed" "$SO"
 run_smoke smoke-restored
+run_entity_slots entity-slots-restored
 "$VENVPY" -I "$HERE/native-selection-smoke.py" installed
 echo "native-verify: passed for $PYVER/$ABI (installed -> missing -> restored)"
