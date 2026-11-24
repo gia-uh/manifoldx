@@ -161,6 +161,12 @@ fn expect_schema(
 
 /// Read the selected World rows and build owned instances.
 ///
+/// The source's selected columns are revalidated here, before any row is
+/// allocated. `InstanceSource` has public fields, so a manually built source or
+/// one resolved against a different `World` can name a column with the wrong
+/// element type or width; this boundary turns that into a [`SceneError`]
+/// instead of a sliced-buffer panic or a misindexed row.
+///
 /// `ignore_transform` exists only for the negative control: it proves that a
 /// changed World transform is what changes the image, because forcing identity
 /// makes the two scene states identical.
@@ -169,6 +175,15 @@ pub fn read_instances(
     source: InstanceSource,
     ignore_transform: bool,
 ) -> Result<InstanceBatch, SceneError> {
+    if source.max_instances == 0 {
+        return Err(SceneError::BadLimit);
+    }
+    expect_schema(world, source.transform, ElementType::F32, 10, "Transform")?;
+    expect_schema(world, source.mesh, ElementType::U32, 1, "Mesh")?;
+    if let Some(material) = source.material {
+        expect_schema(world, material, ElementType::U32, 1, "Material")?;
+    }
+
     // Reject before snapshotting: a scene above the bound must not allocate an
     // entity list or any component rows.
     let alive = world.alive_count() as usize;

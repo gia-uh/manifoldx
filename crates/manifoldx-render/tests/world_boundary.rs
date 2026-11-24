@@ -4,7 +4,7 @@
 use manifoldx_core::ecs::{ColumnData, ComponentPayload, ElementType, EntityId, World};
 use manifoldx_render::math::Mat4;
 use manifoldx_render::scene::{
-    read_instances, resolve_source, spawn_instances, MeshData, SceneError,
+    read_instances, resolve_source, spawn_instances, InstanceSource, MeshData, SceneError,
 };
 
 fn world_with_rows() -> (World, Vec<EntityId>, usize) {
@@ -116,6 +116,136 @@ fn wrong_schema_is_rejected_before_a_read() {
     world.register("Mesh", ElementType::U32, 1).unwrap();
     match resolve_source(&world, "Transform", "Mesh", None, 4) {
         Err(SceneError::Schema { name, .. }) => assert_eq!(name, "Transform"),
+        other => panic!("expected a schema error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_manually_constructed_source_with_wrong_width_is_rejected() {
+    let mut world = World::new(4).unwrap();
+    world.register("Transform", ElementType::F32, 10).unwrap();
+    let mesh = world.register("Mesh", ElementType::U32, 1).unwrap();
+    let thin = world.register("Thin", ElementType::F32, 3).unwrap();
+    world
+        .spawn(
+            1,
+            &[
+                ComponentPayload {
+                    component: thin,
+                    data: ColumnData::F32(vec![1.0, 2.0, 3.0]),
+                },
+                ComponentPayload {
+                    component: mesh,
+                    data: ColumnData::U32(vec![7]),
+                },
+            ],
+        )
+        .unwrap();
+
+    // The public fields let a caller name a three-wide f32 column. Reading it
+    // as the ten-wide Transform row must fail before the slice, not panic.
+    let source = InstanceSource {
+        transform: thin,
+        mesh,
+        material: None,
+        max_instances: 8,
+    };
+    match read_instances(&world, source, false) {
+        Err(SceneError::Schema {
+            name,
+            expected,
+            actual,
+        }) => {
+            assert_eq!(name, "Transform");
+            assert!(expected.contains("F32 width 10"), "{expected}");
+            assert!(actual.contains("F32 width 3"), "{actual}");
+        }
+        other => panic!("expected a schema error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_manually_constructed_source_with_wrong_mesh_width_is_rejected() {
+    let mut world = World::new(4).unwrap();
+    let transform = world.register("Transform", ElementType::F32, 10).unwrap();
+    let wide_mesh = world.register("WideMesh", ElementType::U32, 2).unwrap();
+    world
+        .spawn(
+            1,
+            &[
+                ComponentPayload {
+                    component: transform,
+                    data: ColumnData::F32(vec![0.0; 10]),
+                },
+                ComponentPayload {
+                    component: wide_mesh,
+                    data: ColumnData::U32(vec![7, 8]),
+                },
+            ],
+        )
+        .unwrap();
+
+    let source = InstanceSource {
+        transform,
+        mesh: wide_mesh,
+        material: None,
+        max_instances: 8,
+    };
+    match read_instances(&world, source, false) {
+        Err(SceneError::Schema {
+            name,
+            expected,
+            actual,
+        }) => {
+            assert_eq!(name, "Mesh");
+            assert!(expected.contains("U32 width 1"), "{expected}");
+            assert!(actual.contains("U32 width 2"), "{actual}");
+        }
+        other => panic!("expected a schema error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_source_resolved_against_another_world_is_rejected() {
+    let (world_a, _, _) = world_with_rows();
+    let source = resolve_source(&world_a, "Transform", "Mesh", Some("Material"), 32).unwrap();
+
+    // World B has the same column indices but a three-wide f32 column where
+    // World A had Transform. The old read passed the kind check and then
+    // sliced ten floats out of a three-float row.
+    let mut world_b = World::new(4).unwrap();
+    let thin = world_b.register("Thin", ElementType::F32, 3).unwrap();
+    let mesh = world_b.register("Mesh", ElementType::U32, 1).unwrap();
+    let material = world_b.register("Material", ElementType::U32, 1).unwrap();
+    assert_eq!(
+        (thin, mesh, material),
+        (source.transform, source.mesh, source.material.unwrap())
+    );
+    world_b
+        .spawn(
+            1,
+            &[
+                ComponentPayload {
+                    component: thin,
+                    data: ColumnData::F32(vec![1.0, 2.0, 3.0]),
+                },
+                ComponentPayload {
+                    component: mesh,
+                    data: ColumnData::U32(vec![7]),
+                },
+                ComponentPayload {
+                    component: material,
+                    data: ColumnData::U32(vec![1]),
+                },
+            ],
+        )
+        .unwrap();
+
+    match read_instances(&world_b, source, false) {
+        Err(SceneError::Schema { name, actual, .. }) => {
+            assert_eq!(name, "Transform");
+            assert!(actual.contains("F32 width 3"), "{actual}");
+        }
         other => panic!("expected a schema error, got {other:?}"),
     }
 }
