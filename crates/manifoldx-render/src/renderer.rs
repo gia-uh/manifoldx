@@ -757,13 +757,50 @@ struct VertexOut {
     @location(1) color: vec3<f32>,
 };
 
+fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
+    let len_sq = dot(v, v);
+    if len_sq > 1e-20 && len_sq < 1e30 {
+        return v * inverseSqrt(len_sq);
+    }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+// The instance model is T * R * S. Its upper-left 3x3 columns are s_j * R e_j,
+// so (M^-1)^T n = sum_j (n_j / |column_j|^2) * column_j. No explicit inverse is
+// needed. A zero or non-finite axis is dropped; when every axis is degenerate
+// the input normal is used so the result stays finite. math::transform_normal
+// mirrors this function for tests and evidence.
+fn transform_normal(model: mat4x4<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let c0 = model[0].xyz;
+    let c1 = model[1].xyz;
+    let c2 = model[2].xyz;
+    let l0 = dot(c0, c0);
+    let l1 = dot(c1, c1);
+    let l2 = dot(c2, c2);
+    var result = vec3<f32>(0.0);
+    if l0 > 1e-20 && l0 < 1e30 {
+        result += (normal.x / l0) * c0;
+    }
+    if l1 > 1e-20 && l1 < 1e30 {
+        result += (normal.y / l1) * c1;
+    }
+    if l2 > 1e-20 && l2 < 1e30 {
+        result += (normal.z / l2) * c2;
+    }
+    let len_sq = dot(result, result);
+    if len_sq > 1e-20 && len_sq < 1e30 {
+        return result * inverseSqrt(len_sq);
+    }
+    return safe_normalize(normal);
+}
+
 @vertex
 fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     let model = mat4x4<f32>(instance.m0, instance.m1, instance.m2, instance.m3);
     let world = model * vec4<f32>(in.position, 1.0);
     var out: VertexOut;
     out.clip_position = camera.view_proj * world;
-    out.normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);
+    out.normal = transform_normal(model, in.normal);
     out.color = instance.color.rgb;
     return out;
 }

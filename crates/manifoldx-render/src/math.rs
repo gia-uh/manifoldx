@@ -129,6 +129,57 @@ pub fn model_from_transform_row(row: &[f32]) -> Mat4 {
     )
 }
 
+/// Transform a direction by the model's linear part, ignoring translation.
+pub fn transform_direction(model: &Mat4, direction: Vec3) -> Vec3 {
+    let mut out = [0.0; 3];
+    for (row, value) in out.iter_mut().enumerate() {
+        *value = model.at(row, 0) * direction[0]
+            + model.at(row, 1) * direction[1]
+            + model.at(row, 2) * direction[2];
+    }
+    out
+}
+
+/// The unit normal after the inverse-transpose normal transform.
+///
+/// [`trs`] builds `T * R * S`, whose upper-left 3x3 columns are `s_j * R e_j`.
+/// For that family `M^-T n = sum_j (n_j / |column_j|^2) * column_j`, so no
+/// explicit inverse is needed. A zero or non-finite axis is dropped; when
+/// every axis is degenerate the normalized input normal is returned, and a
+/// non-finite input falls back to `+Z`. The shader in `renderer.rs` mirrors
+/// this function.
+pub fn transform_normal(model: &Mat4, normal: Vec3) -> Vec3 {
+    let mut out = [0.0f32; 3];
+    for column in 0..3 {
+        let axis = [
+            model.at(0, column),
+            model.at(1, column),
+            model.at(2, column),
+        ];
+        let len_sq = axis.iter().map(|value| value * value).sum::<f32>();
+        if len_sq.is_finite() && len_sq > 1e-20 && len_sq < 1e30 {
+            let factor = normal[column] / len_sq;
+            for (row, value) in out.iter_mut().enumerate() {
+                *value += factor * axis[row];
+            }
+        }
+    }
+    unit_or(out).unwrap_or_else(|| unit_or(normal).unwrap_or([0.0, 0.0, 1.0]))
+}
+
+fn unit_or(value: Vec3) -> Option<Vec3> {
+    let len_sq = value
+        .iter()
+        .map(|component| component * component)
+        .sum::<f32>();
+    if len_sq.is_finite() && len_sq > 1e-20 && len_sq < 1e30 {
+        let inverse = len_sq.sqrt().recip();
+        Some([value[0] * inverse, value[1] * inverse, value[2] * inverse])
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +229,63 @@ mod tests {
         assert_eq!(c[3], 13.0);
         assert_eq!(c[4], 2.0);
         assert_eq!(c[12], 4.0);
+    }
+
+    fn unit(v: Vec3) -> Vec3 {
+        let len = dot(v, v).sqrt();
+        [v[0] / len, v[1] / len, v[2] / len]
+    }
+
+    fn dot(a: Vec3, b: Vec3) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    #[test]
+    fn inverse_transpose_keeps_an_oblique_normal_perpendicular() {
+        // The reviewed failure case: scale(2, 1, 1) with an oblique normal
+        // (1, 1, 0)/sqrt(2) and the in-plane tangent (1, -1, 0)/sqrt(2).
+        // A yaw rotation and a translation must not change the result.
+        let half = 0.6f32 * 0.5;
+        let model = trs(
+            [1.0, 2.0, 3.0],
+            [0.0, half.sin(), 0.0, half.cos()],
+            [2.0, 1.0, 1.0],
+        );
+        let normal = unit([1.0, 1.0, 0.0]);
+        let tangent = unit([1.0, -1.0, 0.0]);
+        let scaled_tangent = unit(transform_direction(&model, tangent));
+
+        // The old formula transformed a normal like a tangent. Its dot product
+        // with the scaled tangent is 0.6, so the normal stops being perpendicular.
+        let legacy = unit(transform_direction(&model, normal));
+        let legacy_dot = dot(legacy, scaled_tangent);
+        assert!(
+            (legacy_dot - 0.6).abs() < 1e-5,
+            "old formula dot {legacy_dot}, expected 0.6"
+        );
+
+        let correct = transform_normal(&model, normal);
+        let correct_dot = dot(correct, scaled_tangent);
+        assert!(
+            correct_dot.abs() < 1e-5,
+            "inverse-transpose dot {correct_dot}, expected 0"
+        );
+    }
+
+    #[test]
+    fn degenerate_scale_keeps_the_normal_finite() {
+        let model = trs([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 1.0]);
+        for normal in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 1.0]] {
+            let out = transform_normal(&model, normal);
+            assert!(out.iter().all(|value| value.is_finite()), "{out:?}");
+            let len = dot(out, out).sqrt();
+            assert!((len - 1.0).abs() < 1e-5, "{out:?} has length {len}");
+        }
+
+        let collapsed = trs([0.0; 3], [0.0, 0.0, 0.0, 1.0], [0.0; 3]);
+        assert_eq!(
+            transform_normal(&collapsed, [0.0, 0.0, 1.0]),
+            [0.0, 0.0, 1.0]
+        );
     }
 }

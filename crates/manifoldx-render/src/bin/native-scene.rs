@@ -5,6 +5,13 @@
 //! `--check` asserts coverage, depth ordering, a transform-driven image change
 //! and the two negative controls. `--no-draw` and `--ignore-transform` are the
 //! controls; with `--check` they deliberately exit non-zero.
+//!
+//! `--check-normals` is a small dedicated case for the inverse-transpose normal
+//! transform: one oblique normal on a surface scaled by `(2, 1, 1)`, compared
+//! with the pixel the corrected math predicts and against the old formula's
+//! pixel. `--corrupt-normal` is its negative control: it uploads the normal
+//! that makes the corrected shader reproduce the old formula, so the check
+//! deliberately exits non-zero.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,8 +19,9 @@ use std::time::Instant;
 
 use manifoldx_core::ecs::{ColumnData, ElementType, EntityId, World};
 use manifoldx_render::camera::Camera;
+use manifoldx_render::math::{transform_direction, transform_normal, trs, Mat4};
 use manifoldx_render::renderer::{
-    json_string, write_ppm, NativeRenderer, RenderOutput, RendererOptions, MAX_SIDE,
+    json_string, srgb_to_linear, write_ppm, NativeRenderer, RenderOutput, RendererOptions, MAX_SIDE,
 };
 use manifoldx_render::scene::{resolve_source, spawn_instances, MeshData, DEFAULT_MAX_INSTANCES};
 
@@ -36,6 +44,8 @@ struct Options {
     check: bool,
     no_draw: bool,
     ignore_transform: bool,
+    check_normals: bool,
+    corrupt_normal: bool,
 }
 
 impl Default for Options {
@@ -47,6 +57,8 @@ impl Default for Options {
             check: false,
             no_draw: false,
             ignore_transform: false,
+            check_normals: false,
+            corrupt_normal: false,
         }
     }
 }
@@ -60,6 +72,8 @@ impl Options {
                 "--check" => options.check = true,
                 "--no-draw" => options.no_draw = true,
                 "--ignore-transform" => options.ignore_transform = true,
+                "--check-normals" => options.check_normals = true,
+                "--corrupt-normal" => options.corrupt_normal = true,
                 "--out-dir" => {
                     options.out_dir = PathBuf::from(args.next().ok_or("--out-dir needs a path")?);
                 }
@@ -80,6 +94,7 @@ impl Options {
                 "-h" | "--help" => {
                     println!(
                         "native-scene [--check] [--no-draw] [--ignore-transform]\n\
+                         \x20            [--check-normals] [--corrupt-normal]\n\
                          \x20            [--out-dir DIR] [--width N] [--height N]"
                     );
                     std::process::exit(0);
@@ -114,6 +129,10 @@ fn main() -> ExitCode {
 fn run(options: Options) -> Result<(), String> {
     let started = Instant::now();
     std::fs::create_dir_all(&options.out_dir).map_err(|error| error.to_string())?;
+
+    if options.check_normals || options.corrupt_normal {
+        return run_normal_check(&options, started);
+    }
 
     let mut rows = initial_rows();
     let (mut world, ids, transform_column) = build_world(&rows)?;
@@ -253,6 +272,305 @@ fn run(options: Options) -> Result<(), String> {
         CheckResult::Control(message) => Err(message),
         CheckResult::Fail(message) => Err(message),
     }
+}
+
+const NORMAL_CHECK_SIZE: u32 = 128;
+const NORMAL_CHECK_GEOMETRY: u32 = 1;
+const NORMAL_CHECK_MATERIAL: u32 = 1;
+const NORMAL_CHECK_SCALE: [f32; 3] = [2.0, 1.0, 1.0];
+const NORMAL_CHECK_COLOR: [f32; 3] = [0.9, 0.9, 0.9];
+/// One 8-bit unit covers rounding; two more cover the hardware sRGB transfer
+/// and f32 interpolation. The old formula's pixel is 16 units away, so the
+/// positive check also requires a margin of twice the tolerance.
+const NORMAL_CHECK_TOLERANCE: u8 = 3;
+
+enum NormalCheck {
+    Pass,
+    ExpectedFailure(String),
+    Fail(String),
+}
+
+fn run_normal_check(options: &Options, started: Instant) -> Result<(), String> {
+    let mut renderer =
+        NativeRenderer::new(RendererOptions::default()).map_err(|error| error.to_string())?;
+
+    // The reviewed case: scale(2, 1, 1) with normal (1, 1, 0)/sqrt(2) and the
+    // in-plane tangent (1, -1, 0)/sqrt(2).
+    let input_normal = normalized([1.0, 1.0, 0.0]);
+    let tangent = normalized([1.0, -1.0, 0.0]);
+    let up = [0.0, 0.0, 1.0];
+    let model = trs([0.0; 3], IDENTITY, NORMAL_CHECK_SCALE);
+    let correct_normal = transform_normal(&model, input_normal);
+    let legacy = legacy_normal(&model, input_normal);
+
+    // The negative control uploads the normal the corrected shader maps back to
+    // the old formula's world normal: n_obj = normalize(S * n_legacy).
+    let upload_normal = if options.corrupt_normal {
+        normalized(transform_direction(&model, legacy))
+    } else {
+        input_normal
+    };
+
+    let mesh = oblique_quad(tangent, up, upload_normal);
+    renderer
+        .upload_mesh(NORMAL_CHECK_GEOMETRY, &mesh, NORMAL_CHECK_COLOR)
+        .map_err(|error| error.to_string())?;
+    renderer.register_material(NORMAL_CHECK_MATERIAL, NORMAL_CHECK_COLOR);
+
+    let mut world = World::new(4).map_err(|error| error.to_string())?;
+    world
+        .register("Transform", ElementType::F32, 10)
+        .map_err(|error| error.to_string())?;
+    world
+        .register("Mesh", ElementType::U32, 1)
+        .map_err(|error| error.to_string())?;
+    world
+        .register("Material", ElementType::U32, 1)
+        .map_err(|error| error.to_string())?;
+    let rows = [row([0.0; 3], IDENTITY, NORMAL_CHECK_SCALE)];
+    spawn_instances(
+        &mut world,
+        &rows,
+        &[NORMAL_CHECK_GEOMETRY],
+        &[NORMAL_CHECK_MATERIAL],
+    )
+    .map_err(|error| error.to_string())?;
+    let source = resolve_source(&world, "Transform", "Mesh", Some("Material"), 8)
+        .map_err(|error| error.to_string())?;
+
+    // Look along the oblique normal so the quad is face-on before the scale.
+    let camera = Camera {
+        position: scale3(input_normal, 3.0),
+        target: [0.0; 3],
+        up,
+        fov_y_degrees: 55.0,
+        near: 0.1,
+        far: 100.0,
+    };
+
+    let image = renderer
+        .render(
+            &world,
+            source,
+            &camera,
+            NORMAL_CHECK_SIZE,
+            NORMAL_CHECK_SIZE,
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+    write_ppm(
+        &options.out_dir.join("normal-check.ppm"),
+        image.width,
+        image.height,
+        &image.rgba,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let expected_correct = shade_rgb(NORMAL_CHECK_COLOR, correct_normal);
+    let expected_legacy = shade_rgb(NORMAL_CHECK_COLOR, legacy);
+    let actual = center_rgb(&image);
+    let delta_correct = max_channel_diff(actual, expected_correct);
+    let delta_legacy = max_channel_diff(actual, expected_legacy);
+
+    let check = if options.corrupt_normal {
+        if delta_correct <= NORMAL_CHECK_TOLERANCE {
+            NormalCheck::Fail(format!(
+                "corrupt-normal negative still matched the corrected normal: actual {actual:?}, \
+                 expected {expected_correct:?}"
+            ))
+        } else {
+            NormalCheck::ExpectedFailure(format!(
+                "corrupt normal rejected: actual {actual:?} is {delta_correct} from corrected \
+                 {expected_correct:?} and {delta_legacy} from old-formula {expected_legacy:?}"
+            ))
+        }
+    } else if delta_correct <= NORMAL_CHECK_TOLERANCE
+        && delta_legacy > NORMAL_CHECK_TOLERANCE.saturating_mul(2)
+    {
+        NormalCheck::Pass
+    } else {
+        NormalCheck::Fail(format!(
+            "actual {actual:?} is {delta_correct} from corrected {expected_correct:?} \
+             (tolerance {NORMAL_CHECK_TOLERANCE}) and {delta_legacy} from old-formula \
+             {expected_legacy:?}"
+        ))
+    };
+
+    let summary = normal_summary_json(
+        options,
+        &renderer,
+        &image,
+        input_normal,
+        correct_normal,
+        legacy,
+        expected_correct,
+        expected_legacy,
+        actual,
+        delta_correct,
+        delta_legacy,
+        &check,
+        elapsed_ms(started.elapsed()),
+    );
+    std::fs::write(options.out_dir.join("normal-check.json"), &summary)
+        .map_err(|error| error.to_string())?;
+    println!("{summary}");
+
+    match check {
+        NormalCheck::Pass => Ok(()),
+        NormalCheck::ExpectedFailure(message) | NormalCheck::Fail(message) => Err(message),
+    }
+}
+
+fn oblique_quad(tangent: [f32; 3], up: [f32; 3], normal: [f32; 3]) -> MeshData {
+    let a = scale3(tangent, 0.5);
+    let b = scale3(up, 0.5);
+    let positions = vec![
+        add3(scale3(a, -1.0), scale3(b, -1.0)),
+        add3(scale3(a, -1.0), b),
+        add3(a, b),
+        add3(a, scale3(b, -1.0)),
+    ];
+    MeshData {
+        positions,
+        normals: vec![normal; 4],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    }
+}
+
+fn legacy_normal(model: &Mat4, normal: [f32; 3]) -> [f32; 3] {
+    normalized(transform_direction(model, normal))
+}
+
+fn shade_rgb(base_srgb: [f32; 3], normal: [f32; 3]) -> [u8; 3] {
+    let light = normalized([0.35, 0.8, 0.55]);
+    let diffuse = dot3(normal, light).max(0.0);
+    let factor = 0.28 + 0.72 * diffuse;
+    let base = srgb_to_linear(base_srgb);
+    [
+        linear_to_srgb_u8(base[0] * factor),
+        linear_to_srgb_u8(base[1] * factor),
+        linear_to_srgb_u8(base[2] * factor),
+    ]
+}
+
+fn linear_to_srgb_u8(value: f32) -> u8 {
+    let linear = value.clamp(0.0, 1.0);
+    let encoded = if linear <= 0.003_130_8 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+fn center_rgb(image: &RenderOutput) -> [u8; 3] {
+    let index =
+        ((image.height / 2) as usize * image.width as usize + (image.width / 2) as usize) * 4;
+    [
+        image.rgba[index],
+        image.rgba[index + 1],
+        image.rgba[index + 2],
+    ]
+}
+
+fn max_channel_diff(a: [u8; 3], b: [u8; 3]) -> u8 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(left, right)| left.abs_diff(*right))
+        .max()
+        .unwrap_or(0)
+}
+
+fn normalized(v: [f32; 3]) -> [f32; 3] {
+    let len = dot3(v, v).sqrt();
+    if len.is_finite() && len > 1e-20 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        [0.0, 0.0, 1.0]
+    }
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn scale3(v: [f32; 3], scale: f32) -> [f32; 3] {
+    [v[0] * scale, v[1] * scale, v[2] * scale]
+}
+
+fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normal_summary_json(
+    options: &Options,
+    renderer: &NativeRenderer,
+    image: &RenderOutput,
+    input: [f32; 3],
+    correct: [f32; 3],
+    legacy: [f32; 3],
+    expected_correct: [u8; 3],
+    expected_legacy: [u8; 3],
+    actual: [u8; 3],
+    delta_correct: u8,
+    delta_legacy: u8,
+    check: &NormalCheck,
+    elapsed_ms: u64,
+) -> String {
+    let (result, message) = match check {
+        NormalCheck::Pass => ("pass", None),
+        NormalCheck::ExpectedFailure(message) => ("control", Some(message.as_str())),
+        NormalCheck::Fail(message) => ("fail", Some(message.as_str())),
+    };
+    let source_sha = option_env!("MANIFOLDX_SOURCE_SHA").unwrap_or("uncommitted");
+    format!(
+        concat!(
+            "{{\"schema\":\"manifoldx-native-normal-check/1\",",
+            "\"source_sha\":{},",
+            "\"adapter\":{},\"width\":{},\"height\":{},",
+            "\"format\":\"rgba8unorm-srgb\",",
+            "\"model\":{{\"scale\":{},\"rotation\":[0,0,0,1]}},",
+            "\"input_normal\":{},\"correct_normal\":{},\"legacy_normal\":{},",
+            "\"expected_correct_rgb\":{},\"expected_legacy_rgb\":{},",
+            "\"actual_center_rgb\":{},\"tolerance\":{},",
+            "\"delta_correct\":{},\"delta_legacy\":{},",
+            "\"mode\":{},\"result\":{},\"message\":{},",
+            "\"elapsed_ms\":{},",
+            "\"note\":\"old formula is normalize(model * vec4(n, 0)); expected pixels come from \
+             that formula and from the inverse-transpose formula\"}}"
+        ),
+        json_string(source_sha),
+        renderer.adapter().to_json(),
+        image.width,
+        image.height,
+        vec3_json(NORMAL_CHECK_SCALE),
+        vec3_json(input),
+        vec3_json(correct),
+        vec3_json(legacy),
+        rgb_json(expected_correct),
+        rgb_json(expected_legacy),
+        rgb_json(actual),
+        NORMAL_CHECK_TOLERANCE,
+        delta_correct,
+        delta_legacy,
+        json_string(if options.corrupt_normal {
+            "corrupt-normal"
+        } else {
+            "positive"
+        }),
+        json_string(result),
+        message.map_or_else(|| "null".to_string(), json_string),
+        elapsed_ms
+    )
+}
+
+fn vec3_json(value: [f32; 3]) -> String {
+    format!("[{:.6},{:.6},{:.6}]", value[0], value[1], value[2])
+}
+
+fn rgb_json(value: [u8; 3]) -> String {
+    format!("[{},{},{}]", value[0], value[1], value[2])
 }
 
 fn build_world(rows: &[[f32; 10]]) -> Result<(World, Vec<EntityId>, usize), String> {
