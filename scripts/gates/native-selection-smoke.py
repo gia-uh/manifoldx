@@ -31,9 +31,11 @@ if state == "installed":
     name, bootstrap = _selection()
     assert name == "rust" and bootstrap["runtime"] == "not implemented", bootstrap
     expected, message = NotImplementedError, "native Engine runtime is not implemented"
-else:
-    assert state == "missing", state
+elif state == "missing":
     expected, message = ImportError, "requires manifoldx._core_native"
+else:
+    assert state == "unloadable", state
+    expected, message = ImportError, "manifoldx._core_native could not load"
 
 engine = Engine.__new__(Engine)
 try:
@@ -42,6 +44,9 @@ except expected as exc:
     assert message in str(exc), str(exc)
     if state == "missing":
         assert isinstance(exc.__cause__, ModuleNotFoundError)
+    elif state == "unloadable":
+        assert isinstance(exc.__cause__, (ImportError, OSError)), exc.__cause__
+        assert not isinstance(exc.__cause__, ModuleNotFoundError), exc.__cause__
     print(f"rust {state}: {type(exc).__name__}: {exc}")
 else:
     raise AssertionError("Rust selection constructed a Python Engine")
