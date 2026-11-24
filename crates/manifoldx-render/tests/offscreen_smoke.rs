@@ -66,7 +66,7 @@ fn offscreen_render_reads_world_and_changes_with_a_transform() {
         .count();
     assert!(lit > 100, "only {lit} lit pixels");
 
-    let rows = vec![
+    let rows = [
         [0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.5, 0.5, 0.5],
         [0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.5, 0.5, 0.5],
     ]

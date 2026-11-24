@@ -95,7 +95,14 @@ impl Options {
 }
 
 fn main() -> ExitCode {
-    match run(Options::parse()) {
+    let options = match Options::parse() {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("native-scene: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match run(options) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("CHECK FAIL: {error}");

@@ -127,7 +127,7 @@ fn mesh_validation_rejects_bad_indices_and_mismatched_normals() {
         normals: vec![[0.0, 0.0, 1.0]; 3],
         indices: vec![0, 1, 2],
     };
-    assert_eq!(mesh.validate(), Ok(3));
+    assert_eq!(mesh.validate().unwrap(), 3);
     mesh.indices = vec![0, 1, 3];
     assert!(matches!(
         mesh.validate(),
