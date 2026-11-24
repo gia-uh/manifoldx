@@ -66,7 +66,13 @@ impl Output {
         Self { ptr }
     }
 
-    pub fn mesh(&mut self, positions: &[f32], normals: &[f32], indices: &[u32], material: u32) -> u32 {
+    pub fn mesh(
+        &mut self,
+        positions: &[f32],
+        normals: &[f32],
+        indices: &[u32],
+        material: u32,
+    ) -> u32 {
         debug_assert_eq!(positions.len(), normals.len());
         unsafe {
             ((*self.ptr).push_mesh)(
