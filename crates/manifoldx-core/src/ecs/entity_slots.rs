@@ -262,6 +262,32 @@ impl EntitySlots {
         self.slots.get(slot as usize).map(|slot| slot.state)
     }
 
+    /// Validate that a batch names unique, live, generation-current entities.
+    ///
+    /// The whole batch is checked without changing any slot. A stale
+    /// generation, a duplicate slot, an out-of-range slot or a non-live slot
+    /// rejects the batch with the allocator untouched.
+    pub fn validate_alive(&self, ids: &[EntityId]) -> Result<(), EntityError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.validate_unique(ids)?;
+        for id in ids {
+            self.require_state(*id, SlotState::Alive, EntityError::NotAlive { id: *id })?;
+        }
+        Ok(())
+    }
+
+    /// Every live identity in ascending slot order, as an owned list.
+    pub fn alive_ids(&self) -> Vec<EntityId> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.state == SlotState::Alive)
+            .map(|(slot, state)| EntityId::new(slot as u32, state.generation))
+            .collect()
+    }
+
     /// The current identity of one slot, including free slots.
     pub fn current_identity(&self, slot: u32) -> Result<EntityId, EntityError> {
         let current = self
