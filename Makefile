@@ -1,5 +1,5 @@
 .PHONY: help test format lint run clean install bench docs docs-test docs-check \
-	native-check native-build native-verify
+	native-check native-build native-verify parity-fast
 
 help:
 	@echo "ManifoldX Makefile"
@@ -16,6 +16,7 @@ help:
 	@echo "  make native-check  - fmt, clippy and tests for the workspace crates"
 	@echo "  make native-build  - Build the manifold-gfx wheel with maturin"
 	@echo "  make native-verify - Build, install in a fresh venv, smoke, negative control"
+	@echo "  make parity-fast - Shared Python/native backend cases in an installed venv"
 	@echo "  make clean    - Clean build artifacts"
 
 install:
@@ -55,6 +56,33 @@ native-build:
 # must pass again.
 native-verify: native-build
 	bash scripts/gates/native-verify.sh $(NATIVE_PYTHON) $(NATIVE_DIST)
+
+# The shared-backend parity suite. PARITY_PYTHON is an already selected
+# interpreter (a venv with the production wheel and pytest); this target builds
+# nothing, installs nothing and never falls back to the source checkout. The
+# isolated interpreter and a disposable cwd keep a poisoned PYTHONPATH,
+# PYTHONHOME or checkout on sys.path from choosing the runtime.
+PARITY_PYTHON ?= python3.14t
+TESTS ?= tests/core/test_backend.py
+
+parity-fast:
+	@test -x "$(PARITY_PYTHON)" || command -v "$(PARITY_PYTHON)" >/dev/null || { \
+		echo "parity-fast: interpreter not found: $(PARITY_PYTHON)" >&2; exit 2; }
+	@$(PARITY_PYTHON) -I -c 'import manifoldx, pytest' 2>/dev/null || { \
+		echo "parity-fast: $(PARITY_PYTHON) needs an installed manifoldx and pytest" >&2; exit 2; }
+	@set -eu; \
+	tmp="$$(mktemp -d "$${TMPDIR:-/var/tmp}/manifoldx-parity.XXXXXX")"; \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	tests=""; \
+	for path in $(TESTS); do \
+		case "$$path" in /*) ;; *) path="$(CURDIR)/$$path" ;; esac; \
+		tests="$$tests $$path"; \
+	done; \
+	cd "$$tmp"; \
+	env -u PYTHONPATH -u PYTHONHOME "$(PARITY_PYTHON)" -I -m pytest -v \
+		-o addopts= -o pythonpath= -p no:cacheprovider \
+		--rootdir="$(CURDIR)" --confcutdir="$(CURDIR)/tests/core" \
+		--import-mode=importlib $$tests
 
 run:
 	@if [ -z "$(EXAMPLE)" ]; then \

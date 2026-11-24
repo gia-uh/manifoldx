@@ -37,8 +37,10 @@ jobs:
 
       - name: Packaging and startup contracts with CPU Engine callers
         # Root conftest probes a GPU during configuration; these checks need none.
+        # test_backend.py needs the built wheel and runs in its own step below.
         run: >-
-          uv run --no-sync pytest -o addopts= --confcutdir=tests/core tests/core
+          uv run --no-sync pytest -o addopts= --confcutdir=tests/core
+          --ignore=tests/core/test_backend.py tests/core
           tests/test_engine.py::test_engine_stores_title_width_height_fullscreen
           tests/test_engine.py::test_engine_creation
           tests/test_engine.py::test_engine_startup_decorator
@@ -53,6 +55,17 @@ jobs:
           tests/test_ibl.py::test_engine_environment_intensity
           tests/test_ibl_loading.py::test_set_environment_alone_starts_no_work
           tests/test_web_engine_apis.py -q
+
+      - name: Shared Python/native backend parity from the built wheel
+        # The same target a developer runs; no second build, only an isolated
+        # installation of the wheel this job already produced.
+        shell: bash
+        run: |
+          set -euo pipefail
+          venv="$(mktemp -d "${TMPDIR:-/tmp}/manifoldx-parity.XXXXXX")/venv"
+          uv venv --python python3.14t "$venv"
+          uv pip install --python "$venv/bin/python" dist/*.whl pytest
+          make parity-fast PARITY_PYTHON="$venv/bin/python" TESTS=tests/core/test_backend.py
 
       - name: Rift coverage
         run: uvx --from git+https://github.com/apiad/rift@v0.9.0 rift check .
