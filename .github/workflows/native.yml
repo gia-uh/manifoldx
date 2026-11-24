@@ -12,8 +12,16 @@ on:
 
 jobs:
   native:
+    needs: wheel
+    # A skipped dependent job cannot carry a failed required wheel check.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require the installed wheel matrix
+        env:
+          WHEEL_RESULT: ${{ needs.wheel.result }}
+        run: test "$WHEEL_RESULT" = success
+
       - uses: actions/checkout@v4
 
       - name: Install Rust with rustfmt and clippy
@@ -28,12 +36,6 @@ jobs:
 
       - name: Check the workspace crates
         run: make native-check
-
-      - name: Build the wheel for the free-threaded interpreter
-        run: make native-build NATIVE_PYTHON=python3.14t
-
-      - name: Verify the installed wheel (smoke and negative control)
-        run: bash scripts/gates/native-verify.sh python3.14t dist
 
       - name: Packaging and startup contracts with CPU Engine callers
         # Root conftest probes a GPU during configuration; these checks need none.
@@ -56,3 +58,51 @@ jobs:
 
       - name: Rift coverage
         run: uvx --from git+https://github.com/apiad/rift@v0.9.0 rift check .
+
+  wheel:
+    name: Wheel (${{ matrix.os }}, CPython ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.14', '3.14t']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          ref: 7e53eafe4c0bccd3d133991c1abd46709374fcbc
+          path: pre-core
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Measure the same wheel build and installed Python workload on both trees
+        shell: bash
+        env:
+          CHECK_PYTHON: ${{ matrix.python }}
+        run: |
+          # Run both builds and Python startup workloads on this runner.
+          mkdir -p wheel-evidence
+          uv run --no-project --python "$CHECK_PYTHON" python scripts/gates/wheel-baseline.py
+
+      - name: Verify the native wheel and its failure controls
+        shell: bash
+        env:
+          CHECK_PYTHON: ${{ matrix.python }}
+        run: |
+          # Git Bash needs a POSIX temporary directory on Windows.
+          export TMPDIR=/tmp
+          NATIVE_VERIFY_LOGS="$PWD/wheel-evidence/native" \
+            bash scripts/gates/native-verify.sh "$CHECK_PYTHON" dist
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.python }}
+          path: |
+            dist/*.whl
+            wheel-evidence/
