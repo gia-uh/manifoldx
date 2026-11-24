@@ -33,7 +33,7 @@ jobs:
         run: make native-build NATIVE_PYTHON=python3.14t
 
       - name: Verify the installed wheel (smoke and negative control)
-        run: make native-verify NATIVE_PYTHON=python3.14t NATIVE_DIST=dist
+        run: bash scripts/gates/native-verify.sh python3.14t dist
 
       - name: Packaging contracts
         run: uv run --no-sync pytest tests/core -q

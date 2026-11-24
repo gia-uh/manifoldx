@@ -81,7 +81,8 @@ rules:
   - name: "every production workspace crate is named in the README"
     extract:
       file: "Cargo.toml"
-      yaml_keys: "workspace.members"
+      # Production crate paths in the TOML workspace, not YAML mapping keys.
+      regex: '"(crates/manifoldx-[^"]+)"'
     require:
       in: "README.md"
       as: mention

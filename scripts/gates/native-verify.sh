@@ -1,63 +1,87 @@
 #!/usr/bin/env bash
-# The installed-wheel verification for the phase-0 native gate: a fresh venv,
-# the wheel installed into it, the smoke gate from outside the checkout, and
-# the negative control (the extension renamed inside the disposable venv; the
-# smoke must fail, then pass again when it is restored).
-#
-# Usage: native-verify.sh <python> <dist-dir>
-#
-# Builds nothing: `make native-build` runs first (native-verify depends on
-# it). The wheel is chosen for the interpreter's ABI tag, so a dist with both
-# the GIL and the free-threaded wheel works. The venv is disposable and
-# removed at the end; needs uv on PATH.
-
+# Install an existing wheel, run the ordinary smoke, remove the extension,
+# require the SAME smoke to fail for that reason, restore it and smoke again.
+# Usage: native-verify.sh <python> <dist-dir>; builds nothing, requires uv.
+# NATIVE_VERIFY_LOGS retains the smoke logs after the disposable venv is removed.
 set -euo pipefail
-
+unset PYTHONPATH PYTHONHOME
+fail() { echo "FAIL: $*" >&2; exit 1; }
 PY_ARG="${1:?usage: native-verify.sh <python> <dist-dir>}"
 DIST="${2:?usage: native-verify.sh <python> <dist-dir>}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+DIST="$(cd "$DIST" && pwd -P)"
+[ -z "${NATIVE_VERIFY_LOGS:-}" ] || {
+    mkdir -p "$NATIVE_VERIFY_LOGS"
+    NATIVE_VERIFY_LOGS="$(cd "$NATIVE_VERIFY_LOGS" && pwd -P)"
+}
 
-command -v uv >/dev/null || { echo "FAIL: uv is not on PATH" >&2; exit 1; }
-[ -d "$DIST" ] || { echo "FAIL: no dist dir at $DIST (run make native-build first)" >&2; exit 1; }
-
-# The tag computation needs a runnable interpreter path; uv can also be
-# handed a name such as python3.14t, so resolve it first.
-if [ ! -x "$PY_ARG" ] && ! command -v "$PY_ARG" >/dev/null 2>&1; then
-    PY_ARG="$(uv python find "$PY_ARG" 2>/dev/null)" \
-        || { echo "FAIL: cannot resolve interpreter: $1" >&2; exit 1; }
+# Keep uv's named interpreter lookup: python3.14t need not be on PATH.
+if [ -x "$PY_ARG" ]; then
+    PY="$PY_ARG"
+elif command -v "$PY_ARG" >/dev/null 2>&1; then
+    PY="$(command -v "$PY_ARG")"
+else
+    PY="$(uv python find "$PY_ARG")"
 fi
+PY="$(cd "$(dirname "$PY")" && pwd -P)/$(basename "$PY")"
+TAGS="$("$PY" -c 'import sys, sysconfig; p = f"cp{sys.version_info.major}{sys.version_info.minor}"; print(p, p + ("t" if sysconfig.get_config_var("Py_GIL_DISABLED") else ""))')"
+read -r PYVER ABI <<< "$TAGS"
+WHEEL="$("$PY" - "$DIST" "$PYVER" "$ABI" <<'PYTHON'
+import pathlib
+import sys
 
-TAG="$("$PY_ARG" -c 'import sys, sysconfig
-t = "t" if sysconfig.get_config_var("Py_GIL_DISABLED") else ""
-print(f"cp{sys.version_info.major}{sys.version_info.minor}{t}")')"
-WHEEL="$(ls "$DIST"/manifold_gfx-*-"$TAG"-*.whl 2>/dev/null | head -n 1)"
-[ -n "$WHEEL" ] || { echo "FAIL: no $TAG wheel in $DIST" >&2; exit 1; }
-echo "wheel:  $WHEEL"
+dist, pyver, abi = sys.argv[1:]
+candidates = []
+for path in sorted(pathlib.Path(dist).glob("manifold_gfx-*.whl")):
+    _, py_tags, abi_tags, _ = path.stem.rsplit("-", 3)
+    if pyver in py_tags.split(".") and abi in abi_tags.split("."):
+        candidates.append(path)
+if len(candidates) != 1:
+    sys.exit(f"FAIL: expected one wheel for {pyver}/{abi}, found {len(candidates)}: {candidates}")
+print(candidates[0])
+PYTHON
+)"
 
-VENV="$(dirname "$DIST")/native-smoke-venv-$TAG"
-rm -rf "$VENV"
-trap 'rm -rf "$VENV"' EXIT
-uv venv --python "$PY_ARG" "$VENV" >/dev/null
-uv pip install --python "$VENV/bin/python" "$WHEEL" >/dev/null
-echo "venv:   $VENV"
+echo "wheel: $WHEEL; interpreter: $PY; ABI: $PYVER/$ABI; invocation cwd: $PWD"
+SCRATCH="$(mktemp -d "${TMPDIR:-/var/tmp}/manifoldx-native-verify.XXXXXX")"
+cleanup() {
+    local status=$?
+    if [ -n "${NATIVE_VERIFY_LOGS:-}" ]; then
+        cp "$SCRATCH"/*.log "$NATIVE_VERIFY_LOGS/" || echo "FAIL: could not retain logs" >&2
+    fi
+    rm -rf "$SCRATCH"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cd "$SCRATCH"
+VENV="$SCRATCH/venv"
+uv venv --python "$PY" "$VENV"
+uv pip install --python "$VENV/bin/python" "$WHEEL"
+VENVPY="$VENV/bin/python"
 
-SO="$("$VENV/bin/python" -c 'import manifoldx._core_native, pathlib
-print(pathlib.Path(manifoldx._core_native.__file__))')"
-echo "ext:    $SO"
-
-echo "--- smoke (installed, from outside the checkout) ---"
-bash "$HERE/native-wheel-smoke.sh" "$VENV/bin/python"
-
-echo "--- negative control: extension renamed inside the disposable venv ---"
-mv "$SO" "$SO.gate-missing"
-if ! bash "$HERE/native-wheel-smoke.sh" "$VENV/bin/python" --expect-missing; then
-    mv "$SO.gate-missing" "$SO"
-    echo "FAIL: the smoke passed with the extension removed" >&2
-    exit 1
+# Capture exit codes directly, retain diagnostics even on an unexpected failure.
+run_smoke() {
+    local label="$1" status
+    if bash "$HERE/native-wheel-smoke.sh" "$VENVPY" >"$SCRATCH/$label.log" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
+run_smoke smoke-before
+SO="$("$VENVPY" -c 'import manifoldx._core_native as m; print(m.__file__)')"
+mv "$SO" "$SO.gate-removed"
+[ ! -e "$SO" ] && [ -f "$SO.gate-removed" ] || fail "ineffective removal: $SO"
+if run_smoke smoke-removed; then
+    fail "ordinary smoke passed with _core_native removed"
 fi
-
-echo "--- restored: the smoke must pass again ---"
-mv "$SO.gate-missing" "$SO"
-bash "$HERE/native-wheel-smoke.sh" "$VENV/bin/python" | tail -n 1
-
-echo "native-verify: passed for $TAG"
+grep -qx 'FAIL: manifoldx._core_native is not installed in the venv' "$SCRATCH/smoke-removed.log" \
+    || fail "ordinary smoke failed for a reason other than missing _core_native"
+mv "$SO.gate-removed" "$SO"
+run_smoke smoke-restored
+echo "native-verify: passed for $PYVER/$ABI (installed -> missing -> restored)"
