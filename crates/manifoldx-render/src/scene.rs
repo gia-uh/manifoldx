@@ -169,14 +169,18 @@ pub fn read_instances(
     source: InstanceSource,
     ignore_transform: bool,
 ) -> Result<InstanceBatch, SceneError> {
-    let snapshot = world.snapshot();
-    let entities = &snapshot.entities;
-    if entities.len() > source.max_instances {
+    // Reject before snapshotting: a scene above the bound must not allocate an
+    // entity list or any component rows.
+    let alive = world.alive_count() as usize;
+    if alive > source.max_instances {
         return Err(SceneError::TooManyInstances {
-            requested: entities.len(),
+            requested: alive,
             max: source.max_instances,
         });
     }
+    let snapshot = world.snapshot();
+    debug_assert_eq!(snapshot.entities.len(), alive);
+    let entities = &snapshot.entities;
 
     let transforms = world.read_component(source.transform, Some(entities))?;
     let meshes = world.read_component(source.mesh, Some(entities))?;
