@@ -237,8 +237,8 @@ impl NativeRenderer {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("manifoldx-native-pipeline-layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
             });
         let pipeline = gpu
             .device
@@ -262,8 +262,8 @@ impl NativeRenderer {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Greater,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Greater),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -588,7 +588,7 @@ impl NativeRenderer {
 
         let readback_started = Instant::now();
         let (sender, receiver) = std::sync::mpsc::channel();
-        readback.map_async(wgpu::MapMode::Read, move |result| {
+        readback.map_async(wgpu::MapMode::Read, .., move |result| {
             let _ = sender.send(result);
         });
         self.gpu
@@ -600,7 +600,7 @@ impl NativeRenderer {
             .map_err(|_| RenderError::ReadbackChannel)?
             .map_err(|error| RenderError::Readback(error.to_string()))?;
 
-        let mapped = readback.get_mapped_range();
+        let mapped = readback.get_mapped_range(..);
         let mut rgba = Vec::with_capacity((width * height * 4) as usize);
         for row in mapped
             .chunks_exact(padded_bytes_per_row as usize)
