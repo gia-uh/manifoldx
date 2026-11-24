@@ -43,6 +43,7 @@ nav.toc a:hover{background:var(--raised);color:var(--strong);text-decoration:non
 nav.toc a.on{color:var(--strong);background:var(--raised);box-shadow:inset 2px 0 0 var(--accent)}
 main{padding:34px 46px 120px;min-width:0}
 @media (max-width:860px){.wrap{grid-template-columns:1fr}nav.toc{display:none}main{padding:24px 18px 80px}}
+@media (max-width:560px){.chrome{height:auto;min-height:40px;flex-wrap:wrap;padding:6px 12px}.chrome .st{margin-left:0;flex-wrap:wrap;gap:6px;width:100%}.chrome .pill{font-size:10px;padding:1px 7px}main{padding:20px 14px 70px}.gate{grid-template-columns:1fr;gap:4px}.gate .nn{text-align:left}}
 h1{font-family:var(--font-mono);font-weight:500;font-size:22px;color:var(--strong);margin:0 0 6px;letter-spacing:-.01em}
 .lede{font-family:var(--font-prose);font-size:18px;color:var(--ink);max-width:70ch;margin:14px 0 0;line-height:1.55}
 h2{font-family:var(--font-mono);font-weight:500;font-size:15px;color:var(--strong);margin:56px 0 14px;padding-top:14px;border-top:1px solid var(--rule)}
@@ -108,7 +109,7 @@ pre .c{color:var(--faint)}
 <header class="chrome">
   <div class="tab">rust-core</div>
   <div class="st">
-    <span class="pill acc">spec · approved 2026-11-24</span>
+    <span class="pill acc">spec · revised 2026-11-24</span>
     <span class="pill">2026-11-22</span>
     <a class="pill" href="https://github.com/gia-uh/manifoldx/issues/348">tracker #348</a>
     <span class="pill">branch rust-core</span>
@@ -125,50 +126,51 @@ pre .c{color:var(--faint)}
   <a href="#s06">06 · The native boundary</a>
   <a href="#s07">07 · Inside the core</a>
   <a href="#s08">08 · Compatibility</a>
-  <a href="#s09">09 · Spikes, in order</a>
-  <a href="#s10">10 · The branch</a>
-  <a href="#s11">11 · The move criteria</a>
-  <a href="#s12">12 · Non-goals and questions</a>
+  <a href="#s09">09 · Historic spikes</a>
+  <a href="#s10">10 · Branch and delivery</a>
+  <a href="#s11">11 · Acceptance and gates</a>
+  <a href="#s12">12 · Non-goals and decisions</a>
 </nav>
 
 <main>
 <h1>The Rust core: a frame that does not wait for Python</h1>
 <p class="meta"><span>manifoldx</span><span>·</span><span>design spec</span><span>·</span><span>2026-11-22</span><span>·</span><span>rev. 2026-11-24</span><span>·</span><span>branch <code>rust-core</code></span></p>
 
-<p class="lede">The frame stops depending on Python: a Rust loop, a Rust store and scheduler, and a versioned C boundary for a game's own native code. Python keeps the API, the unrestricted systems and the whole dev lane. This page fixes the four spikes, the branch model, and the numbers that decide when <code>main</code> moves.</p>
+<p class="lede">Rust owns the frame, the entity state, the physics and the renderer. Python remains the public application and authoring language, with unrestricted systems and NumPy modeling. Restricted kernels compile from validated Python to typed IR and run on the Rust CPU evaluator or GPU compute. Acceptance is concrete: every in-scope example through its public entrypoint, then Contravía at 1920×1080 on the designated reference laptop.</p>
 
 <div class="stats">
-  <div class="stat"><div class="v">0</div><div class="k">frames over 33 ms with a 300 ms async system (S-a: both loops)</div></div>
-  <div class="stat"><div class="v">0</div><div class="k">source lines an existing app must change</div></div>
-  <div class="stat"><div class="v">&lt;1 s</div><div class="k">Python phase of a web reload; #164 measures 3.07 s today</div></div>
-  <div class="stat"><div class="v">0.99 ms</div><div class="k">to apply a 20k-row command over 100k (S-d)</div></div>
+  <div class="stat"><div class="v">49</div><div class="k">in-scope examples and demos, each run through its documented entrypoint</div></div>
+  <div class="stat"><div class="v">1920×1080</div><div class="k">fullscreen final application, not an offscreen proxy</div></div>
+  <div class="stat"><div class="v">3</div><div class="k">full route repeats plus transitions for the game gate</div></div>
+  <div class="stat"><div class="v">60</div><div class="k">fps target; proposed measurement, not yet achieved</div></div>
 </div>
 
 <h2 id="s01"><span class="n">01</span>What this delivers</h2>
-<p>Four requirements drive the design, and each becomes a number a bench can check:</p>
+<p>Four requirements drive the design, and each becomes something a test or a run can check:</p>
 <ul>
-  <li><b>A stable frame.</b> The p99 frame time does not move when a traffic, weather or settlement system takes 300 ms, and does not move when Python pauses for garbage collection. The frame loop is Rust and waits only for systems that declare themselves synchronous.</li>
-  <li><b>Native code per game, one line from Python.</b> A game writes its heavy preprocessing and its irregular algorithms in Rust, exports them as versioned capsules, and registers them with <code>world.streamer(...)</code> or <code>world.system(...)</code>. They run on engine threads without the GIL.</li>
-  <li><b>A fast dev loop.</b> Saving Python gives a new frame in under a second, and the world survives the reload: entities, GPU meshes and streamed cells stay. Saving Rust recompiles incrementally and swaps the pointer between frames.</li>
-  <li><b>Large sets move as IR, not as rows.</b> Python builds selections and commands; Rust evaluates them when applied. Reading rows into Python is explicit, and the bench reports it.</li>
+  <li><b>One native frame owner.</b> Rust owns the loop, the store, the clock, physics and the renderer. No production frame path falls back to a Python implementation. A Python <code>@system</code> enters only through an explicit synchronous call that the engine brackets, budgets and reports.</li>
+  <li><b>Python remains the application language.</b> Components, decorators, unrestricted systems, scripts, events and NumPy modeling stay in Python. A <code>@system</code> is synchronous by default; a rate, a snapshot and bounded commands are opt-in. The engine applies those commands at defined boundaries.</li>
+  <li><b>Restricted work compiles; unrestricted work does not.</b> A <code>@kernel</code> is written as Python, validated as an AST at import with a source location, and lowered to typed IR. Production executes that IR on the Rust CPU evaluator or as GPU WGSL compute. A pure-Python evaluator exists only as a test reference. <code>@shader</code> targets the GPU and is a separate declaration.</li>
+  <li><b>Acceptance is the application, not a microbenchmark.</b> Every in-scope example and demo runs through the entrypoint its documentation names and produces its real feature outcome on the native engine. The final gate is Contravía at 1920×1080, fullscreen, with traffic and pedestrians, on the designated reference laptop.</li>
 </ul>
-<p>This is a migration, not a rewrite of the public surface. An app written today keeps its imports, its components, its decorators and its numpy arrays.</p>
-<div class="note"><p><b>The spikes are in.</b> S-a says no: on 3.14t a 300 ms CPU-bound Python system at 2 Hz moved neither the current engine nor the Rust loop (p99 1.03× and 1.00×, zero late frames). S-b says yes, with a caveat: a native cell builder is 25.4× faster than the loop-shaped Python builder and uses 20.6% of the process-pool memory, with identical bytes and a safe capsule; a vectorized numpy builder closes the gap to 2.1× on a regular grid. S-b2 added a street graph, BFS and variable lots: the floor moved to 2.8×, not to 4×. S-c says the store survives and the native build is 840 ms, but the desktop reloader already reloads the same app in 84 ms; the 3.07 s that matters is the web reload (#164). S-d is a clean pass: a Python system decides over 100k rows in 0.036 ms without reading one, and the command applies in 0.99 ms while the frame holds 60 Hz. The case is native irregular work, memory, the boundary, the web dev loop and the IR seam, not the frame loop or the desktop reload, and the 4× claim holds only against the current loop builder.</p></div>
-<div class="note"><p><b>Decision, 2026-11-24 · approved.</b> The full core runtime is committed, not a scoped subset. The order is fixed: production contracts and packaging; native ECS with safe numpy leases; scheduler and loop; current physics plus native ground and contact queries; native wgpu renderer, base then full with the GUI runtime; generic streaming and devtools; full Contravía validation; game-specific traffic and quadtree work only where the profiles justify it; then the gradual Move A, B and C. The 2026-11-23 decision scoped the core to native systems and made traffic the first milestone; that order is superseded and its measurements stay in this page as history. Python keeps the API and the scripts, and an explicitly requested Rust path with a missing or unsupported piece fails visibly instead of falling back.</p></div>
-<div class="note"><p><b>What has landed, 2026-11-24.</b> <a href="https://github.com/gia-uh/manifoldx/pull/349">#349</a> merged the production Cargo workspace and one installable wheel at <code>2acebc0</code>; <code>manifoldx._core_native</code> bootstraps and reports <code>runtime: not implemented</code>, so no engine code moved. <a href="https://github.com/gia-uh/manifoldx/pull/351">#351</a> merged at <code>56b7ddc</code> and makes an explicit <code>MANIFOLDX_CORE=rust</code> selection fail before Engine initialization when the extension is missing, unloadable or reports no runtime; it creates no Python state and falls back to nothing. <a href="https://github.com/gia-uh/manifoldx/pull/352">#352</a> merged at <code>1ec4fe4</code> and reconciled this page with the approved order. <a href="https://github.com/gia-uh/manifoldx/pull/354">#354</a> merged at <code>24ec335</code> and pins the Python reference contracts the native store must reproduce: layouts, fixed capacity and overflow, reuse order, queries, reservations, NumPy alias and copy behavior, and command capture. Contravía's <a href="https://github.com/apiad/contravia/pull/127">#127</a> merged at <code>72b9669</code> with a reproducible Python-engine baseline: seven controlled 1080p runs and images, five negative controls, fixed park and contact at 3 × 120 samples with exact per-scene state and work replay and one or two bodies, plus a separate 240-frame run with 30 unique GPU readbacks. A separate native window probe on Linux Wayland/Vulkan exercised a hidden <code>32×32</code> window, an actual <code>Resized(16×16)</code> event, two acquire/submit/present frames on the original main thread and ordered teardown; its omit-second-frame control exits 1 and is rejected. These are bounded prerequisites, not gates. The combined branch at <code>24ec335</code> passes 39 <code>tests/core</code>, and Contravía's full test workflow on <code>main</code> at <code>72b9669</code> succeeded (<a href="https://github.com/apiad/contravia/actions/runs/45444822454">run 45444822454</a>). Phase 0 remains open for broader API/private-consumer inventory coverage and executable shared-backend common cases, including the missing <code>parity-fast</code> target. The read-only ECS inventory is complete; native runtime, renderer and reload validation belong to their implementation phases and promotion. No GW gate is green.</p></div>
+<p>This is a migration with an explicit boundary. Python is the public application surface. Where the native core replaces a Python runtime capability, the application adapts to the native API. An unavailable or unsupported native piece fails visibly. It does not fall back inside a frame.</p>
+
+<div class="note"><p><b>Decision, 2026-11-24 · approved.</b> The core runtime is the deliverable, not a scoped subset. The work proceeds in small PRs against <code>rust-core</code>: contracts and packaging; native ECS with safe leases; scheduler and loop; current physics plus native ground and contact queries; native wgpu renderer, base then full paths including the GUI runtime; generic streaming and devtools; full Contravía validation; then game-specific traffic, quadtree, city queries or cell generation only where the profiles justify the port. Python keeps the API, the scripts and the unrestricted systems. The 2026-11-23 traffic-first order is history, not an ordering rule or a gate. There is no independent universal legacy/runtime parity program, no mandatory second external client, no release-long compatibility train and no web gate in this migration.</p></div>
+
+<div class="note"><p><b>Delivered, 2026-11-24.</b> <a href="https://github.com/gia-uh/manifoldx/pull/349">#349</a> merged the production Cargo workspace and one installable wheel at <code>2acebc0</code>. <a href="https://github.com/gia-uh/manifoldx/pull/351">#351</a> merged at <code>56b7ddc</code> and makes an explicit <code>MANIFOLDX_CORE=rust</code> selection reject an absent, unloadable or unimplemented extension before Engine initialization; it creates no Python state and falls back to nothing. <a href="https://github.com/gia-uh/manifoldx/pull/354">#354</a> merged at <code>24ec335</code> and pins the Python reference contracts. <a href="https://github.com/gia-uh/manifoldx/pull/363">#363</a> merged at <code>672d8c1</code> and adds the private <code>_NativeWorld</code>: fixed capacity, typed <code>f32</code>/<code>u32</code> columns, zero-width markers, spawn and destroy, bulk row and field updates, membership queries and owned snapshots. <a href="https://github.com/gia-uh/manifoldx/pull/365">#365</a> merged at <code>4a50063</code> and adds <code>NativeRuntime</code>, which takes exclusive ownership of that World and executes bounded FIFO commands on the calling thread with Python detached; it creates no native thread and no Python frame callback. The World and runtime evidence is CPU integration, not scheduler, vehicle, renderer, game or FPS evidence. The public selector still refuses to construct a Rust Engine because Engine activation is not delivered. <a href="https://github.com/gia-uh/manifoldx/pull/367">#367</a> (native vehicle physics) and <a href="https://github.com/gia-uh/manifoldx/pull/369">#369</a> (native offscreen mesh instances) are open, non-draft and have green Native CI; #369 also has a green build check. Neither is merged, and neither proves a full vehicle, window, renderer or game path. Contravía's <code>contravia#127</code> controlled Python-engine 1080p references remain reference evidence, not native execution or a game-FPS claim. These deliveries close no gate by themselves.</p></div>
 
 <h2 id="s02"><span class="n">02</span>The wager, stated honestly</h2>
 <p>Most of what used to justify Rust is now solvable without it. The design has to say what is left, or it should not be built.</p>
 <table class="tbl">
   <thead><tr><th>Problem</th><th>Without a Rust core</th><th>What is left</th></tr></thead>
   <tbody>
-    <tr><td>GIL contention</td><td>The free-threaded build plus pipelined frames already keeps most Python systems off the frame (#262, #260). S-a measured it: a 300 ms async Python system moved neither loop.</td><td class="why">A frame lane that never calls Python at all, so a GC pause or a GIL build cannot reach it. A Rust loop with Python sync systems still waits for them.</td></tr>
-    <tr><td>Per-entity cost</td><td>Kernels compiled to WGSL compute cover the vectorizable work, and GPU-driven rendering plus caches cover the draw path.</td><td class="why">Irregular CPU work that neither numpy vectorizes nor the GPU wants: cell generation, road and traffic graphs, spatial indexes, broad-phase collision, contact solvers. Shared-memory threads instead of one 2.5 GB process per province.</td></tr>
-    <tr><td>Command evaluation</td><td>Python applies commands directly, row by row or in numpy batches.</td><td class="why">A small IR evaluator in Rust that applies a command over fresh columns at the sync point. S-d measured 0.036 ms to build and enqueue, 0.48–0.99 ms to apply over 100k, and zero rows read.</td></tr>
-    <tr><td>Two runtimes</td><td>The web target is a second implementation over three.js.</td><td class="why">One core compiled to native and to wasm, with Python as the desktop authoring layer.</td></tr>
+    <tr><td>GIL contention</td><td>The free-threaded build plus pipelined frames keeps most Python systems off the frame. A 300 ms asynchronous Python system moved neither loop in S-a.</td><td class="why">A frame lane that never calls Python, so a GC pause or a GIL build cannot reach it. A Rust loop with synchronous Python systems still waits for them, and that wait is measured.</td></tr>
+    <tr><td>Per-entity cost</td><td>Kernels compiled to WGSL compute cover the vectorizable work, and GPU-driven rendering plus caches cover the draw path.</td><td class="why">Irregular CPU work that neither NumPy vectorizes nor the GPU wants: cell generation, road and traffic graphs, spatial indexes, broad-phase collision, contact solvers. Shared-memory threads replace one process per province.</td></tr>
+    <tr><td>Command evaluation</td><td>Python applies commands directly, row by row or in NumPy batches.</td><td class="why">A small typed IR evaluator in Rust applies selections and commands over fresh columns at the sync point. S-d measured 0.036 ms to build and enqueue, 0.48–0.99 ms to apply over 100k rows, and zero rows read.</td></tr>
+    <tr><td>Frame and GPU ownership</td><td>A Python scheduler and a Python-owned wgpu device still cross the language boundary, and physics can call Python per wheel and substep.</td><td class="why">One Rust owner of the clock, frame order, columns, device, queue and surface, with native ground and contact queries. Python is an explicit participant, not the frame owner.</td></tr>
   </tbody>
 </table>
-<div class="note"><p><b>The stop rule, after the spikes.</b> S-a failed: the frame already holds under async Python. S-b passed: 25.4× over the loop builder, 20.6% of the pool memory, identical bytes, a safe boundary, with a 2.1× floor against vectorized numpy. S-b2's irregular cell moved the floor to 2.8×, so the general 4× claim is still open. S-c passed: the store survives ten reloads in 0.79 ms, the native build is 840 ms, but the current desktop reloader already does 84 ms; the web reload's 3.07 s is the number the store has to remove. S-d passed cleanly: 0.036 ms to decide over 100k rows, 0.99 ms to apply, zero rows read, p99 16.674 ms. The migration continues on the current-code speed, memory, boundary and IR seam; a per-feature facade cell is the next test if 4× against the best Python is the bar, and the web reload needs an end-to-end measurement.</p><p><b>Superseded scope.</b> The traffic-first stop rule above is history. The 2026-11-24 decision commits the core runtime and leaves the game-specific ports to the profile measured on the migrated core.</p></div>
+<div class="note"><p><b>Historic measurements, not gates.</b> S-a found that a 300 ms CPU-bound Python system at 2 Hz moved neither loop (p99 1.00× Rust, 1.03× current, zero frames over 33 ms), while a 125–160 ms GC pause moved both; Rust with a Python sync callback lost 42 of 1080 frames (p99 51.75 ms) against 48 (p99 95.93 ms). S-b measured a native cell builder at 25.4× the loop builder and 2.1× vectorized NumPy, using 20.6% of the pool memory, with identical bytes; S-b2's irregular cell moved the NumPy floor to 2.8×. S-c kept 10,000 entities and 200 meshes through ten reloads at 0.79 ms p50, while the current desktop reloader already did the same app in 83.8 ms; its 3.07 s web number is history, not a current acceptance target. S-d built a 20,000-of-100,000 selection in 0.036 ms, applied 20 batches in 0.482 ms p50 and 0.990 ms p99, and held p99 16.674 ms with zero rows read. Its five kernels were fixed Rust loops: S-d proves selection and command IR dispatch only, not an AST validator, typed-IR kernel compiler, Rust CPU evaluator or GPU backend. S-e measured nbody at 36.7–42.0× and boids at 54.7–219× over NumPy, with offscreen llvmpipe frame numbers that are microbenchmarks, not game FPS. The <code>MANIFOLDX_NUMPY=1</code> comparison in those examples was a spike aid, not a production fallback.</p><p><b>Historic scope.</b> The 2026-11-23 traffic-first ordering and its stop rule are history. They are not a prerequisite, an ordering constraint or a promotion gate.</p></div>
 
 <h2 id="s03"><span class="n">03</span>Three lanes</h2>
 <p>Every piece of work belongs to exactly one lane. When a feature is unclear, the lane decides its rules.</p>
@@ -190,7 +192,7 @@ pre .c{color:var(--faint)}
 
     <rect x="14" y="230" width="732" height="86" rx="8" fill="#191814" stroke="#9db07e"/>
     <text x="28" y="252" fill="#9db07e" font-size="12">DEV LANE · Python + numpy · offline</text>
-    <text x="28" y="274" fill="#8a867b">modeling · assets · preprocessing · notebooks · debug interpreter</text>
+    <text x="28" y="274" fill="#8a867b">modeling · assets · preprocessing · notebooks · reference evaluator (tests)</text>
     <text x="28" y="292" fill="#8a867b">runs before engine.run() or inside an async job</text>
     <text x="28" y="310" fill="#8a867b">this is where numpy and unrestricted Python live</text>
   </g>
@@ -200,14 +202,26 @@ pre .c{color:var(--faint)}
 <table class="tbl">
   <thead><tr><th>Lane</th><th>Runs</th><th>Rule</th></tr></thead>
   <tbody>
-    <tr><td>frame</td><td>Rust loop and store; kernels; render.</td><td class="why">Only synchronous systems may enter, and they are budgeted. A sync system that costs more than 1 ms is flagged by the HUD and the bench.</td></tr>
-    <tr><td>async</td><td>Python at a rate, native systems, builders.</td><td class="why">Reads a snapshot or declared columns; writes through commands; may miss its own deadline, never the frame's.</td></tr>
-    <tr><td>dev</td><td>Modeling, assets, PCG, notebooks, debug.</td><td class="why">No constraints beyond memory. The debug interpreter is the oracle for the other two lanes.</td></tr>
+    <tr><td>frame</td><td>Rust loop, store, physics and renderer; typed kernels on the Rust CPU or the GPU.</td><td class="why">Only explicit synchronous <code>@system</code> calls may enter, and they are budgeted. A sync system that costs more than 1 ms is flagged by the HUD and the bench. No Python fallback.</td></tr>
+    <tr><td>async</td><td>Unrestricted <code>@system</code> in Python at a rate; native systems; builders.</td><td class="why">Synchronous is the default. An async system declares a rate, reads a snapshot or declared columns, and emits bounded commands. It may miss its own deadline, never the frame's. The engine applies its commands at a defined boundary.</td></tr>
+    <tr><td>dev</td><td>Modeling, assets, PCG, notebooks, NumPy; the reference evaluator for tests.</td><td class="why">No constraints beyond memory. The reference evaluator is a test oracle, not a production whole-scene debug lane.</td></tr>
   </tbody>
 </table>
 
 <h2 id="s04"><span class="n">04</span>The Python API</h2>
-<p>The authoring surface is the one that was discussed and agreed. Names are illustrative until the spikes land; the shape is the contract.</p>
+<p>The public application is Python. Names below are illustrative; the shape and the boundaries are the contract.</p>
+
+<table class="tbl">
+  <thead><tr><th>Decision</th><th>Choice</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>application language</td><td>Python stays the public application and authoring surface; engine state, loop, physics and renderer are Rust.</td><td class="why">Approved 2026-11-24</td></tr>
+    <tr><td>unrestricted systems</td><td><code>@system</code> is Python and synchronous by default; <code>hz=</code>, a snapshot and bounded commands are opt-in, with engine synchronization at defined boundaries.</td><td class="why">Approved 2026-11-24</td></tr>
+    <tr><td>restricted kernels</td><td><code>@kernel</code> is Python source, validated as an AST at import with a source location, lowered to typed IR, and executed by the Rust CPU evaluator or as GPU WGSL compute.</td><td class="why">Approved 2026-11-24</td></tr>
+    <tr><td>Python evaluator</td><td>Reference tests only. It is never selectable at runtime, never a fallback, and never a production whole-scene Python lane.</td><td class="why">Approved 2026-11-24</td></tr>
+    <tr><td>shaders</td><td><code>@shader</code> is a separate restricted declaration whose production destination is GPU WGSL. A fragment shader is not required to have a CPU production backend.</td><td class="why">Approved 2026-11-24</td></tr>
+    <tr><td>IR details</td><td>IR representation and subset, CPU/GPU numeric agreement, and GPU residency and copy policy are decided before the implementation slice that depends on them. They are not reopened as a global choice about who owns the core.</td><td class="why">Bounded decision</td></tr>
+  </tbody>
+</table>
 
 <h3>Components and kernels</h3>
 <pre><code><span class="c"># a component is what it is today: annotations give dtype and shape</span>
@@ -217,30 +231,30 @@ class Car(Component):
     target_speed: f32
     lane: i32
 
-@kernel                                  <span class="c"># every frame, over all rows, in Rust or on the GPU</span>
+@kernel                                  <span class="c"># restricted Python; validated AST; typed IR; framewise</span>
 def drive(c: Car, dt: f32) -&gt; None:
     c.speed += clamp(c.target_speed - c.speed, -3.0 * dt, 2.0 * dt)
     c.pos += forward(c) * c.speed * dt
 
-@kernel                                  <span class="c"># a kernel may declare reads and writes when it helps scheduling</span>
+@kernel                                  <span class="c"># declarations may narrow reads and writes</span>
 def age(e: Agent, dt: f32) -&gt; None:
     e.ttl -= dt
 </code></pre>
-<p>A kernel is valid Python. The decorator reads its AST at import, rejects anything outside the subset with a file and line, and compiles it to a typed IR. The same function runs in the Python debug interpreter, which gives tests an oracle: IR output must match Python output.</p>
+<p>A kernel is valid Python in a restricted subset. The decorator validates the AST at import, rejects anything outside the subset with a file and a line, and lowers the function to typed IR. Production runs that IR on the Rust CPU evaluator or compiles it to WGSL compute. The Python evaluator exists only in tests, where it is the reference for both production destinations. It cannot be selected by an application and it is never a fallback.</p>
 
 <h3>Systems: synchronous by default, async by asking</h3>
-<pre><code>@system                                  <span class="c"># the frame waits; numpy views, as today</span>
+<pre><code>@system                                  <span class="c"># the frame waits; Python and NumPy, as today</span>
 def steer(input, player):
     player.target_speed = 30.0 if input.key("w") else 0.0
 
 @system(hz=5, reads=[Car.speed, Car.lane])   <span class="c"># the frame never waits</span>
 def traffic_ai(snap, cmds):
-    jammed = snap.query(Car).where(Car.speed &lt; 2.0)   <span class="c"># a lazy selection, no rows read</span>
+    jammed = snap.query(Car).where(Car.speed &lt; 2.0)   <span class="c"># lazy selection, no rows read</span>
     cmds.set(jammed, Car.target_speed, 8.0)           <span class="c"># applied in Rust at the sync point</span>
     if snap.clock.hour == 23:
         cmds.spawn(Car, count=40, at=depots())        <span class="c"># Python decides, Rust executes</span>
 </code></pre>
-<p>Defaulting to synchronous is what makes the migration free: every system written today runs unchanged as a sync system. The engine measures each one and names the expensive ones as candidates for a kernel or for <code>hz=</code>.</p>
+<p>Synchronous is the default so ordinary Python control code stays ordinary Python. An async system declares its rate and the columns it reads, receives a snapshot, and writes through bounded commands that the engine applies at a frame boundary in registration order. A late async run skips; it does not queue up. A native system is never silently downgraded to Python.</p>
 
 <h3>Selections, commands and explicit reads</h3>
 <pre><code>hot = world.query(Car).where(Car.speed &gt; 30.0)   <span class="c"># IR only</span>
@@ -248,7 +262,7 @@ world.set(hot, Car.target_speed, 0.0)             <span class="c"># IR only</spa
 
 rows = hot.numpy("pos")                          <span class="c"># explicit: this crosses to Python</span>
 </code></pre>
-<p>Selections and commands build IR. Rows appear only through <code>.numpy()</code> or a buffer view, and the bench reports how many rows a system pulls per frame.</p>
+<p>Selections and commands build their own IR. That IR is independent of kernel compilation: a selection is not a kernel and does not exercise the kernel compiler. Rows appear only through <code>.numpy()</code> or a declared buffer view, and the bench counts how many rows a system pulls per frame.</p>
 
 <h3>Native code from a game</h3>
 <pre><code>from mygame import native
@@ -263,22 +277,24 @@ world.system(native.traffic_flow, reads=[Car.lane], writes=[Car.target_speed])
 def heat(uv: Vec2, value: f32, cmap: Texture1D) -&gt; Vec4:
     return sample(cmap, clamp(value, 0.0, 1.0))
 </code></pre>
-<p>Phase 2. Kernels and fragment shaders share the typed subset and the IR, so a material written this way is linted and tested like any other Python. WGSL stays available for full shaders.</p>
+<p>Phase 2. A <code>@shader</code> is restricted Python that is linted and lowered for the GPU. It may share surface syntax and validation with <code>@kernel</code>, but it has a distinct production destination: WGSL on the GPU. A fragment shader does not get a CPU production backend and is not part of the Rust CPU evaluator path. WGSL stays available for full shaders.</p>
 
 <h2 id="s05"><span class="n">05</span>What moves, what is compiled, what stays</h2>
 <table class="tbl">
   <thead><tr><th>Piece</th><th>Goes to</th><th>Why</th></tr></thead>
   <tbody>
     <tr><td>frame loop, scheduler, store</td><td>Rust, handwritten</td><td class="why">The frame must not take the GIL and must own the columns.</td></tr>
-    <tr><td>IR evaluator, selection and command execution</td><td>Rust, handwritten</td><td class="why">Commands apply over fresh data at the sync point; Python never reads the rows.</td></tr>
-    <tr><td>renderer, streamer, asset load</td><td>Rust, phases 4–6</td><td class="why">They sit on the frame path. Phase 5 removes the wgpu-py bridge from the native path. The Python reference/default runtime remains through Move A/B and is deleted only at Move C in phase 9.</td></tr>
-    <tr><td>irregular algorithms, game preprocessing</td><td>Rust, per game, via SDK</td><td class="why">The part numpy and the GPU do badly, written by the people who know the domain.</td></tr>
-    <tr><td>@kernel, @shader</td><td>IR → WGSL, IR → Rust CPU</td><td class="why">Written once in lintable Python; the scheduler picks the backend by size and shape.</td></tr>
-    <tr><td>unrestricted systems</td><td>Python</td><td class="why">Logic, input, orchestration; sync only for small work, otherwise at a rate.</td></tr>
-    <tr><td>modeling, assets, PCG, notebooks</td><td>Python + numpy</td><td class="why">Off the frame path; the reason numpy stays a core dependency.</td></tr>
+    <tr><td>physics, ground and contact queries</td><td>Rust, native</td><td class="why">The solver cannot call Python per wheel and substep. Game geography stays in the application; the generic query representation belongs to the engine.</td></tr>
+    <tr><td>renderer, streamer, asset load</td><td>Rust, native production path</td><td class="why">They sit on the frame path and share the one GPU owner. A temporary Python bridge is removed by the phase that lands its native replacement and never becomes a fallback.</td></tr>
+    <tr><td>selection and command evaluator</td><td>Rust, handwritten</td><td class="why">Commands apply over fresh data at the sync point; Python does not read the rows.</td></tr>
+    <tr><td>@kernel</td><td>typed IR → Rust CPU or WGSL GPU</td><td class="why">Written once in validated Python; the scheduler or the workload chooses a production destination.</td></tr>
+    <tr><td>@shader</td><td>WGSL GPU</td><td class="why">A distinct GPU-only declaration. It is not required to run on the Rust CPU backend.</td></tr>
+    <tr><td>unrestricted systems</td><td>Python</td><td class="why">Logic, input and orchestration; synchronous only for small work, otherwise at a rate with snapshots and commands.</td></tr>
+    <tr><td>modeling, assets, PCG, notebooks</td><td>Python + NumPy</td><td class="why">Off the frame path; the reason NumPy stays a core dependency.</td></tr>
+    <tr><td>reference evaluator</td><td>Tests only</td><td class="why">An oracle for the Rust CPU and WGSL results. Never a runtime option and never a fallback.</td></tr>
   </tbody>
 </table>
-<p>The public Python surface stays. What changes underneath is who runs the frame.</p>
+<p>Python remains the public application and authoring language. The native path has one owner of frame state and GPU resources. A missing native capability fails visibly; it is not absorbed by a Python implementation. Reference images captured from the Python engine are test evidence, not a parallel production runtime.</p>
 
 <h2 id="s06"><span class="n">06</span>The native boundary</h2>
 <p>The engine and a game's native crate are two wheels compiled separately. They cannot share Rust types: Rust has no stable ABI, so two crates can lay out the same struct differently. The boundary is C layout plus a function pointer, carried in a <code>PyCapsule</code>.</p>
@@ -355,162 +371,146 @@ fn build_cell(req: &amp;CellRequest, out: &amp;mut Output) -&gt; Result&lt;()&gt
 
 <h2 id="s07"><span class="n">07</span>Inside the core</h2>
 <h3>Store</h3>
-<p>Columns of a fixed dtype and width, with a version per column, in CPU memory and optionally on the GPU. A system declares what it reads and writes; the scheduler copies a column between devices only when a consumer asks for the other side, and only if the version changed. Suspending a system at an arbitrary point in its work, or handing a snapshot to an async system, copies only the columns it declared. This is the decision the first spike of the store must get right, because it fixes the cost of every async system afterwards.</p>
-<div class="note"><p><b>Private native allocator slice, decided 2026-11-24.</b> The first native allocator slice keeps fixed capacity, as the Python store does today. The phase 1a private slice has entity identities and owned snapshot lists, not component columns. Copied component batches and their validated updates are a separate planned deliverable. Identities carry <code>u64</code> generations: a stale generation is rejected, and exhaustion retires that slot instead of wrapping; the other slots remain usable. Validation is atomic, and there is no canonical mutable NumPy export. These rules apply to the private allocator first; they are not approval to break the existing public slice alias APIs. Retained basic raw slices keep aliasing today, repeated raw aliases must be found by scan and adapted, and a context manager cannot revoke an <code>ndarray</code> already handed out. Public compatibility, private raw-consumer adaptations and the full component-dtype scope each need an explicit follow-on contract before Engine can be enabled on this slice. The CPU-only PyO3 detach and reattach probe proves same-thread callback mechanics; it is not bridge lifetime or window and surface ownership evidence.</p></div>
+<p>Columns of a fixed dtype and width, with a version per column, in CPU memory and optionally on the GPU. A system declares what it reads and writes; the scheduler copies a column between devices only when a consumer asks for the other side, and only if the version changed. Suspending a system at an arbitrary point in its work, or handing a snapshot to an async system, copies only the columns it declared. This is the decision the first store slice must get right, because it fixes the cost of every async system afterwards.</p>
+<div class="note"><p><b>Delivered native slice, 2026-11-24.</b> The private <code>_NativeWorld</code> merged in #363 with fixed capacity, typed <code>f32</code> and <code>u32</code> columns, zero-width markers, spawn and destroy, bulk whole-row and field updates, membership queries and owned snapshot/readback. The World lock is held only to resolve a schema and for the validated commit or query; it is released while Python buffers are acquired or released and while Python outputs are built. Descriptors, dtype, shape, length, stale identity, non-member and capacity failures are rejected before any entity, membership or value mutation. Inputs are copied into typed Rust vectors; outputs are owned bytes. The boundary reports handles, payload, bytes in and bytes out, and makes no zero-copy or writable-alias claim. #365 added the calling-thread <code>NativeRuntime</code> over that same World, with bounded FIFO commands, queue credits, atomic rejection and owned readbacks. Public ECS compatibility, arbitrary dtypes, a scheduler, GPU residency and Engine activation remain pending.</p></div>
 <h3>Scheduler and loop</h3>
 <ul>
-  <li>The loop runs in Rust and releases the GIL for its whole life. Python enters only through a sync-system call, bracketed and timed.</li>
+  <li>The loop runs in Rust and releases the GIL for its whole life. Python enters only through an explicit sync-system call, bracketed and timed.</li>
   <li>Frame systems run in dependency order derived from their declared reads and writes; independent ones run in parallel on the engine pool.</li>
-  <li>Async systems run at their rate on separate threads, over a snapshot, and their commands apply at a frame boundary in registration order. A late async run skips, it does not queue up.</li>
+  <li>Async systems run at their rate on separate threads, over a snapshot, and their bounded commands apply at a frame boundary in registration order. A late async run skips; it does not queue up.</li>
   <li>Native systems are scheduled exactly like Python ones; only the call target differs.</li>
   <li>The frame has a deadline. A sync system that overruns it is reported, not silently absorbed; the bench and the HUD name it.</li>
 </ul>
 <h3>Reload</h3>
-<p>The store, the GPU resources and the loaded cells live in Rust and are not rebuilt. A Python edit reimports the changed modules, rebuilds their IR graphs and replaces the systems; entities and meshes stay. A Rust edit compiles the game crate incrementally, loads the new <code>.so</code> under a versioned name, and swaps the capsules between frames. The state rules in <code>know-how/hot-reload.md</code> shrink to what genuinely belongs to Python.</p>
-<h3>The debug interpreter</h3>
-<p>A pure-Python evaluator for the same IR: whole-scene slow mode, and a one-entity mode that runs only the kernel for entity 42 under <code>pdb</code> while everything else stays in Rust. It is the oracle for the Rust CPU backend and the WGSL backend, and it is why a bug in a large scene does not require a 2-second frame to reproduce.</p>
+<p>The store, the GPU resources and the loaded cells live in Rust and are not rebuilt. A Python edit reimports the changed modules and replaces their systems; entities and meshes stay. A Rust edit compiles the game crate incrementally, loads the new <code>.so</code> under a versioned name, and swaps the capsules between frames. The state rules in <code>know-how/hot-reload.md</code> shrink to what genuinely belongs to Python.</p>
+<h3>The reference evaluator</h3>
+<p>A pure-Python evaluator for the typed IR exists only in the test suite. It runs a kernel and its inputs to produce expected results for the Rust CPU evaluator and the WGSL backend, and it can run one kernel for one entity under <code>pdb</code> in a test. It is not a production execution mode, it cannot be selected by an application, and it is never a fallback. Failures are reproduced with targeted cases and captured scenes, not by shipping a whole-scene Python debug lane.</p>
 <h3>Renderer</h3>
-<p>Committed, in order. Phase 4 builds the base on the Rust wgpu device: surface, present, resize, fullscreen and monitor choice, floating origin, geometry, buffers, textures, materials, instancing and culling. Phase 5 completes the paths the applications use, including shadows, post-processing, sprites, labels, skinning and the GUI layout, hit testing, drawing and input runtime. Phase 5 removes the wgpu-py batch bridge from the native path. The separate Python reference/default renderer remains through Move A/B; it is deleted only at Move C in phase 9. A visual path with no native implementation blocks its gate; it is not switched off to produce a capture.</p>
+<p>Committed, in order. Phase 4 builds the base on the Rust wgpu device: surface, present, resize, fullscreen and monitor choice, floating origin, geometry, buffers, textures, materials, instancing and culling. Phase 5 completes the paths the applications use, including shadows, post-processing, sprites, labels, skinning and the GUI layout, hit testing, drawing and input runtime. The native path has one renderer owner. Reference images from the Python engine are test evidence; they are not a parallel production renderer. A visual path with no native implementation blocks its gate; it is not switched off to produce a capture.</p>
 <p><b>Ownership, decided 2026-11-24.</b> Phases 1–3 keep the Python main-thread window, GPU canvas context, device, queue and renderer in one ownership group, while the Rust scheduler owns the clock, frame order and barriers. Phase 4 moves the whole graphics group to native ownership: one Rust main-thread <code>winit</code> application handler, a surface that retains its window, and a compatible device, queue and resources. A split group, a Python-owned window with a native device or the reverse, is not a supported transition. The Linux Wayland clear-only probe above does not validate engine WGSL, bindings, materials, images, render parity, physics, callbacks or reload.</p>
 
-<h2 id="s08"><span class="n">08</span>Compatibility</h2>
+<h2 id="s08"><span class="n">08</span>Compatibility and correctness</h2>
 <ul>
-  <li><b>numpy stays a core dependency.</b> Modeling, PCG, assets and researcher data keep using it. The frame lane does not import it, and a test asserts that.</li>
-  <li><b>NumPy semantics are part of the contract.</b> Inventory actual dtype, shape, strides, mutability and retained-view lifetime for arrays passed to <code>spawn</code>, builders and commands. Compatible contiguous buffers cross zero-copy when ownership and lifetime make it safe. Required conversions and copies are explicit, counted and measured by buffer type; retained views must remain safe and preserve public API behavior.</li>
-  <li><b>The public API does not change.</b> Same imports, components, decorators and engine methods. The only addition is <code>world</code>, the new configuration surface, which is also reachable from <code>engine</code> for compatibility.</li>
-  <li><b>Two engines, one suite.</b> While the flag exists, every test runs on both. A test may not skip because of the engine; a feature is done when both pass it, and the Python engine is the oracle.</li>
-  <li><b>Opt-in first.</b> <code>MANIFOLDX_CORE=rust</code> selects the new path. Default stays Python until the move gates pass; then the default flips; then the Python runtime is deleted.</li>
+  <li><b>NumPy stays a core dependency.</b> Modeling, PCG, assets and researcher data keep using it. The frame lane does not import it, and a test asserts that.</li>
+  <li><b>The native boundary is explicit about copies.</b> It accepts documented C-contiguous <code>float32</code> and <code>uint32</code> arrays with the documented shapes. Other strides, shapes and dtypes are rejected rather than coerced silently. Copies are counted by buffer type and reported. There is no general zero-copy promise and no writable NumPy alias to native columns.</li>
+  <li><b>Python remains the public application language, not a promise that every legacy internal survives.</b> The compatibility target is the documented public entrypoints and real feature outcomes of the in-scope examples and Contravía. Where the design replaces a Python runtime capability, the application adapts to the native API. An unsupported selection fails visibly before or at initialization; it does not fall back inside a frame.</li>
+  <li><b>Focused native correctness, not a universal parity program.</b> Each slice carries its own tests: AST validation and source locations, typed-IR outcomes against the reference evaluator, CPU and GPU numeric agreement within a threshold fixed before the backend, physics at a fixed substep, image tolerances per scene and channel, and ownership and lifetime checks. There is no independent suite whose purpose is to run every legacy Python runtime path beside the native core.</li>
+  <li><b>Opt-in and explicit.</b> <code>MANIFOLDX_CORE=rust</code> selects the new path. The selector rejects an unavailable or unimplemented Rust Engine; the current tree still does. Promotion and deletion are evidence gates, not a release-long dual-runtime train.</li>
 </ul>
 
-<h2 id="s09"><span class="n">09</span>Spikes, in order of risk</h2>
-<p>Each spike is a branch off <code>rust-core</code>, a small demo or bench case, a number, and a one-page note in <code>know-how/</code>. They merge into <code>rust-core</code> when they answer their question, pass or fail. A failed spike is a result, not a branch to keep alive.</p>
+<h2 id="s09"><span class="n">09</span>Spikes, historic measurements</h2>
+<p>Each spike was a branch off <code>rust-core</code>, a small demo or bench case, a number, and a note in <code>know-how/</code>. The results below are the record of what was measured in November 2026. They are history, not current gates, ordering or acceptance. None proves a production compiler, scheduler, physics solver, renderer, game or FPS result.</p>
 
 <div class="card">
-<h4>S-a · the frame under a slow async system</h4>
+<h4>S-a · the frame under a slow async system <span class="who">historic</span></h4>
 <p><b>Hypothesis.</b> A Rust loop keeps p99 frame time flat while a Python async system takes 300 ms, and the current pipelined free-threaded engine does not do so reliably.</p>
 <p><b>Method.</b> <code>benchmarks/spikes/s_a_frame.py</code>: three loops (Rust with a no-op sync callback, Rust with no Python callback, the current engine pipelined headless) in three modes (base, a 2 Hz job that burns 300 ms of CPU and allocates 50 MB, and that job plus a 125–160 ms forced GC pause every second). Three runs of six seconds at 60 Hz, 1080 frames each.</p>
-<p><b>Result: no.</b> The async job moved neither loop: p99 1.00× on Rust and 1.03× on the current engine, zero frames over 33 ms. The GC pause moved both; Rust with a Python sync callback still lost 42 frames of 1080 (p99 51.75 ms) against 48 on the current engine (p99 95.93 ms). Only the loop with no Python callback stayed at 1.00× and zero late frames. The current engine already passes the async half, so S-a fails its own gate and the case rests on S-b.</p>
-<p><b>Evidence.</b> <code>know-how/rust-core-s-a.md</code>, <code>benchmarks/spikes/s_a_results.json</code>.</p>
-<p><b>Done</b> 2026-11-23. <b>Blocks.</b> Nothing now; S-b decides the migration.</p>
+<p><b>Result: no.</b> The async job moved neither loop: p99 1.00× on Rust and 1.03× on the current engine, zero frames over 33 ms. The GC pause moved both; Rust with a Python sync callback still lost 42 frames of 1080 (p99 51.75 ms) against 48 on the current engine (p99 95.93 ms). Only the loop with no Python callback stayed at 1.00× and zero late frames. The current engine already passes the async half, so S-a failed its own gate.</p>
+<p><b>Evidence.</b> <code>know-how/rust-core-s-a.md</code>, <code>benchmarks/spikes/s_a_results.json</code>. <b>Historic.</b> Does not block current acceptance.</p>
 </div>
 
 <div class="card">
-<h4>S-b · a native cell builder</h4>
+<h4>S-b · a native cell builder <span class="who">historic</span></h4>
 <p><b>Hypothesis.</b> A Rust builder registered by capsule generates a cell at least 4× faster than the Python builder, at a quarter of the memory of the process-pool path, with identical output.</p>
-<p><b>Method.</b> <code>benchmarks/spikes/s_b_builders.py</code>: two separately compiled cdylibs (the game against <code>crates/manifoldx-sdk</code>, the engine-side collector in <code>crates/spike-s-b</code>) building a 1 km² cell: a 25 m street grid, a box per block, a lamp row every third intersection. The Python side is measured twice: the loop shape the current streamer uses, and a vectorized numpy floor. 20 builds, three seeds, two spawned pool workers for memory, and the failure corpus (panic, wrong version, non-capsules, 10k fuzz objects, 1k wrong capsules).</p>
-<p><b>Result: pass, with a caveat.</b> Bytes identical on all three seeds. The loop builder takes 46.14 ms, vectorized numpy 3.84 ms, the native builder 1.81 ms: <b>25.4×</b> over the loop and <b>2.1×</b> over numpy. Peak RSS is 27.3 MB against 133.0 MB for the two-worker pool, <b>20.6%</b>. A panic returns <code>RuntimeError: native builder failed (code 2): panic: …</code> and the process survives; a wrong version fails at registration; every malformed input is rejected.</p>
-<p><b>The caveat.</b> A regular grid is the best case for numpy. Road graphs, parcels, spatial indexes and pathfinding are where the 2.1× floor moves; an S-b2 on an irregular cell is the honest next test. The durable wins are the memory (no process duplication, which only grows with a warm world) and the versioned capsule boundary.</p>
-<p><b>Evidence.</b> <code>know-how/rust-core-s-b.md</code>, <code>benchmarks/spikes/s_b_results.json</code>.</p>
-<p><b>S-b2, the irregular cell.</b> A street graph with a ninth of its edges missing, BFS distances from the centre, four candidate lots per block and heights that read the BFS. The loop builder takes 110.06 ms, vectorized numpy 15.18 ms, the native builder 5.46 ms: <b>20.1×</b> over the loop, <b>2.8×</b> over numpy, 20.6% of the pool memory, bytes identical. The floor moved from 2.1× to 2.8×; the 4× general claim is still open, and a per-feature facade cell is the next test. <code>know-how/rust-core-s-b2.md</code>.</p>
-<p><b>Done</b> 2026-11-23. <b>Blocks.</b> The general 4× claim; not the migration.</p>
+<p><b>Method.</b> <code>benchmarks/spikes/s_b_builders.py</code>: two separately compiled cdylibs (the game against <code>crates/manifoldx-sdk</code>, the engine-side collector in <code>crates/spike-s-b</code>) building a 1 km² cell: a 25 m street grid, a box per block, a lamp row every third intersection. The Python side is measured twice: the loop shape the current streamer uses, and a vectorized NumPy floor. 20 builds, three seeds, two spawned pool workers for memory, and the failure corpus (panic, wrong version, non-capsules, 10k fuzz objects, 1k wrong capsules).</p>
+<p><b>Result: pass, with a caveat.</b> Bytes identical on all three seeds. The loop builder takes 46.14 ms, vectorized NumPy 3.84 ms, the native builder 1.81 ms: <b>25.4×</b> over the loop and <b>2.1×</b> over NumPy. Peak RSS is 27.3 MB against 133.0 MB for the two-worker pool, <b>20.6%</b>. A panic returns <code>RuntimeError: native builder failed (code 2): panic: …</code> and the process survives; a wrong version fails at registration; every malformed input is rejected.</p>
+<p><b>The caveat.</b> A regular grid is the best case for NumPy. Road graphs, parcels, spatial indexes and pathfinding are where the 2.1× floor moves; S-b2 was the next test. The durable wins are memory and the versioned capsule boundary.</p>
+<p><b>S-b2, the irregular cell.</b> A street graph with a ninth of its edges missing, BFS distances from the centre, four candidate lots per block and heights that read the BFS. The loop builder takes 110.06 ms, vectorized NumPy 15.18 ms, the native builder 5.46 ms: <b>20.1×</b> over the loop, <b>2.8×</b> over NumPy, 20.6% of the pool memory, bytes identical. The 4× general claim remains open; a per-feature facade cell was the proposed next test.</p>
+<p><b>Evidence.</b> <code>know-how/rust-core-s-b.md</code>, <code>know-how/rust-core-s-b2.md</code>, <code>benchmarks/spikes/s_b_results.json</code>, <code>s_b2_results.json</code>. <b>Historic.</b> Does not block current acceptance.</p>
 </div>
 
 <div class="card">
-<h4>S-c · reload with a live store</h4>
+<h4>S-c · reload with a live store <span class="who">historic</span></h4>
 <p><b>Hypothesis.</b> Python reload under 1 s with the world intact, and native incremental reload under 5 s.</p>
 <p><b>Method.</b> <code>benchmarks/spikes/s_c_reload.py</code>: a Rust store (<code>crates/spike-s-c</code>) holding 10k rows, 200 mesh handles and the frame counter while a Python app module is reimported and its systems swapped (ten reloads, counts and RSS checked); the same shape of app (117 meshes, 10k entities) on the current desktop <code>HotReloader</code> (five reloads); and an incremental <code>cargo build</code> of the game crate plus loading the new cdylib (five builds).</p>
-<p><b>Result: pass, but not a desktop differentiator.</b> Prototype 0.79 ms p50 / 1.05 ms p95, 10,000 entities and 200 meshes intact, the new module's system runs, RSS +0.88%. The current desktop reloader already does the same app in <b>83.8 ms</b> p50 (101.7 ms p95). Native incremental build 840 ms p50, loading the cdylib 4.1 ms. All gates pass.</p>
-<p><b>What it means.</b> The 3.1–3.5 s in #164 is <code>run --web</code>, not the desktop: its Python phase is 3.07 s, startup 1.29 s and reach 1.18 s, and the tab swap another 209 ms. The store removes startup and, if the core keeps the IR, reach; the prototype shows the mechanism at 0.79 ms but does not model the web snapshot, transpile, write or tab swap. The end-to-end web number is still unmeasured; the remaining phases add up to about 0.2 s, so 1 s looks reachable, not proven.</p>
-<p><b>Evidence.</b> <code>know-how/rust-core-s-c.md</code>, <code>benchmarks/spikes/s_c_results.json</code>.</p>
-<p><b>Done</b> 2026-11-23. <b>Blocks.</b> The merge through the web dev loop; the desktop path already meets it.</p>
+<p><b>Result: pass, but not a desktop differentiator.</b> Prototype 0.79 ms p50 / 1.05 ms p95, 10,000 entities and 200 meshes intact, the new module's system runs, RSS +0.88%. The current desktop reloader already did the same app in <b>83.8 ms</b> p50 (101.7 ms p95). Native incremental build 840 ms p50, loading the cdylib 4.1 ms.</p>
+<p><b>What it means.</b> The web reload numbers in #164 were 3.1–3.5 s. That path is outside this migration's acceptance. The prototype shows the state mechanism at 0.79 ms; it does not model an end-to-end application reload.</p>
+<p><b>Evidence.</b> <code>know-how/rust-core-s-c.md</code>, <code>benchmarks/spikes/s_c_results.json</code>. <b>Historic.</b> Does not block current acceptance.</p>
 </div>
 
 <div class="card">
-<h4>S-d · selections and commands over 100k rows</h4>
+<h4>S-d · selections and commands over 100k rows <span class="who">historic</span></h4>
 <p><b>Hypothesis.</b> Python can decide over 100k entities by building IR only, at a cost that fits a 60 Hz frame.</p>
-<p><b>Method.</b> <code>benchmarks/spikes/s_d_ir.py</code> over <code>crates/spike-s-d</code>: 100k agents in eight f32 columns, five Rust kernels, and a Python system at 2 Hz that builds <code>select("speed", "&lt;", 2.0)</code>, enqueues a <code>set</code> and a <code>spawn</code>, and reads no row. A Rust loop paces 600 frames at 60 Hz, calls the system every 30 frames and applies its commands at the boundary; apply time is measured inside Rust. The naive path, <code>read_speeds()</code>, is measured for contrast.</p>
+<p><b>Method.</b> <code>benchmarks/spikes/s_d_ir.py</code> over <code>crates/spike-s-d</code>: 100k agents in eight f32 columns, five fixed Rust kernels, and a Python system at 2 Hz that builds <code>select("speed", "&lt;", 2.0)</code>, enqueues a <code>set</code> and a <code>spawn</code>, and reads no row. A Rust loop paces 600 frames at 60 Hz, calls the system every 30 frames and applies its commands at the boundary; apply time is measured inside Rust. The naive path, <code>read_speeds()</code>, is measured for contrast.</p>
 <p><b>Result: pass.</b> The selection matches 20,000 of 100,000. The Python decision costs <b>0.036 ms</b>; reading the same column into Python costs 12.46 ms. The commands apply in <b>0.482 ms p50 and 0.990 ms p99/max</b> over 20 batches. The frame holds p50 16.667 ms, <b>p99 16.674 ms</b>, max 18.89 ms, zero frames over 33 ms. Zero rows read; 20 sets, 20 spawns, 32,360 rows affected; 100,800 entities at the end.</p>
-<p><b>What it means.</b> The zero-row rule works, and the apply fits the frame. The selection is fresh at apply time because the command carries the spec, not an index list. The five kernels are fixed Rust loops and the store has no secondary indexes, so every batch scans 100k rows; an index can only lower the 0.99 ms.</p>
-<p><b>Evidence.</b> <code>know-how/rust-core-s-d.md</code>, <code>benchmarks/spikes/s_d_results.json</code>.</p>
-<p><b>Done</b> 2026-11-23. <b>Blocks.</b> The API freeze; the loop is not affected.</p>
+<p><b>What it means, and what it does not.</b> The zero-row rule works, and command application fits the frame. The selection is fresh at apply time because the command carries the spec, not an index list. The five kernels are fixed Rust loops and the store has no secondary indexes, so every batch scans 100k rows. <b>S-d proves selection and command IR dispatch only.</b> It does not exercise the <code>@kernel</code> AST validator, typed-IR compiler, Rust CPU evaluator or WGSL backend.</p>
+<p><b>Evidence.</b> <code>know-how/rust-core-s-d.md</code>, <code>benchmarks/spikes/s_d_results.json</code>. <b>Historic.</b> Does not block current acceptance.</p>
 </div>
 
 <div class="card">
-<h4>S-e · the nbody and boids examples</h4>
-<p><b>Hypothesis.</b> The simulation examples' numpy hot loops improve when they run natively.</p>
-<p><b>Method.</b> <code>benchmarks/spikes/s_nbody_boids.py</code> over <code>crates/spike-nbody-boids</code>: the examples' own math, numpy against pyo3 + numpy + rayon. nbody is the same all-pairs gravity with <code>max(dist, softening)</code>; boids uses a uniform grid at the 4 m perception radius. Ten steps after two warm-ups, no rendering, 4 vCPUs; correctness within 1.2e-7.</p>
-<p><b>Result: pass, largest margin.</b> nbody 32.34 → 0.88 ms at 500 bodies (<b>36.7×</b>), 110.04 → 2.71 at 1,000 (<b>40.6×</b>), 440.84 → 10.49 at 2,000 (<b>42.0×</b>). boids 17.63 → 0.32 ms at 300 (<b>54.7×</b>), 209.92 → 1.09 at 1,000 (<b>192×</b>), 754.69 → 3.45 at 2,000 (<b>219×</b>). The native step reaches 10,000 bodies at 240 ms/step (nbody) and 54 ms/step (boids); numpy was skipped there for memory.</p>
-<p><b>What it means.</b> At their default sizes both examples already miss 16.7 ms in numpy; the native steps fit. The nbody win is the same algorithm: no N×N×3 temporaries and four cores, 37–42×. The boids win is part grid, part native, so its 55–219× is not all apples to apples. This is the native per-entity workload the core is for, and a stronger case than the cell builder's 2.8× against vectorized numpy.</p>
-<p><b>Full frame, after integration.</b> The examples now take the native step when the extension is built, with <code>MANIFOLDX_NUMPY=1</code> to compare. At 800×600 offscreen: nbody 500 goes from 112.57 to 81.17 ms per frame (update 34.32 → 1.90), 2,000 from 830.47 to 223.03 (607.94 → 12.07); boids 300 from 42.66 to 18.86 (26.66 → 1.37), 2,000 from 1,177.59 to 83.86 (1,126.61 → 4.63). The frame includes the canvas and GPU wait on llvmpipe; on a real GPU the update share dominates. <code>src/manifoldx/native.py</code> loads the extension, the examples fall back to numpy, and <code>tests/test_native_steps.py</code> covers the step.</p>
-<p><b>Caveats.</b> The full-frame numbers are llvmpipe; the boids comparison is native grid against numpy all-pairs; four vCPUs on a shared host; the pyo3 call is included. The loader is a development hook for the local crate, not a packaged wheel yet.</p>
-<p><b>Evidence.</b> <code>know-how/rust-core-s-e.md</code>, <code>benchmarks/spikes/s_nbody_boids_results.json</code>.</p>
-<p><b>Done</b> 2026-11-23. <b>Blocks.</b> Nothing; it supports the kernel and native-system case.</p>
+<h4>S-e · the nbody and boids examples <span class="who">historic</span></h4>
+<p><b>Hypothesis.</b> The simulation examples' NumPy hot loops improve when they run natively.</p>
+<p><b>Method.</b> <code>benchmarks/spikes/s_nbody_boids.py</code> over <code>crates/spike-nbody-boids</code>: the examples' own math, NumPy against pyo3 + NumPy + rayon. nbody is the same all-pairs gravity with <code>max(dist, softening)</code>; boids uses a uniform grid at the 4 m perception radius. Ten steps after two warm-ups, no rendering, 4 vCPUs; correctness within 1.2e-7.</p>
+<p><b>Result: pass, largest margin.</b> nbody 32.34 → 0.88 ms at 500 bodies (<b>36.7×</b>), 110.04 → 2.71 at 1,000 (<b>40.6×</b>), 440.84 → 10.49 at 2,000 (<b>42.0×</b>). boids 17.63 → 0.32 ms at 300 (<b>54.7×</b>), 209.92 → 1.09 at 1,000 (<b>192×</b>), 754.69 → 3.45 at 2,000 (<b>219×</b>). The native step reaches 10,000 bodies at 240 ms/step (nbody) and 54 ms/step (boids); NumPy was skipped there for memory.</p>
+<p><b>Full frame, after the spike integration.</b> At 800×600 offscreen on llvmpipe: nbody 500 went from 112.57 to 81.17 ms per frame (update 34.32 → 1.90), 2,000 from 830.47 to 223.03 (607.94 → 12.07); boids 300 from 42.66 to 18.86 (26.66 → 1.37), 2,000 from 1,177.59 to 83.86 (1,126.61 → 4.63). The frame includes the canvas and GPU wait on llvmpipe. These are offscreen microbenchmarks, not game FPS or acceptance evidence.</p>
+<p><b>Caveats.</b> The boids comparison is a native grid against NumPy all-pairs; four vCPUs on a shared host; the pyo3 call is included. The native step and <code>MANIFOLDX_NUMPY=1</code> comparison were development hooks, not production fallback policy.</p>
+<p><b>Evidence.</b> <code>know-how/rust-core-s-e.md</code>, <code>benchmarks/spikes/s_nbody_boids_results.json</code>, <code>s_nbody_boids_frame_results.json</code>. <b>Historic.</b> The examples remain in scope through their documented public entrypoints and real feature outcomes, not through this benchmark.</p>
 </div>
 
 <h2 id="s10"><span class="n">10</span>The branch and the delivery</h2>
-<p><code>main</code> keeps shipping. <code>rust-core</code> is an integration branch, not a fork of the product.</p>
+<p><code>main</code> keeps shipping until promotion. <code>rust-core</code> is an integration branch, not a fork of the product.</p>
 <ul>
-  <li><b>Additive by construction.</b> New code lives in <code>crates/manifoldx-core/</code> and <code>src/manifoldx/_core/</code>; the existing modules are untouched until the flag flips. That keeps rebases cheap and lets <code>main</code> keep fixing bugs.</li>
+  <li><b>One integration branch.</b> New code lives in <code>crates/</code> and the native binding. Existing Python modules remain until their native replacement lands and the promotion step removes the Python frame path. There is no second product to maintain in parallel.</li>
   <li><b>Merge, never rebase.</b> <code>main</code> merges into <code>rust-core</code> every week with <code>git merge origin/main</code>. Published history is not rewritten and no force push is allowed. A public API change on <code>main</code> gets a matching core commit within five working days, or the change waits.</li>
-  <li><b>Divergence budget: one week.</b> More than one week behind <code>main</code>, or a parity suite red for more than one week after a merge, freezes new features on the branch until it is green. A branch that cannot pass its own gate is not a branch, it is a second product.</li>
-  <li><b>Spikes are branches off it</b>, named <code>spike/s-a-async-frame</code> and so on, merged with their note and number.</li>
-  <li><b>CI.</b> The current <code>Native</code> workflow has a <code>native</code> job for PRs into <code>rust-core</code>: crate checks, wheel build, installed-wheel startup smoke and missing-extension negative control, packaging contracts and rift. It does not yet run the full shared parity suite or focused native scenarios. The planned required <code>core</code> parity/scenario gate remains to be implemented before promotion.</li>
+  <li><b>Divergence budget: one week.</b> More than one week behind <code>main</code>, or a required gate red for more than one week after a merge, freezes new features on the branch until it is green. A branch that cannot pass its own gate is not a branch, it is a second product.</li>
+  <li><b>Spikes are history.</b> The spike branches and their notes remain in the repository as evidence. They are not reopened as current gates or ordering.</li>
+  <li><b>CI.</b> The <code>Native</code> workflow has a <code>native</code> job for PRs into <code>rust-core</code>: crate checks, wheel build, installed-wheel startup smoke and missing-extension negative control, packaging contracts in <code>tests/core</code>, and rift. #367 ran it green; #369 ran it green with an additional green build check. The required scenario gate still has to run the in-scope examples and the Contravía acceptance path. It is not a universal legacy parity suite and it does not depend on a web export.</li>
   <li><b>The pinned issue is the dashboard</b>: <a href="https://github.com/gia-uh/manifoldx/issues/348">#348</a>, one row per gate, its status, and a link to the run or PR that proves it. The spec is the contract; the issue is the scoreboard.</li>
 </ul>
 <div class="note"><p><b>The point of the pinned issue.</b> A long-running branch loses its reasons. Every gate on it names the exact command and the exact number that closes it, so "almost done" is never a status.</p></div>
 
-<h2 id="s11"><span class="n">11</span>The move criteria</h2>
-<p>"Ready" is not a date and not a feature list. It is a set of gates that must all be green on the branch, then on <code>main</code> behind the flag, then after the flip. The move happens in three steps, and each has its own trigger.</p>
-<p>Two rules govern the numbers below. Numerical and image tolerances are fixed per module and per scene before its port, with the seed, adapter and channel thresholds named; physics is compared at a fixed substep and the frame feedback is reported separately. No threshold is waived quietly: a gate that changes scope is written here with its reason, or it stays red.</p>
-<div class="note"><p><b>Phase 0 status, 2026-11-24.</b> The approved phase 0 fixes contracts, packaging, selector, inventory, executable common cases and reproducible references; it tests window ownership feasibility before porting the renderer. This phase is still open. This mapping restores the approved order; it does not waive or narrow any promotion gate.</p>
-<ul>
-<li><b>Evidenced:</b> installed wheel and selector rejection (#349/#351); Python reference contracts (#354); controlled free/contact references (Contravía #127); content synchronization SHAs; the Linux Wayland/Vulkan ownership/main-thread feasibility probe, including its negative control and independent repeat. This hidden clear-only probe does not prove visible display performance or platform-wide support.</li>
-<li><b>ECS inventory complete, read-only:</b> <a href="../analysis/2026-11-24-ecs-contract-inventory.html">pinned public/private consumer evidence</a> records copies, public slice aliases, private raw consumers and GUI/streaming ownership traces. Ground, GPU, events, GUI, streaming and audio still need broader coverage; the ECS trace alone is not the full API inventory.</li>
-<li><b>Missing phase 0 execution:</b> <code>native-build</code> and <code>native-check</code> exist, but <code>parity-fast</code> and shared common-case wiring to real Python and native backends are missing. #354 characterizes Python only. <a href="https://github.com/gia-uh/manifoldx/pull/357">#357</a> proposes private allocator cases but is open with review corrections pending; it is not delivered parity.</li>
-<li><b>Contracts now, execution later:</b> record the graphics ownership group, main-thread/platform constraints, public aliases and bridge lifetime rules now. The Python bridge's runtime/reload/shutdown validation belongs to phases 2/6. Windows/macOS surface evidence remains pending in phase 4/platform validation and GW-3; Linux feasibility does not waive it.</li>
-<li><b>Later implementation and promotion:</b> native ECS/runtime, physics, renderer/shader parity, streaming and full integration are phases 1–7. Their absence is not an additional phase 0 blocker. GW-1 through GW-8 all remain pending.</li>
-</ul></div>
+<h2 id="s11"><span class="n">11</span>Acceptance and gates</h2>
+<p>"Ready" is not a date and not a feature list. It is the current gates, all green on the branch with their evidence linked, then on <code>main</code> behind the flag, then at deletion. The <code>GW</code> identifiers are retained from the earlier gate set; the definitions below supersede the legacy-parity, external-client, traffic-first, release-long and web definitions that previously used the same labels. A gate that changes scope is written here with its reason, or it stays red.</p>
+<p>Two rules govern the numbers below. Numerical and image tolerances are fixed per module and per scene before its port, with the seed, adapter and channel thresholds named; physics is compared at a fixed substep and the frame feedback is reported separately. No threshold is waived quietly.</p>
+<div class="note"><p><b>Current state, 2026-11-24.</b> The private native World and calling-thread runtime merged in #363/#365. #351 still makes the selector reject an unavailable Rust Engine; Engine activation is not delivered. #367 and #369 are open with green Native CI and are not merged. No gate below is green. The old phase 0 parity inventory is evidence work, not a prerequisite that can reinstate a universal parity program.</p></div>
 
-<h3>Move A · merge into <code>main</code> behind <code>MANIFOLDX_CORE=rust</code></h3>
-<p>This is the first real merge. It changes no user's default. It happens when the branch passes all of these:</p>
+<div class="gate"><div class="id">GW-1</div><div><p><b>In-scope examples and demos.</b> At this revision there are 46 examples and 5 demos. <code>examples/web_crowd.py</code> and <code>examples/web_walk.py</code> are excluded because they are web-export-only. <code>examples/quad_streaming.py</code> remains in scope through its documented desktop command; its <code>export --web</code> path is out of scope. <code>examples/gltf_export.py</code> remains in scope as a non-web modeling export. That leaves 44 examples and 5 demos, 49 runs. Every remaining example and demo runs through the entrypoint its documentation names, with the native engine selected, and produces the feature outcome it documents: a non-blank or changed frame, a written and parsed mesh, a query state, a physics pose, an event, an audio block or the equivalent. Exit 0 alone is not evidence. A run must record native provenance (the <code>MANIFOLDX_CORE=rust</code> selection or the native executable), commit, adapter and any remaining Python bridge. A Python-engine run does not satisfy this gate. Optional dependencies are declared, not skipped silently. If the set changes, the PR names the addition or removal.</p></div><div class="nn">49 runs</div></div>
+<div class="gate"><div class="id">GW-2</div><div><p><b>Frame and concurrency.</b> The frame lane runs in Rust with no Python callback in the base loop and no fallback. A 300 ms async system and a deliberate GC pause do not move the no-Python frame; a synchronous Python system that overruns is reported with its name and time. Async systems read snapshots and apply bounded commands at the declared boundary. With 100k entities and five kernels, p99 ≤ 16.7 ms on the designated reference laptop, with zero frames over 33 ms in the controlled frame case. No dangling handle, stale generation, leaked view or write lost across a boundary.</p></div><div class="nn">p99 ≤ 16.7 ms</div></div>
+<div class="gate"><div class="id">GW-3</div><div><p><b>Kernels, selections and commands.</b> A <code>@kernel</code> outside the restricted subset fails at import with file and line. Valid kernels lower to typed IR and run on both production destinations that claim support. The Python reference evaluator is tests-only and is never selectable at runtime. Rust CPU and GPU results agree within a numeric threshold fixed before the backend, and the dtype and rounding rules are named. Selections and commands build their own IR, are tested independently of kernel compilation, and read rows only through explicit readback with counted rows and bytes. S-d is not evidence for this gate.</p></div><div class="nn">source-located</div></div>
+<div class="gate"><div class="id">GW-4</div><div><p><b>Native physics, renderer and GUI.</b> The current vehicle steps at a fixed 120 Hz with native ground and contact queries and no Python call per wheel or substep. The native wgpu renderer owns device, queue and surface and covers the base path and the paths the applications use, including shadows, post-processing, sprites, labels, skinning and the GUI layout, hit testing, drawing and input runtime. Reference images match with tolerances fixed per scene and channel before the port; physics matches within its fixed-substep tolerance. Fullscreen is physical 1920×1080, not a smaller texture scaled up. A missing native visual path blocks the gate; it is not disabled to produce a capture. The temporary Python bridge is gone from the native path.</p></div><div class="nn">no bridge</div></div>
+<div class="gate"><div class="id">GW-5</div><div><p><b>Memory, ABI and safety.</b> Fixed capacity, generation-bearing handles, atomic validation, lock discipline and copy accounting hold under tests. Wrong versions, panics and malformed inputs fail with clear Python errors and do not crash the process. Fuzz cases, oversized inputs, stale identities and buffer callbacks that re-enter the store are covered. Seven days of a real application run on the core with no crash, leaked handle or RSS growth over 5%. Boundary tests run under a sanitizer where the platform allows. <code>cargo clippy -D warnings</code> and <code>cargo test</code> are green.</p></div><div class="nn">7 days</div></div>
+<div class="gate"><div class="id">GW-6</div><div><p><b>Dev loop and reload.</b> A Python edit reaches the first native frame at p50 &lt; 1.0 s and p95 &lt; 1.5 s on the designated reference laptop. A native incremental build is p50 &lt; 5 s and a full build is &lt; 60 s. Ten reloads preserve entity, mesh and loaded-cell counts and keep RSS within 5%. This gate is desktop; the old web reload threshold is not part of it.</p></div><div class="nn">&lt;1 s</div></div>
+<div class="gate"><div class="id">GW-7</div><div><p><b>Packaging, selection and operations.</b> Wheels build, install and run on Linux and Windows, the game platforms. macOS remains a declared engine target; missing runner evidence leaves its verification pending, never passed or unrequired. Both GIL and free-threaded interpreters are covered. An installed wheel in a clean environment runs the native entrypoint, and removing the extension makes the selector reject Rust startup for the right reason. CI wall time is ≤ 1.5× the pre-core baseline and wheel size ≤ 2×. No external client beyond Contravía is a prerequisite.</p></div><div class="nn">installed</div></div>
+<div class="gate"><div class="id">GW-8</div><div><p><b>Delete test and divergence.</b> On a scratch branch, delete the Python frame path and run the full suite; it passes with the reference evaluator and unrestricted Python systems as the only Python left. The branch is at most one week behind <code>main</code>, every public API change since the last synchronization is mirrored, and no gate above has an open waiver.</p></div><div class="nn">suite green</div></div>
+<div class="gate"><div class="id">GW-9</div><div><p><b>Contravía at 1920×1080.</b> On the designated reference laptop, the actual application runs fullscreen at 1920×1080 with traffic and pedestrians active and visual quality accepted as reasonable. The measured evidence covers the agreed actual route in three full repeats plus the transitions into and out of it. For each loaded repeat, report p50, p95 and p99 frame time and every frame over 33.3 ms. Report cold load and streaming pauses separately. The display's measured refresh is 59.96 Hz. <b>Proposed</b> stability criteria, not achieved requirements: p95 ≤ 17.5 ms and p99 ≤ 20 ms in each loaded repeat, with a <b>proposed</b> GPU budget of ≤ 12 ms. Investigate every frame over 33.3 ms. No claim comes from an offscreen run, a microbenchmark, a reduced resolution, frozen traffic, a smaller window or a missing visual path. Cold loads are judged by startup time and the absence of stalls, and are not removed from the evidence.</p></div><div class="nn">3 repeats</div></div>
 
-<div class="gate"><div class="id">GW-1</div><div><p><b>Parity.</b> <code>make test</code> and <code>manifoldx bench check</code> pass on both engines, from one suite, with no skip added for the core and no test excluded by engine. All 45 examples and 5 demos run in the smoke matrix; rendered images match a tolerance fixed per scene and channel before the port, naming the colour and depth thresholds, the seed and the adapter. Two percent of pixels is the reference, not an ambiguous pass mark.</p></div><div class="nn">0 failures</div></div>
-<div class="gate"><div class="id">GW-2</div><div><p><b>Frame stability.</b> No-op baseline p99 ≤ 1.05× the Python engine on the same interpreter. With the S-a async system: p99 ≤ 1.05× baseline and 0 frames over 33 ms (S-a showed the current engine already holds this; the core must not regress it). With a GC pause, the frame lane must have no Python callback, or the gate accepts the one-frame cost and measures it. With 100k entities and five kernels: p99 ≤ 16.7 ms on the reference machine.</p></div><div class="nn">p99 ≤ 1.05×</div></div>
-<div class="gate"><div class="id">GW-3</div><div><p><b>Public API compatibility.</b> Examples, demos and two external apps preserve public API behavior without source edits beyond an optional import. Private API adaptations are inventoried and documented separately; they do not waive public API guarantees. NumPy dtype, shape, strides, mutability and retained-view semantics are tested against the reference. Compatible contiguous buffers are zero-copy when safe; required conversions and copies are explicit, counted and measured by buffer type. Wheels build, install and start on Linux and Windows, the game platforms, and macOS, a declared engine target. Missing runner evidence leaves that platform and its promotion gate pending; it never removes the requirement. Both GIL and free-threaded interpreters are covered.</p></div><div class="nn">0 public API edits</div></div>
-<div class="gate"><div class="id">GW-4</div><div><p><b>Dev loop.</b> Python edit to first new frame p50 &lt; 1.0 s and p95 &lt; 1.5 s, measured on the web path (#164's Python phase is 3.07 s; the desktop reloader already does 84 ms). S-c's prototype is 0.79 ms but does not include the web export. Native incremental reload p50 &lt; 5 s (S-c: 840 ms); full build &lt; 60 s. Ten reloads keep entity and mesh counts and grow RSS by less than 5%.</p></div><div class="nn">&lt;1 s</div></div>
-<div class="gate"><div class="id">GW-5</div><div><p><b>Native SDK.</b> <code>examples/native_builder/</code> builds with one command and matches the Python builder byte for byte; ≥ 4× faster than the loop-shaped builder and ≤ 25% of the process-pool memory (S-b measured 25.4× and 20.6%, with a 2.1× floor against vectorized numpy; S-b2 moved the floor to 2.8× on an irregular cell). Wrong version, panic and malformed inputs each produce a clear Python error; the fuzz corpus finds no crash.</p></div><div class="nn">4× · 25%</div></div>
-<div class="gate"><div class="id">GW-6</div><div><p><b>Operations.</b> Seven days of a real app on the core: no crash, RSS drift under 5%, no leaked handles. <code>cargo clippy -D warnings</code> and <code>cargo test</code> green; boundary tests run under a sanitizer where the platform allows. CI wall time ≤ 1.5× today; wheel size ≤ 2× today.</p></div><div class="nn">7 days</div></div>
-<div class="gate"><div class="id">GW-7</div><div><p><b>No unique Python path.</b> The delete test: on a scratch branch, delete the Python implementation of the frame path and run the full suite; it passes, with the debug interpreter and the Python-facing systems as the only Python left. If it does not, the core is still a second engine.</p></div><div class="nn">suite green</div></div>
-<div class="gate"><div class="id">GW-8</div><div><p><b>Divergence.</b> The branch is at most one week behind <code>main</code>, every public API change since the last synchronization is mirrored, and no gate above has an open waiver.</p></div><div class="nn">≤ 7 days</div></div>
+<h3>Promotion, default and deletion</h3>
+<p>Promotion, default and deletion are evidence gates, not a calendar. When GW-1 to GW-9 are green, the core can merge into <code>main</code> behind <code>MANIFOLDX_CORE=rust</code>. The default can flip on the same evidence with the flag required, and the Python frame path is deleted after the delete test. There is no one-release compatibility window, no dual-backend parity program, no traffic-first milestone and no web gate. The old Move A/B/C calendar is historical; those labels do not add waits or prerequisites.</p>
+<p>The migration note in the changelog says what changed, what did not, and how to run the previous engine during the transition window that the release actually provides. It does not create a second runtime commitment.</p>
 
-<h3>Move B · flip the default</h3>
-<p>One full release after A, with the <code>core</code> CI job required and the flag on in at least two real apps (one of them a game):</p>
-<ul>
-  <li>GW-1 to GW-8 green on <code>main</code> with the flag as the default.</li>
-  <li>No P1 or P2 issue attributable to the core in the release.</li>
-  <li>Every bench scenario within 1.05× of its Python result, and the target scenarios (async frame, native cell, reload, 100k IR) better by their gate margins.</li>
-  <li>A migration note in the changelog: what changed, what did not, and how to run the old engine one last time.</li>
-</ul>
+<div class="note"><p><b>What "not ready" looks like.</b> Any gate red, any gate quietly waived, an in-scope example that exits without its feature outcome, a run whose native provenance is missing, an application that needs an undeclared public API edit, a bench scenario that regressed beyond noise, or a Python path that still owns a production capability the core does not. A single red gate is a no; the branch waits and the tracker says why.</p></div>
 
-<h3>Move C · delete the Python runtime</h3>
-<p>In the next minor after B: remove the Python frame path, keep the debug interpreter as a test oracle, and keep the unrestricted Python systems. From then on there is one engine and one place where the frame is defined.</p>
-
-<div class="note"><p><b>What "not ready" looks like.</b> Any gate red, any gate quietly waived, an app that needs an unapproved public API source edit, a bench scenario that regressed beyond noise, or a Python path that still owns a capability the core does not. A single red gate is a no; the branch waits and the tracker says why.</p></div>
-
-<h2 id="s12"><span class="n">12</span>Non-goals and open questions</h2>
+<h2 id="s12"><span class="n">12</span>Non-goals and bounded decisions</h2>
 <h3>Non-goals for this migration</h3>
 <ul>
-  <li><b>No Python renderer in the completed native path.</b> Phase 5 removes the temporary wgpu-py bridge from that path; a missing native capability cannot fall back to Python. The Python reference/default runtime, including its renderer, coexists through Move A/B and is deleted only at Move C in phase 9.</li>
+  <li><b>No production whole-scene Python lane.</b> The Python evaluator is a test reference. A whole scene does not run through it, and it is never a fallback.</li>
+  <li><b>No Python renderer in the completed native path.</b> The native path has one renderer owner. A missing native capability blocks its gate; it does not fall back to Python.</li>
+  <li><b>No independent universal legacy/runtime parity program.</b> Correctness is proved per slice and per public entrypoint, not by running every historical Python path beside the native core.</li>
+  <li><b>No web export or wasm acceptance here.</b> The web target and <code>export --web</code> are outside this migration's gates. Modeling and non-web exports such as glTF remain in scope.</li>
+  <li><b>No traffic-first rule.</b> Game-specific traffic, city queries, quadtree work or cell generation are ported only after the profile on the migrated core justifies them.</li>
+  <li><b>No external client as a prerequisite.</b> Contravía is the application under test. A second external client does not gate promotion.</li>
   <li><b>No ABI-stable Rust types.</b> Only C-layout structs and function pointers cross the boundary.</li>
-  <li><b>No requirement that every system become a kernel.</b> Python logic without limits stays the default; kernels are for what repeats per entity.</li>
-  <li><b>No removal of numpy.</b> It stays in the dev and async lanes; only the frame lane is numpy-free.</li>
-  <li><b>No wasm gate here.</b> One runtime for desktop and web is the long-term payoff, but the browser build follows the native core.</li>
-  <li><b>No Python-side rewrite of modeling, assets, widget declarations or game rules.</b> The GUI layout, hit testing, drawing and input runtime do move to Rust in phase 5; the declarative widgets and their Python callbacks stay.</li>
+  <li><b>No requirement that every system become a kernel.</b> Unrestricted Python logic stays Python; kernels are for what repeats per entity and fits the restricted subset.</li>
+  <li><b>No removal of NumPy from modeling or the async/dev lanes.</b> Only the frame lane is NumPy-free.</li>
+  <li><b>No Python-side rewrite of modeling, assets, widget declarations or game rules.</b> The GUI layout, hit testing, drawing and input runtime move to Rust in phase 5; the declarative widgets and their Python callbacks stay.</li>
 </ul>
-<h3>Open questions, each closed by a spike or a decision</h3>
+
+<h3>Bounded decisions, due before the dependent slice</h3>
+<p>These are implementation decisions inside the approved architecture, not a reopened choice between Python and Rust ownership. Each closes before the slice that needs it.</p>
 <table class="tbl">
-  <thead><tr><th>Question</th><th>Closes when</th></tr></thead>
+  <thead><tr><th>Decision</th><th>Closes when</th></tr></thead>
   <tbody>
-    <tr><td>pyo3 or a thinner C extension for the Python façade?</td><td class="why">S-a, by building both façades for the same loop and comparing build time, wheel size and free-threaded behavior.</td></tr>
-    <tr><td>Does a sync system get numpy views (compatibility) or IR handles (speed)?</td><td class="why">S-d: views for compatibility, with a measured cost and a migration path to handles for hot ones.</td></tr>
-    <tr><td>How is the kernel IR represented, and does the Rust CPU backend ship in v1?</td><td class="why">S-d and the first kernel port; the Python interpreter is the oracle either way.</td></tr>
-    <tr><td>What is the GPU residency and copy policy for columns?</td><td class="why">The first store spike, before any async system ships.</td></tr>
-    <tr><td>maturin per platform, or one wheel per interpreter?</td><td class="why">GW-3; the answer is the smallest matrix that covers Linux and Windows, and macOS, and both interpreters. An unavailable runner leaves verification and promotion pending, not waived.</td></tr>
-    <tr><td>When does the renderer move, and does it move to wgpu-rs or stay on wgpu-py for the web target?</td><td class="why">Decided 2026-11-24: phases 4 and 5, on the Rust wgpu device, with the GUI runtime included. The web target keeps its own path.</td></tr>
+    <tr><td>Kernel IR representation and restricted subset</td><td class="why">Before the kernel compiler slice. The AST validator, source locations, node set, dtype rules and lowering boundary are fixed there. Selections and commands keep their separate IR.</td></tr>
+    <tr><td>Rust CPU and WGSL numeric agreement</td><td class="why">Before a kernel backend claims support. Name the dtype, rounding, clamp and transcendental behavior and the comparison threshold; the Python reference evaluator supplies expected values in tests only.</td></tr>
+    <tr><td>GPU residency and copy policy</td><td class="why">Before the first GPU-resident store or async column path. Name when a column is copied, which side owns it, how readback is counted, and when a version invalidates it.</td></tr>
+    <tr><td>Native boundary fixture and wheel matrix</td><td class="why">Before packaging promotion. PyO3 is the delivered binding; the matrix covers Linux and Windows for the game, macOS as a declared target, and GIL plus free-threaded interpreters. An unavailable runner leaves verification pending, not waived.</td></tr>
+    <tr><td>Sync-system view versus IR handle</td><td class="why">Closed for this revision. Unrestricted <code>@system</code> uses Python and NumPy; selections and commands use IR; rows cross only through explicit readback. A hot system moves to a kernel or a native capsule when measured.</td></tr>
+    <tr><td>Renderer ownership</td><td class="why">Closed 2026-11-24. Phases 4 and 5 on the Rust wgpu device, with the GUI runtime included. There is no Python production renderer in the native path and no web target in these gates.</td></tr>
   </tbody>
 </table>
 
-<p class="meta" style="margin-top:48px"><span>Spec lives on <code>rust-core</code> until Move A.</span><span>·</span><span>Scoreboard: the pinned migration issue.</span></p>
+<p class="meta" style="margin-top:48px"><span>Spec lives on <code>rust-core</code> until promotion.</span><span>·</span><span>Scoreboard: the pinned migration issue.</span></p>
+
 </main>
 </div>
 
