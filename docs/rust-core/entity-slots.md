@@ -17,7 +17,9 @@ API or a claim that the current Python `EntityStore` behaves this way.
 - **Allocation order.** `reserve` consumes free slots LIFO (most recently freed
   first), then the lowest never-used slots in ascending order. Reserved slots
   are disjoint and invisible: neither `alive_count` nor a snapshot state says
-  alive until `commit`.
+  alive until `commit`. The free list is a stack: a reservation validates one
+  contiguous suffix and truncates it after validation, so its cost is linear in
+  the slots it consumes rather than products of free and requested counts.
 - **Commit.** A successful `commit` makes the reserved identities live and
   raises the high-water mark to one past the highest committed slot.
 - **Cancel and destroy.** `cancel` returns a reservation to the free set without
@@ -26,7 +28,9 @@ API or a claim that the current Python `EntityStore` behaves this way.
   never decreases.
 - **Whole-batch validation.** Overflow, a stale identity, a wrong lifecycle
   state, an out-of-range slot or a duplicate slot rejects the complete batch
-  before any slot, free-order, high-water, generation or version changes.
+  before any slot, free-order, high-water, generation or version changes. An
+  impossible `reserve` scans the fixed table instead of allocating its own
+  requested length first, so an untrusted huge count cannot exhaust memory.
 - **Identity.** The exposed ID is the slot integer; the allocator also carries a
   `u64` generation per slot. `reserve` returns `(slot, generation)` handles for
   exact-identity operations, and `spawn` returns slot integers.

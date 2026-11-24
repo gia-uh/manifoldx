@@ -282,13 +282,22 @@ impl EntitySlots {
         }
 
         let requested = n as usize;
-        let mut selected = Vec::with_capacity(requested);
+        // Grow with the slots actually found, never with the untrusted request:
+        // an impossible batch must not allocate its own length before the
+        // capacity check below.
+        let mut selected = Vec::new();
         let mut retired = Vec::new();
 
-        for &slot in self.free.iter().rev() {
+        // The free list is a stack, so a reservation consumes one contiguous
+        // suffix. Record where that suffix starts and truncate it only after
+        // the whole batch validates, leaving a failed reserve untouched.
+        let mut consumed = self.free.len();
+        for index in (0..self.free.len()).rev() {
             if selected.len() == requested {
                 break;
             }
+            consumed = index;
+            let slot = self.free[index];
             let generation = self.slots[slot as usize].generation;
             if generation == u64::MAX {
                 retired.push(slot);
@@ -324,8 +333,7 @@ impl EntitySlots {
             });
         }
 
-        self.free
-            .retain(|slot| !selected.contains(slot) && !retired.contains(slot));
+        self.free.truncate(consumed);
         for slot in retired {
             self.slots[slot as usize].state = SlotState::Retired;
         }
@@ -594,6 +602,53 @@ mod tests {
         let error = store.cancel(&reserved).unwrap_err();
         assert!(matches!(error, EntityError::NotReserved { .. }));
         assert_eq!(store.snapshot(), after_cancel);
+    }
+
+    #[test]
+    fn reserve_rejects_extreme_batches_without_allocating_them() {
+        let mut store = EntitySlots::new(1).unwrap();
+        let before = store.snapshot();
+        let error = store.reserve(u32::MAX).unwrap_err();
+        assert!(matches!(error, EntityError::Capacity { .. }));
+        assert_eq!(store.snapshot(), before);
+
+        let ids = store.reserve(1).unwrap();
+        assert_eq!(slots_of(&ids), vec![0]);
+        assert_eq!(store.reserved_count(), 1);
+    }
+
+    #[test]
+    fn reserve_pops_a_free_stack_suffix_then_fresh_and_fails_atomically() {
+        let mut store = EntitySlots::new(8).unwrap();
+        store.free = vec![0, 1, 2, 3];
+        store.next_fresh = 4;
+        store.slots[0].generation = u64::MAX;
+
+        // The free suffix is 3, 2; slot 0 stays below the consumed boundary.
+        let ids = store.reserve(2).unwrap();
+        assert_eq!(slots_of(&ids), vec![3, 2]);
+        assert_eq!(store.snapshot().free_order, vec![0, 1]);
+
+        // Too large: the scan reaches the retired slot 0 but must not apply it.
+        let before = store.snapshot();
+        let error = store.reserve(9).unwrap_err();
+        assert!(matches!(
+            error,
+            EntityError::Capacity {
+                requested: 9,
+                available: 5,
+                capacity: 8
+            }
+        ));
+        assert_eq!(store.snapshot(), before);
+        assert_eq!(store.state_of(0), Some(SlotState::Free));
+
+        // The next batch consumes slot 1, retires 0, then extends into the
+        // fresh range in ascending order.
+        let ids = store.reserve(5).unwrap();
+        assert_eq!(slots_of(&ids), vec![1, 4, 5, 6, 7]);
+        assert!(store.snapshot().free_order.is_empty());
+        assert_eq!(store.state_of(0), Some(SlotState::Retired));
     }
 
     #[test]

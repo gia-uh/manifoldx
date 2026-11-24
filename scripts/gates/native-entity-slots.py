@@ -13,6 +13,7 @@ failed check. There is no fallback, skip or source-tree import.
 
 import importlib.machinery
 import importlib.util
+import subprocess
 import sys
 import traceback
 
@@ -159,6 +160,18 @@ def owned_copies(slots):
     store.commit(source)
     check(store.alive_count == 2, "mutating the caller's source list does not affect the store")
 
+    live = store.snapshot()
+    live["slots"].clear()
+    live["states"][1] = "retired"
+    live["generations"][0] = 999
+    unchanged = store.snapshot()
+    check(
+        unchanged["slots"] == [0, 1, 2, 3]
+        and unchanged["states"] == ["alive", "alive", "free", "free"]
+        and unchanged["generations"][0] == 1,
+        "mutating a live snapshot does not reach the store",
+    )
+
     snapshot = store.snapshot()
     del store
     check(snapshot["slots"] == [0, 1, 2, 3], "snapshot survives wrapper deletion")
@@ -166,6 +179,58 @@ def owned_copies(slots):
     snapshot["slots"].clear()
     snapshot["generations"][0] = 999
     check(snapshot["slots"] == [], "snapshot rows are ordinary owned lists")
+
+
+def oversized_reserve_is_rejected_without_oom():
+    """Bound an impossible reservation so the old code fails without real OOM.
+
+    Linux-only adaptation: the child imports the installed extension first,
+    then caps RLIMIT_AS at its current address space plus 64 MiB, so a large
+    allocation fails deterministically instead of consuming the machine.
+    """
+    if not sys.platform.startswith("linux"):
+        print("skip: the bounded RLIMIT_AS regression runs on Linux only")
+        return
+    child = r"""
+import resource
+
+import manifoldx._core_native as native
+
+with open("/proc/self/status", encoding="ascii") as status:
+    vmsize = next(int(line.split()[1]) * 1024 for line in status if line.startswith("VmSize:"))
+assert vmsize > 0
+
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+_, hard = resource.getrlimit(resource.RLIMIT_AS)
+bound = vmsize + 64 * 1024 * 1024
+if hard != resource.RLIM_INFINITY:
+    bound = min(bound, hard)
+resource.setrlimit(resource.RLIMIT_AS, (bound, hard))
+
+try:
+    native._EntitySlots(1).reserve(2**32 - 1)
+except RuntimeError as error:
+    message = str(error)
+    assert "Max entities 1" in message, message
+    print(message)
+else:
+    raise SystemExit("oversized reserve was accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", child],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    check(
+        result.returncode == 0,
+        f"oversized reserve child exited {result.returncode} without aborting: "
+        f"{result.stderr.strip()}",
+    )
+    check(
+        "Max entities 1" in result.stdout,
+        f"oversized reserve returns the capacity message: {result.stdout.strip()}",
+    )
 
 
 def python_reuse_order():
@@ -213,7 +278,13 @@ def python_reservations():
     return first, second, visible_before, visible_after_second, visible_after_both
 
 
+def slot_text(values):
+    return ", ".join(str(value[0]) if isinstance(value, tuple) else str(value) for value in values)
+
+
 def parity(slots):
+    rows = []
+
     native = slots(20)
     native.spawn(10)
     native.destroy([native.current(2), native.current(5), native.current(7)])
@@ -222,6 +293,15 @@ def parity(slots):
     check(native_ids == py_ids, f"reuse IDs match Python: {native_ids} == {py_ids}")
     check(native.alive_count == py_alive, f"alive count matches Python: {native.alive_count}")
     check(native.high_water == py_high, f"high-water matches Python: {native.high_water}")
+    rows.append(
+        (
+            "reuse after destroy(2,5,7)",
+            slot_text(native_ids),
+            slot_text(py_ids),
+            native.alive_count,
+            py_alive,
+        )
+    )
 
     native = slots(10)
     native.spawn(8)
@@ -236,6 +316,15 @@ def parity(slots):
     check(
         native.high_water == py_high,
         f"post-overflow high-water matches Python: {native.high_water}",
+    )
+    rows.append(
+        (
+            "overflow then refill",
+            slot_text(native_ids),
+            slot_text(py_ids),
+            native.alive_count,
+            py_alive,
+        )
     )
 
     native = slots(20)
@@ -253,6 +342,16 @@ def parity(slots):
         before == [] and after_second == py_second and after_both == py_first + py_second,
         "reservation visibility matches Python",
     )
+    rows.append(
+        (
+            "two reservations committed",
+            f"{slot_text(native_first)} + {slot_text(native_second)}",
+            f"{slot_text(py_first)} + {slot_text(py_second)}",
+            native.alive_count,
+            len(after_both),
+        )
+    )
+    return rows
 
 
 def main():
@@ -266,17 +365,13 @@ def main():
     reservations(slots)
     stale_and_duplicate(slots)
     owned_copies(slots)
-    parity(slots)
+    oversized_reserve_is_rejected_without_oom()
+    rows = parity(slots)
     print()
-    print(
-        "| scenario | native slots | Python slots | native alive | Python alive | stale identity |"
-    )
-    print("|---|---|---|---|---|---|")
-    print("| reuse after destroy(2,5,7) | 7,5,2,10,11 | 7,5,2,10,11 | 12 | 12 | rejected |")
-    print("| overflow then refill | 0,8,9 | 0,8,9 | 10 | 10 | rejected |")
-    print(
-        "| two reservations | 0,1 + 2,3,4 | 0,1 + 2,3,4 | 5 after commit | 5 after commit | rejected |"
-    )
+    print("| scenario | native slots | Python slots | native alive | Python alive |")
+    print("|---|---|---|---|---|")
+    for scenario, native_slots, python_slots, native_alive, python_alive in rows:
+        print(f"| {scenario} | {native_slots} | {python_slots} | {native_alive} | {python_alive} |")
     print()
     print(f"native entity slots: {checks} checks passed")
 
