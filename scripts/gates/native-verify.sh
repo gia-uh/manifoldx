@@ -20,6 +20,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 command -v uv >/dev/null || { echo "FAIL: uv is not on PATH" >&2; exit 1; }
 [ -d "$DIST" ] || { echo "FAIL: no dist dir at $DIST (run make native-build first)" >&2; exit 1; }
 
+# The tag computation needs a runnable interpreter path; uv can also be
+# handed a name such as python3.14t, so resolve it first.
+if [ ! -x "$PY_ARG" ] && ! command -v "$PY_ARG" >/dev/null 2>&1; then
+    PY_ARG="$(uv python find "$PY_ARG" 2>/dev/null)" \
+        || { echo "FAIL: cannot resolve interpreter: $1" >&2; exit 1; }
+fi
+
 TAG="$("$PY_ARG" -c 'import sys, sysconfig
 t = "t" if sysconfig.get_config_var("Py_GIL_DISABLED") else ""
 print(f"cp{sys.version_info.major}{sys.version_info.minor}{t}")')"
