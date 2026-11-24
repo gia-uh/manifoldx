@@ -1,0 +1,9 @@
+[package]
+name = "manifoldx-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "manifoldx_core"
+path = "src/lib.rs"
