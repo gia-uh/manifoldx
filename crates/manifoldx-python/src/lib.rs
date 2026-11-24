@@ -9,9 +9,11 @@
 //!
 //! This is a testable native seam, not the public ECS, the Engine runtime or a
 //! compatibility backend. The binding owns every returned value; no pointer
-//! into native storage is exported. NumPy inputs are copied once at the
-//! boundary into typed Rust vectors. Calls lock one mutex, so a free-threaded
-//! interpreter serializes mutations here.
+//! into native storage is exported. NumPy inputs are copied into typed Rust
+//! vectors with no World lock held, then committed after reacquiring it. Calls
+//! lock one mutex only for schema resolution and the validated operation, so a
+//! free-threaded interpreter serializes mutations here and buffer exporters
+//! may safely reenter.
 
 use std::sync::Mutex;
 
@@ -398,6 +400,35 @@ fn parse_element(kind: &str) -> PyResult<ElementType> {
     }
 }
 
+struct ResolvedComponent {
+    index: usize,
+    name: String,
+    element: ElementType,
+    width: u32,
+}
+
+fn resolve_component(world: &World, name: &str) -> Option<ResolvedComponent> {
+    let index = world.component_index(name)?;
+    let schema = world.schema(index)?;
+    Some(ResolvedComponent {
+        index,
+        name: schema.name.clone(),
+        element: schema.element,
+        width: schema.width,
+    })
+}
+
+fn component_matches(world: &World, resolved: &ResolvedComponent) -> bool {
+    world
+        .schema(resolved.index)
+        .map(|schema| {
+            schema.name == resolved.name
+                && schema.element == resolved.element
+                && schema.width == resolved.width
+        })
+        .unwrap_or(false)
+}
+
 #[pymethods]
 impl PyNativeWorld {
     #[new]
@@ -451,12 +482,14 @@ impl PyNativeWorld {
     /// Registered schemas as `[(name, kind, width), ...]`.
     #[getter]
     fn schemas(&self) -> Vec<(String, &'static str, u32)> {
-        self.inner
-            .lock()
-            .expect("world lock")
-            .schemas()
-            .map(|schema| (schema.name.clone(), schema.element.as_str(), schema.width))
-            .collect()
+        let schemas = {
+            let world = self.inner.lock().expect("world lock");
+            world
+                .schemas()
+                .map(|schema| (schema.name.clone(), schema.element.as_str(), schema.width))
+                .collect()
+        };
+        schemas
     }
 
     /// Register one component schema and return its index.
@@ -467,10 +500,11 @@ impl PyNativeWorld {
     /// rejected without changing live state.
     fn register_component(&self, name: &str, kind: &str, width: u32) -> PyResult<usize> {
         let element = parse_element(kind)?;
-        let mut world = self.inner.lock().expect("world lock");
-        world
-            .register(name, element, width)
-            .map_err(map_world_error)
+        let result = {
+            let mut world = self.inner.lock().expect("world lock");
+            world.register(name, element, width)
+        };
+        result.map_err(map_world_error)
     }
 
     /// Publish `count` entities with `{component_name: 2-D array}` payloads.
@@ -478,48 +512,50 @@ impl PyNativeWorld {
     /// Each payload is C-contiguous with dtype `float32` or `uint32` and shape
     /// `(count, width)`. A zero-width component accepts `None` or a zero-sized
     /// `(count, 0)` buffer. Returns owned handles (`uint64`, shape `(n, 2)`,
-    /// little-endian) plus the input byte count copied at this boundary.
+    /// little-endian) plus honest boundary byte counts.
+    ///
+    /// The World lock is held only to resolve a schema and again for the
+    /// validated commit. No Python buffer is acquired or released under it, so
+    /// an exporter's `__buffer__` or `__release_buffer__` may reenter.
     fn spawn<'py>(
         &self,
         py: Python<'py>,
         count: u32,
         payload: &Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let mut world = self.inner.lock().expect("world lock");
         let mut payloads = Vec::with_capacity(payload.len());
-        let mut bytes_in = 0usize;
+        let mut resolved = Vec::with_capacity(payload.len());
+        let mut payload_in = 0usize;
         for (key, value) in payload {
             let name: String = key
                 .extract()
                 .map_err(|_| PyTypeError::new_err("component payload keys must be strings"))?;
-            let component = world
-                .component_index(&name)
-                .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
-            let schema = world
-                .schema(component)
-                .expect("registered component has a schema");
-            let element = schema.element;
-            let width = schema.width as usize;
+            let component = {
+                let world = self.inner.lock().expect("world lock");
+                resolve_component(&world, &name)
+            }
+            .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
+            let width = component.width as usize;
             let data = if value.is_none() {
                 if width != 0 {
                     return Err(PyTypeError::new_err(format!(
                         "component '{name}' needs a {} payload of shape ({count}, {width})",
-                        element.as_str()
+                        component.element.as_str()
                     )));
                 }
-                match element {
+                match component.element {
                     ElementType::F32 => ColumnData::F32(Vec::new()),
                     ElementType::U32 => ColumnData::U32(Vec::new()),
                 }
             } else {
                 let label = format!("component '{name}' payload");
-                match element {
+                match component.element {
                     ElementType::F32 => ColumnData::F32(read_matrix::<f32>(
                         py,
                         &value,
                         count as usize,
                         width,
-                        element,
+                        component.element,
                         &label,
                     )?),
                     ElementType::U32 => ColumnData::U32(read_matrix::<u32>(
@@ -527,20 +563,41 @@ impl PyNativeWorld {
                         &value,
                         count as usize,
                         width,
-                        element,
+                        component.element,
                         &label,
                     )?),
                 }
             };
-            bytes_in += data.byte_len();
-            payloads.push(ComponentPayload { component, data });
+            payload_in += data.byte_len();
+            payloads.push(ComponentPayload {
+                component: component.index,
+                data,
+            });
+            resolved.push(component);
         }
-        let ids = world.spawn(count, &payloads).map_err(map_world_error)?;
+
+        let mut world = self.inner.lock().expect("world lock");
+        for component in &resolved {
+            if !component_matches(&world, component) {
+                drop(world);
+                return Err(PyRuntimeError::new_err(format!(
+                    "component '{}' schema changed during submission",
+                    component.name
+                )));
+            }
+        }
+        let result = world.spawn(count, &payloads);
+        drop(world);
+        let ids = result.map_err(map_world_error)?;
+
         let handles = handles_bytes(&ids);
         let dict = PyDict::new(py);
         dict.set_item("count", ids.len())?;
         dict.set_item("handles", PyBytes::new(py, &handles))?;
-        dict.set_item("bytes_in", bytes_in)?;
+        dict.set_item("handles_in", 0usize)?;
+        dict.set_item("payload_in", payload_in)?;
+        dict.set_item("bytes_in", payload_in)?;
+        dict.set_item("handles_out", handles.len())?;
         dict.set_item("bytes_out", handles.len())?;
         Ok(dict)
     }
@@ -548,7 +605,8 @@ impl PyNativeWorld {
     /// Overwrite whole member rows: `data` has shape `(len(handles), width)`.
     ///
     /// Every identity must be live and carry the component. The whole batch is
-    /// validated before any row changes.
+    /// validated before any row changes. Handles are decoded before the World
+    /// lock is taken, and the commit is validated after reacquiring it.
     fn update_rows<'py>(
         &self,
         py: Python<'py>,
@@ -557,23 +615,20 @@ impl PyNativeWorld {
         data: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let ids = decode_handles(py, handles)?;
-        let mut world = self.inner.lock().expect("world lock");
-        let component = world
-            .component_index(name)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
-        let schema = world
-            .schema(component)
-            .expect("registered component has a schema");
-        let element = schema.element;
-        let width = schema.width as usize;
+        let component = {
+            let world = self.inner.lock().expect("world lock");
+            resolve_component(&world, name)
+        }
+        .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
+        let width = component.width as usize;
         let label = format!("component '{name}' rows");
-        let payload = match element {
+        let payload = match component.element {
             ElementType::F32 => ColumnData::F32(read_matrix::<f32>(
                 py,
                 data,
                 ids.len(),
                 width,
-                element,
+                component.element,
                 &label,
             )?),
             ElementType::U32 => ColumnData::U32(read_matrix::<u32>(
@@ -581,21 +636,36 @@ impl PyNativeWorld {
                 data,
                 ids.len(),
                 width,
-                element,
+                component.element,
                 &label,
             )?),
         };
-        let bytes_in = payload.byte_len();
-        let rows = world
-            .update_rows(component, &ids, payload)
-            .map_err(map_world_error)?;
+        let payload_in = payload.byte_len();
+        let handles_in = ids.len() * 16;
+
+        let mut world = self.inner.lock().expect("world lock");
+        if !component_matches(&world, &component) {
+            drop(world);
+            return Err(PyRuntimeError::new_err(format!(
+                "component '{name}' schema changed during submission"
+            )));
+        }
+        let result = world.update_rows(component.index, &ids, payload);
+        drop(world);
+        let rows = result.map_err(map_world_error)?;
+
         let dict = PyDict::new(py);
         dict.set_item("rows", rows)?;
-        dict.set_item("bytes_in", bytes_in)?;
+        dict.set_item("handles_in", handles_in)?;
+        dict.set_item("payload_in", payload_in)?;
+        dict.set_item("bytes_in", handles_in + payload_in)?;
         Ok(dict)
     }
 
     /// Overwrite one field: `data` has shape `(len(handles),)`.
+    ///
+    /// The same lock discipline as `update_rows` applies: decode and copy
+    /// Python buffers with no lock, then validate and commit after reacquiring.
     fn update_field<'py>(
         &self,
         py: Python<'py>,
@@ -605,34 +675,54 @@ impl PyNativeWorld {
         data: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let ids = decode_handles(py, handles)?;
-        let mut world = self.inner.lock().expect("world lock");
-        let component = world
-            .component_index(name)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
-        let schema = world
-            .schema(component)
-            .expect("registered component has a schema");
-        let element = schema.element;
+        let component = {
+            let world = self.inner.lock().expect("world lock");
+            resolve_component(&world, name)
+        }
+        .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
         let label = format!("component '{name}' field {field}");
-        let payload = match element {
-            ElementType::F32 => {
-                ColumnData::F32(read_field::<f32>(py, data, ids.len(), element, &label)?)
-            }
-            ElementType::U32 => {
-                ColumnData::U32(read_field::<u32>(py, data, ids.len(), element, &label)?)
-            }
+        let payload = match component.element {
+            ElementType::F32 => ColumnData::F32(read_field::<f32>(
+                py,
+                data,
+                ids.len(),
+                component.element,
+                &label,
+            )?),
+            ElementType::U32 => ColumnData::U32(read_field::<u32>(
+                py,
+                data,
+                ids.len(),
+                component.element,
+                &label,
+            )?),
         };
-        let bytes_in = payload.byte_len();
-        let rows = world
-            .update_field(component, field, &ids, payload)
-            .map_err(map_world_error)?;
+        let payload_in = payload.byte_len();
+        let handles_in = ids.len() * 16;
+
+        let mut world = self.inner.lock().expect("world lock");
+        if !component_matches(&world, &component) {
+            drop(world);
+            return Err(PyRuntimeError::new_err(format!(
+                "component '{name}' schema changed during submission"
+            )));
+        }
+        let result = world.update_field(component.index, field, &ids, payload);
+        drop(world);
+        let rows = result.map_err(map_world_error)?;
+
         let dict = PyDict::new(py);
         dict.set_item("rows", rows)?;
-        dict.set_item("bytes_in", bytes_in)?;
+        dict.set_item("handles_in", handles_in)?;
+        dict.set_item("payload_in", payload_in)?;
+        dict.set_item("bytes_in", handles_in + payload_in)?;
         Ok(dict)
     }
 
     /// Bulk membership flags for `handles`, one `uint8` per entity.
+    ///
+    /// Handles are decoded with no lock; the query runs under one brief lock
+    /// and the result is turned into Python objects after it is released.
     fn has<'py>(
         &self,
         py: Python<'py>,
@@ -640,38 +730,51 @@ impl PyNativeWorld {
         handles: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let ids = decode_handles(py, handles)?;
-        let world = self.inner.lock().expect("world lock");
-        let component = world
-            .component_index(name)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
-        let flags = world
-            .memberships(component, &ids)
-            .map_err(map_world_error)?;
+        let component = {
+            let world = self.inner.lock().expect("world lock");
+            resolve_component(&world, name)
+        }
+        .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
+        let result = {
+            let world = self.inner.lock().expect("world lock");
+            world.memberships(component.index, &ids)
+        };
+        let flags = result.map_err(map_world_error)?;
+        let handles_in = ids.len() * 16;
         let bytes: Vec<u8> = flags.iter().map(|flag| u8::from(*flag)).collect();
+
         let dict = PyDict::new(py);
         dict.set_item("count", flags.len())?;
         dict.set_item("flags", PyBytes::new(py, &bytes))?;
+        dict.set_item("handles_in", handles_in)?;
+        dict.set_item("payload_in", 0usize)?;
+        dict.set_item("bytes_in", handles_in)?;
         dict.set_item("bytes_out", bytes.len())?;
         Ok(dict)
     }
 
     /// Destroy live entities and clear their rows and membership.
+    ///
+    /// Handles are decoded with no lock; the validated destroy runs under one
+    /// brief lock and the response is built after it is released.
     fn destroy<'py>(
         &self,
         py: Python<'py>,
         handles: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let ids = decode_handles(py, handles)?;
-        let bytes_in = ids.len() * 16;
-        let count = self
-            .inner
-            .lock()
-            .expect("world lock")
-            .destroy(&ids)
-            .map_err(map_world_error)?;
+        let handles_in = ids.len() * 16;
+        let result = {
+            let mut world = self.inner.lock().expect("world lock");
+            world.destroy(&ids)
+        };
+        let count = result.map_err(map_world_error)?;
+
         let dict = PyDict::new(py);
         dict.set_item("entities", count)?;
-        dict.set_item("bytes_in", bytes_in)?;
+        dict.set_item("handles_in", handles_in)?;
+        dict.set_item("payload_in", 0usize)?;
+        dict.set_item("bytes_in", handles_in)?;
         Ok(dict)
     }
 
@@ -679,7 +782,9 @@ impl PyNativeWorld {
     ///
     /// `handles` selects and orders rows; `None` reads every live entity in
     /// ascending slot order. Returns the handles, membership flags (`uint8`)
-    /// and values as little-endian bytes.
+    /// and values as little-endian bytes. Handles are decoded with no lock;
+    /// the owned readout is copied under one lock, then Python objects are
+    /// built after it is released.
     fn read_component<'py>(
         &self,
         py: Python<'py>,
@@ -690,13 +795,18 @@ impl PyNativeWorld {
             Some(object) => Some(decode_handles(py, object)?),
             None => None,
         };
-        let world = self.inner.lock().expect("world lock");
-        let component = world
-            .component_index(name)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
-        let readout = world
-            .read_component(component, ids.as_deref())
-            .map_err(map_world_error)?;
+        let handles_in = ids.as_ref().map_or(0, |ids| ids.len() * 16);
+        let component = {
+            let world = self.inner.lock().expect("world lock");
+            resolve_component(&world, name)
+        }
+        .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
+        let result = {
+            let world = self.inner.lock().expect("world lock");
+            world.read_component(component.index, ids.as_deref())
+        };
+        let readout = result.map_err(map_world_error)?;
+
         let handles = handles_bytes(&readout.ids);
         let membership: Vec<u8> = readout
             .membership
@@ -713,13 +823,25 @@ impl PyNativeWorld {
         dict.set_item("handles", PyBytes::new(py, &handles))?;
         dict.set_item("membership", PyBytes::new(py, &membership))?;
         dict.set_item("data", PyBytes::new(py, &data))?;
+        dict.set_item("handles_in", handles_in)?;
+        dict.set_item("payload_in", 0usize)?;
+        dict.set_item("bytes_in", handles_in)?;
+        dict.set_item("handles_out", handles.len())?;
+        dict.set_item("membership_out", membership.len())?;
+        dict.set_item("data_out", data.len())?;
         dict.set_item("bytes_out", bytes_out)?;
         Ok(dict)
     }
 
     /// An owned snapshot of entities, schemas and counters (not values).
+    ///
+    /// The snapshot is copied under one brief lock; the dictionary is built
+    /// after the lock is released.
     fn snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let snapshot = self.inner.lock().expect("world lock").snapshot();
+        let snapshot = {
+            let world = self.inner.lock().expect("world lock");
+            world.snapshot()
+        };
         let handles = handles_bytes(&snapshot.entities);
         let schemas: Vec<(String, &'static str, u32)> = snapshot
             .schemas
@@ -734,6 +856,10 @@ impl PyNativeWorld {
         dict.set_item("count", snapshot.entities.len())?;
         dict.set_item("handles", PyBytes::new(py, &handles))?;
         dict.set_item("schemas", schemas)?;
+        dict.set_item("handles_in", 0usize)?;
+        dict.set_item("payload_in", 0usize)?;
+        dict.set_item("bytes_in", 0usize)?;
+        dict.set_item("handles_out", handles.len())?;
         dict.set_item("bytes_out", handles.len())?;
         Ok(dict)
     }

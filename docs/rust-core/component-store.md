@@ -64,9 +64,21 @@ must be C-contiguous; other strides, shapes and dtypes are rejected with the
 expected shape and kind in the message. NumPy is a modeling and preparation
 tool at this boundary, never a requirement inside the core crate.
 
-Each submitted array is copied once into typed Rust storage. A caller may
-mutate its array immediately after the call without changing native data. Each
-readback is an owned copy. No zero-copy or frame-rate claim is made here.
+Each submitted array is acquired through the Python buffer protocol with no
+World lock held, copied into a typed Rust vector, and then copied into the
+column (two Rust copies). Handles are decoded the same way. Readback is copied
+from the column into an owned readout, encoded as little-endian bytes, and then
+into a Python `bytes` object (three Rust copies); `np.frombuffer` is a view of
+that owned bytes object. A caller may mutate its array immediately after the
+call without changing native data. No zero-copy, single-copy or frame-rate
+claim is made here.
+
+The binding holds the World lock only to resolve a schema and for the validated
+commit or query. It never holds it while acquiring or releasing a Python buffer
+or building Python objects, so an exporter's `__buffer__` or
+`__release_buffer__` may call back into the World. If that callback mutates the
+World, the pending batch is validated again at commit: stale or non-live
+identities are rejected instead of being written.
 
 ## Python API
 
@@ -93,9 +105,11 @@ values = np.frombuffer(readback["data"], dtype="<f4").reshape(-1, 3)
 world.destroy(handles[:1_000])
 ```
 
-The result dictionaries also report `bytes_in` and `bytes_out`, so a caller can
-count the boundary transfer without guessing. `snapshot()` returns the live
-identities, schemas and counters as owned data.
+The result dictionaries report `handles_in`, `payload_in` and `bytes_in` for
+submitted buffers, and `bytes_out` (plus `handles_out`, `membership_out` and
+`data_out` on readback) for owned output, so a caller can count the boundary
+transfer honestly. `snapshot()` returns the live identities, schemas and
+counters as owned data.
 
 ## Evidence
 
@@ -103,10 +117,15 @@ identities, schemas and counters as owned data.
 example and focused gate. It asserts compiled-extension provenance, schema
 uniqueness and locking, real values and zero defaults, membership, caller
 mutation after submission, stale and malformed batch atomicity, destroy/reuse
-clearing, capacity overflow and ordinary slot lifecycle. It then uploads 10k
-and 100k entity worlds from NumPy, applies bulk row/field updates, queries and
-reads back, destroys and reuses a subset, and prints the measured table and a
-small before/after sample.
+clearing, capacity overflow, ordinary slot lifecycle, and bounded buffer
+reentrancy. The reentrancy child runs under a timeout and covers an exporter
+`__buffer__` that calls `snapshot()`, a `__release_buffer__` that calls
+`snapshot()`, and a callback that destroys the entity a pending update targets;
+the update must be rejected at commit.
+
+It then uploads 10k and 100k entity worlds from NumPy, applies bulk row/field
+updates, queries and reads back, destroys and reuses a subset, and prints the
+measured table, honest transfer counts and a small before/after sample.
 
 `scripts/gates/native-verify.sh` runs it from the disposable cwd after installing
 the wheel, and again as a negative control with the extension removed.
