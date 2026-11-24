@@ -437,6 +437,32 @@ class Tint(Component):
     rgb: Vector3 = (1.0, 1.0, 1.0)
 
 
+class Palette(Component):
+    """Eight sRGB colours this entity's mesh wears by part, per instance; entities without one wear white.
+
+    Only a StandardMaterial made with paletted=True reads it. Each vertex of surface PALETTE_SURFACE + k
+    takes colour k times its own colour, so one figure geometry shared by a crowd dresses each walker
+    differently in one instanced draw. A Figure's paletted_geometry() lays its slots out this way
+    (skin, top, bottom, stripe, shoes, hair, hat; see human_dress.SLOTS) and its palette() gives the
+    colours it was dressed in:
+
+        mat = StandardMaterial("#ffffff", vertex_colors=True, paletted=True)
+        engine.spawn(Mesh(fig.paletted_geometry()), Material(mat), Transform(pos=spots),
+                     Palette(c1=shirts, c2=trousers), n=len(spots))
+
+    The colours are sRGB, like a hex colour or a vertex colour.
+    """
+
+    c0: Vector3 = (1.0, 1.0, 1.0)
+    c1: Vector3 = (1.0, 1.0, 1.0)
+    c2: Vector3 = (1.0, 1.0, 1.0)
+    c3: Vector3 = (1.0, 1.0, 1.0)
+    c4: Vector3 = (1.0, 1.0, 1.0)
+    c5: Vector3 = (1.0, 1.0, 1.0)
+    c6: Vector3 = (1.0, 1.0, 1.0)
+    c7: Vector3 = (1.0, 1.0, 1.0)
+
+
 class Baked(Component):
     """Which layer of its material's baked texture array this entity's SURFACE_BAKED vertices draw, per
     instance; -1 (or no Baked) draws those vertices' own colours.

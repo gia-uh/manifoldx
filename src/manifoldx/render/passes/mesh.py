@@ -10,7 +10,7 @@ moving camera and moving instances replay it with one call. Without it the pass 
 import numpy as np
 import wgpu
 
-from manifoldx.resources import TINTS_BINDING
+from manifoldx.resources import PALETTE_BINDING, PALETTE_SLOTS, TINTS_BINDING
 from manifoldx.skinning import BLOCKS_BINDING, JOINTS_BINDING
 from manifoldx import counters
 
@@ -165,9 +165,10 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
     if draw is not None and any(c.skinned for c in draw.chunks):
         joint_buffers()
     tints = _upload_tints(rp, mesh_batches, entities)
+    palettes = _upload_palettes(rp, mesh_batches, entities)
     bundles = rp._use_bundles
     geometry = engine._geometry_registry
-    glob = (rp._batch_buffers.transforms_buf, joints.get("bufs"), lit, bundles, tints)
+    glob = (rp._batch_buffers.transforms_buf, joints.get("bufs"), lit, bundles, tints, palettes)
     if draw is None or draw.glob != glob:
         draw = rp._mesh_draw = _Draw(glob)
     if draw.layout is not layout:
@@ -195,7 +196,7 @@ def render_mesh_batches(rp, engine, render_pass, mesh_batches, model_matrices, m
     draw.mat_sigs = sigs
     for c in draw.chunks:
         if c.dirty or (changed and not changed.isdisjoint(c.mids)):
-            c.entries, c.skinned = _resolve(rp, engine, c.keys, c.slots, mats, lit, joint_buffers, tints,
+            c.entries, c.skinned = _resolve(rp, engine, c.keys, c.slots, mats, lit, joint_buffers, (tints, palettes),
                                             draw.index_counts)
             c.bufs = [geometry.get_gpu_buffers(k[0]) for k in c.keys]
             c.mids = {k[3] for k in c.keys}
@@ -275,9 +276,10 @@ def _lit_groups(rp, engine):
     return ibl_bg, rp._shadow_bind_group[1]
 
 
-def _resolve(rp, engine, keys, slots, mats, lit, joint_buffers, tints, index_counts):
+def _resolve(rp, engine, keys, slots, mats, lit, joint_buffers, bufs, index_counts):
     """Each batch's pipeline, bind groups and buffers: ([entries], any skinned). Writes each slot's
     index count into `index_counts` (0 for a batch that cannot draw)."""
+    tints, palettes = bufs
     draw_list = rp.__dict__.setdefault("_draw_list", {})  # batch key -> (buffers, material, state, pipeline, layout)
     entries = []
     skinned = False
@@ -322,6 +324,7 @@ def _resolve(rp, engine, keys, slots, mats, lit, joint_buffers, tints, index_cou
             joints_buf, blocks_buf = joint_buffers()
             skinned = True
         tinted = _reads_tints(mat_subtype)
+        paletted = _is_paletted(mat_subtype)
 
         # Every object the bind group points at: it is rebuilt only when one
         # of them changed (a grown buffer, a swapped texture).
@@ -335,6 +338,7 @@ def _resolve(rp, engine, keys, slots, mats, lit, joint_buffers, tints, index_cou
             blocks_buf if has_joints else None,
             rp._lights_buffer if needs_lights else None,
             tints if tinted else None,
+            palettes if paletted else None,
             *((b_, h.sampler, h.view) for b_, h in texture_bindings.items()),
         )
         cached = rp._mesh_bind_groups.get((mat_id, has_joints))
@@ -389,6 +393,11 @@ def _resolve(rp, engine, keys, slots, mats, lit, joint_buffers, tints, index_cou
             if tinted:
                 bind_group_entries.append(
                     {"binding": TINTS_BINDING, "resource": {"buffer": tints, "offset": 0, "size": tints.size}}
+                )
+
+            if paletted:
+                bind_group_entries.append(
+                    {"binding": PALETTE_BINDING, "resource": {"buffer": palettes, "offset": 0, "size": palettes.size}}
                 )
 
             if needs_lights:
@@ -488,6 +497,39 @@ def _upload_tints(rp, mesh_batches, entities):
         counters.write_buffer(rp._device.queue, bufs.tints_buf, 0, data)
     rp._mesh_tint_bytes = data
     return bufs.tints_buf
+
+
+def _is_paletted(subtype) -> bool:
+    return isinstance(subtype, str) and subtype.startswith("vcolor-palette")
+
+
+def _upload_palettes(rp, mesh_batches, entities):
+    """The palettes buffer, PALETTE_SLOTS (4,) rows per drawn instance in the transforms' order (rgb a Palette
+    colour decoded from sRGB), written when its bytes changed; None when the layout holds no paletted batch.
+    An entity without a Palette, and every row outside a paletted batch, is white."""
+    layout = mesh_batches.layout
+    kind = layout.__dict__.get("_paletted")
+    if kind is None:
+        kind = layout._paletted = np.array([_is_paletted(k[2]) for k in layout.keys], bool)
+    if not kind.any():
+        return None
+    bufs = rp._batch_buffers
+    out = np.ones((max(len(entities), 1), PALETTE_SLOTS, 4), np.float32)
+    values = rp._store._components.get("Palette")
+    if values is not None and mesh_batches.counts[kind].any():
+        from manifoldx.resources import srgb_to_linear
+
+        rows = np.flatnonzero(np.repeat(kind, mesh_batches.counts))
+        ents = entities[rows]
+        has = rp._store._members["Palette"][ents]
+        out[rows[has], :, :3] = srgb_to_linear(values[ents[has]].reshape(-1, PALETTE_SLOTS, 3))
+    data = out.tobytes()
+    if bufs.palettes_buf is None or bufs.palettes_capacity < len(data):
+        bufs.upload_palettes(out)
+    elif rp.__dict__.get("_mesh_palette_bytes") != data:
+        counters.write_buffer(rp._device.queue, bufs.palettes_buf, 0, data)
+    rp._mesh_palette_bytes = data
+    return bufs.palettes_buf
 
 
 def _encode(target, entries, draw):

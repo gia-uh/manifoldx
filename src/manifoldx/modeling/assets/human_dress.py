@@ -33,6 +33,8 @@ RELAX = 8  # Taubin steps that unfold a garment pushed into a crease
 HEM = 0.002  # metres a garment stands off the skin beyond its looseness
 SKIRT_RINGS = {0: 8, 1: 5, 2: 3}
 SHELL_LAT = {0: 6, 1: 4, 2: 3}
+# The palette slots a dressed figure's vertices belong to, in the order of a Palette's colours.
+SLOTS = ("skin", "top", "bottom", "stripe", "shoes", "hair", "hat")
 
 
 @dataclass
@@ -67,6 +69,8 @@ class _Dressing:
         self.normals = mesh.recompute_normals().normals.astype(float)
         self.faces = [mesh.faces.astype(np.int64)]
         self.colors = mesh.colors.astype(np.float32).copy()
+        self.slots = np.zeros(len(self.pos), np.int8)  # each vertex's palette slot (SLOTS), all skin at first
+        self.shades = np.ones(len(self.pos), np.float32)  # and how dark it is against that slot's colour
         self.pairs = mesh.joints.astype(np.int64).copy()
         self.weights = mesh.weights.astype(np.float32).copy()
         self.region = sk.region
@@ -107,26 +111,30 @@ class _Dressing:
         short = np.maximum(0.5 * self.push_by[moved] - off, 0.0)
         self.pos[moved] += self.normals[moved] * short[:, None]
 
-    def paint(self, verts, rgb):
-        self.colors[verts] = rgb
+    def paint(self, verts, rgb, slot: str, shade: float = 1.0):
+        self.colors[verts] = np.asarray(rgb) * shade
+        self.slots[verts] = SLOTS.index(slot)
+        self.shades[verts] = shade
 
     def mark(self, name, verts):
         self.parts.setdefault(name, []).append(np.asarray(verts, np.int64))
 
-    def shell(self, name, positions, faces, pairs, weights, rgb):
+    def shell(self, name, positions, faces, pairs, weights, rgb, slot: str):
         """A closed shell of its own, appended and turned outward."""
         n = len(self.pos)
         faces = orient_outward(positions, np.asarray(faces, np.int64))
         self.pos = np.concatenate([self.pos, positions])
         self.faces.append(faces + n)
         self.colors = np.concatenate([self.colors, np.broadcast_to(rgb, (len(positions), 3))]).astype(np.float32)
+        self.slots = np.concatenate([self.slots, np.full(len(positions), SLOTS.index(slot), np.int8)])
+        self.shades = np.concatenate([self.shades, np.ones(len(positions), np.float32)])
         self.pairs = np.concatenate([self.pairs, pairs])
         self.weights = np.concatenate([self.weights, weights]).astype(np.float32)
         self.region = np.concatenate([self.region, np.full(len(positions), SHELL, np.uint8)])
         self.station = np.concatenate([self.station, np.zeros(len(positions), np.float32)])
         self.mark(name, np.arange(n, n + len(positions)))
 
-    def mesh(self) -> tuple[Mesh, dict]:
+    def mesh(self) -> tuple:
         mesh = Mesh(
             positions=self.pos.astype(np.float32),
             faces=np.concatenate(self.faces).astype(np.uint32),
@@ -134,7 +142,7 @@ class _Dressing:
             joints=self.pairs.astype(np.uint32),
             weights=np.clip(self.weights, 0, 1).astype(np.float32),
         )
-        return mesh, {k: np.unique(np.concatenate(v)) for k, v in self.parts.items()}
+        return mesh, {k: np.unique(np.concatenate(v)) for k, v in self.parts.items()}, self.slots, self.shades
 
 
 def _ring_verts(rings, i0, i1):
@@ -196,8 +204,9 @@ def _sphere(centre, radius, k, lat):
     return pos, np.array(faces)
 
 
-def dress(mesh: Mesh, sk: Skin, joints: dict, outfit: Outfit, level: int, tone) -> tuple[Mesh, dict]:
-    """`mesh` (a figure's skin with colours, joints and weights) wearing `outfit` at `level`; the garments' vertices."""
+def dress(mesh: Mesh, sk: Skin, joints: dict, outfit: Outfit, level: int, tone) -> tuple:
+    """`mesh` (a figure's skin with colours, joints and weights) wearing `outfit` at `level`: the dressed mesh, the
+    garments' vertices, and each vertex's palette slot and shade (see Figure)."""
     outfit.validate()
     d = _Dressing(mesh, sk)
     idx = {n: i for i, n in enumerate(JOINTS)}
@@ -220,12 +229,12 @@ def dress(mesh: Mesh, sk: Skin, joints: dict, outfit: Outfit, level: int, tone) 
             wrist = _nearest_ring(d, chain, joints[f"wrist_{side}"])
             verts.append(_limb(d, region, chain, round(sleeves * wrist) if sleeves > 0 else -1))
         top = np.unique(np.concatenate(verts))
-        d.paint(top, _rgb(outfit.top_color))
+        d.paint(top, _rgb(outfit.top_color), "top")
         if outfit.stripe is not None:
             lo, hi, colour = outfit.stripe
             y0, y1 = ring_y[0], ring_y[-1]
             band = top[(d.pos[top, 1] >= y0 + lo * (y1 - y0)) & (d.pos[top, 1] <= y0 + hi * (y1 - y0))]
-            d.paint(band, _rgb(colour))
+            d.paint(band, _rgb(colour), "stripe")
         if near:
             d.push(top, loose + HEM)
             d.mark("top", top)
@@ -243,17 +252,17 @@ def dress(mesh: Mesh, sk: Skin, joints: dict, outfit: Outfit, level: int, tone) 
         legs.append(_limb(d, region, chain, upto))
     bottom_rgb = _rgb(outfit.bottom_color)
     if outfit.bottom == "skirt":
-        d.paint(pelvis, bottom_rgb)
+        d.paint(pelvis, bottom_rgb, "bottom")
         if near:
             d.push(pelvis, outfit.looseness + HEM)
             d.mark("waist", pelvis)  # the band above a skirt; "bottom" is the tube itself
             _skirt(d, sk, joints, idx, outfit, hem_y, k, level, bottom_rgb)
         else:
             covered = np.concatenate([pelvis, *legs])
-            d.paint(covered, bottom_rgb)
+            d.paint(covered, bottom_rgb, "bottom")
     else:
         covered = np.concatenate([pelvis, *legs])
-        d.paint(covered, bottom_rgb)
+        d.paint(covered, bottom_rgb, "bottom")
         if near:
             d.push(covered, outfit.looseness + HEM)
             d.mark("bottom", covered)
@@ -264,15 +273,15 @@ def dress(mesh: Mesh, sk: Skin, joints: dict, outfit: Outfit, level: int, tone) 
         sole = feet[d.pos[feet, 1] < 0.015]
         shoe_rgb = _rgb(outfit.shoe_color)
         if outfit.shoes == "sandals":
-            d.paint(sole, shoe_rgb)
+            d.paint(sole, shoe_rgb, "shoes")
         else:
             shoe = feet
             if outfit.shoes == "boots":
                 for region, side in ((LEG_L, "l"), (LEG_R, "r")):
                     top_y = joints[f"ankle_{side}"][1] + 0.12
                     shoe = np.concatenate([shoe, np.flatnonzero((d.region == region) & (d.pos[:, 1] < top_y))])
-            d.paint(shoe, shoe_rgb)
-            d.paint(sole, shoe_rgb * 0.6)
+            d.paint(shoe, shoe_rgb, "shoes")
+            d.paint(sole, shoe_rgb, "shoes", 0.6)
             if near:
                 d.push(shoe, 0.004)
                 d.pos[shoe, 1] = np.maximum(d.pos[shoe, 1], 0.0)
@@ -319,7 +328,7 @@ def _skirt(d, sk, joints, idx, outfit, hem_y, k, level, rgb):
     knee = np.array([idx[f"knee_{s}"] for s in side])
     hy, ky = joints["hip_l"][1], joints["knee_l"][1]
     w = np.clip((pos[:, 1] - ky) / max(hy - ky, 1e-6), 0, 1)
-    d.shell("bottom", pos, faces, np.stack([hip, knee], 1), w, rgb)
+    d.shell("bottom", pos, faces, np.stack([hip, knee], 1), w, rgb, "bottom")
 
 
 def _head(d, joints, idx, outfit, level, k, tone):
@@ -336,7 +345,7 @@ def _head(d, joints, idx, outfit, level, k, tone):
                                     (108, 124, (0.0,), 0.62)):
             for c in lons:
                 spot = head[(polar >= lo) & (polar < hi) & (np.abs(lon - c) < 14)]
-                d.paint(spot, tone * shade)
+                d.paint(spot, tone, "skin", shade)
 
     if outfit.hair is not None:
         style = outfit.hair
@@ -349,7 +358,7 @@ def _head(d, joints, idx, outfit, level, k, tone):
             p = d.pos[hair]
             by += 0.01 * np.sin(p[:, 0] * 97 + p[:, 1] * 131 + p[:, 2] * 173)
         rgb = _rgb(outfit.hair_color)
-        d.paint(hair, rgb)
+        d.paint(hair, rgb, "hair")
         if shaped:
             d.push(hair, by)
             d.mark("hair", hair)
@@ -357,12 +366,12 @@ def _head(d, joints, idx, outfit, level, k, tone):
                 back = d.pos[head][:, 2].min()
                 pos, faces = _sphere(centre + [0, 0.04, back - centre[2] - 0.02], 0.045, k, SHELL_LAT[level])
                 n = len(pos)
-                d.shell("hair", pos, faces, np.full((n, 2), idx["head"]), np.ones(n), rgb)
+                d.shell("hair", pos, faces, np.full((n, 2), idx["head"]), np.ones(n), rgb, "hair")
 
     if outfit.hat is not None:
         crown = head[polar < 62]
         rgb = _rgb(outfit.hat_color)
-        d.paint(crown, rgb)
+        d.paint(crown, rgb, "hat")
         if shaped:
             d.push(crown, 0.016)
             d.mark("hat", crown)
@@ -376,4 +385,4 @@ def _head(d, joints, idx, outfit, level, k, tone):
             width = 0.07 if outfit.hat == "brim" else 0.015
             pos, faces = _annulus(np.array([centre[0], y, centre[2]]), r_in, r_in + width, 0.006, k)
             n = len(pos)
-            d.shell("hat", pos, faces, np.full((n, 2), idx["head"]), np.ones(n), rgb)
+            d.shell("hat", pos, faces, np.full((n, 2), idx["head"]), np.ones(n), rgb, "hat")

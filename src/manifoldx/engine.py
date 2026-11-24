@@ -1468,12 +1468,14 @@ class Engine:
                 )
         self._render_pipeline._joints.set_many(idx, m)
 
-    def bake_poses(self, frames) -> int:
+    def bake_poses(self, frames, into: int | None = None) -> int:
         """Keep a clip of (K, J, 4, 4) poses on the GPU, shared by every entity that plays it; returns its id.
 
-        A looping cycle bakes its first pose again as the last frame, so position K - 1 equals 0.
+        A looping cycle bakes its first pose again as the last frame, so position K - 1 equals 0. With `into`,
+        a clip id of the same K frames, the poses replace that clip's in place: clips are never freed, so a
+        caller that keeps baking new ones reuses those nobody plays.
         """
-        return self._render_pipeline._joints.bake(frames)
+        return self._render_pipeline._joints.bake(frames, at=into)
 
     def set_pose_frames(self, indices, clip, positions):
         """Draw entities `indices` at `positions` (frames, 0 to K - 1) of the baked `clip` (one or one each).
