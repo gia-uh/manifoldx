@@ -35,8 +35,24 @@ jobs:
       - name: Verify the installed wheel (smoke and negative control)
         run: bash scripts/gates/native-verify.sh python3.14t dist
 
-      - name: Packaging contracts
-        run: uv run --no-sync pytest tests/core -q
+      - name: Packaging and startup contracts with CPU Engine callers
+        # Root conftest probes a GPU during configuration; these checks need none.
+        run: >-
+          uv run --no-sync pytest -o addopts= --confcutdir=tests/core tests/core
+          tests/test_engine.py::test_engine_stores_title_width_height_fullscreen
+          tests/test_engine.py::test_engine_creation
+          tests/test_engine.py::test_engine_startup_decorator
+          tests/test_engine.py::test_engine_shutdown_decorator
+          tests/test_engine.py::test_engine_quit
+          tests/test_engine.py::test_engine_registers_frame_handlers
+          tests/test_render_mvp.py::test_engine_has_camera
+          tests/test_render_mvp.py::test_camera_has_position_and_target
+          tests/test_ibl.py::test_engine_set_environment_preset
+          tests/test_ibl.py::test_engine_set_environment_object
+          tests/test_ibl.py::test_engine_set_environment_none
+          tests/test_ibl.py::test_engine_environment_intensity
+          tests/test_ibl_loading.py::test_set_environment_alone_starts_no_work
+          tests/test_web_engine_apis.py -q
 
       - name: Rift coverage
         run: uvx --from git+https://github.com/apiad/rift@v0.9.0 rift check .
