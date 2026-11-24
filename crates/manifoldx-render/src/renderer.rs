@@ -809,7 +809,7 @@ pub fn write_ppm(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()
     }
     let mut out = Vec::with_capacity(16 + (width as usize * height as usize * 3));
     out.extend_from_slice(format!("P6\n{width} {height}\n255\n").as_bytes());
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0 {
         out.extend_from_slice(&pixel[..3]);
     }
     std::fs::write(path, out).map_err(RenderError::Io)
@@ -817,6 +817,8 @@ pub fn write_ppm(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()
 
 /// Minimal JSON string escaping for the evidence objects.
 pub fn json_string(value: &str) -> String {
+    use std::fmt::Write as _;
+
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for ch in value.chars() {
@@ -826,7 +828,9 @@ pub fn json_string(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }

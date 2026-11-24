@@ -113,7 +113,7 @@ impl Camera {
 
     /// `projection * view`, the matrix the vertex shader receives.
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
-        self.projection(aspect).mul(&self.view())
+        self.projection(aspect).multiply(&self.view())
     }
 }
 

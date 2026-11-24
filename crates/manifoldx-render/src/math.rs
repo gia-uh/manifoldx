@@ -30,7 +30,7 @@ impl Mat4 {
     }
 
     /// Multiply two row-major matrices: `self * rhs`.
-    pub fn mul(&self, rhs: &Self) -> Self {
+    pub fn multiply(&self, rhs: &Self) -> Self {
         let mut out = Self::ZERO;
         for row in 0..4 {
             for column in 0..4 {

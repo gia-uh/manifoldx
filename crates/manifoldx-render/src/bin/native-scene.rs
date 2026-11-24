@@ -477,9 +477,15 @@ fn diff(a: &RenderOutput, b: &RenderOutput) -> DiffStats {
     }
     let mut pixels = 0;
     let mut total = 0u64;
-    for (left, right) in a.rgba.chunks_exact(4).zip(b.rgba.chunks_exact(4)) {
+    for (left, right) in a
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.rgba.as_chunks::<4>().0)
+    {
         let delta = (0..3)
-            .map(|channel| (left[channel] as i32 - right[channel] as i32).unsigned_abs())
+            .map(|channel| left[channel].abs_diff(right[channel]))
             .max()
             .unwrap_or(0);
         total += delta as u64;

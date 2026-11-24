@@ -59,7 +59,9 @@ fn offscreen_render_reads_world_and_changes_with_a_transform() {
     assert_eq!(first.rgba.len(), 96 * 72 * 4);
     let lit = first
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|pixel| pixel[0] > 10 || pixel[1] > 10 || pixel[2] > 10)
         .count();
     assert!(lit > 100, "only {lit} lit pixels");
@@ -77,8 +79,10 @@ fn offscreen_render_reads_world_and_changes_with_a_transform() {
         .unwrap();
     let changed = first
         .rgba
-        .chunks_exact(4)
-        .zip(second.rgba.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(second.rgba.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
     assert!(changed > 50, "only {changed} pixels changed");
