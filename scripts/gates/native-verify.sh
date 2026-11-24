@@ -95,9 +95,26 @@ run_component_world() {
     echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
     return "$status"
 }
+run_runtime() {
+    local label="$1" status
+    shift
+    if "$VENVPY" -I "$HERE/../../examples/native_runtime.py" "$@" >"$SCRATCH/$label.log" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
 run_smoke smoke-before
 run_entity_slots entity-slots-before
 run_component_world component-world-before
+run_runtime runtime-before
+if run_runtime runtime-drop-control --deterministic-only --control-drop-first; then
+    fail "runtime gate passed after dropping the first submission"
+fi
+grep -q 'AssertionError: read ID' "$SCRATCH/runtime-drop-control.log" || fail "lost-command control failed for an unrelated reason"
 "$VENVPY" -I "$HERE/native-selection-smoke.py" installed
 SO="$("$VENVPY" -c 'import manifoldx._core_native as m; print(m.__file__)')"
 mv "$SO" "$SO.gate-removed"
@@ -117,10 +134,15 @@ if run_component_world component-world-missing; then
 fi
 grep -q 'compiled extension' "$SCRATCH/component-world-missing.log" \
     || fail "component world gate failed for a reason other than the missing extension"
+if run_runtime runtime-missing --deterministic-only; then
+    fail "runtime gate passed with extension removed"
+fi
+grep -q 'ImportError.*_core_native' "$SCRATCH/runtime-missing.log" || fail "runtime gate failed for unrelated reason"
 "$VENVPY" -I "$HERE/native-selection-smoke.py" missing
 mv "$SO.gate-removed" "$SO"
 run_smoke smoke-restored
 run_entity_slots entity-slots-restored
 run_component_world component-world-restored
+run_runtime runtime-restored --deterministic-only
 "$VENVPY" -I "$HERE/native-selection-smoke.py" installed
 echo "native-verify: passed for $PYVER/$ABI (installed -> missing -> restored)"

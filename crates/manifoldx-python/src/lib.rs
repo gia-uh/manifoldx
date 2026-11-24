@@ -15,7 +15,9 @@
 //! free-threaded interpreter serializes mutations here and buffer exporters
 //! may safely reenter.
 
-use std::sync::Mutex;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex, MutexGuard};
+mod runtime;
 
 use manifoldx_core::ecs::{
     ColumnData, ComponentPayload, ElementType, EntityError, EntityId, EntitySlots, SlotState,
@@ -241,7 +243,34 @@ impl PyEntitySlots {
 /// owned snapshot encoded as little-endian bytes.
 #[pyclass(name = "_NativeWorld", module = "manifoldx._core_native", frozen)]
 struct PyNativeWorld {
-    inner: Mutex<World>,
+    inner: Arc<Mutex<Option<World>>>,
+}
+
+struct WorldGuard<'a>(MutexGuard<'a, Option<World>>);
+impl Deref for WorldGuard<'_> {
+    type Target = World;
+    fn deref(&self) -> &World {
+        self.0.as_ref().expect("checked World ownership")
+    }
+}
+impl DerefMut for WorldGuard<'_> {
+    fn deref_mut(&mut self) -> &mut World {
+        self.0.as_mut().expect("checked World ownership")
+    }
+}
+impl PyNativeWorld {
+    fn lock(&self) -> PyResult<WorldGuard<'_>> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("World lock poisoned"))?;
+        if guard.is_none() {
+            return Err(PyRuntimeError::new_err(
+                "World is owned by NativeRuntime; close it first",
+            ));
+        }
+        Ok(WorldGuard(guard))
+    }
 }
 
 fn map_world_error(error: WorldError) -> PyErr {
@@ -297,6 +326,14 @@ fn handles_bytes(ids: &[EntityId]) -> Vec<u8> {
 }
 
 fn decode_handles(py: Python<'_>, object: &Bound<'_, PyAny>) -> PyResult<Vec<EntityId>> {
+    decode_handles_limited(py, object, None)
+}
+
+fn decode_handles_limited(
+    py: Python<'_>,
+    object: &Bound<'_, PyAny>,
+    limits: Option<(usize, usize)>,
+) -> PyResult<Vec<EntityId>> {
     let buffer = PyBuffer::<u64>::get(object).map_err(|_| {
         PyTypeError::new_err("entity handles must be a C-contiguous uint64 buffer of shape (n, 2)")
     })?;
@@ -308,6 +345,16 @@ fn decode_handles(py: Python<'_>, object: &Bound<'_, PyAny>) -> PyResult<Vec<Ent
     }
     if !buffer.is_c_contiguous() {
         return Err(PyValueError::new_err("entity handles must be C-contiguous"));
+    }
+    if let Some((max_rows, row_bytes)) = limits {
+        let rows = buffer.shape()[0];
+        if rows > max_rows
+            || rows
+                .checked_mul(row_bytes)
+                .is_none_or(|bytes| bytes > manifoldx_core::runtime::MAX_COMMAND_BYTES)
+        {
+            return Err(PyValueError::new_err("command exceeds row or byte limit"));
+        }
     }
     let flat = buffer.to_vec(py).map_err(|_| {
         PyTypeError::new_err("entity handles must be a C-contiguous uint64 buffer of shape (n, 2)")
@@ -434,62 +481,64 @@ impl PyNativeWorld {
     #[new]
     fn new(capacity: u32) -> PyResult<Self> {
         Ok(Self {
-            inner: Mutex::new(World::new(capacity).map_err(map_world_error)?),
+            inner: Arc::new(Mutex::new(Some(
+                World::new(capacity).map_err(map_world_error)?,
+            ))),
         })
     }
 
-    fn __repr__(&self) -> String {
-        let inner = self.inner.lock().expect("world lock");
-        format!(
+    fn __repr__(&self) -> PyResult<String> {
+        let inner = self.lock()?;
+        Ok(format!(
             "_NativeWorld(capacity={}, alive={}, schemas={}, published={})",
             inner.capacity(),
             inner.alive_count(),
             inner.schemas().count(),
             inner.published()
-        )
+        ))
     }
 
     /// Fixed entity capacity.
     #[getter]
-    fn capacity(&self) -> u32 {
-        self.inner.lock().expect("world lock").capacity()
+    fn capacity(&self) -> PyResult<u32> {
+        Ok(self.lock()?.capacity())
     }
 
     /// Number of live entities.
     #[getter]
-    fn alive_count(&self) -> u32 {
-        self.inner.lock().expect("world lock").alive_count()
+    fn alive_count(&self) -> PyResult<u32> {
+        Ok(self.lock()?.alive_count())
     }
 
     /// One past the highest slot ever published.
     #[getter]
-    fn high_water(&self) -> u32 {
-        self.inner.lock().expect("world lock").high_water()
+    fn high_water(&self) -> PyResult<u32> {
+        Ok(self.lock()?.high_water())
     }
 
     /// Incremented by each successful schema or data mutation.
     #[getter]
-    fn version(&self) -> u64 {
-        self.inner.lock().expect("world lock").version()
+    fn version(&self) -> PyResult<u64> {
+        Ok(self.lock()?.version())
     }
 
     /// Whether an entity has ever been published.
     #[getter]
-    fn published(&self) -> bool {
-        self.inner.lock().expect("world lock").published()
+    fn published(&self) -> PyResult<bool> {
+        Ok(self.lock()?.published())
     }
 
     /// Registered schemas as `[(name, kind, width), ...]`.
     #[getter]
-    fn schemas(&self) -> Vec<(String, &'static str, u32)> {
+    fn schemas(&self) -> PyResult<Vec<(String, &'static str, u32)>> {
         let schemas = {
-            let world = self.inner.lock().expect("world lock");
+            let world = self.lock()?;
             world
                 .schemas()
                 .map(|schema| (schema.name.clone(), schema.element.as_str(), schema.width))
                 .collect()
         };
-        schemas
+        Ok(schemas)
     }
 
     /// Register one component schema and return its index.
@@ -501,7 +550,7 @@ impl PyNativeWorld {
     fn register_component(&self, name: &str, kind: &str, width: u32) -> PyResult<usize> {
         let element = parse_element(kind)?;
         let result = {
-            let mut world = self.inner.lock().expect("world lock");
+            let mut world = self.lock()?;
             world.register(name, element, width)
         };
         result.map_err(map_world_error)
@@ -531,7 +580,7 @@ impl PyNativeWorld {
                 .extract()
                 .map_err(|_| PyTypeError::new_err("component payload keys must be strings"))?;
             let component = {
-                let world = self.inner.lock().expect("world lock");
+                let world = self.lock()?;
                 resolve_component(&world, &name)
             }
             .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
@@ -576,7 +625,7 @@ impl PyNativeWorld {
             resolved.push(component);
         }
 
-        let mut world = self.inner.lock().expect("world lock");
+        let mut world = self.lock()?;
         for component in &resolved {
             if !component_matches(&world, component) {
                 drop(world);
@@ -616,7 +665,7 @@ impl PyNativeWorld {
     ) -> PyResult<Bound<'py, PyDict>> {
         let ids = decode_handles(py, handles)?;
         let component = {
-            let world = self.inner.lock().expect("world lock");
+            let world = self.lock()?;
             resolve_component(&world, name)
         }
         .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
@@ -643,7 +692,7 @@ impl PyNativeWorld {
         let payload_in = payload.byte_len();
         let handles_in = ids.len() * 16;
 
-        let mut world = self.inner.lock().expect("world lock");
+        let mut world = self.lock()?;
         if !component_matches(&world, &component) {
             drop(world);
             return Err(PyRuntimeError::new_err(format!(
@@ -676,7 +725,7 @@ impl PyNativeWorld {
     ) -> PyResult<Bound<'py, PyDict>> {
         let ids = decode_handles(py, handles)?;
         let component = {
-            let world = self.inner.lock().expect("world lock");
+            let world = self.lock()?;
             resolve_component(&world, name)
         }
         .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
@@ -700,7 +749,7 @@ impl PyNativeWorld {
         let payload_in = payload.byte_len();
         let handles_in = ids.len() * 16;
 
-        let mut world = self.inner.lock().expect("world lock");
+        let mut world = self.lock()?;
         if !component_matches(&world, &component) {
             drop(world);
             return Err(PyRuntimeError::new_err(format!(
@@ -731,12 +780,12 @@ impl PyNativeWorld {
     ) -> PyResult<Bound<'py, PyDict>> {
         let ids = decode_handles(py, handles)?;
         let component = {
-            let world = self.inner.lock().expect("world lock");
+            let world = self.lock()?;
             resolve_component(&world, name)
         }
         .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
         let result = {
-            let world = self.inner.lock().expect("world lock");
+            let world = self.lock()?;
             world.memberships(component.index, &ids)
         };
         let flags = result.map_err(map_world_error)?;
@@ -765,7 +814,7 @@ impl PyNativeWorld {
         let ids = decode_handles(py, handles)?;
         let handles_in = ids.len() * 16;
         let result = {
-            let mut world = self.inner.lock().expect("world lock");
+            let mut world = self.lock()?;
             world.destroy(&ids)
         };
         let count = result.map_err(map_world_error)?;
@@ -797,12 +846,12 @@ impl PyNativeWorld {
         };
         let handles_in = ids.as_ref().map_or(0, |ids| ids.len() * 16);
         let component = {
-            let world = self.inner.lock().expect("world lock");
+            let world = self.lock()?;
             resolve_component(&world, name)
         }
         .ok_or_else(|| PyValueError::new_err(format!("unknown component '{name}'")))?;
         let result = {
-            let world = self.inner.lock().expect("world lock");
+            let world = self.lock()?;
             world.read_component(component.index, ids.as_deref())
         };
         let readout = result.map_err(map_world_error)?;
@@ -839,7 +888,7 @@ impl PyNativeWorld {
     /// after the lock is released.
     fn snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let snapshot = {
-            let world = self.inner.lock().expect("world lock");
+            let world = self.lock()?;
             world.snapshot()
         };
         let handles = handles_bytes(&snapshot.entities);
@@ -871,5 +920,6 @@ fn _core_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bootstrap, m)?)?;
     m.add_class::<PyEntitySlots>()?;
     m.add_class::<PyNativeWorld>()?;
+    m.add_class::<runtime::PyNativeRuntime>()?;
     Ok(())
 }
