@@ -407,8 +407,11 @@ An escaped snapshot or command lease raises after the callback returns.
 The Rust loop applies external FIFO commands before settling ready systems in
 registration order. A synchronous callback sees preceding commits. Async
 systems with independent declarations can overlap. A busy or conflicting
-periodic start is skipped. Closing discards unapplied work and joins workers.
-The run report records frame intervals, named system timings, calls over one
+periodic start is skipped. An async result whose declared read or write
+versions changed is rejected at the barrier. Its command IDs report a stale
+result and its events are discarded. Closing discards unapplied work and
+joins workers.
+The run report records stale results, frame intervals, named system timings, calls over one
 millisecond, snapshot copies and bytes. `run` without synchronous systems or
 a graphics bridge stays detached from Python while the clock advances.
 

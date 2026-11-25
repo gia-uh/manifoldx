@@ -264,6 +264,64 @@ def overlap():
     )
 
 
+def stale_async_result():
+    world = World(2)
+    world.register(Speed)
+    world.register("other", kind="u32", width=1)
+    world.spawn(Speed(value=1), payload={"other": np.array([[1]], "u4")})
+    speed, other = world.field(Speed, "value"), world.field("other")
+    started = threading.Event()
+    release = threading.Event()
+    stale_ids, fresh_ids, independent_ids = [], [], []
+
+    @world.system(hz=10, reads=[Speed], writes=[speed])
+    def async_writer(snapshot, commands):
+        current = snapshot.read(Speed).numpy()[0, 0]
+        if current == 1:
+            started.set()
+            assert release.wait(2)
+            stale_ids.append(commands.set(snapshot.query(Speed), speed, current + 1))
+            commands.emit("stale", "must not publish")
+        elif current == 200:
+            fresh_ids.append(commands.set(snapshot.query(Speed), speed, current))
+            commands.emit("fresh", "committed")
+
+    @world.system(hz=10, reads=["other"], writes=[other])
+    def independent_writer(snapshot, commands):
+        if snapshot.clock.frame == 0:
+            assert release.wait(2)
+            independent_ids.append(commands.set(snapshot.query("other"), other, 3))
+
+    @world.system(writes=[speed])
+    def sync_writer(snapshot, commands):
+        if snapshot.clock.frame == 1:
+            assert started.wait(2)
+            commands.set(snapshot.query(Speed), speed, 200)
+            release.set()
+
+    report = world.run(frames=18)
+    values = world.query(Speed).numpy().ravel().tolist()
+    assert values == [200], f"stale async result overwrote 200 with {values}"
+    closed = outcomes(world)
+    assert len(stale_ids) == 1 and "stale" in closed[stale_ids[0]][1], closed
+    assert len(independent_ids) == 1 and closed[independent_ids[0]][1] is None, closed
+    assert world.query("other").numpy()[0, 0] == 3
+    assert any(closed[sequence][1] is None for sequence in fresh_ids), closed
+    assert report["stale_system_results"] == 1, report
+    assert {name for _, name, _ in report["events"]} == {"fresh"}, report
+    print(
+        json.dumps(
+            {
+                "stale_async": values,
+                "stale_id": stale_ids[0],
+                "fresh_ids": fresh_ids,
+                "independent_ids": independent_ids,
+                "outcomes": closed,
+            }
+        )
+    )
+
+
 def shutdown():
     world = World(1)
     world.register(Speed)
@@ -386,6 +444,7 @@ def main():
         uint32_components()
         expired_structural_lease()
         overlap()
+        stale_async_result()
         shutdown()
 
 

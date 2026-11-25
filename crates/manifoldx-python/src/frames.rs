@@ -318,6 +318,54 @@ struct Access {
     writes: Arc<[usize]>,
 }
 
+// Compare declared inputs and write targets at the same barrier that will
+// publish the batch. A writer that ran while Python was detached wins over a
+// result computed from that older version. Structural work conflicts globally.
+enum Revision {
+    World(u64),
+    Columns {
+        entities: Option<u64>,
+        versions: Vec<(usize, u64)>,
+    },
+}
+
+impl Revision {
+    fn capture(world: &World, access: &Access) -> Result<Self, String> {
+        if access.writes.contains(&STRUCTURAL) {
+            return Ok(Self::World(world.version()));
+        }
+        let versions: Vec<_> = access
+            .reads
+            .iter()
+            .chain(
+                access
+                    .writes
+                    .iter()
+                    .filter(|column| !access.reads.contains(column)),
+            )
+            .map(|&column| {
+                world
+                    .column_version(column)
+                    .map(|version| (column, version))
+            })
+            .collect::<Result<_, _>>()?;
+        let entities = (!versions.is_empty()).then(|| world.entity_version());
+        Ok(Self::Columns { entities, versions })
+    }
+
+    fn matches(&self, world: &World) -> bool {
+        match self {
+            Self::World(version) => *version == world.version(),
+            Self::Columns { entities, versions } => {
+                entities.is_none_or(|version| version == world.entity_version())
+                    && versions
+                        .iter()
+                        .all(|&(column, version)| world.column_version(column) == Ok(version))
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CallState {
     control: Control,
@@ -330,7 +378,7 @@ struct Worker {
     sender: Option<SyncSender<Job>>,
     receiver: Receiver<Completed>,
     thread: Option<JoinHandle<()>>,
-    busy: bool,
+    pending: Option<Revision>,
 }
 
 impl Worker {
@@ -351,31 +399,28 @@ impl Worker {
             sender: Some(sender),
             receiver,
             thread: Some(thread),
-            busy: false,
+            pending: None,
         })
     }
 
-    fn take(&mut self) -> Result<Option<Completed>, String> {
-        if !self.busy {
+    fn take(&mut self) -> Result<Option<(Revision, Completed)>, String> {
+        if self.pending.is_none() {
             return Ok(None);
         }
         match self.receiver.try_recv() {
-            Ok(completed) => {
-                self.busy = false;
-                Ok(Some(completed))
-            }
+            Ok(completed) => Ok(Some((self.pending.take().unwrap(), completed))),
             Err(TryRecvError::Empty) => Ok(None),
             Err(TryRecvError::Disconnected) => Err("async worker exited".into()),
         }
     }
 
-    fn launch(&mut self, snapshot: Snapshot) -> Result<(), String> {
+    fn launch(&mut self, snapshot: Snapshot, revision: Revision) -> Result<(), String> {
         self.sender
             .as_ref()
             .unwrap()
             .try_send(Job { snapshot })
             .map_err(|_| "async worker unavailable".to_string())?;
-        self.busy = true;
+        self.pending = Some(revision);
         Ok(())
     }
 }
@@ -413,6 +458,7 @@ impl System {
         completed: Completed,
         report: &mut Report,
         tick: u64,
+        current: bool,
     ) -> Result<(), String> {
         self.ns = self.ns.max(completed.ns);
         self.last_ns = completed.ns;
@@ -421,6 +467,13 @@ impl System {
         let batch = completed
             .batch
             .map_err(|error| format!("{}: {error}", self.name))?;
+        if !current {
+            report.stale_system_results += 1;
+            for command in batch.commands {
+                command.reject(tick, "stale async result: declared World versions changed");
+            }
+            return Ok(());
+        }
         for command in batch.commands {
             report.system_commands += u64::from(command.commit(world, tick));
         }
@@ -439,6 +492,7 @@ struct Report {
     frame_intervals_ns: Vec<u64>,
     events: Vec<(u64, String, String)>,
     system_commands: u64,
+    stale_system_results: u64,
     snapshot_copies: u64,
     snapshot_bytes: u64,
     bridge_calls: u64,
@@ -612,17 +666,20 @@ impl Loop {
             // Settle ready work in registration order. A sync callback sees
             // the commits from all preceding registrations at this barrier.
             for system in &mut self.systems {
-                let ready = match &mut system.work {
-                    Work::Async(_, worker) => worker.take()?,
+                let (ready, current) = match &mut system.work {
+                    Work::Async(_, worker) => {
+                        let Some((revision, completed)) = worker.take()? else {
+                            continue;
+                        };
+                        (completed, revision.matches(world))
+                    }
                     Work::Sync(callback) => {
                         let snap =
                             capture(world, &clock, &system.access.reads, &mut cache, &mut report)?;
-                        Some(call(callback, snap, &system.access, &self.state))
+                        (call(callback, snap, &system.access, &self.state), true)
                     }
                 };
-                if let Some(result) = ready {
-                    system.finish(world, result, &mut report, clock.tick())?;
-                }
+                system.finish(world, ready, &mut report, clock.tick(), current)?;
             }
             // Prefer the least recently dispatched registration when starts
             // conflict. Ties use registration order. No missed start is queued.
@@ -642,7 +699,7 @@ impl Loop {
                     unreachable!()
                 };
                 let blocked = before.iter().chain(after.iter()).any(|other| {
-                    matches!(&other.work, Work::Async(_, worker) if worker.busy)
+                    matches!(&other.work, Work::Async(_, worker) if worker.pending.is_some())
                         && (system.access.writes.contains(&STRUCTURAL)
                             || other.access.writes.contains(&STRUCTURAL)
                             || conflicts(
@@ -652,12 +709,13 @@ impl Loop {
                                 &other.access.writes,
                             ))
                 });
-                if blocked || worker.busy {
+                if blocked || worker.pending.is_some() {
                     system.skipped += 1;
                 } else {
                     let snapshot =
                         capture(world, &clock, &system.access.reads, &mut cache, &mut report)?;
-                    worker.launch(snapshot)?;
+                    let revision = Revision::capture(world, &system.access)?;
+                    worker.launch(snapshot, revision)?;
                     system.last_start = Some(clock.tick());
                 }
             }
@@ -904,6 +962,7 @@ impl FrameLoop {
         result.set_item("frame_intervals_ns", report.frame_intervals_ns)?;
         result.set_item("events", report.events)?;
         result.set_item("system_commands", report.system_commands)?;
+        result.set_item("stale_system_results", report.stale_system_results)?;
         result.set_item("snapshot_copies", report.snapshot_copies)?;
         result.set_item("snapshot_bytes", report.snapshot_bytes)?;
         result.set_item(

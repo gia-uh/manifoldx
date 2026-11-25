@@ -422,6 +422,15 @@ impl Staged {
     pub fn commit(mut self, world: &mut World, frame: u64) -> bool {
         let result = apply(world, self.command.take().unwrap());
         let success = result.is_ok();
+        self.settle(frame, result);
+        success
+    }
+
+    pub fn reject(mut self, frame: u64, error: &str) {
+        self.settle(frame, Err(error.into()));
+    }
+
+    fn settle(&mut self, frame: u64, result: Result<Option<ComponentReadout>, String>) {
         let mut s = self
             .control
             .0
@@ -431,7 +440,6 @@ impl Staged {
         s.staged -= 1;
         Control::record_outcome(&mut s, self.sequence, frame, result);
         self.settled = true;
-        success
     }
 }
 
