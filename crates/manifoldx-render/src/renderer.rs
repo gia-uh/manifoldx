@@ -527,6 +527,13 @@ impl NativeRenderer {
             if !omit_draw && !draw_groups.is_empty() {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                let instance_buffer = &self
+                    .instance_buffer
+                    .as_ref()
+                    .expect("groups imply data")
+                    .buffer;
+                // Draw ranges index the full buffer in packed group order.
+                pass.set_vertex_buffer(1, instance_buffer.slice(..));
                 let mut first_instance = 0u32;
                 for group in &draw_groups {
                     let mesh = self
@@ -534,13 +541,6 @@ impl NativeRenderer {
                         .get(&group.geometry_id)
                         .ok_or(RenderError::UnknownGeometry(group.geometry_id))?;
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    let offset = first_instance as u64 * INSTANCE_BYTES as u64;
-                    let instance_buffer = &self
-                        .instance_buffer
-                        .as_ref()
-                        .expect("groups imply data")
-                        .buffer;
-                    pass.set_vertex_buffer(1, instance_buffer.slice(offset..));
                     pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(
                         0..mesh.index_count,
