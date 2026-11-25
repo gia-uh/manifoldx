@@ -293,7 +293,7 @@ impl<A: DesktopApplication> Desktop<'_, A> {
             depth,
             width: context.size.width,
             height: context.size.height,
-            clear: wgpu::Color::BLACK,
+            clear: context.renderer.background(),
         };
         let mut encoder = context
             .renderer

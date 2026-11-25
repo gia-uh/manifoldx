@@ -4,7 +4,7 @@
 
 use manifoldx_core::ecs::{ColumnData, ElementType, World};
 use manifoldx_render::camera::Camera;
-use manifoldx_render::renderer::{NativeRenderer, RendererOptions};
+use manifoldx_render::renderer::{NativeRenderer, RendererOptions, Shading};
 use manifoldx_render::scene::{resolve_source, spawn_instances, MeshData};
 
 fn quad() -> MeshData {
@@ -86,4 +86,57 @@ fn offscreen_render_reads_world_and_changes_with_a_transform() {
         .filter(|(a, b)| a != b)
         .count();
     assert!(changed > 50, "only {changed} pixels changed");
+}
+
+#[test]
+fn mirrored_flat_mesh_is_visible_and_an_outside_instance_is_culled() {
+    let mut renderer = match NativeRenderer::new(RendererOptions {
+        allow_software: true,
+        ..Default::default()
+    }) {
+        Ok(renderer) => renderer,
+        Err(error) => {
+            eprintln!("skip offscreen test: {error}");
+            return;
+        }
+    };
+    renderer.upload_mesh(1, &quad(), [1.0; 3]).unwrap();
+    renderer
+        .set_material(
+            1,
+            [204.0 / 255.0, 34.0 / 255.0, 17.0 / 255.0],
+            Shading::Flat,
+        )
+        .unwrap();
+    let mut world = World::new(4).unwrap();
+    world.register("Transform", ElementType::F32, 10).unwrap();
+    world.register("Mesh", ElementType::U32, 1).unwrap();
+    world.register("Material", ElementType::U32, 1).unwrap();
+    spawn_instances(
+        &mut world,
+        &[
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, -1.0, 0.75, 0.4],
+            [15.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        ],
+        &[1, 1],
+        &[1, 1],
+    )
+    .unwrap();
+    let source = resolve_source(&world, "Transform", "Mesh", Some("Material"), 4).unwrap();
+    let camera = Camera::new([0.0, 0.0, 3.0], [0.0; 3]);
+    let result = renderer
+        .render(&world, source, &camera, 64, 64, false)
+        .unwrap();
+    let center = &result.rgba[((32 * 64 + 32) * 4)..][..4];
+    assert_eq!(center, &[204, 34, 17, 255]);
+    assert_eq!(result.stats.instances, 1);
+    assert_eq!(result.stats.draw_calls, 1);
+
+    let large = [255u8; 16];
+    let small = [0, 0, 255, 255];
+    assert!(renderer.upload_albedo(1, 2, 2, &[&large]).is_err());
+    assert!(renderer
+        .upload_albedo(1, 2, 2, &[&large, &small[..3]])
+        .is_err());
+    renderer.upload_albedo(1, 2, 2, &[&large, &small]).unwrap();
 }

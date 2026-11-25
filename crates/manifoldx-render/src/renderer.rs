@@ -7,6 +7,7 @@ use std::time::Instant;
 use manifoldx_core::ecs::World;
 
 use crate::camera::Camera;
+use crate::math::Mat4;
 use crate::scene::{
     read_instances, InstanceBatch, InstanceSource, MeshData, SceneError, DEFAULT_MAX_INSTANCES,
 };
@@ -17,10 +18,10 @@ pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 /// Reversed-depth float buffer; the pass clears 0 and compares `Greater`.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-const CAMERA_BYTES: usize = 64;
-const INSTANCE_FLOATS: usize = 20;
+const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8) * 4;
+const INSTANCE_FLOATS: usize = 24;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
-const VERTEX_BYTES: usize = 6 * 4;
+const VERTEX_BYTES: usize = 8 * 4;
 /// Largest offscreen side accepted by this slice.
 pub const MAX_SIDE: u32 = 4096;
 
@@ -157,11 +158,51 @@ impl Gpu {
     }
 }
 
+/// Supported opaque material families for the base renderer.
+#[derive(Clone, Copy, Debug)]
+pub enum Shading {
+    Basic,
+    Flat,
+    Phong,
+    Standard {
+        roughness: f32,
+        metallic: f32,
+        ao: f32,
+        albedo: Option<u32>,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PointLight {
+    pub position: [f32; 3],
+    /// The established point-light buffer stores the input RGB directly.
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Material {
+    color: [f32; 4],
+    style: [f32; 4],
+    albedo: u32,
+}
+
+impl Material {
+    fn diffuse(color: [f32; 4]) -> Self {
+        Self {
+            color,
+            style: [0.0; 4],
+            albedo: 0,
+        }
+    }
+}
+
 struct GpuMesh {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
     color: [f32; 4],
+    bounds: [[f32; 3]; 2],
 }
 
 struct InstanceBuffer {
@@ -241,10 +282,15 @@ pub struct RenderOutput {
 pub struct NativeRenderer {
     gpu: Gpu,
     pipeline: wgpu::RenderPipeline,
+    reversed_pipeline: wgpu::RenderPipeline,
+    texture_layout: wgpu::BindGroupLayout,
+    textures: HashMap<u32, wgpu::BindGroup>,
+    point_lights: [[f32; 8]; 4],
+    clear: wgpu::Color,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     meshes: HashMap<u32, GpuMesh>,
-    materials: HashMap<u32, [f32; 4]>,
+    materials: HashMap<u32, Material>,
     instance_buffer: Option<InstanceBuffer>,
     max_instances: usize,
 }
@@ -269,66 +315,90 @@ impl NativeRenderer {
                     label: Some("manifoldx-native-camera-layout"),
                     entries: &[wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(CAMERA_BYTES as u64),
+                            min_binding_size: wgpu::BufferSize::new(GLOBAL_BYTES as u64),
                         },
                         count: None,
                     }],
+                });
+        let texture_layout =
+            gpu.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("manifoldx-albedo-layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                    ],
                 });
         let pipeline_layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("manifoldx-native-pipeline-layout"),
-                bind_group_layouts: &[Some(&bind_group_layout)],
+                bind_group_layouts: &[Some(&bind_group_layout), Some(&texture_layout)],
                 immediate_size: 0,
             });
-        let pipeline = gpu
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("manifoldx-native-opaque-pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[VERTEX_LAYOUT, INSTANCE_LAYOUT],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
-                    unclipped_depth: false,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Greater),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+        let pipeline = |front_face| {
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("manifoldx-native-opaque-pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[VERTEX_LAYOUT, INSTANCE_LAYOUT],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face,
+                        cull_mode: Some(wgpu::Face::Back),
+                        unclipped_depth: false,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        conservative: false,
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Greater),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
         let camera_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("manifoldx-native-camera-uniform"),
-            size: CAMERA_BYTES as u64,
+            size: GLOBAL_BYTES as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -340,16 +410,26 @@ impl NativeRenderer {
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
-        Self {
+        let regular = pipeline(wgpu::FrontFace::Ccw);
+        let reversed = pipeline(wgpu::FrontFace::Cw);
+        let mut renderer = Self {
             gpu,
-            pipeline,
+            pipeline: regular,
+            reversed_pipeline: reversed,
+            texture_layout,
+            textures: HashMap::new(),
+            point_lights: [[0.0; 8]; 4],
+            clear: wgpu::Color::BLACK,
             camera_buffer,
             camera_bind_group,
             meshes: HashMap::new(),
             materials: HashMap::new(),
             instance_buffer: None,
             max_instances,
-        }
+        };
+        let white = renderer.make_texture(1, 1, &[&[255, 255, 255, 255]]);
+        renderer.textures.insert(0, white);
+        renderer
     }
 
     /// Adapter facts for evidence.
@@ -379,11 +459,36 @@ impl NativeRenderer {
         mesh: &MeshData,
         color_srgb: [f32; 3],
     ) -> Result<(), RenderError> {
+        self.upload_mesh_with_uv(geometry_id, mesh, color_srgb, &[])
+    }
+
+    pub fn upload_mesh_with_uv(
+        &mut self,
+        geometry_id: u32,
+        mesh: &MeshData,
+        color_srgb: [f32; 3],
+        uvs: &[[f32; 2]],
+    ) -> Result<(), RenderError> {
         if geometry_id == 0 {
             return Err(RenderError::ReservedGeometryId);
         }
         let vertex_count = mesh.validate()?;
-        let interleaved = mesh.interleaved();
+        if !uvs.is_empty() && uvs.len() != vertex_count {
+            return Err(RenderError::Resource(
+                "mesh UV count differs from vertex count".into(),
+            ));
+        }
+        let mut interleaved = Vec::with_capacity(vertex_count * 8);
+        let mut bounds = [mesh.positions[0]; 2];
+        for (index, (position, normal)) in mesh.positions.iter().zip(&mesh.normals).enumerate() {
+            for axis in 0..3 {
+                bounds[0][axis] = bounds[0][axis].min(position[axis]);
+                bounds[1][axis] = bounds[1][axis].max(position[axis]);
+            }
+            interleaved.extend_from_slice(position);
+            interleaved.extend_from_slice(normal);
+            interleaved.extend_from_slice(uvs.get(index).unwrap_or(&[0.0; 2]));
+        }
         let vertex_bytes = bytemuck::cast_slice(&interleaved);
         let vertex_buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("manifoldx-native-vertices"),
@@ -400,7 +505,7 @@ impl NativeRenderer {
             mapped_at_creation: false,
         });
         self.gpu.queue.write_buffer(&index_buffer, 0, index_bytes);
-        debug_assert_eq!(interleaved.len(), vertex_count * 6);
+        debug_assert_eq!(interleaved.len(), vertex_count * 8);
         self.meshes.insert(
             geometry_id,
             GpuMesh {
@@ -408,6 +513,7 @@ impl NativeRenderer {
                 index_buffer,
                 index_count: mesh.indices.len() as u32,
                 color: srgb_to_linear(color_srgb),
+                bounds,
             },
         );
         Ok(())
@@ -416,7 +522,168 @@ impl NativeRenderer {
     /// Register an opaque material colour for a `Material` row id.
     pub fn register_material(&mut self, material_id: u32, color_srgb: [f32; 3]) {
         self.materials
-            .insert(material_id, srgb_to_linear(color_srgb));
+            .insert(material_id, Material::diffuse(srgb_to_linear(color_srgb)));
+    }
+
+    pub fn set_material(
+        &mut self,
+        id: u32,
+        color_srgb: [f32; 3],
+        shading: Shading,
+    ) -> Result<(), RenderError> {
+        if id == 0 || color_srgb.iter().any(|value| !value.is_finite()) {
+            return Err(RenderError::Resource("invalid material id or color".into()));
+        }
+        let (style, albedo) = match shading {
+            Shading::Basic | Shading::Phong => ([0.0, 0.0, 0.0, 1.0], 0),
+            Shading::Flat => ([0.0, 0.0, 0.0, 2.0], 0),
+            Shading::Standard {
+                roughness,
+                metallic,
+                ao,
+                albedo,
+            } => {
+                if !(0.001..=1.0).contains(&roughness)
+                    || !(0.0..=1.0).contains(&metallic)
+                    || !(0.0..=1.0).contains(&ao)
+                {
+                    return Err(RenderError::Resource(
+                        "invalid Standard material factors".into(),
+                    ));
+                }
+                let mode = if albedo.is_some() { 4.0 } else { 3.0 };
+                ([roughness, metallic, ao, mode], albedo.unwrap_or(0))
+            }
+        };
+        if !self.textures.contains_key(&albedo) {
+            return Err(RenderError::Resource(format!(
+                "unknown albedo texture {albedo}"
+            )));
+        }
+        self.materials.insert(
+            id,
+            Material {
+                color: srgb_to_linear(color_srgb),
+                style,
+                albedo,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn set_background(&mut self, linear_rgb: [f32; 3]) {
+        let [r, g, b] = linear_rgb.map(f64::from);
+        self.clear = wgpu::Color { r, g, b, a: 1.0 };
+    }
+
+    pub fn background(&self) -> wgpu::Color {
+        self.clear
+    }
+
+    pub fn set_point_lights(&mut self, lights: &[PointLight]) {
+        self.point_lights = [[0.0; 8]; 4];
+        // The base light buffer has four slots, as in the existing Standard material.
+        for (row, light) in self.point_lights.iter_mut().zip(lights) {
+            let [x, y, z] = light.position;
+            let [r, g, b] = light.color;
+            *row = [x, y, z, 0.0, r, g, b, light.intensity];
+        }
+    }
+
+    /// Upload a complete sRGB RGBA8 chain, largest mip first.
+    pub fn upload_albedo(
+        &mut self,
+        id: u32,
+        width: u32,
+        height: u32,
+        levels: &[&[u8]],
+    ) -> Result<(), RenderError> {
+        let limit = self.device().limits().max_texture_dimension_2d;
+        if id == 0 || !(1..=limit).contains(&width) || !(1..=limit).contains(&height) {
+            return Err(RenderError::Resource("invalid texture id or size".into()));
+        }
+        let expected_levels = width.max(height).ilog2() + 1;
+        if levels.len() != expected_levels as usize {
+            return Err(RenderError::Resource(format!(
+                "expected {expected_levels} mip levels"
+            )));
+        }
+        for (level, pixels) in levels.iter().enumerate() {
+            let w = (width >> level).max(1);
+            let h = (height >> level).max(1);
+            if pixels.len() != w as usize * h as usize * 4 {
+                return Err(RenderError::Resource(format!(
+                    "invalid byte count at mip {level}"
+                )));
+            }
+        }
+        let texture = self.make_texture(width, height, levels);
+        self.textures.insert(id, texture);
+        Ok(())
+    }
+
+    fn make_texture(&self, width: u32, height: u32, levels: &[&[u8]]) -> wgpu::BindGroup {
+        let texture = self.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("manifoldx-albedo"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: levels.len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (level, pixels) in levels.iter().enumerate() {
+            let w = (width >> level).max(1);
+            let h = (height >> level).max(1);
+            self.queue().write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let view = texture.create_view(&Default::default());
+        let sampler = self.device().create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
+        self.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("manifoldx-albedo"),
+            layout: &self.texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+            ],
+        })
     }
 
     /// Render the World's instances offscreen and return an owned RGBA image.
@@ -487,7 +754,7 @@ impl NativeRenderer {
             depth: &depth_view,
             width,
             height,
-            clear: wgpu::Color::BLACK,
+            clear: self.clear,
         };
         let mut stats = self.encode_world(
             &mut encoder,
@@ -604,18 +871,19 @@ impl NativeRenderer {
             entities_examined: batch.entities_examined,
             ..Default::default()
         };
-        let draw_groups = self.pack_instances(&batch, &mut stats)?;
-        stats.instances = batch.instances.len();
+        let aspect = target.width as f32 / target.height as f32;
+        let view_projection = camera.view_projection(aspect);
+        let draw_groups = self.pack_instances(&batch, &view_projection, &mut stats)?;
         stats.read_ns = elapsed_ns(read_started.elapsed());
 
-        let aspect = target.width as f32 / target.height as f32;
-        let view_projection = camera.view_projection(aspect).to_columns();
         let upload_started = Instant::now();
-        self.gpu.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&view_projection),
-        );
+        let mut globals = [0.0; GLOBAL_BYTES / 4];
+        globals[..16].copy_from_slice(&view_projection.to_columns());
+        globals[16..19].copy_from_slice(&camera.position);
+        globals[20..].copy_from_slice(self.point_lights.as_flattened());
+        self.gpu
+            .queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&globals));
 
         let instance_data = self.pack_instance_bytes(&draw_groups);
         if !instance_data.is_empty() {
@@ -666,8 +934,6 @@ impl NativeRenderer {
                 multiview_mask: None,
             });
             if !omit_draw && !draw_groups.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 let instance_buffer = &self
                     .instance_buffer
                     .as_ref()
@@ -677,6 +943,14 @@ impl NativeRenderer {
                 pass.set_vertex_buffer(1, instance_buffer.slice(..));
                 let mut first_instance = 0u32;
                 for group in &draw_groups {
+                    let pipeline = if group.reversed {
+                        &self.reversed_pipeline
+                    } else {
+                        &self.pipeline
+                    };
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    pass.set_bind_group(1, &self.textures[&group.albedo], &[]);
                     let mesh = self
                         .meshes
                         .get(&group.geometry_id)
@@ -714,34 +988,48 @@ impl NativeRenderer {
     fn pack_instances(
         &self,
         batch: &InstanceBatch,
+        view_projection: &Mat4,
         stats: &mut RenderStats,
     ) -> Result<Vec<DrawGroup>, RenderError> {
-        let mut by_geometry: BTreeMap<u32, Vec<f32>> = BTreeMap::new();
+        let mut groups: BTreeMap<(u32, bool, u32), Vec<f32>> = BTreeMap::new();
         for instance in &batch.instances {
             let mesh = self
                 .meshes
                 .get(&instance.geometry_id)
                 .ok_or(RenderError::UnknownGeometry(instance.geometry_id))?;
-            let color = instance
+            let clip = view_projection.multiply(&instance.model);
+            if outside_frustum(&clip, mesh.bounds) {
+                continue;
+            }
+            let material = instance
                 .material_id
                 .and_then(|id| self.materials.get(&id).copied())
-                .unwrap_or(mesh.color);
-            let entry = by_geometry.entry(instance.geometry_id).or_default();
+                .unwrap_or(Material::diffuse(mesh.color));
+            let entry = groups
+                .entry((
+                    instance.geometry_id,
+                    flips_winding(&instance.model),
+                    material.albedo,
+                ))
+                .or_default();
             entry.extend_from_slice(&instance.model.to_columns());
-            entry.extend_from_slice(&color);
+            entry.extend_from_slice(&material.color);
+            entry.extend_from_slice(&material.style);
+            stats.instances += 1;
         }
-        let mut groups = Vec::with_capacity(by_geometry.len());
-        for (geometry_id, values) in by_geometry {
-            debug_assert!(values.len().is_multiple_of(INSTANCE_FLOATS));
-            let instances = (values.len() / INSTANCE_FLOATS) as u32;
-            groups.push(DrawGroup {
-                geometry_id,
-                instances,
-                values,
-            });
-        }
-        stats.instances = batch.instances.len();
-        Ok(groups)
+        Ok(groups
+            .into_iter()
+            .map(|((geometry_id, reversed, albedo), values)| {
+                debug_assert!(values.len().is_multiple_of(INSTANCE_FLOATS));
+                DrawGroup {
+                    geometry_id,
+                    reversed,
+                    albedo,
+                    instances: (values.len() / INSTANCE_FLOATS) as u32,
+                    values,
+                }
+            })
+            .collect())
     }
 
     fn pack_instance_bytes(&self, groups: &[DrawGroup]) -> Vec<u8> {
@@ -754,13 +1042,39 @@ impl NativeRenderer {
     }
 }
 
+fn flips_winding(model: &Mat4) -> bool {
+    let [a, b, c, _, d, e, f, _, g, h, i, _, ..] = model.0;
+    a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g) < 0.0
+}
+
+fn outside_frustum(clip: &Mat4, [lo, hi]: [[f32; 3]; 2]) -> bool {
+    let mut outside = [true; 6];
+    for x in [lo[0], hi[0]] {
+        for y in [lo[1], hi[1]] {
+            for z in [lo[2], hi[2]] {
+                let [x, y, z, w] = clip.transform_point([x, y, z]);
+                for (plane, clipped) in
+                    outside
+                        .iter_mut()
+                        .zip([x < -w, x > w, y < -w, y > w, z < 0.0, z > w])
+                {
+                    *plane &= clipped;
+                }
+            }
+        }
+    }
+    outside.into_iter().any(|plane| plane)
+}
+
 struct DrawGroup {
     geometry_id: u32,
+    reversed: bool,
+    albedo: u32,
     instances: u32,
     values: Vec<f32>,
 }
 
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -771,13 +1085,18 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
         offset: 12,
         shader_location: 1,
     },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 24,
+        shader_location: 7,
+    },
 ];
 const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: VERTEX_BYTES as u64,
     step_mode: wgpu::VertexStepMode::Vertex,
     attributes: &VERTEX_ATTRIBUTES,
 };
-const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
         offset: 0,
@@ -803,6 +1122,11 @@ const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
         offset: 64,
         shader_location: 6,
     },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 80,
+        shader_location: 8,
+    },
 ];
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: INSTANCE_BYTES as u64,
@@ -811,14 +1135,23 @@ const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLay
 };
 
 const SHADER: &str = r#"
+struct PointLight {
+    position: vec4<f32>,
+    rgb_intensity: vec4<f32>,
+};
 struct Camera {
     view_proj: mat4x4<f32>,
+    position: vec4<f32>,
+    lights: array<PointLight, 4>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(1) @binding(0) var albedo_sampler: sampler;
+@group(1) @binding(1) var albedo_texture: texture_2d<f32>;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(7) uv: vec2<f32>,
 };
 struct InstanceIn {
     @location(2) m0: vec4<f32>,
@@ -826,11 +1159,15 @@ struct InstanceIn {
     @location(4) m2: vec4<f32>,
     @location(5) m3: vec4<f32>,
     @location(6) color: vec4<f32>,
+    @location(8) style: vec4<f32>,
 };
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) color: vec3<f32>,
+    @location(2) world_position: vec3<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) @interpolate(flat) style: vec4<f32>,
 };
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
@@ -878,16 +1215,76 @@ fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     out.clip_position = camera.view_proj * world;
     out.normal = transform_normal(model, in.normal);
     out.color = instance.color.rgb;
+    out.world_position = world.xyz;
+    out.uv = in.uv;
+    out.style = instance.style;
     return out;
+}
+
+fn geometry_schlick(ndot: f32, roughness: f32) -> f32 {
+    let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    return ndot / (ndot * (1.0 - k) + k);
+}
+
+fn standard_light(
+    n: vec3<f32>, v: vec3<f32>, world: vec3<f32>, albedo: vec3<f32>,
+    roughness: f32, metallic: f32, light: PointLight,
+) -> vec3<f32> {
+    let offset = light.position.xyz - world;
+    let l = safe_normalize(offset);
+    let h = safe_normalize(v + l);
+    let dist_sq = max(dot(offset, offset), 0.0001);
+    let radiance = light.rgb_intensity.rgb * light.rgb_intensity.a / dist_sq;
+    let ndotv = max(dot(n, v), 0.0);
+    let ndotl = max(dot(n, l), 0.0);
+    let ndoth = max(dot(n, h), 0.0);
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let denom = ndoth * ndoth * (a2 - 1.0) + 1.0;
+    let pi = 3.14159265359;
+    let distribution = a2 / (pi * denom * denom);
+    let geometry = geometry_schlick(ndotv, roughness) * geometry_schlick(ndotl, roughness);
+    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+    let f = f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - dot(h, v), 0.0, 1.0), 5.0);
+    let diffuse = (vec3<f32>(1.0) - f) * (1.0 - metallic) * albedo / pi;
+    let specular = distribution * geometry * f / (4.0 * ndotv * ndotl + 0.0001);
+    return (diffuse + specular) * radiance * ndotl;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let light_dir = normalize(vec3<f32>(0.35, 0.8, 0.55));
-    let diffuse = max(dot(normalize(in.normal), light_dir), 0.0);
-    // Flat opaque material: one albedo, one directional term, no PBR.
-    let shaded = in.color * (0.28 + 0.72 * diffuse);
-    return vec4<f32>(shaded, 1.0);
+    let uv_dx = dpdx(in.uv);
+    let uv_dy = dpdy(in.uv);
+    let mode = u32(in.style.w);
+    let n = safe_normalize(in.normal);
+    if mode == 0u {
+        let direction = normalize(vec3<f32>(0.35, 0.8, 0.55));
+        let light = 0.28 + 0.72 * max(dot(n, direction), 0.0);
+        return vec4<f32>(in.color * light, 1.0);
+    }
+    if mode == 1u {
+        let direction = normalize(vec3<f32>(0.5773, 0.5773, 0.5773));
+        let light = 0.3 + 0.7 * max(dot(n, direction), 0.0);
+        return vec4<f32>(in.color * light, 1.0);
+    }
+    if mode == 2u {
+        return vec4<f32>(in.color, 1.0);
+    }
+    var albedo = in.color;
+    if mode == 4u {
+        let texel = textureSampleGrad(albedo_texture, albedo_sampler, in.uv, uv_dx, uv_dy);
+        if texel.a < 0.5 { discard; }
+        albedo = texel.rgb;
+    }
+    let v = safe_normalize(camera.position.xyz - in.world_position);
+    var color = 0.03 * albedo * in.style.z;
+    for (var i = 0u; i < 4u; i++) {
+        let light = camera.lights[i];
+        if light.rgb_intensity.a > 0.0 {
+            color += standard_light(n, v, in.world_position, albedo, in.style.x, in.style.y, light);
+        }
+    }
+    return vec4<f32>(color / (color + vec3<f32>(1.0)), 1.0);
 }
 "#;
 
@@ -956,6 +1353,8 @@ pub fn json_string(value: &str) -> String {
 pub enum RenderError {
     /// The native desktop window or surface failed.
     Window(String),
+    /// A resource declaration is invalid for this renderer.
+    Resource(String),
     /// Scene preparation failed.
     Scene(SceneError),
     /// No Vulkan adapter answered.
@@ -998,6 +1397,7 @@ impl std::fmt::Display for RenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Window(error) => write!(f, "desktop: {error}"),
+            Self::Resource(error) => write!(f, "resource: {error}"),
             Self::Scene(error) => write!(f, "scene: {error}"),
             Self::Adapter(error) => write!(f, "no usable adapter: {error}"),
             Self::Device(error) => write!(f, "device creation failed: {error}"),

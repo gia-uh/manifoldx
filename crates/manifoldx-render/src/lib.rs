@@ -9,7 +9,8 @@ pub mod scene;
 pub use camera::Camera;
 pub use renderer::{
     json_string, srgb_to_linear, write_ppm, AdapterSummary, FrameTarget, Gpu, NativeRenderer,
-    RenderError, RenderOutput, RenderStats, RendererOptions, COLOR_FORMAT, DEPTH_FORMAT, MAX_SIDE,
+    PointLight, RenderError, RenderOutput, RenderStats, RendererOptions, Shading, COLOR_FORMAT,
+    DEPTH_FORMAT, MAX_SIDE,
 };
 pub use scene::{
     read_instances, resolve_source, spawn_instances, used_geometry_ids, Instance, InstanceBatch,
