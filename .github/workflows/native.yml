@@ -1,7 +1,6 @@
 # The rust-core branch carries the Rust migration, and its PRs run focused
-# checks instead of the whole suite: the phase-0 native gates. These are
-# blocking — the installed-wheel smoke and the missing-extension negative
-# control fail the PR when they fail. The full suite (test.yml) still runs
+# checks instead of the whole suite: the native gates and applicable
+# regressions. The full suite (test.yml) still runs
 # on main and release branches; main-parity for rust-core stays a
 # coordinator decision until the phase-0 policy adds it.
 name: Native
@@ -12,8 +11,16 @@ on:
 
 jobs:
   native:
+    needs: wheel
+    # A skipped dependent job cannot carry a failed required wheel check.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require the installed wheel matrix
+        env:
+          WHEEL_RESULT: ${{ needs.wheel.result }}
+        run: test "$WHEEL_RESULT" = success
+
       - uses: actions/checkout@v4
 
       - name: Install Rust with rustfmt and clippy
@@ -24,16 +31,10 @@ jobs:
           python-version: '3.14t'
 
       - name: Install dependencies
-        run: uv sync --locked --group native --group dev
+        run: uv sync --locked --extra offline --group native --group dev
 
       - name: Check the workspace crates
         run: make native-check
-
-      - name: Build the wheel for the free-threaded interpreter
-        run: make native-build NATIVE_PYTHON=python3.14t
-
-      - name: Verify the installed wheel (smoke and negative control)
-        run: bash scripts/gates/native-verify.sh python3.14t dist
 
       - name: Packaging and startup contracts with CPU Engine callers
         # Root conftest probes a GPU during configuration; these checks need none.
@@ -54,5 +55,72 @@ jobs:
           tests/test_ibl_loading.py::test_set_environment_alone_starts_no_work
           tests/test_web_engine_apis.py -q
 
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+
+      - name: Run compute and volume rendering regressions
+        env:
+          WGPU_BACKEND_TYPE: Vulkan
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run --no-sync pytest -o addopts= -q -rs \
+            tests/test_compute.py tests/test_compute_integration.py \
+            tests/test_compute_slots.py tests/test_compute_transpile.py \
+            tests/test_compute_transpile_integration.py tests/test_volume_render.py \
+            | tee "$RUNNER_TEMP/compute-regressions.log"
+          if grep -q '^SKIPPED ' "$RUNNER_TEMP/compute-regressions.log"; then
+            echo "Compute or volume rendering regression tests skipped" >&2
+            exit 1
+          fi
+
       - name: Rift coverage
         run: uvx --from git+https://github.com/apiad/rift@v0.9.0 rift check .
+
+  wheel:
+    name: Wheel (${{ matrix.os }}, CPython ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.14', '3.14t']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          ref: 7e53eafe4c0bccd3d133991c1abd46709374fcbc
+          path: pre-core
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Measure the same wheel build and installed Python workload on both trees
+        shell: bash
+        env:
+          CHECK_PYTHON: ${{ matrix.python }}
+        run: |
+          # Run both builds and Python startup workloads on this runner.
+          mkdir -p wheel-evidence
+          uv run --no-project --python "$CHECK_PYTHON" python scripts/gates/wheel-baseline.py
+
+      - name: Verify the native wheel and its failure controls
+        shell: bash
+        env:
+          CHECK_PYTHON: ${{ matrix.python }}
+        run: |
+          # Git Bash needs a POSIX temporary directory on Windows.
+          export TMPDIR=/tmp
+          NATIVE_VERIFY_LOGS="$PWD/wheel-evidence/native" \
+            bash scripts/gates/native-verify.sh "$CHECK_PYTHON" dist
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.python }}
+          path: |
+            dist/*.whl
+            wheel-evidence/

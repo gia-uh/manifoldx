@@ -5,7 +5,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::ecs::{ColumnData, ComponentReadout, EntityId, World};
+use crate::ecs::{
+    ColumnData, ComponentPayload, ComponentReadout, EntityId, Scalar, Selection, World,
+    MAX_COMPONENT_WIDTH,
+};
 use crate::vehicles::{Controls, Sim, DT};
 
 /// Maximum owned input or selected readback bytes per operation.
@@ -19,6 +22,16 @@ pub enum Command {
         component: usize,
         ids: Vec<EntityId>,
         data: ColumnData,
+    },
+    Set {
+        selection: Selection,
+        component: usize,
+        field: usize,
+        value: Scalar,
+    },
+    Spawn {
+        count: u32,
+        payload: Vec<ComponentPayload>,
     },
     /// Destroy identities, validated together at application time.
     Destroy(Vec<EntityId>),
@@ -40,16 +53,23 @@ impl Command {
     fn rows(&self) -> usize {
         match self {
             Self::Update { ids, .. } | Self::Read { ids, .. } | Self::Destroy(ids) => ids.len(),
-            Self::Controls { .. } => 0,
+            Self::Set { .. } | Self::Controls { .. } => 0,
+            Self::Spawn { count, .. } => *count as usize,
         }
     }
-    fn bytes(&self) -> usize {
-        self.rows() * 16
-            + match self {
-                Self::Update { data, .. } => data.byte_len(),
-                Self::Controls { .. } => 4 * std::mem::size_of::<f64>(),
-                _ => 0,
+    fn bytes(&self) -> Option<usize> {
+        let row_bytes = self.rows().checked_mul(16)?;
+        match self {
+            Self::Update { data, .. } => row_bytes.checked_add(data.byte_len()),
+            Self::Set { selection, .. } => {
+                32usize.checked_add(selection.predicates.len().checked_mul(32)?)
             }
+            Self::Spawn { payload, .. } => payload.iter().try_fold(row_bytes, |bytes, part| {
+                bytes.checked_add(8)?.checked_add(part.data.byte_len())
+            }),
+            Self::Controls { .. } => Some(4 * std::mem::size_of::<f64>()),
+            _ => Some(row_bytes),
+        }
     }
     fn valid_controls(&self) -> bool {
         match self {
@@ -71,6 +91,32 @@ impl Command {
             _ => true,
         }
     }
+}
+
+/// Apply the same validated operation in every caller and scheduler lane.
+pub fn apply(world: &mut World, command: Command) -> Result<Option<ComponentReadout>, String> {
+    match command {
+        Command::Update {
+            component,
+            ids,
+            data,
+        } => world.update_rows(component, &ids, data).map(|_| None),
+        Command::Destroy(ids) => world.destroy(&ids).map(|_| None),
+        Command::Read { component, ids } => world.read_component(component, Some(&ids)).map(Some),
+        Command::Set {
+            selection,
+            component,
+            field,
+            value,
+        } => {
+            return world
+                .set_selected(&selection, component, field, value)
+                .map(|_| None);
+        }
+        Command::Spawn { count, payload } => world.spawn(count, &payload).map(|_| None),
+        Command::Controls { .. } => return Err("controls require an attached vehicle".into()),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// Admission is nonblocking. IDs are allocated only for admitted commands.
@@ -132,6 +178,7 @@ struct State {
     stop: bool,
     next: u64,
     queue: VecDeque<(u64, Command)>,
+    staged: usize,
     outcomes: VecDeque<Outcome>,
     stats: Stats,
 }
@@ -143,37 +190,179 @@ struct Shared {
     read_row_bytes: Vec<usize>,
     has_vehicle: bool,
 }
+impl Shared {
+    fn command_bytes(&self, command: &Command) -> Result<usize, Admission> {
+        let limit = || Admission::Error("command exceeds row or scalar limit");
+        if !command.valid_controls()
+            || (matches!(command, Command::Controls { .. }) && !self.has_vehicle)
+            || command.rows() > self.max_rows
+            || matches!(command, Command::Update { data, ids, .. }
+                if data.len().div_ceil(MAX_COMPONENT_WIDTH as usize) > ids.len())
+        {
+            return Err(limit());
+        }
+        if let Command::Read { component, ids } = command {
+            let row_bytes = self.read_row_bytes.get(*component).ok_or_else(limit)?;
+            if ids.len().checked_mul(*row_bytes).ok_or_else(limit)? > MAX_COMMAND_BYTES {
+                return Err(limit());
+            }
+        }
+        command
+            .bytes()
+            .filter(|&bytes| bytes <= MAX_COMMAND_BYTES)
+            .ok_or_else(limit)
+    }
+}
 /// Cloneable producer handle; owns no World and launches no worker.
 #[derive(Clone)]
 pub struct Control(Arc<Shared>);
 impl Control {
-    pub fn submit(&self, command: Command) -> Admission {
-        // Bound input vectors too, including malformed core callers.
-        let output_bytes = match &command {
-            Command::Read { component, ids } => self
-                .0
-                .read_row_bytes
-                .get(*component)
-                .and_then(|width| ids.len().checked_mul(*width))
-                .unwrap_or(usize::MAX),
-            _ => 0,
-        };
-        if !command.valid_controls()
-            || (matches!(command, Command::Controls { .. }) && !self.0.has_vehicle)
-            || command.bytes() > MAX_COMMAND_BYTES
-            || output_bytes > MAX_COMMAND_BYTES
-            || command.rows() > self.0.max_rows
-            || matches!(&command,
-            Command::Update { data, ids, .. } if data.len() > ids.len().saturating_mul(256))
-        {
-            return Admission::Error("command exceeds row or scalar limit");
-        }
+    pub fn new(world: &World, capacity: usize, max_rows: usize) -> Self {
+        Self::with_vehicle_support(world, capacity, max_rows, false)
+    }
+    fn with_vehicle_support(
+        world: &World,
+        capacity: usize,
+        max_rows: usize,
+        has_vehicle: bool,
+    ) -> Self {
+        Self(Arc::new(Shared {
+            state: Mutex::new(State {
+                phase: Phase::Ready,
+                stop: false,
+                next: 1,
+                queue: VecDeque::new(),
+                staged: 0,
+                outcomes: VecDeque::new(),
+                stats: Stats::default(),
+            }),
+            wake: Condvar::new(),
+            capacity,
+            max_rows,
+            read_row_bytes: world.schemas().map(|s| 17 + s.width as usize * 4).collect(),
+            has_vehicle,
+        }))
+    }
+    pub fn start(&self) -> Result<(), &'static str> {
         let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        s.stats.bytes_in += command.bytes() as u64;
+        if s.phase != Phase::Ready {
+            return Err("runtime is single-shot or stopped");
+        }
+        s.phase = Phase::Running;
+        Ok(())
+    }
+    pub fn complete(&self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::finish(&mut state);
+        self.0.wake.notify_all();
+    }
+    pub fn frame_boundary(&self, world: &mut World, frame: u64, limit: usize) -> bool {
+        self.frame_boundary_with(frame, limit, |command| apply(world, command))
+    }
+
+    fn frame_boundary_with(
+        &self,
+        frame: u64,
+        limit: usize,
+        mut apply_command: impl FnMut(Command) -> Result<Option<ComponentReadout>, String>,
+    ) -> bool {
+        let commands = {
+            let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            if s.stop {
+                return false;
+            }
+            let count = limit.min(s.queue.len());
+            s.staged += count;
+            s.queue
+                .drain(..count)
+                .map(|(sequence, command)| Staged {
+                    control: self.clone(),
+                    sequence,
+                    command: Some(command),
+                    settled: false,
+                })
+                .collect::<Vec<_>>()
+        };
+        for command in commands {
+            command.commit_with(frame, &mut apply_command);
+        }
+        true
+    }
+    fn record_outcome(
+        s: &mut State,
+        sequence: u64,
+        frame: u64,
+        result: Result<Option<ComponentReadout>, String>,
+    ) {
+        match &result {
+            Ok(read) => {
+                s.stats.applied += 1;
+                if let Some(read) = read {
+                    s.stats.readback_bytes += (read.ids.len() * 17 + read.data.byte_len()) as u64;
+                }
+            }
+            Err(error) => {
+                s.stats.rejected += 1;
+                if s.stats.first_error.is_none() {
+                    s.stats.first_error = Some(error.clone());
+                }
+            }
+        }
+        s.outcomes.push_back(Outcome {
+            sequence,
+            frame,
+            result,
+        });
+    }
+
+    /// Reserve shared queue capacity before touching an input buffer.
+    pub fn reserve(&self) -> Result<Credit, Admission> {
+        let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.stop || s.phase == Phase::Stopped {
+            return Err(Admission::Stopped);
+        }
+        if s.queue.len() + s.outcomes.len() + s.staged >= self.0.capacity {
+            s.stats.full += 1;
+            return Err(Admission::Full);
+        }
+        s.staged += 1;
+        Ok(Credit {
+            control: self.clone(),
+            active: true,
+        })
+    }
+
+    pub fn stage(&self, command: Command) -> Result<Staged, Admission> {
+        self.reserve()?.stage(command)
+    }
+
+    pub fn record_frame(&self) {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats
+            .frames += 1;
+    }
+    pub fn wait_until(&self, deadline: Instant) {
+        let s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self.0.wake.wait_timeout_while(
+            s,
+            deadline.saturating_duration_since(Instant::now()),
+            |s| !s.stop,
+        );
+    }
+    pub fn submit(&self, command: Command) -> Admission {
+        let bytes = match self.0.command_bytes(&command) {
+            Ok(bytes) => bytes,
+            Err(error) => return error,
+        };
+        let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.stats.bytes_in += bytes as u64;
         if s.stop || s.phase == Phase::Stopped {
             return Admission::Stopped;
         }
-        if s.queue.len() + s.outcomes.len() >= self.0.capacity {
+        if s.queue.len() + s.outcomes.len() + s.staged >= self.0.capacity {
             s.stats.full += 1;
             return Admission::Full;
         }
@@ -200,7 +389,7 @@ impl Control {
     pub fn stats(&self) -> Stats {
         let s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = s.stats.clone();
-        result.backlog = s.queue.len();
+        result.backlog = s.queue.len() + s.staged;
         result.outcomes = s.outcomes.len();
         result
     }
@@ -223,6 +412,136 @@ impl Control {
         }
         s.phase = Phase::Stopped;
         s.stop = true;
+    }
+}
+
+/// Reserved admission with no sequence number until its payload is valid.
+pub struct Credit {
+    control: Control,
+    active: bool,
+}
+
+impl Credit {
+    fn accept(&mut self, state: &mut State, bytes: usize) -> Result<u64, Admission> {
+        if state.stop || state.phase == Phase::Stopped {
+            return Err(Admission::Stopped);
+        }
+        let sequence = state.next;
+        state.next = sequence
+            .checked_add(1)
+            .ok_or(Admission::Error("sequence exhausted"))?;
+        state.stats.admitted += 1;
+        state.stats.bytes_in += bytes as u64;
+        self.active = false;
+        Ok(sequence)
+    }
+
+    pub fn stage(mut self, command: Command) -> Result<Staged, Admission> {
+        if matches!(command, Command::Controls { .. }) {
+            return Err(Admission::Error(
+                "vehicle controls must use the runtime queue",
+            ));
+        }
+        let bytes = self.control.0.command_bytes(&command)?;
+        let control = self.control.clone();
+        let mut state = control.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let sequence = self.accept(&mut state, bytes)?;
+        drop(state);
+        Ok(Staged {
+            control,
+            sequence,
+            command: Some(command),
+            settled: false,
+        })
+    }
+
+    pub fn submit(mut self, command: Command) -> Result<u64, Admission> {
+        let bytes = self.control.0.command_bytes(&command)?;
+        let control = self.control.clone();
+        let mut state = control.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let sequence = self.accept(&mut state, bytes)?;
+        state.staged -= 1;
+        state.queue.push_back((sequence, command));
+        Ok(sequence)
+    }
+}
+
+impl Drop for Credit {
+    fn drop(&mut self) {
+        if self.active {
+            self.control
+                .0
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .staged -= 1;
+        }
+    }
+}
+
+/// Work owned by a callback until the scheduler commits it at a barrier.
+pub struct Staged {
+    control: Control,
+    sequence: u64,
+    command: Option<Command>,
+    settled: bool,
+}
+
+impl Staged {
+    pub fn id(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn commit(self, world: &mut World, frame: u64) -> bool {
+        self.commit_with(frame, |command| apply(world, command))
+    }
+
+    fn commit_with(
+        mut self,
+        frame: u64,
+        apply_command: impl FnOnce(Command) -> Result<Option<ComponentReadout>, String>,
+    ) -> bool {
+        let result = apply_command(self.command.take().unwrap());
+        let success = result.is_ok();
+        self.settle(frame, result);
+        success
+    }
+
+    pub fn reject(mut self, frame: u64, error: &str) {
+        self.settle(frame, Err(error.into()));
+    }
+
+    fn settle(&mut self, frame: u64, result: Result<Option<ComponentReadout>, String>) {
+        let mut s = self
+            .control
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        s.staged -= 1;
+        Control::record_outcome(&mut s, self.sequence, frame, result);
+        self.settled = true;
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.settled {
+            let mut s = self
+                .control
+                .0
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            s.staged -= 1;
+            s.stats.cancelled += 1;
+            let frame = s.stats.frames;
+            s.outcomes.push_back(Outcome {
+                sequence: self.sequence,
+                frame,
+                result: Err("cancelled on stop".into()),
+            });
+        }
     }
 }
 
@@ -295,21 +614,7 @@ impl Runtime {
         ) {
             return Err(Box::new((world, error)));
         }
-        let control = Control(Arc::new(Shared {
-            state: Mutex::new(State {
-                phase: Phase::Ready,
-                stop: false,
-                next: 1,
-                queue: VecDeque::new(),
-                outcomes: VecDeque::new(),
-                stats: Stats::default(),
-            }),
-            wake: Condvar::new(),
-            capacity,
-            max_rows,
-            read_row_bytes: world.schemas().map(|s| 17 + s.width as usize * 4).collect(),
-            has_vehicle: false,
-        }));
+        let control = Control::new(&world, capacity, max_rows);
         Ok(Self {
             world: Some(world),
             control,
@@ -383,21 +688,7 @@ impl Runtime {
         if let Err(error) = Self::validate_vehicle(&world, columns, entity) {
             return Err(Box::new((world, error)));
         }
-        let control = Control(Arc::new(Shared {
-            state: Mutex::new(State {
-                phase: Phase::Ready,
-                stop: false,
-                next: 1,
-                queue: VecDeque::new(),
-                outcomes: VecDeque::new(),
-                stats: Stats::default(),
-            }),
-            wake: Condvar::new(),
-            capacity,
-            max_rows,
-            read_row_bytes: world.schemas().map(|s| 17 + s.width as usize * 4).collect(),
-            has_vehicle: true,
-        }));
+        let control = Control::with_vehicle_support(&world, capacity, max_rows, true);
         Ok(Self {
             world: Some(world),
             control,
@@ -426,18 +717,7 @@ impl Runtime {
         if self.vehicle.is_some() && (dt as f64 - DT).abs() > 1e-6 {
             return Err("a vehicle runtime steps at the fixed 120 Hz dt".into());
         }
-        {
-            let mut s = self
-                .control
-                .0
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if s.phase != Phase::Ready {
-                return Err("runtime is single-shot or stopped".into());
-            }
-            s.phase = Phase::Running;
-        }
+        self.control.start()?;
         let start = Instant::now();
         // Always close admission and expose failure even if a future native system panics.
         let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -464,81 +744,36 @@ impl Runtime {
         let world = self.world.as_mut().unwrap();
         for frame in 0..frames {
             let begin = Instant::now();
-            let mut pending_controls = None;
-            // Hold the queue lock while selecting this boundary, so later admissions
-            // cannot slip into an already selected boundary. Results use same credits.
-            {
-                let mut s = self
-                    .control
-                    .0
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if s.stop {
-                    break;
-                }
-                let count = self.batches_per_frame.min(s.queue.len());
-                for _ in 0..count {
-                    let (sequence, command) = s.queue.pop_front().unwrap();
-                    let result = match command {
-                        Command::Update {
-                            component,
-                            ids,
-                            data,
-                        } => world.update_rows(component, &ids, data).map(|_| None),
-                        Command::Destroy(ids) => world.destroy(&ids).map(|_| None),
-                        Command::Read { component, ids } => {
-                            world.read_component(component, Some(&ids)).map(Some)
-                        }
-                        Command::Controls {
+            let vehicle = &mut self.vehicle;
+            if !self
+                .control
+                .frame_boundary_with(frame, self.batches_per_frame, |command| match command {
+                    Command::Controls {
+                        steer,
+                        throttle,
+                        brake,
+                        handbrake,
+                    } => {
+                        let vehicle = vehicle
+                            .as_mut()
+                            .expect("controls require an attached vehicle");
+                        vehicle.sim.set_controls(Controls {
                             steer,
                             throttle,
                             brake,
                             handbrake,
-                        } => {
-                            pending_controls = Some(Controls {
-                                steer,
-                                throttle,
-                                brake,
-                                handbrake,
-                            });
-                            Ok(None)
-                        }
+                        })?;
+                        Ok(None)
                     }
-                    .map_err(|e| e.to_string());
-                    match &result {
-                        Ok(read) => {
-                            s.stats.applied += 1;
-                            if let Some(read) = read {
-                                s.stats.readback_bytes +=
-                                    (read.ids.len() * 17 + read.data.byte_len()) as u64;
-                            }
-                        }
-                        Err(error) => {
-                            s.stats.rejected += 1;
-                            if s.stats.first_error.is_none() {
-                                s.stats.first_error = Some(error.clone());
-                            }
-                        }
-                    }
-                    s.outcomes.push_back(Outcome {
-                        sequence,
-                        frame,
-                        result,
-                    });
-                }
-            }
-            let is_vehicle = self.vehicle.is_some();
-            let mut publish_error = None;
-            let (native_ns, rows, vehicle_ns, publish_ns) = if let Some(vehicle) =
-                self.vehicle.as_mut()
+                    command => apply(world, command),
+                })
             {
-                if let Some(controls) = pending_controls {
-                    vehicle
-                        .sim
-                        .set_controls(controls)
-                        .expect("admitted controls stay valid");
-                }
+                break;
+            }
+            let vehicle_entity = self.vehicle.as_ref().map(|vehicle| vehicle.entity);
+            let is_vehicle = vehicle_entity.is_some();
+            let mut publish_error = None;
+            let (vehicle_ns, publish_ns) = if let Some(vehicle) = self.vehicle.as_mut() {
                 let native_start = Instant::now();
                 vehicle.sim.step();
                 let vehicle_ns = nanos(native_start.elapsed());
@@ -573,19 +808,21 @@ impl Runtime {
                     }
                 }
                 let publish_ns = nanos(publish_start.elapsed());
-                (vehicle_ns + publish_ns, 1, vehicle_ns, publish_ns)
+                (vehicle_ns, publish_ns)
             } else {
-                let native_start = Instant::now();
-                let rows = world
-                    .f32_rows(self.position, self.velocity)
-                    .expect("validated fixed schema")
-                    .for_each(|p, v| {
-                        for (p, v) in p.iter_mut().zip(v) {
-                            *p += *v * dt;
-                        }
-                    });
-                (nanos(native_start.elapsed()), rows, 0, 0)
+                (0, 0)
             };
+            let linear_start = Instant::now();
+            let linear_rows = world
+                .f32_rows_except(self.position, self.velocity, vehicle_entity)
+                .expect("validated fixed schema")
+                .for_each(|p, v| {
+                    for (p, v) in p.iter_mut().zip(v) {
+                        *p += *v * dt;
+                    }
+                });
+            let native_ns = vehicle_ns + publish_ns + nanos(linear_start.elapsed());
+            let rows = linear_rows + usize::from(is_vehicle);
             let frame_ns = nanos(begin.elapsed());
             let mut s = self
                 .control
@@ -677,6 +914,108 @@ mod tests {
             component: 0,
             ids: ids.to_vec(),
         }
+    }
+    #[test]
+    fn command_bounds_match_across_admission_routes() {
+        let width = MAX_COMPONENT_WIDTH;
+        let read_row_bytes = 17 + width as usize * 4;
+        let allowed_rows = MAX_COMMAND_BYTES / read_row_bytes;
+        let mut world = World::new((allowed_rows + 1) as u32).unwrap();
+        let wide = world.register("wide", ElementType::F32, width).unwrap();
+        let ids = world.spawn((allowed_rows + 1) as u32, &[]).unwrap();
+        let control = Control::new(&world, 1, allowed_rows + 1);
+        fn settle(staged: Result<Staged, Admission>, world: &mut World) -> Admission {
+            match staged {
+                Ok(staged) => {
+                    let id = staged.id();
+                    assert!(staged.commit(world, 0));
+                    Admission::Admitted(id)
+                }
+                Err(error) => error,
+            }
+        }
+        type Route = fn(&Control, &mut World, Command) -> Admission;
+        let routes: [Route; 4] = [
+            |c, world, command| {
+                let admission = c.submit(command);
+                assert!(c.frame_boundary(world, 0, 1));
+                admission
+            },
+            |c, world, command| settle(c.stage(command), world),
+            |c, world, command| settle(c.reserve().unwrap().stage(command), world),
+            |c, world, command| {
+                let admission = c.reserve().unwrap().submit(command);
+                assert!(c.frame_boundary(world, 0, 1));
+                admission.map_or_else(|error| error, Admission::Admitted)
+            },
+        ];
+        for admit in routes {
+            let error = Admission::Error("command exceeds row or scalar limit");
+            assert_eq!(
+                admit(
+                    &control,
+                    &mut world,
+                    Command::Read {
+                        component: wide,
+                        ids: ids.clone(),
+                    },
+                ),
+                error
+            );
+            assert_eq!(
+                admit(
+                    &control,
+                    &mut world,
+                    Command::Destroy(vec![ids[0]; allowed_rows + 2]),
+                ),
+                error
+            );
+            assert_eq!(
+                admit(
+                    &control,
+                    &mut world,
+                    update(&ids[..1], &vec![0.; width as usize + 1]),
+                ),
+                error
+            );
+            let input_control = Control::new(&world, 1, usize::MAX);
+            assert_eq!(
+                admit(
+                    &input_control,
+                    &mut world,
+                    Command::Spawn {
+                        count: (MAX_COMMAND_BYTES / 16 + 1) as u32,
+                        payload: vec![],
+                    },
+                ),
+                error
+            );
+            assert!(control.frame_boundary(&mut world, 0, 1));
+            assert!(control.take().is_none());
+            let stats = control.stats();
+            assert_eq!((stats.backlog, stats.admitted, stats.bytes_in), (0, 0, 0));
+            assert_eq!(world.alive_count() as usize, ids.len());
+        }
+
+        for (i, admit) in routes.into_iter().enumerate() {
+            let command = Command::Read {
+                component: wide,
+                ids: ids[..allowed_rows].to_vec(),
+            };
+            let sequence = i as u64 + 1;
+            assert_eq!(
+                admit(&control, &mut world, command),
+                Admission::Admitted(sequence)
+            );
+            let read = control.take().unwrap().result.unwrap().unwrap();
+            assert_eq!(read.ids.len(), allowed_rows);
+        }
+        let stats = control.stats();
+        assert_eq!(stats.bytes_in, (routes.len() * allowed_rows * 16) as u64);
+        assert_eq!(
+            stats.bytes_out,
+            (routes.len() * allowed_rows * read_row_bytes) as u64
+        );
     }
     fn values(r: &Runtime, ids: &[EntityId]) -> Vec<f32> {
         let ColumnData::F32(data) = r
@@ -809,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    fn vehicle_system_steps_at_the_fixed_dt_and_publishes_pose() {
+    fn mixed_world_steps_vehicle_at_fixed_dt_and_integrates_other_rows() {
         use crate::vehicles::sim::test_car;
         use crate::vehicles::{Ground, Sim, DT};
 
@@ -841,6 +1180,21 @@ mod tests {
                 ],
             )
             .unwrap();
+        let other = w
+            .spawn(
+                1,
+                &[
+                    ComponentPayload {
+                        component: position,
+                        data: ColumnData::F32(vec![10.0, 0.0, 0.0]),
+                    },
+                    ComponentPayload {
+                        component: velocity,
+                        data: ColumnData::F32(vec![12.0, 0.0, 0.0]),
+                    },
+                ],
+            )
+            .unwrap();
         let mut sim = Sim::new(test_car()).unwrap();
         sim.set_ground(Ground::flat(0.0, 1.0).unwrap());
         sim.place(0.0, 0.0, 0.0, 0.0).unwrap();
@@ -852,6 +1206,17 @@ mod tests {
         };
         let mut runtime = Runtime::with_vehicle(w, columns, sim, ids[0], 8, 8, 8).unwrap();
         let control = runtime.control();
+        assert!(matches!(
+            control.stage(Command::Controls {
+                steer: 0.0,
+                throttle: 1.0,
+                brake: 0.0,
+                handbrake: 0.0,
+            }),
+            Err(Admission::Error(
+                "vehicle controls must use the runtime queue"
+            ))
+        ));
         assert_eq!(
             control.submit(Command::Controls {
                 steer: 0.0,
@@ -875,11 +1240,23 @@ mod tests {
         assert!(stats.vehicle_ns > 0);
         assert!(stats.publish_ns > 0);
         assert!(control.take().unwrap().result.is_ok());
+        let solver_position = runtime.vehicle.as_ref().unwrap().sim.pose().0;
         let w = runtime.into_world();
+        let ColumnData::F32(other_position) =
+            w.read_component(position, Some(&other)).unwrap().data
+        else {
+            panic!("position must stay f32");
+        };
+        assert!(
+            (other_position[0] - 22.0).abs() < 1e-4,
+            "{other_position:?}"
+        );
+        assert_eq!(stats.rows_integrated, 240);
         let ColumnData::F32(position) = w.read_component(position, Some(&ids)).unwrap().data else {
             panic!("position must stay f32");
         };
         assert!(position[0] > 0.1, "{position:?}");
+        assert_eq!(position, solver_position.map(|value| value as f32));
         let ColumnData::F32(rotation) = w.read_component(rotation, Some(&ids)).unwrap().data else {
             panic!("rotation must stay f32");
         };
@@ -888,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_vehicle_dt_and_a_destroyed_target_write_nothing() {
+    fn invalid_vehicle_dt_and_a_recycled_target_gets_only_linear_motion() {
         use crate::vehicles::sim::test_car;
         use crate::vehicles::{Ground, Sim, DT};
 
@@ -940,14 +1317,38 @@ mod tests {
         .unwrap();
         assert!(runtime.run(120, 1.0 / 60.0, None).is_err());
         let control = runtime.control();
-        control.submit(Command::Destroy(vec![ids[0]]));
+        assert_eq!(
+            control.submit(Command::Destroy(vec![ids[0]])),
+            Admission::Admitted(1)
+        );
+        assert_eq!(
+            control.submit(Command::Spawn {
+                count: 1,
+                payload: vec![
+                    ComponentPayload {
+                        component: position,
+                        data: ColumnData::F32(vec![10.0, 0.0, 0.0]),
+                    },
+                    ComponentPayload {
+                        component: velocity,
+                        data: ColumnData::F32(vec![120.0, 0.0, 0.0]),
+                    },
+                ],
+            }),
+            Admission::Admitted(2)
+        );
         let stats = runtime.run(1, DT as f32, None).unwrap();
         assert_eq!(stats.vehicle_steps, 1);
         assert!(stats.first_error.is_some());
         assert!(stats.publish_ns > 0);
+        assert_eq!(stats.applied, 2);
         let w = runtime.into_world();
-        assert_eq!(w.alive_count(), 0);
         assert!(w.read_component(position, Some(&ids)).is_err());
+        let replacement = w.read_component(position, None).unwrap();
+        assert_eq!(replacement.ids.len(), 1);
+        assert_eq!(replacement.ids[0].slot(), ids[0].slot());
+        assert_ne!(replacement.ids[0].generation(), ids[0].generation());
+        assert_eq!(replacement.data, ColumnData::F32(vec![11.0, 0.0, 0.0]));
     }
 
     #[test]

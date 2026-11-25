@@ -23,8 +23,11 @@ elif command -v "$PY_ARG" >/dev/null 2>&1; then
 else
     PY="$(uv python find "$PY_ARG")"
 fi
+if command -v cygpath >/dev/null 2>&1; then
+    PY="$(cygpath -u "$PY")"
+fi
 PY="$(cd "$(dirname "$PY")" && pwd -P)/$(basename "$PY")"
-TAGS="$("$PY" -c 'import sys, sysconfig; p = f"cp{sys.version_info.major}{sys.version_info.minor}"; print(p, p + ("t" if sysconfig.get_config_var("Py_GIL_DISABLED") else ""))')"
+TAGS="$("$PY" -c 'import sys, sysconfig; p = f"cp{sys.version_info.major}{sys.version_info.minor}"; sys.stdout.write(p + " " + p + ("t" if sysconfig.get_config_var("Py_GIL_DISABLED") else ""))')"
 read -r PYVER ABI <<< "$TAGS"
 WHEEL="$("$PY" - "$DIST" "$PYVER" "$ABI" <<'PYTHON'
 import pathlib
@@ -38,7 +41,7 @@ for path in sorted(pathlib.Path(dist).glob("manifold_gfx-*.whl")):
         candidates.append(path)
 if len(candidates) != 1:
     sys.exit(f"FAIL: expected one wheel for {pyver}/{abi}, found {len(candidates)}: {candidates}")
-print(candidates[0])
+sys.stdout.write(str(candidates[0]))
 PYTHON
 )"
 
@@ -57,9 +60,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 cd "$SCRATCH"
 VENV="$SCRATCH/venv"
-uv venv --python "$PY" "$VENV"
-uv pip install --python "$VENV/bin/python" "$WHEEL"
+uv venv --seed --python "$PY" "$VENV"
 VENVPY="$VENV/bin/python"
+if [ -x "$VENV/Scripts/python.exe" ]; then
+    VENVPY="$VENV/Scripts/python.exe"
+fi
+uv pip install --python "$VENVPY" "$WHEEL"
+"$VENVPY" -I "$HERE/native-wheel-report.py" "$WHEEL" >"$SCRATCH/wheel.log"
+"$VENVPY" -I -m pip debug --verbose >"$SCRATCH/pip-tags.log" 2>&1
+cat "$SCRATCH/wheel.log"
 
 # Capture exit codes directly, retain diagnostics even on an unexpected failure.
 run_smoke() {
@@ -119,6 +128,29 @@ run_vehicles() {
     echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
     return "$status"
 }
+run_public_world() {
+    local label="$1" status=0
+    shift
+    "$VENVPY" -I "$HERE/../../examples/world_runtime.py" "$@" >"$SCRATCH/$label.log" 2>&1 || status=$?
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
+run_kernels() {
+    local label="$1" status=0
+    shift
+    "$VENVPY" -I "$HERE/native-kernels.py" "$@" >"$SCRATCH/$label.log" 2>&1 || status=$?
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
+run_selection() {
+    local state="$1" label="$2" status=0
+    "$VENVPY" -I "$HERE/native-selection-smoke.py" "$state" >"$SCRATCH/$label.log" 2>&1 || status=$?
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
 run_smoke smoke-before
 run_entity_slots entity-slots-before
 run_component_world component-world-before
@@ -133,14 +165,33 @@ if run_runtime runtime-drop-control --deterministic-only --control-drop-first; t
     fail "runtime gate passed after dropping the first submission"
 fi
 grep -q 'AssertionError: read ID' "$SCRATCH/runtime-drop-control.log" || fail "lost-command control failed for an unrelated reason"
-"$VENVPY" -I "$HERE/native-selection-smoke.py" installed
-SO="$("$VENVPY" -c 'import manifoldx._core_native as m; print(m.__file__)')"
+run_public_world public-world
+if run_public_world public-world-drop-control --drop-first; then
+    fail "public World passed after dropping the first command"
+fi
+grep -q 'first command ID missing' "$SCRATCH/public-world-drop-control.log" || fail "public World failed for an unrelated reason"
+if run_public_world public-world-read-control --add-read; then
+    fail "public World row control passed after inserting an explicit read"
+fi
+grep -q 'creating or queuing a selection read rows' "$SCRATCH/public-world-read-control.log" || fail "row control failed for an unrelated reason"
+run_kernels kernel-diagnostics diagnostics
+run_kernels kernel-cpu cpu
+if run_kernels kernel-clamp-control cpu --control clamp; then
+    fail "kernel gate passed after changing clamp acceleration"
+fi
+grep -q 'drive oracle mismatch (upper-clamp)' "$SCRATCH/kernel-clamp-control.log" \
+    || fail "kernel clamp control failed for an unrelated reason"
+run_selection installed selection-before
+SO="$("$VENVPY" -I -c 'import sys, manifoldx._core_native as m; sys.stdout.write(m.__file__)')"
+if command -v cygpath >/dev/null 2>&1; then
+    SO="$(cygpath -u "$SO")"
+fi
 mv "$SO" "$SO.gate-removed"
 [ ! -e "$SO" ] && [ -f "$SO.gate-removed" ] || fail "ineffective removal: $SO"
 if run_smoke smoke-removed; then
     fail "ordinary smoke passed with _core_native removed"
 fi
-grep -qx 'FAIL: manifoldx._core_native is not installed in the venv' "$SCRATCH/smoke-removed.log" \
+tr -d '\r' <"$SCRATCH/smoke-removed.log" | grep -x 'FAIL: manifoldx._core_native is not installed in the venv' >/dev/null \
     || fail "ordinary smoke failed for a reason other than missing _core_native"
 if run_entity_slots entity-slots-missing; then
     fail "entity slot gate passed with _core_native removed"
@@ -160,12 +211,15 @@ if run_vehicles vehicles-missing; then
     fail "vehicle gate passed with extension removed"
 fi
 grep -q 'ImportError.*_core_native' "$SCRATCH/vehicles-missing.log" || fail "vehicle gate failed for unrelated reason"
-"$VENVPY" -I "$HERE/native-selection-smoke.py" missing
+run_selection missing selection-missing
+# At the real extension path, a bad binary must enter the loader-error branch.
+printf 'not a loadable extension\n' >"$SO"
+run_selection unloadable selection-unloadable
 mv "$SO.gate-removed" "$SO"
 run_smoke smoke-restored
 run_entity_slots entity-slots-restored
 run_component_world component-world-restored
 run_runtime runtime-restored --deterministic-only
 run_vehicles vehicles-restored
-"$VENVPY" -I "$HERE/native-selection-smoke.py" installed
+run_selection installed selection-restored
 echo "native-verify: passed for $PYVER/$ABI (installed -> missing -> restored)"
