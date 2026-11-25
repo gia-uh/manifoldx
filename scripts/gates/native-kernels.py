@@ -160,13 +160,22 @@ def isolated_cpu(program):
         expected_speed, expected_pos = case["expected"]
         compare(pose(world.query(Car).numpy()[0]), (expected_speed, *expected_pos), case["name"])
 
+    # Cover dense blocks, a partial block and a second run after inactive slots.
+    dense = make_world(100)
+    dense.spawn(Car(target_speed=30, forward=(1, 0, 0)), count=65)
+    dense.spawn(Player(), count=2)
+    dense.spawn(Car(target_speed=30, forward=(1, 0, 0)), count=33)
+    assert dense.dispatch_kernel(program, dt=0.125, target="cpu") == 98
+    for row in dense.query(Car).numpy():
+        compare(pose(row), (0.25, 0.03125, 0, 0), "CPU dense membership")
+
     seq = CORPUS["sequence"]
     expected = list(checkpoints())
     speed, pos = seq["initial"]
     world = make_world(3)
     (controlled,) = world.spawn(car_row(speed, pos, 0, seq["forward"]), Player())
     (secondary,) = world.spawn(Car(forward=(1, 0, 0)))
-    world.spawn()
+    (nonmember,) = world.spawn()
     install_steering(world, lambda frame: {"w"} if expected[frame][1] else set())
     world.kernel(program, target="cpu")
     observed = []
@@ -174,16 +183,17 @@ def isolated_cpu(program):
     @world.system(reads=(Car,))
     def observe(snapshot, commands):
         data = snapshot.read(Car)
-        assert data.entities == (controlled, secondary)
+        assert data.entities == (controlled, secondary, nonmember), data.entities
+        assert data.membership == bytes((1, 1, 0)), data.membership
         rows = data.numpy()
-        assert pose(rows[1]) == (0, 0, 0, 0)
+        assert pose(rows[1]) == pose(rows[2]) == (0, 0, 0, 0), rows
         observed.append((pose(rows[0]), rows[0, 1], data.version))
 
     report = world.run(frames=len(expected), paced=False)
     assert report["kernel_backend"] == "rust-cpu"
     assert report["kernel_dispatches"] == len(expected)
     assert report["kernel_rows"] == len(expected) * 2
-    assert report["system_commands"] == len(expected)
+    assert report["system_commands"] == len(seq["runs"])
     assert len(observed) == len(expected)
     assert all(a[2] < b[2] for a, b in zip(observed, observed[1:]))
     for frame, ((actual, target, _), (reference, expected_target)) in enumerate(

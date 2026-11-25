@@ -28,10 +28,15 @@ def steering_target(keys):
 def install_steering(world, keys_at):
     player = world.query(Player)
     target_speed = world.field(Car, "target_speed")
+    previous = None
 
     @world.system(writes=(target_speed,))
     def steer(snapshot, commands):
-        commands.set(player, target_speed, steering_target(keys_at(snapshot.clock.frame)))
+        nonlocal previous
+        target = steering_target(keys_at(snapshot.clock.frame))
+        if target != previous:
+            commands.set(player, target_speed, target)
+            previous = target
 
 
 def make_world(capacity):
