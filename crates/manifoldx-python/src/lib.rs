@@ -40,6 +40,7 @@ fn bootstrap(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     info.set_item("core", manifoldx_core::RUNTIME_NAME)?;
     info.set_item("version", manifoldx_core::VERSION)?;
     info.set_item("runtime", manifoldx_core::RUNTIME_STATUS)?;
+    info.set_item("graphics", "native desktop base")?;
     info.set_item("python", format!("{}.{}", pyver.major, pyver.minor))?;
     Ok(info)
 }

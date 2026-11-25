@@ -37,3 +37,16 @@ def _validate_engine_core():
             f"MANIFOLDX_CORE=rust: native Engine runtime is not implemented "
             f"(bootstrap runtime={bootstrap.get('runtime')!r}); use MANIFOLDX_CORE=python"
         )
+
+
+def _make_native_engine(*args, **kwargs):
+    _, bootstrap = _selection()
+    native = importlib.import_module("manifoldx._core_native")
+    if not hasattr(native, "_NativeGraphics"):
+        raise NotImplementedError(
+            f"MANIFOLDX_CORE=rust: native Engine runtime is not implemented "
+            f"(bootstrap runtime={bootstrap.get('runtime')!r}); use MANIFOLDX_CORE=python"
+        )
+    from manifoldx._desktop import _NativeEngine
+
+    return _NativeEngine(*args, **kwargs)

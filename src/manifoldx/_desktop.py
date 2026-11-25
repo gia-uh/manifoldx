@@ -1,0 +1,501 @@
+"""Scene declarations and synchronous systems for the native desktop Engine."""
+
+from __future__ import annotations
+
+import json
+import os
+from inspect import iscoroutinefunction
+from pathlib import Path
+from threading import current_thread, main_thread
+
+import numpy as np
+
+from manifoldx.camera import Camera
+from manifoldx.components import Component, Material, Mesh, Transform
+from manifoldx.ecs import ComponentView, _make_component_class
+from manifoldx.resources import (
+    BasicMaterial,
+    FlatMaterial,
+    PhongMaterial,
+    PointLight,
+    StandardMaterial,
+)
+from manifoldx.systems import Query
+from manifoldx.textures import TextureHandle, _mip_chain
+from manifoldx.world import World
+
+
+def _color(value):
+    if isinstance(value, str):
+        digits = value.removeprefix("#")
+        if len(digits) == 3:
+            digits = "".join(ch * 2 for ch in digits)
+        if len(digits) != 6:
+            raise ValueError(f"expected an opaque hexadecimal RGB color, got {value!r}")
+        return tuple(int(digits[i : i + 2], 16) / 255 for i in (0, 2, 4))
+    if len(value) == 4 and value[3] == 1:
+        value = value[:3]
+    if len(value) != 3:
+        raise ValueError("the native base renderer requires opaque RGB colors")
+    return tuple(value)
+
+
+class _Rows:
+    def __init__(self, columns):
+        self._components = columns
+
+    def get_component_data(self, name, indices):
+        return self._components[name][indices]
+
+
+class _TransformHandle:
+    def __init__(self, engine, entity):
+        self._engine = engine
+        self._entity = entity
+
+    @property
+    def pos(self):
+        engine = self._engine
+        row = engine._transform_rows(self._entity)[0]
+        return row[:3].astype("float64") + engine._origin_vector()
+
+    @pos.setter
+    def pos(self, point):
+        engine = self._engine
+        rows = engine._transform_rows(self._entity)
+        rows[0, :3] = np.asarray(point, "float64") - engine._origin_vector()
+        engine._world.replace("Transform", (self._entity,), rows)
+
+    position = pos
+
+
+class _EntityHandle:
+    def __init__(self, engine, entities):
+        self._entities = entities
+        self.index = entities[0].slot
+        self.indices = np.array([entity.slot for entity in entities])
+        self.transform = _TransformHandle(engine, entities[0])
+
+
+class _NativeEngine:
+    def __init__(
+        self,
+        title,
+        *,
+        height=600,
+        width=800,
+        fullscreen=False,
+        monitor=None,
+        max_fps=240.0,
+        max_entities=100_000,
+        check_numerics=True,
+        pipelined=None,
+        smooth_dt=True,
+    ):
+        from manifoldx._core_native import FrameLoop, _NativeGraphics
+
+        if pipelined:
+            raise NotImplementedError(
+                "Python graphics pipelining is unavailable with the Rust Engine"
+            )
+        if not 1 <= max_fps <= 1000:
+            raise ValueError("max_fps must be between 1 and 1000")
+        self.title, self.w, self.h = title, width, height
+        self.fullscreen, self.monitor, self.max_fps = fullscreen, monitor, max_fps
+        self.elapsed = 0.0
+        self.camera = Camera()
+        self.background_color = (0.1, 0.1, 0.2)
+        self._origin = (0.0, 0.0)
+        self._lights = []
+        self._capacity = max_entities
+        self._world = World(max_entities)
+        self._frame_loop = FrameLoop
+        columns = (("Transform", "f32", 10), ("Mesh", "u32", 1), ("Material", "u32", 1))
+        for name, kind, size in columns:
+            self._world.register(name, kind=kind, width=size)
+        self._registries = {"Mesh": {}, "Material": {}}
+        self._textures = 0
+        self._graphics = _NativeGraphics()
+        self._handlers = {"startup": [], "shutdown": []}
+        self._commands = None
+        self._entities = ()
+        self._time_base = 0.0
+        self._fixed_dt = None
+        self._started = False
+        self._closed = False
+        self._quit = False
+        self._desktop_ran = False
+        self.last_frame = None
+        self.desktop_report = None
+
+    @property
+    def origin(self):
+        return self._origin
+
+    def _origin_vector(self):
+        return np.array((self._origin[0], 0, self._origin[1]), dtype="float64")
+
+    def _transform_rows(self, entity):
+        self._world._owner()
+        handles = self._world._handles((entity,))
+        return (
+            self._world._readback(self._world._native.read_component("Transform", handles))
+            .numpy()
+            .copy()
+        )
+
+    def set_origin(self, x, z):
+        self._world._owner()
+        offset = self._origin_vector() - (x, 0, z)
+        data = self._world.query("Transform").read()
+        rows = data.numpy().copy()
+        rows[:, :3] = rows[:, :3].astype("float64") + offset
+        if data.entities:
+            self._world.replace("Transform", data.entities, rows)
+        self.camera.position = (self.camera.position.astype("float64") + offset).astype("float32")
+        self.camera.target = (self.camera.target.astype("float64") + offset).astype("float32")
+        self._origin = (float(x), float(z))
+
+    def on(self, event):
+        if event not in self._handlers:
+            raise NotImplementedError(f"the Rust base Engine does not dispatch {event!r}")
+
+        def register(callback):
+            if iscoroutinefunction(callback):
+                raise NotImplementedError("native Engine lifecycle callbacks must be synchronous")
+            self._handlers[event].append(callback)
+            return callback
+
+        return register
+
+    def component(self, cls):
+        cls = _make_component_class(cls, None)
+        width = sum(size for _, size in cls._component_start_idx.values())
+        self._world.register(cls.__name__, kind="f32", width=width)
+        return cls
+
+    def system(self, callback=None, *, parallel=False):
+        if parallel:
+            raise NotImplementedError(
+                "parallel Engine systems require explicit World access declarations"
+            )
+        if callback is None:
+            return self.system
+        if iscoroutinefunction(callback):
+            raise NotImplementedError("the Rust base Engine requires synchronous systems")
+        columns = []
+        for hint in callback.__annotations__.values():
+            if isinstance(hint, Query):
+                components = (
+                    hint.components if isinstance(hint.components, tuple) else (hint.components,)
+                )
+                for component in components:
+                    if isinstance(component, type) and issubclass(component, Component):
+                        self._register_component(component)
+                    columns.append(self._column_key(component))
+        columns = tuple(dict.fromkeys(columns))
+
+        def invoke(snapshot, commands):
+            clock = snapshot.clock
+            self.elapsed = self._time_base + clock.time + clock.dt
+            data = {key: snapshot.read(key) for key in columns}
+            selected = None
+            for value in data.values():
+                ids = {entity for entity, member in zip(value.entities, value.membership) if member}
+                selected = ids if selected is None else selected & ids
+            entities = (
+                tuple(entity for entity in next(iter(data.values())).entities if entity in selected)
+                if data
+                else ()
+            )
+            arrays = {}
+            for key, value in data.items():
+                rows = {entity: index for index, entity in enumerate(value.entities)}
+                arrays[self._column_name(key)] = value.numpy()[
+                    [rows[entity] for entity in entities]
+                ]
+            originals = {name: rows.copy() for name, rows in arrays.items()}
+            query = ComponentView(
+                _Rows(arrays), list(arrays), np.arange(len(entities), dtype=np.intp)
+            )
+            self._commands, self._entities = commands, entities
+            self._pending_destroy = []
+            try:
+                callback(query, clock.dt)
+                for key in columns:
+                    name = self._column_name(key)
+                    if not np.array_equal(arrays[name], originals[name]):
+                        commands.replace(key, entities, arrays[name])
+                if self._pending_destroy:
+                    commands.destroy(tuple(dict.fromkeys(self._pending_destroy)))
+                self._sync_scene()
+            finally:
+                self._commands, self._entities = None, ()
+
+        invoke.__qualname__ = callback.__qualname__
+        self._world.system(invoke, reads=columns, writes=columns, structural=True)
+        return callback
+
+    @staticmethod
+    def _column_name(component):
+        return component if isinstance(component, str) else component.__name__
+
+    @staticmethod
+    def _column_key(component):
+        return (
+            component
+            if isinstance(component, type) and issubclass(component, Component)
+            else _NativeEngine._column_name(component)
+        )
+
+    def _register_component(self, component):
+        if component not in self._world._schemas:
+            self._world.register(component)
+
+    def _mesh(self, geometry):
+        registry = self._registries["Mesh"]
+        key = id(geometry)
+        if key in registry:
+            return registry[key][0]
+        index = len(registry) + 1
+        if "joints" in geometry or "weights" in geometry:
+            raise NotImplementedError("skinned meshes are unavailable in the native base renderer")
+        if "indices" not in geometry:
+            raise ValueError("native meshes require triangle indices")
+        self._graphics.mesh(
+            index,
+            np.asarray(geometry["positions"]).tolist(),
+            np.asarray(geometry["normals"]).tolist(),
+            np.asarray(geometry["indices"]).reshape(-1).tolist(),
+            np.asarray(geometry.get("uvs", [])).tolist(),
+        )
+        registry[key] = (index, geometry)
+        return index
+
+    def _material(self, material):
+        registry = self._registries["Material"]
+        key = id(material)
+        if key in registry:
+            return registry[key][0]
+        index = len(registry) + 1
+        types = {
+            BasicMaterial: "basic",
+            FlatMaterial: "flat",
+            PhongMaterial: "phong",
+            StandardMaterial: "standard",
+        }
+        kind = types.get(type(material))
+        if kind is None:
+            raise NotImplementedError(f"native base renderer has no {type(material).__name__}")
+        params = None
+        if kind == "standard":
+            unsupported = (
+                material.vertex_colors
+                or material.sway
+                or material.ripple
+                or material.mirror is not None
+                or material.opacity != 1
+                or material.cut is not None
+                or material.tinted
+                or material.faded
+                or material.detail
+                or material.paletted
+                or material.baked is not None
+            )
+            if unsupported:
+                raise NotImplementedError(
+                    "the requested Standard material effect needs a later native renderer"
+                )
+            texture = material.albedo_map
+            if texture is not None and getattr(texture, "_native_owner", None) is not self:
+                raise ValueError("albedo texture belongs to a different graphics owner")
+            params = (
+                material.roughness,
+                material.metallic,
+                material.ao,
+                None if texture is None else texture.id,
+            )
+        self._graphics.material(index, _color(material.color), kind, params)
+        registry[key] = (index, material)
+        return index
+
+    def _upload_native_albedo(self, image, source):
+        self._textures += 1
+        index = self._textures
+        width, height = image.size
+        self._graphics.albedo(
+            index, width, height, [level.tobytes() for level in _mip_chain(image)]
+        )
+        texture = TextureHandle(index, None, None, None, (width, height), source)
+        texture._native_owner = self
+        return texture
+
+    def spawn(self, *components, n=1):
+        if n == 0:
+            return None
+        payload = {}
+        for component in components:
+            key = self._column_key(type(component))
+            if key == "Mesh":
+                rows = np.full((n, 1), self._mesh(component._geometry), dtype="uint32")
+            elif key == "Material":
+                rows = np.full((n, 1), self._material(component._material), dtype="uint32")
+            else:
+                if isinstance(component, Component):
+                    self._register_component(type(component))
+                rows = component.get_data(n)
+                if key == "Transform" and component._pos is not None:
+                    rows[:, :3] = (
+                        np.asarray(component._pos, dtype="float64") - self._origin_vector()
+                    )
+            if key in payload:
+                raise ValueError(f"duplicate spawn component {self._column_name(key)}")
+            payload[key] = rows
+        if self._commands is not None:
+            return self._commands.spawn(count=n, payload=payload)
+        return _EntityHandle(self, self._world.spawn(count=n, payload=payload))
+
+    def destroy(self, indices):
+        if self._commands is None:
+            raise RuntimeError("destroy requires an active native system")
+        self._pending_destroy.extend(self._entities[i] for i in indices)
+
+    def set_lights(self, lights):
+        lights = list(lights)
+        if any(type(light) is not PointLight for light in lights):
+            raise NotImplementedError("the native base renderer supports point lights")
+        self._lights = lights
+
+    def add_light(self, light):
+        self.set_lights([*self._lights, light])
+
+    def _sync_scene(self):
+        camera = self.camera
+        if camera.layers is not None or camera.vertical_scale != 1:
+            raise NotImplementedError(
+                "layers and vertical scale are unavailable in the native base renderer"
+            )
+        self._graphics.camera(
+            (
+                camera.position.tolist(),
+                camera.target.tolist(),
+                camera.up.tolist(),
+                camera.fov,
+                camera.near,
+                camera.far,
+            )
+        )
+        lights = [
+            (list(light.position), _color(light.color), light.intensity)
+            for light in self._lights[:4]
+        ]
+        self._graphics.settings(self.background_color, lights)
+
+    def set_fixed_timestep(self, dt):
+        if not 0.001 <= dt <= 1:
+            raise ValueError("native frame dt must be between 0.001 and 1 second")
+        self._fixed_dt = dt
+
+    def _start(self):
+        if self._closed:
+            raise RuntimeError("native Engine is closed")
+        if not self._started:
+            self._started = True
+            for callback in self._handlers["startup"]:
+                callback({})
+        self._sync_scene()
+        return not self._quit
+
+    def quit(self):
+        self._quit = True
+        if self._world._running:
+            self._world.stop()
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self.quit()
+        if self._started:
+            for callback in self._handlers["shutdown"]:
+                callback({})
+
+    def run(self):
+        if current_thread() is not main_thread():
+            raise RuntimeError("run the native desktop Engine on the main thread")
+        if self.last_frame is not None or self._desktop_ran:
+            raise RuntimeError("native desktop Engine requires a fresh window session")
+        self._desktop_ran = True
+        frames = os.environ.get("MANIFOLDX_DESKTOP_FRAMES")
+        monitor = self.monitor if self.monitor is not None else os.environ.get("MANIFOLDX_MONITOR")
+        hz = 1 / self._fixed_dt if self._fixed_dt is not None else min(60.0, self.max_fps)
+        options = (
+            self.title,
+            self.w,
+            self.h,
+            self.fullscreen,
+            None if monitor is None else str(monitor),
+            os.environ.get("MANIFOLDX_PRESENT", "fifo"),
+            hz,
+            int(frames) if frames else None,
+        )
+
+        def startup():
+            ready = self._start()
+            self._world._running = ready
+            return ready
+
+        try:
+            self.desktop_report = self._world._loop.run_desktop(
+                self._graphics, options, self._world._systems, startup
+            )
+            if location := os.environ.get("MANIFOLDX_DESKTOP_REPORT"):
+                Path(location).write_text(json.dumps(self.desktop_report, indent=2) + "\n")
+        finally:
+            self._world._running = False
+            self.close()
+
+    def render_frame(self, *, supersample=1, pass_="beauty", groups=None, dt=1 / 30):
+        if self._desktop_ran:
+            raise RuntimeError("presented and offscreen targets require separate Engine sessions")
+        if supersample != 1 or pass_ != "beauty" or groups is not None:
+            raise NotImplementedError("native base capture supports one beauty sample per pixel")
+        if not self._start():
+            raise RuntimeError("native Engine quit during startup")
+        step = self._fixed_dt if self._fixed_dt is not None else dt
+        self._world._loop = self._frame_loop(self._world._native, 64, 8, 4096)
+        self._world._running = True
+        self._time_base = self.elapsed
+        try:
+            self._world._loop.run(1, 1 / step, False, self._world._systems, None)
+        finally:
+            self._world._running = False
+        self.elapsed = self._time_base + step
+        self._sync_scene()
+        captured = self._graphics.capture(self._world._native, self.w, self.h)
+        rgba = captured.pop("rgba")
+        self.last_frame = captured
+        return np.frombuffer(rgba, dtype=np.uint8).reshape(self.h, self.w, 4)[:, :, :3].copy()
+
+    def cli(self, **options):
+        from manifoldx.engine import Engine
+
+        return Engine.cli(self, **options)
+
+    def render(
+        self, *, output, fps=30, duration=None, frame_count=None, quality="high", codec="h264"
+    ):
+        from manifoldx.engine import Engine
+
+        if (duration is None) == (frame_count is None) or fps <= 0:
+            raise ValueError("provide either duration or frame_count, with a positive fps")
+        count = int(duration * fps) if frame_count is None else frame_count
+        if count < 1:
+            raise ValueError("video requires at least one frame")
+        writer = Engine._get_video_writer(self, output, fps, self.w, self.h, codec, quality)
+        try:
+            for _ in range(count):
+                writer.send(self.render_frame(dt=1 / fps))
+        finally:
+            writer.close()
+            self.close()

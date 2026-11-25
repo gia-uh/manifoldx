@@ -29,17 +29,20 @@ engine_module._warm_wgpu_types = reject_python_initialization
 engine_module.EntityStore = reject_python_initialization
 if state == "installed":
     name, bootstrap = _selection()
-    assert name == "rust" and bootstrap["runtime"] == "not implemented", bootstrap
-    expected, message = NotImplementedError, "native Engine runtime is not implemented"
+    assert name == "rust" and bootstrap["graphics"] == "native desktop base", bootstrap
+    engine = Engine("selection", max_entities=16)
+    assert engine._world._capacity == 16 and engine._graphics is not None
+    engine.close()
+    print("Rust Engine constructed from the installed native wheel")
+    sys.exit(0)
 elif state == "missing":
     expected, message = ImportError, "requires manifoldx._core_native"
 else:
     assert state == "unloadable", state
     expected, message = ImportError, "manifoldx._core_native could not load"
 
-engine = Engine.__new__(Engine)
 try:
-    engine.__init__("selection")
+    Engine("selection")
 except expected as exc:
     assert message in str(exc), str(exc)
     if state == "missing":
@@ -50,5 +53,4 @@ except expected as exc:
     print(f"rust {state}: {type(exc).__name__}: {exc}")
 else:
     raise AssertionError("Rust selection constructed a Python Engine")
-assert vars(engine) == {}, vars(engine)
 print("Python startup usable; Rust rejected before Engine state initialization")

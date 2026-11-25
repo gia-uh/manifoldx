@@ -394,6 +394,15 @@ def _clear_color(color):
     return (r, g, b, float(color[3]) if len(color) == 4 else 1.0)
 
 class Engine:
+    def __new__(cls, *args, **kwargs):
+        import os
+
+        if cls is Engine and (args or "title" in kwargs) and os.environ.get("MANIFOLDX_CORE") == "rust":
+            from manifoldx._core import _make_native_engine
+
+            return _make_native_engine(*args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(
         self,
         title: str,
