@@ -4,6 +4,7 @@ use crate::ecs::{ElementType, World};
 
 pub const VERSION: u32 = 1;
 const MAX_VALUES: usize = 256;
+const BLOCK: usize = 32;
 pub const MAX_CODE: usize = 512;
 
 #[derive(Clone, Copy)]
@@ -45,6 +46,8 @@ pub struct Program {
     width: usize,
     code: Vec<Instruction>,
     writes: bool,
+    registers: usize,
+    branches: bool,
 }
 
 // op, destination, operands (or field offset / jump address), and literal.
@@ -66,6 +69,8 @@ impl Program {
         }
         let mut code = Vec::with_capacity(words.len());
         let mut writes = false;
+        let mut registers = 1;
+        let mut branches = false;
         let len = words.len();
         for (pc, (op, out, a, b, c, literal)) in words.into_iter().enumerate() {
             if out >= MAX_VALUES {
@@ -102,6 +107,7 @@ impl Program {
             if out == 0 && !matches!(op.as_str(), "store" | "branch" | "jump") {
                 return Err("kernel uniform is read-only");
             }
+            registers = registers.max(out + 1);
             code.push(match op.as_str() {
                 "literal" if literal.is_finite() => Instruction::Literal(out, literal),
                 "load" => Instruction::Load(out, field(a, b)?, b),
@@ -137,7 +143,10 @@ impl Program {
                     };
                     Instruction::Compare(comparison, out, reg(a)?, reg(b)?)
                 }
-                "branch" => Instruction::Branch(reg(a)?, jump(b)?),
+                "branch" => {
+                    branches = true;
+                    Instruction::Branch(reg(a)?, jump(b)?)
+                }
                 "jump" => Instruction::Jump(jump(a)?),
                 _ => return Err("invalid kernel instruction"),
             });
@@ -149,6 +158,8 @@ impl Program {
             width,
             code,
             writes,
+            registers,
+            branches,
         })
     }
 
@@ -173,10 +184,25 @@ impl Program {
         if !dt.is_finite() || dt < 0.0 {
             return Err("kernel dt must be finite and nonnegative");
         }
-        let mut values = [[0.0; 3]; MAX_VALUES];
-        values[0][0] = dt;
-        world.visit_kernel_rows(column, self.writes, |row| {
-            self.evaluate(row, &mut values);
+        let mut single = vec![[[0.0; 1]; 3]; self.registers];
+        single[0][0][0] = dt;
+        if self.branches {
+            return world.visit_kernel_runs(column, self.writes, |run| {
+                for row in run.chunks_exact_mut(self.width) {
+                    self.evaluate(row, &mut single);
+                }
+            });
+        }
+        let mut block = vec![[[0.0; BLOCK]; 3]; self.registers];
+        block[0][0].fill(dt);
+        world.visit_kernel_runs(column, self.writes, |run| {
+            let mut groups = run.chunks_exact_mut(self.width * BLOCK);
+            for rows in &mut groups {
+                self.evaluate(rows, &mut block);
+            }
+            for row in groups.into_remainder().chunks_exact_mut(self.width) {
+                self.evaluate(row, &mut single);
+            }
         })
     }
 
@@ -184,51 +210,65 @@ impl Program {
         &self.name
     }
 
-    fn evaluate(&self, row: &mut [f32], values: &mut [[f32; 3]; MAX_VALUES]) {
+    fn evaluate<const N: usize>(&self, rows: &mut [f32], values: &mut [[[f32; N]; 3]]) {
         let mut pc = 0;
         while pc < self.code.len() {
             match self.code[pc] {
-                Instruction::Literal(out, value) => values[out][0] = value,
+                Instruction::Literal(out, value) => values[out][0].fill(value),
                 Instruction::Load(out, offset, n) => {
-                    values[out][..n].copy_from_slice(&row[offset..offset + n]);
+                    for (coordinate, plane) in values[out][..n].iter_mut().enumerate() {
+                        *plane = std::array::from_fn(|lane| {
+                            rows[lane * self.width + offset + coordinate]
+                        });
+                    }
                 }
                 Instruction::Store(offset, n, src) => {
-                    row[offset..offset + n].copy_from_slice(&values[src][..n]);
+                    for (lane, row) in rows.chunks_exact_mut(self.width).enumerate() {
+                        for (coordinate, cell) in row[offset..offset + n].iter_mut().enumerate() {
+                            *cell = values[src][coordinate][lane];
+                        }
+                    }
                 }
                 Instruction::Copy(out, src) => values[out] = values[src],
                 Instruction::Neg(out, src, n) => {
                     let source = values[src];
-                    for (target, value) in values[out][..n].iter_mut().zip(source) {
-                        *target = -value;
+                    for (target, plane) in values[out][..n].iter_mut().zip(source) {
+                        *target = plane.map(|value| -value);
                     }
                 }
                 Instruction::Scalar(op, out, a, b) => {
                     values[out][0] = op.apply(values[a][0], values[b][0]);
                 }
                 Instruction::Vector(op, out, a, b, a_vector, b_vector) => {
-                    let a = if a_vector {
-                        values[a]
-                    } else {
-                        [values[a][0]; 3]
-                    };
-                    let b = if b_vector {
-                        values[b]
-                    } else {
-                        [values[b][0]; 3]
-                    };
-                    values[out] = [
-                        op.apply(a[0], b[0]),
-                        op.apply(a[1], b[1]),
-                        op.apply(a[2], b[2]),
-                    ];
+                    for i in 0..3 {
+                        let a = values[a][if a_vector { i } else { 0 }];
+                        let b = values[b][if b_vector { i } else { 0 }];
+                        values[out][i] = op.apply(a, b);
+                    }
                 }
                 Instruction::Clamp(out, src, lo, hi) => {
-                    values[out][0] = values[src][0].max(values[lo][0]).min(values[hi][0]);
+                    values[out][0] = std::array::from_fn(|lane| {
+                        let (value, lo, hi) = (
+                            values[src][0][lane],
+                            values[lo][0][lane],
+                            values[hi][0][lane],
+                        );
+                        if value < lo {
+                            lo
+                        } else if value > hi {
+                            hi
+                        } else {
+                            value
+                        }
+                    });
                 }
                 Instruction::Compare(op, out, a, b) => {
-                    values[out][0] = u8::from(op.test(values[a][0], values[b][0])) as f32;
+                    values[out][0] = std::array::from_fn(|lane| {
+                        u8::from(op.test(values[a][0][lane], values[b][0][lane])) as f32
+                    });
                 }
-                Instruction::Branch(src, target) if values[src][0] == 0.0 => {
+                Instruction::Branch(src, target) if values[src][0][0] == 0.0 => {
+                    debug_assert_eq!(N, 1);
                     pc = target;
                     continue;
                 }
@@ -326,11 +366,11 @@ fn validate_registers(code: &[Instruction]) -> Result<(), &'static str> {
 
 impl Arithmetic {
     #[inline]
-    fn apply(self, a: f32, b: f32) -> f32 {
+    fn apply<const N: usize>(self, a: [f32; N], b: [f32; N]) -> [f32; N] {
         match self {
-            Self::Add => a + b,
-            Self::Sub => a - b,
-            Self::Mul => a * b,
+            Self::Add => std::array::from_fn(|lane| a[lane] + b[lane]),
+            Self::Sub => std::array::from_fn(|lane| a[lane] - b[lane]),
+            Self::Mul => std::array::from_fn(|lane| a[lane] * b[lane]),
         }
     }
 }

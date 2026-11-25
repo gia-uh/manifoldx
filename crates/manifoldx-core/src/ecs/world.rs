@@ -521,8 +521,8 @@ impl World {
         })
     }
 
-    /// Visit native rows that currently own this component, in slot order.
-    pub(crate) fn visit_kernel_rows(
+    /// Visit contiguous runs of native members, in ascending slot order.
+    pub(crate) fn visit_kernel_runs(
         &mut self,
         index: usize,
         writes: bool,
@@ -540,11 +540,13 @@ impl World {
         for (word_id, &members) in column.members.iter().enumerate() {
             let mut active = members;
             while active != 0 {
-                let slot = word_id * 64 + active.trailing_zeros() as usize;
-                let start = slot * width;
-                visit(&mut data[start..start + width]);
-                count += 1;
-                active &= active - 1;
+                let first = active.trailing_zeros();
+                let len = (active >> first).trailing_ones();
+                let start = (word_id * 64 + first as usize) * width;
+                let end = start + len as usize * width;
+                visit(&mut data[start..end]);
+                count += len as usize;
+                active &= !((u64::MAX >> (64 - len)) << first);
             }
         }
         if writes && count != 0 {
