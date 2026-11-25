@@ -1,0 +1,79 @@
+# Compile and package the first native mesh renderer slice at an exact SHA.
+# The runner has no GPU; the uploaded binary is executed offscreen on the
+# GPU host, which is where the render evidence comes from.
+name: Native renderer
+
+on:
+  pull_request:
+    branches: [rust-core]
+    paths:
+      - 'crates/manifoldx-render/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/native-render.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Keep the PR merge checkout and fetch its parents for their trees.
+          fetch-depth: 2
+
+      - name: Set the source SHA from the checkout
+        run: |
+          checkout_sha=$(git rev-parse --verify HEAD)
+          printf 'MANIFOLDX_SOURCE_SHA=%s\n' "$checkout_sha" >> "$GITHUB_ENV"
+
+      - name: Install Rust with rustfmt and clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format the renderer crate
+        run: cargo fmt -p manifoldx-render -- --check
+
+      - name: Clippy the renderer crate
+        run: cargo clippy -p manifoldx-render --all-targets -- -D warnings
+
+      - name: Test the renderer crate
+        # The offscreen test skips itself when the runner exposes no Vulkan
+        # adapter; the standalone binary is the hardware evidence path.
+        run: cargo test -p manifoldx-render
+
+      - name: Build the release scene binary
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          checkout_tree=$(git rev-parse --verify "${MANIFOLDX_SOURCE_SHA}^{tree}")
+          pr_head_tree=$(git rev-parse --verify "${PR_HEAD_SHA}^{tree}")
+          pr_base_tree=$(git rev-parse --verify "${PR_BASE_SHA}^{tree}")
+          cargo build -p manifoldx-render --release --bin native-scene
+          strip target/release/native-scene
+          checksum=$(sha256sum target/release/native-scene)
+          printf '%s\n' "$checksum" > target/release/native-scene.sha256
+          printf '%s\n' \
+            "checkout_sha=$MANIFOLDX_SOURCE_SHA" \
+            "checkout_tree=$checkout_tree" \
+            "pr_head_sha=$PR_HEAD_SHA" \
+            "pr_head_tree=$pr_head_tree" \
+            "pr_base_sha=$PR_BASE_SHA" \
+            "pr_base_tree=$pr_base_tree" \
+            "binary_sha256=${checksum%% *}" \
+            > target/release/native-scene.provenance
+
+      - name: Upload the binary and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-scene
+          path: |
+            target/release/native-scene
+            target/release/native-scene.sha256
+            target/release/native-scene.provenance
+          if-no-files-found: error
+          retention-days: 7

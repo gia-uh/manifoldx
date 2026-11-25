@@ -35,6 +35,7 @@ def test_workspace_has_the_production_members_and_excludes_the_spikes():
     assert set(workspace["members"]) == {
         "crates/manifoldx-core",
         "crates/manifoldx-python",
+        "crates/manifoldx-render",
         "crates/manifoldx-sdk",
     }
     assert len(workspace["exclude"]) == 5

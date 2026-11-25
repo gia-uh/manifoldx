@@ -86,6 +86,10 @@ packaging only:
 
 - `crates/manifoldx-core` — the runtime core; it must stay free of any Python
   dependency.
+- `crates/manifoldx-render` — the native offscreen renderer slice: one wgpu
+  device, indexed instanced meshes driven by World transforms, a depth buffer
+  and an owned readback. The window, textures and the remaining paths are
+  later slices.
 - `crates/manifoldx-python` — the PyO3 bindings, built into the
   `manifold-gfx` wheel as one extension, `manifoldx._core_native`.
 - `crates/manifoldx-sdk` — the native SDK for out-of-process builders.
