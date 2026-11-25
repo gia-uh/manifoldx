@@ -116,6 +116,14 @@ run_runtime() {
     echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
     return "$status"
 }
+run_public_world() {
+    local label="$1" status=0
+    shift
+    "$VENVPY" -I "$HERE/../../examples/world_runtime.py" "$@" >"$SCRATCH/$label.log" 2>&1 || status=$?
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
 run_selection() {
     local state="$1" label="$2" status=0
     "$VENVPY" -I "$HERE/native-selection-smoke.py" "$state" >"$SCRATCH/$label.log" 2>&1 || status=$?
@@ -131,6 +139,11 @@ if run_runtime runtime-drop-control --deterministic-only --control-drop-first; t
     fail "runtime gate passed after dropping the first submission"
 fi
 grep -q 'AssertionError: read ID' "$SCRATCH/runtime-drop-control.log" || fail "lost-command control failed for an unrelated reason"
+run_public_world public-world
+if run_public_world public-world-drop-control --drop-first; then
+    fail "public World passed after dropping the first command"
+fi
+grep -q 'first command ID missing' "$SCRATCH/public-world-drop-control.log" || fail "public World failed for an unrelated reason"
 run_selection installed selection-before
 SO="$("$VENVPY" -I -c 'import sys, manifoldx._core_native as m; sys.stdout.write(m.__file__)')"
 if command -v cygpath >/dev/null 2>&1; then
