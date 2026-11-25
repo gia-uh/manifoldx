@@ -139,7 +139,7 @@ class Component:
             size = int(np.prod(shape))
             value = self._field_values.get(name)
             if value is not None:
-                v = np.asarray(value, dtype=np.float32)
+                v = np.asarray(value, dtype=data.dtype)
                 if v.ndim == 0:
                     data[:, col : col + size] = v.item()
                 elif v.ndim == 1 and v.shape[0] == n and size == 1:

@@ -181,6 +181,20 @@ def contract(drop_first, add_read):
     )
 
 
+def uint32_components():
+    class ExternalID(Component):
+        _dtype = np.dtype("u4")
+        value: Float
+
+    world = World(2)
+    world.register(ExternalID)
+    world.spawn(ExternalID(value=16_777_217))
+    world.spawn(ExternalID(value=4_294_967_295))
+    values = world.query(ExternalID).numpy("value").ravel().tolist()
+    assert values == [16_777_217, 4_294_967_295], values
+    print(json.dumps({"uint32_components": values}))
+
+
 def overlap():
     world = World(2)
     world.register(Speed)
@@ -336,6 +350,7 @@ def main():
         stress(args.stress, args.frames)
     else:
         contract(args.drop_first, args.add_read)
+        uint32_components()
         overlap()
         shutdown()
 
