@@ -20,6 +20,7 @@ import time
 
 import numpy as np
 from manifoldx import _core_native as native
+from manifoldx.vehicles import Engine, FlatGround, Gearbox, NativeVehicles, Tyre, VehicleSpec, Wheel
 
 G = 9.81
 A, B = 1.15, 1.45
@@ -84,6 +85,27 @@ def car_spec(mu=1.0):
         "max_steer": 0.6,
         "brake_torque": 5000.0,
     }
+
+
+def public_spec(**overrides):
+    """Construct the same reference car with the public authoring types."""
+    config = car_spec()
+    config["wheels"] = tuple(Wheel(**(w | {"tyre": Tyre(**w["tyre"])})) for w in config["wheels"])
+    config["engine"] = Engine(**config["engine"])
+    config["gearbox"] = Gearbox(**config["gearbox"])
+    return VehicleSpec(**(config | overrides))
+
+
+def public_fleet():
+    fleet = NativeVehicles([public_spec()], FlatGround())
+    fleet.place(0, (0.0, 0.0, 0.0), 0.0)
+    stats = [fleet.advance([[0.0, 1.0, 0.0, 0.0]], 1 / 60) for _ in range(180)]
+    state = fleet.snapshot()[0]
+    require(sum(s["substeps"] for s in stats) == 360, "public fleet: wrong substep count")
+    require(all(s["bodies"] == 1 for s in stats), "public fleet: wrong body count")
+    require(len(state["wheel_centres"]) == 4, "public fleet: wrong wheel count")
+    require(fleet.telemetry(0)["speed"] > 10.0, "public fleet: did not accelerate")
+    print("public fleet: 360 fixed substeps, 1 body, 4 wheels")
 
 
 ROAD = {
@@ -456,6 +478,7 @@ def main():
         negative_control()
         return
     check_wheel_inertia()
+    public_fleet()
     rows = cases()
     print("| case | substeps | solver ms/substep | publish ms/frame | gear | rpm | pose (x, y, z) |")
     print("|---|---:|---:|---:|---:|---:|---|")

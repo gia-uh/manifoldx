@@ -3,7 +3,12 @@
 Arrows or WASD drive, Space is the handbrake, R puts the car back at the start, 1 to 9 set the assists from
 fully helped (1) to none (9). The car is a build_car model on a car_spec built from the same measurements, so
 the drawn body lands where the physics puts it. engine.state["car"] carries the telemetry for an agent.
+
+With the native wheel, pass --native-physics to use the Rust fleet in the window,
+or --native-physics-check to run the same track without opening a window.
 """
+
+import sys
 
 import numpy as np
 
@@ -11,21 +16,49 @@ import manifoldx as mx
 from manifoldx.components import Material, Mesh, Transform
 from manifoldx.modeling.assets.car import CarParams, build_car, place_car, spawn_car
 from manifoldx.systems import Query
-from manifoldx.vehicles import ShapeGround, Vehicles, car_spec, strengths_for
+from manifoldx.vehicles import NativeVehicles, ShapeGround, Vehicles, car_spec, strengths_for
 from manifoldx.vehicles.body import matrices
 
 PROFILE = [(-60, 0.0), (20, 0.0), (35, -1.5), (50, -1.5), (60, 0.0), (90, 0.0), (100, 1.2), (104, 1.2),
            (106, 0.0), (400, 0.0)]
 KERBS = (130.0, 150.0)
 
-engine = mx.Engine("Vehicle")
 params = CarParams()
-model = build_car(params)
 spec = car_spec(length=params.length, width=params.width, height=params.height, wheelbase=params.wheelbase,
                 front_overhang=params.front_overhang, track=params.track, wheel_radius=params.wheel_radius,
                 mass=1250, power_kw=85, drive="rear", ratios=(3.6, 2.1, 1.4, 1.0, 0.8))
 ground = ShapeGround(profile=PROFILE, kerbs=KERBS, kerb_height=0.15)
-fleet = Vehicles([spec])
+native_check = __name__ == "__main__" and "--native-physics-check" in sys.argv
+use_native = native_check or (__name__ == "__main__" and "--native-physics" in sys.argv)
+fleet = NativeVehicles([spec], ground) if use_native else Vehicles([spec])
+
+
+def reset_car():
+    if use_native:
+        fleet.place(0, (0.0, 0.0, 0.0), 0.0)
+    else:
+        fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
+
+
+def advance(controls, dt, realism):
+    strengths = strengths_for(realism)
+    if use_native:
+        return fleet.advance(controls, dt, strengths)
+    return fleet.advance(controls, ground, None, dt, strengths)
+
+
+if native_check:
+    reset_car()
+    steps = sum(advance([[0.0, 1.0, 0.0, 0.0]], 1 / 60, 30)["substeps"] for _ in range(180))
+    row = fleet.snapshot()[0]
+    speed = fleet.telemetry(0)["speed"]
+    if steps != 360 or row["position"][0] <= 10.0 or speed <= 10.0 or len(row["wheel_centres"]) != 4:
+        raise AssertionError(f"native vehicle did not complete its drive: {steps=}, {speed=}, {row=}")
+    print(f"{steps} native substeps, {row['position'][0]:.3f} m, {speed:.3f} m/s, {len(row['wheel_centres'])} wheels")
+    raise SystemExit(0)
+
+engine = mx.Engine("Vehicle")
+model = build_car(params)
 state = {"realism": 30, "handles": None}
 
 
@@ -45,7 +78,7 @@ def road():
 @engine.on("startup")
 def setup(_payload):
     road()
-    fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
+    reset_car()
     state["handles"] = spawn_car(engine, model)
 
 
@@ -53,17 +86,21 @@ def setup(_payload):
 def drive(query: Query[Transform], dt: float):
     key = engine.input.is_pressed
     if engine.input.just_pressed("r"):
-        fleet.place(0, (0.0, 0.0, 0.0), 0.0, ground)
+        reset_car()
     for n in range(1, 10):
         if engine.input.just_pressed(str(n)):
             state["realism"] = (n - 1) * 12.5
     controls = np.array([[float(key("ArrowRight") or key("d")) - float(key("ArrowLeft") or key("a")),
                           float(key("ArrowUp") or key("w")), float(key("ArrowDown") or key("s")),
                           float(key("Space"))]])
-    fleet.advance(controls, ground, None, dt, strengths_for(state["realism"]))
+    advance(controls, dt, state["realism"])
     at, rotation = fleet.model_transform(0)
-    steer = fleet.steer_angle[0, :2].mean()
-    place_car(state["handles"], model, at=at, rotation=rotation, wheel_turn=float(fleet.wheel_turn[0].mean()),
+    if use_native:
+        row = fleet.snapshot()[0]
+        steer, spin = np.mean(row["steer_angle"][:2]), np.mean(row["wheel_turn"])
+    else:
+        steer, spin = fleet.steer_angle[0, :2].mean(), fleet.wheel_turn[0].mean()
+    place_car(state["handles"], model, at=at, rotation=rotation, wheel_turn=float(spin),
               steer=-float(steer), travel=fleet.travel(0).tolist())
     heading = matrices(rotation[None])[0][:, 0] * np.array([1.0, 0.0, 1.0])
     heading /= max(np.linalg.norm(heading), 1e-6)

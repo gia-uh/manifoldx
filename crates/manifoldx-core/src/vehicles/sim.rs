@@ -113,6 +113,11 @@ pub struct Snapshot {
     pub shift_timer: f64,
     pub rpm: f64,
     pub impulse: f64,
+    pub wheel_centres: Vec<V3>,
+    pub chassis_contacts: u32,
+    pub drive_cut: f64,
+    pub brake_scale: Vec<f64>,
+    pub lit: [bool; 4],
 }
 
 /// Derived geometry and per-wheel curves, computed once from the spec.
@@ -215,6 +220,9 @@ struct State {
     rpm: f64,
     drive_cut: f64,
     impulse: f64,
+    wheel_centres: Vec<V3>,
+    chassis_contacts: u32,
+    lit: [bool; 4],
     brake_scale: Vec<f64>,
     extra_brake: Vec<f64>,
     forward: V3,
@@ -240,6 +248,9 @@ impl State {
             rpm: spec.engine.idle_rpm,
             drive_cut: 0.0,
             impulse: 0.0,
+            wheel_centres: vec![[0.0; 3]; n],
+            chassis_contacts: 0,
+            lit: [false; 4],
             brake_scale: vec![1.0; n],
             extra_brake: vec![0.0; n],
             forward: [1.0, 0.0, 0.0],
@@ -310,7 +321,10 @@ impl Sim {
                 ax[1] * wheel.mount[0] + ay[1] * wheel.mount[1] + az[1] * wheel.mount[2],
                 ax[2] * wheel.mount[0] + ay[2] * wheel.mount[1] + az[2] * wheel.mount[2],
             ];
-            let height = self.ground.height(x + mount[0], z + mount[2], y);
+            let height = self
+                .ground
+                .height_if_present(x + mount[0], z + mount[2], y)
+                .ok_or_else(|| format!("no registered ground under wheel {index}"))?;
             heights[index] = height;
             let rest = self.spec.mass * G / n as f64 / wheel.spring.max(1.0);
             let reach = wheel.radius + wheel.travel - rest.min(wheel.travel);
@@ -332,8 +346,15 @@ impl Sim {
         self.state.rpm = self.spec.engine.idle_rpm;
         self.state.drive_cut = 0.0;
         self.state.impulse = 0.0;
-        self.state.brake_scale.fill(1.0);
-        self.state.extra_brake.fill(0.0);
+        self.state.chassis_contacts = 0;
+        for (index, wheel) in self.spec.wheels.iter().enumerate() {
+            self.state.wheel_centres[index] = [
+                x + ax[0] * wheel.mount[0] + az[0] * wheel.mount[2],
+                self.state.ground_y[index] + wheel.radius,
+                z + ax[2] * wheel.mount[0] + az[2] * wheel.mount[2],
+            ];
+        }
+        self.clear_assists();
         self.state.forward = ax;
         Ok(())
     }
@@ -377,6 +398,11 @@ impl Sim {
             shift_timer: self.state.shift_timer,
             rpm: self.state.rpm,
             impulse: self.state.impulse,
+            wheel_centres: self.state.wheel_centres.clone(),
+            chassis_contacts: self.state.chassis_contacts,
+            drive_cut: self.state.drive_cut,
+            brake_scale: self.state.brake_scale.clone(),
+            lit: self.state.lit,
         }
     }
 
@@ -391,6 +417,75 @@ impl Sim {
 
     pub fn angular(&self) -> V3 {
         self.state.angular
+    }
+
+    pub(super) fn set_velocity(&mut self, velocity: V3) {
+        self.state.velocity = velocity;
+    }
+
+    pub(super) fn rebase(&mut self, delta: V3) {
+        self.state.position = add(self.state.position, scale(delta, -1.0));
+        for height in &mut self.state.ground_y {
+            *height -= delta[1];
+        }
+        for centre in &mut self.state.wheel_centres {
+            *centre = add(*centre, scale(delta, -1.0));
+        }
+    }
+
+    pub(super) fn set_assists(
+        &mut self,
+        drive_cut: f64,
+        brake_scale: &[f64],
+        extra_brake: &[f64],
+        lit: [bool; 4],
+    ) {
+        self.state.drive_cut = drive_cut;
+        self.state.lit = lit;
+        self.state.brake_scale.copy_from_slice(brake_scale);
+        self.state.extra_brake.copy_from_slice(extra_brake);
+    }
+
+    pub(super) fn clear_assists(&mut self) {
+        self.state.drive_cut = 0.0;
+        self.state.lit = [false; 4];
+        self.state.brake_scale.fill(1.0);
+        self.state.extra_brake.fill(0.0);
+    }
+
+    pub(super) fn loaded_wheels(&self) -> usize {
+        self.state.load.iter().filter(|load| **load > 0.0).count()
+    }
+
+    pub(super) fn chassis_contacts(&self) -> (u32, f64) {
+        (self.state.chassis_contacts, self.state.impulse)
+    }
+
+    pub(super) fn body(&self) -> Body {
+        Body {
+            pos: self.state.position,
+            vel: self.state.velocity,
+            ang: self.state.angular,
+            inv_mass: 1.0 / self.spec.mass,
+            inv: inverse_inertia(rotation_columns(self.state.rotation), self.spec.inertia),
+            impulse: self.state.impulse,
+            contacts: self.state.chassis_contacts,
+        }
+    }
+
+    pub(super) fn set_body(&mut self, body: Body) {
+        self.state.position = body.pos;
+        self.state.velocity = body.vel;
+        self.state.angular = body.ang;
+        self.state.impulse = body.impulse;
+    }
+
+    pub(super) fn body_bounds(&self) -> ([V3; 3], [f64; 2]) {
+        let (x, y, z) = rotation_columns(self.state.rotation);
+        (
+            [x, y, z],
+            [self.constants.lo, self.constants.lo + self.spec.size[1]],
+        )
     }
 }
 
@@ -426,10 +521,35 @@ fn step_inner(
     let mut heights = vec![0.0; n];
     let mut dist = vec![0.0; n];
     let mut normal = vec![[0.0, 1.0, 0.0]; n];
+    let tiled = matches!(ground, Ground::Tiles { .. });
+    let mut tile_grip = vec![0.0; n];
     let tilt = ay[1].max(0.2);
     let upright = ay[1] > 0.3;
     for (index, wheel) in spec.wheels.iter().enumerate() {
         let mount = mounts[index];
+        if tiled {
+            let mut best: Option<(f64, _)> = None;
+            for along in SAMPLES {
+                let x = mount[0] + ax[0] * wheel.radius * along;
+                let z = mount[2] + ax[2] * wheel.radius * along;
+                if let Some(surface) = ground.surface(x, z, near[index]) {
+                    let centre = surface.height + wheel.radius * (1.0 - along * along).sqrt();
+                    if best.is_none_or(|(height, _)| centre > height) {
+                        best = Some((centre, surface));
+                    }
+                }
+            }
+            if let Some((centre, surface)) = best {
+                dist[index] = (mount[1] - centre) / tilt;
+                heights[index] = surface.height;
+                normal[index] = surface.normal;
+                tile_grip[index] = surface.grip;
+            } else {
+                heights[index] = near[index];
+                dist[index] = wheel.travel;
+            }
+            continue;
+        }
         let mut samples = [0.0; 3];
         let mut best = f64::NEG_INFINITY;
         let mut best_sample = 0usize;
@@ -481,6 +601,11 @@ fn step_inner(
     let mut contact = vec![[0.0; 3]; n];
     for index in 0..n {
         let wheel = &spec.wheels[index];
+        state.wheel_centres[index] = [
+            mounts[index][0] + down[0] * dist[index],
+            mounts[index][1] + down[1] * dist[index],
+            mounts[index][2] + down[2] * dist[index],
+        ];
         contact[index] = [
             mounts[index][0] + down[0] * dist[index] - normal[index][0] * wheel.radius,
             mounts[index][1] + down[1] * dist[index] - normal[index][1] * wheel.radius,
@@ -490,10 +615,11 @@ fn step_inner(
 
     let steer = ackermann(spec, k, controls.steer);
     state.steer_angle = steer.clone();
-    let mu_ground: Vec<f64> = contact
-        .iter()
-        .map(|point| ground.grip(point[0], point[2]))
-        .collect();
+    let mu_ground = if tiled {
+        tile_grip
+    } else {
+        contact.iter().map(|p| ground.grip(p[0], p[2])).collect()
+    };
     let mut heading = vec![[1.0, 0.0, 0.0]; n];
     let mut side = vec![[0.0, 0.0, 1.0]; n];
     let mut v_long = vec![0.0; n];
@@ -794,23 +920,7 @@ fn integrate(
         *value /= length;
     }
     let (ax, ay, az) = rotation_columns(q);
-    let inv = [
-        [
-            ax[0] * ax[0] / inertia[0] + ay[0] * ay[0] / inertia[1] + az[0] * az[0] / inertia[2],
-            ax[0] * ax[1] / inertia[0] + ay[0] * ay[1] / inertia[1] + az[0] * az[1] / inertia[2],
-            ax[0] * ax[2] / inertia[0] + ay[0] * ay[2] / inertia[1] + az[0] * az[2] / inertia[2],
-        ],
-        [
-            ax[1] * ax[0] / inertia[0] + ay[1] * ay[0] / inertia[1] + az[1] * az[0] / inertia[2],
-            ax[1] * ax[1] / inertia[0] + ay[1] * ay[1] / inertia[1] + az[1] * az[1] / inertia[2],
-            ax[1] * ax[2] / inertia[0] + ay[1] * ay[2] / inertia[1] + az[1] * az[2] / inertia[2],
-        ],
-        [
-            ax[2] * ax[0] / inertia[0] + ay[2] * ay[0] / inertia[1] + az[2] * az[0] / inertia[2],
-            ax[2] * ax[1] / inertia[0] + ay[2] * ay[1] / inertia[1] + az[2] * az[1] / inertia[2],
-            ax[2] * ax[2] / inertia[0] + ay[2] * ay[2] / inertia[1] + az[2] * az[2] / inertia[2],
-        ],
-    ];
+    let inv = inverse_inertia((ax, ay, az), inertia);
     let mut body = Body {
         pos: state.position,
         vel: velocity,
@@ -818,9 +928,10 @@ fn integrate(
         inv_mass: 1.0 / mass,
         inv,
         impulse: 0.0,
+        contacts: 0,
     };
     let speed = dot(velocity, velocity).sqrt();
-    let substeps = ((speed * dt / STEP).ceil() as usize).max(1);
+    let substeps = ((speed * dt / STEP).ceil() as usize).clamp(1, 64);
     let loose = ay[1] < 0.87
         || spec.wheels.iter().enumerate().any(|(index, wheel)| {
             state.load[index] <= 0.0 || state.compression[index] >= wheel.travel
@@ -841,15 +952,37 @@ fn integrate(
     state.angular = body.ang;
     state.rotation = q;
     state.impulse = body.impulse;
+    state.chassis_contacts = body.contacts;
 }
 
-struct Body {
-    pos: V3,
-    vel: V3,
-    ang: V3,
-    inv_mass: f64,
-    inv: [[f64; 3]; 3],
-    impulse: f64,
+fn inverse_inertia((ax, ay, az): (V3, V3, V3), inertia: V3) -> [[f64; 3]; 3] {
+    [
+        [
+            ax[0] * ax[0] / inertia[0] + ay[0] * ay[0] / inertia[1] + az[0] * az[0] / inertia[2],
+            ax[0] * ax[1] / inertia[0] + ay[0] * ay[1] / inertia[1] + az[0] * az[1] / inertia[2],
+            ax[0] * ax[2] / inertia[0] + ay[0] * ay[2] / inertia[1] + az[0] * az[2] / inertia[2],
+        ],
+        [
+            ax[1] * ax[0] / inertia[0] + ay[1] * ay[0] / inertia[1] + az[1] * az[0] / inertia[2],
+            ax[1] * ax[1] / inertia[0] + ay[1] * ay[1] / inertia[1] + az[1] * az[1] / inertia[2],
+            ax[1] * ax[2] / inertia[0] + ay[1] * ay[2] / inertia[1] + az[1] * az[2] / inertia[2],
+        ],
+        [
+            ax[2] * ax[0] / inertia[0] + ay[2] * ay[0] / inertia[1] + az[2] * az[0] / inertia[2],
+            ax[2] * ax[1] / inertia[0] + ay[2] * ay[1] / inertia[1] + az[2] * az[1] / inertia[2],
+            ax[2] * ax[2] / inertia[0] + ay[2] * ay[2] / inertia[1] + az[2] * az[2] / inertia[2],
+        ],
+    ]
+}
+
+pub(super) struct Body {
+    pub pos: V3,
+    pub vel: V3,
+    pub ang: V3,
+    pub inv_mass: f64,
+    pub inv: [[f64; 3]; 3],
+    pub impulse: f64,
+    pub contacts: u32,
 }
 
 fn body_on_ground(
@@ -877,11 +1010,13 @@ fn body_on_ground(
     let mut heights = Vec::with_capacity(offsets.len());
     let mut touching = false;
     for offset in &offsets {
-        let height = ground.height(
-            body.pos[0] + offset[0],
-            body.pos[2] + offset[2],
-            body.pos[1] + offset[1],
-        );
+        let height = ground
+            .height_if_present(
+                body.pos[0] + offset[0],
+                body.pos[2] + offset[2],
+                body.pos[1] + offset[1],
+            )
+            .unwrap_or(f64::NEG_INFINITY);
         heights.push(height);
         if height > body.pos[1] + offset[1] {
             touching = true;
@@ -932,6 +1067,7 @@ fn apply(body: &mut Body, lever: V3, normal: V3, depth: f64) {
         body.vel = add(body.vel, scale(impulse, body.inv_mass));
         body.ang = add(body.ang, multiply(body.inv, cross(lever, impulse)));
         body.impulse += dot(impulse, impulse).sqrt();
+        body.contacts += 1;
     }
     let push = (depth - SLOP).max(0.0) * PUSH;
     body.pos = add(body.pos, scale(normal, push));
@@ -960,7 +1096,7 @@ fn ackermann(spec: &VehicleSpec, k: &Constants, steer: f64) -> Vec<f64> {
         .collect()
 }
 
-fn rotation_columns(q: Quaternion) -> (V3, V3, V3) {
+pub(super) fn rotation_columns(q: Quaternion) -> (V3, V3, V3) {
     let [x, y, z, w] = q;
     (
         [
@@ -981,7 +1117,7 @@ fn rotation_columns(q: Quaternion) -> (V3, V3, V3) {
     )
 }
 
-fn multiply(matrix: [[f64; 3]; 3], vector: V3) -> V3 {
+pub(super) fn multiply(matrix: [[f64; 3]; 3], vector: V3) -> V3 {
     [
         matrix[0][0] * vector[0] + matrix[0][1] * vector[1] + matrix[0][2] * vector[2],
         matrix[1][0] * vector[0] + matrix[1][1] * vector[1] + matrix[1][2] * vector[2],
@@ -989,11 +1125,11 @@ fn multiply(matrix: [[f64; 3]; 3], vector: V3) -> V3 {
     ]
 }
 
-fn dot(a: V3, b: V3) -> f64 {
+pub(super) fn dot(a: V3, b: V3) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn cross(a: V3, b: V3) -> V3 {
+pub(super) fn cross(a: V3, b: V3) -> V3 {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -1001,7 +1137,7 @@ fn cross(a: V3, b: V3) -> V3 {
     ]
 }
 
-fn add(a: V3, b: V3) -> V3 {
+pub(super) fn add(a: V3, b: V3) -> V3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
@@ -1009,7 +1145,7 @@ fn sub(a: V3, b: V3) -> V3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn scale(a: V3, factor: f64) -> V3 {
+pub(super) fn scale(a: V3, factor: f64) -> V3 {
     [a[0] * factor, a[1] * factor, a[2] * factor]
 }
 
