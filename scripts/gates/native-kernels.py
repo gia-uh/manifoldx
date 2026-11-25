@@ -173,7 +173,7 @@ def isolated_cpu(program):
 
     @world.system(reads=(Car,))
     def observe(snapshot, commands):
-        data = snapshot.query(Car).read()
+        data = snapshot.read(Car)
         assert data.entities == (controlled, secondary)
         rows = data.numpy()
         assert pose(rows[1]) == (0, 0, 0, 0)
