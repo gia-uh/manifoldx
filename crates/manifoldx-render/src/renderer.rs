@@ -1,10 +1,4 @@
-//! One native wgpu device, one fixed opaque pipeline, indexed instanced draws
-//! from World rows, a depth buffer and an owned offscreen readback.
-//!
-//! This is the base renderer slice, not the full engine renderer. Textures,
-//! PBR, shadows, GUI, streaming, skinning and a window surface are later
-//! slices. There is no shader compiler or material graph here: one WGSL
-//! pipeline and one colour per material id.
+//! Native indexed instancing with shared drawing for desktop and offscreen targets.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -94,22 +88,41 @@ pub struct Gpu {
 impl Gpu {
     /// Create the Vulkan instance and a hardware device, or fail visibly.
     pub fn new(allow_software: bool) -> Result<Self, RenderError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+        let instance = Self::instance();
+        let adapter = Self::compatible_adapter(&instance, None)?;
+        Self::from_adapter(&adapter, allow_software)
+    }
+
+    pub(crate) fn instance() -> wgpu::Instance {
+        wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        })
+    }
+
+    pub(crate) fn compatible_adapter(
+        instance: &wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<wgpu::Adapter, RenderError> {
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
+            compatible_surface: surface,
             force_fallback_adapter: false,
         }))
-        .map_err(|error| RenderError::Adapter(error.to_string()))?;
+        .map_err(|error| RenderError::Adapter(error.to_string()))
+    }
+
+    pub(crate) fn from_adapter(
+        adapter: &wgpu::Adapter,
+        allow_software: bool,
+    ) -> Result<Self, RenderError> {
         let info = adapter.get_info();
         if !allow_software && matches!(info.device_type, wgpu::DeviceType::Cpu) {
             return Err(RenderError::NoHardwareAdapter(info.name));
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("manifoldx-native-renderer-device"),
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
             ..Default::default()
         }))
         .map_err(|error| RenderError::Device(error.to_string()))?;
@@ -156,6 +169,34 @@ struct InstanceBuffer {
     capacity_bytes: u64,
 }
 
+/// Physical color and reverse-depth target for one frame.
+#[derive(Clone, Copy)]
+pub struct FrameTarget<'a> {
+    pub color: &'a wgpu::TextureView,
+    pub depth: &'a wgpu::TextureView,
+    pub width: u32,
+    pub height: u32,
+    pub clear: wgpu::Color,
+}
+
+pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+    let depth = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("manifoldx-native-depth"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    depth.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
 /// Per-frame counters and wall times.
 ///
 /// `wait_readback_ns` is CPU wall time around submission, GPU execution and
@@ -196,7 +237,7 @@ pub struct RenderOutput {
     pub stats: RenderStats,
 }
 
-/// A native offscreen renderer.
+/// Native GPU resources and drawing for one target format.
 pub struct NativeRenderer {
     gpu: Gpu,
     pipeline: wgpu::RenderPipeline,
@@ -212,6 +253,10 @@ impl NativeRenderer {
     /// Create the device, the fixed pipeline and its camera uniform.
     pub fn new(options: RendererOptions) -> Result<Self, RenderError> {
         let gpu = Gpu::new(options.allow_software)?;
+        Ok(Self::with_gpu(gpu, COLOR_FORMAT, options.max_instances))
+    }
+
+    pub(crate) fn with_gpu(gpu: Gpu, format: wgpu::TextureFormat, max_instances: usize) -> Self {
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -273,7 +318,7 @@ impl NativeRenderer {
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: COLOR_FORMAT,
+                        format,
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -295,7 +340,7 @@ impl NativeRenderer {
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
-        Ok(Self {
+        Self {
             gpu,
             pipeline,
             camera_buffer,
@@ -303,8 +348,8 @@ impl NativeRenderer {
             meshes: HashMap::new(),
             materials: HashMap::new(),
             instance_buffer: None,
-            max_instances: options.max_instances,
-        })
+            max_instances,
+        }
     }
 
     /// Adapter facts for evidence.
@@ -316,6 +361,11 @@ impl NativeRenderer {
     /// device API.
     pub fn device(&self) -> &wgpu::Device {
         self.gpu.device()
+    }
+
+    /// Borrow the queue paired with this renderer's device.
+    pub fn queue(&self) -> &wgpu::Queue {
+        self.gpu.queue()
     }
 
     /// Upload one indexed geometry under the World's `Mesh` id.
@@ -408,6 +458,139 @@ impl NativeRenderer {
         if !(1..=MAX_SIDE).contains(&width) || !(1..=MAX_SIDE).contains(&height) {
             return Err(RenderError::BadSize { width, height });
         }
+        let color = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("manifoldx-native-color"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth_target(self.device(), width, height);
+
+        let encode_started = Instant::now();
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("manifoldx-native-encoder"),
+            });
+        let target = FrameTarget {
+            color: &color_view,
+            depth: &depth_view,
+            width,
+            height,
+            clear: wgpu::Color::BLACK,
+        };
+        let mut stats = self.encode_world(
+            &mut encoder,
+            target,
+            world,
+            source,
+            camera,
+            ignore_transform,
+            omit_draw,
+        )?;
+
+        let padded_bytes_per_row = align_to(width * 4, 256);
+        let readback_size = padded_bytes_per_row as u64 * height as u64;
+        let readback = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("manifoldx-native-readback"),
+            size: readback_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &color,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.gpu.queue.submit([encoder.finish()]);
+        stats.encode_submit_ns = elapsed_ns(encode_started.elapsed())
+            .saturating_sub(stats.read_ns)
+            .saturating_sub(stats.upload_ns);
+
+        let readback_started = Instant::now();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        readback.map_async(wgpu::MapMode::Read, .., move |result| {
+            let _ = sender.send(result);
+        });
+        self.gpu
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| RenderError::Poll(error.to_string()))?;
+        receiver
+            .recv()
+            .map_err(|_| RenderError::ReadbackChannel)?
+            .map_err(|error| RenderError::Readback(error.to_string()))?;
+
+        let mapped = readback.get_mapped_range(..);
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for row in mapped
+            .chunks_exact(padded_bytes_per_row as usize)
+            .take(height as usize)
+        {
+            rgba.extend_from_slice(&row[..(width * 4) as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+        stats.wait_readback_ns = elapsed_ns(readback_started.elapsed());
+        stats.total_ns = elapsed_ns(started.elapsed());
+
+        Ok(RenderOutput {
+            width,
+            height,
+            rgba,
+            stats,
+        })
+    }
+
+    /// Encode the scene into a color and depth view owned by this device.
+    pub fn encode_world_to_target(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: FrameTarget<'_>,
+        world: &World,
+        source: InstanceSource,
+        camera: &Camera,
+    ) -> Result<RenderStats, RenderError> {
+        self.encode_world(encoder, target, world, source, camera, false, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_world(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: FrameTarget<'_>,
+        world: &World,
+        source: InstanceSource,
+        camera: &Camera,
+        ignore_transform: bool,
+        omit_draw: bool,
+    ) -> Result<RenderStats, RenderError> {
         if source.max_instances > self.max_instances {
             return Err(RenderError::InstanceBound {
                 requested: source.max_instances,
@@ -422,9 +605,10 @@ impl NativeRenderer {
             ..Default::default()
         };
         let draw_groups = self.pack_instances(&batch, &mut stats)?;
+        stats.instances = batch.instances.len();
         stats.read_ns = elapsed_ns(read_started.elapsed());
 
-        let aspect = width as f32 / height as f32;
+        let aspect = target.width as f32 / target.height as f32;
         let view_projection = camera.view_projection(aspect).to_columns();
         let upload_started = Instant::now();
         self.gpu.queue.write_buffer(
@@ -457,63 +641,20 @@ impl NativeRenderer {
         }
         stats.upload_ns = elapsed_ns(upload_started.elapsed());
 
-        let color = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("manifoldx-native-color"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: COLOR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("manifoldx-native-depth"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let encode_started = Instant::now();
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("manifoldx-native-encoder"),
-            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("manifoldx-native-opaque-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
+                    view: target.color,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(target.clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
+                    view: target.depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
@@ -554,72 +695,7 @@ impl NativeRenderer {
             }
         }
 
-        let padded_bytes_per_row = align_to(width * 4, 256);
-        let readback_size = padded_bytes_per_row as u64 * height as u64;
-        let readback = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("manifoldx-native-readback"),
-            size: readback_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &color,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.gpu.queue.submit([encoder.finish()]);
-        stats.encode_submit_ns = elapsed_ns(encode_started.elapsed());
-
-        let readback_started = Instant::now();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        readback.map_async(wgpu::MapMode::Read, .., move |result| {
-            let _ = sender.send(result);
-        });
-        self.gpu
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|error| RenderError::Poll(error.to_string()))?;
-        receiver
-            .recv()
-            .map_err(|_| RenderError::ReadbackChannel)?
-            .map_err(|error| RenderError::Readback(error.to_string()))?;
-
-        let mapped = readback.get_mapped_range(..);
-        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-        for row in mapped
-            .chunks_exact(padded_bytes_per_row as usize)
-            .take(height as usize)
-        {
-            rgba.extend_from_slice(&row[..(width * 4) as usize]);
-        }
-        drop(mapped);
-        readback.unmap();
-        stats.wait_readback_ns = elapsed_ns(readback_started.elapsed());
-        stats.instances = batch.instances.len();
-        stats.total_ns = elapsed_ns(started.elapsed());
-
-        Ok(RenderOutput {
-            width,
-            height,
-            rgba,
-            stats,
-        })
+        Ok(stats)
     }
 
     /// Render without issuing any draw, for the negative control.
@@ -878,6 +954,8 @@ pub fn json_string(value: &str) -> String {
 /// A renderer or scene failure.
 #[derive(Debug)]
 pub enum RenderError {
+    /// The native desktop window or surface failed.
+    Window(String),
     /// Scene preparation failed.
     Scene(SceneError),
     /// No Vulkan adapter answered.
@@ -919,6 +997,7 @@ pub enum RenderError {
 impl std::fmt::Display for RenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Window(error) => write!(f, "desktop: {error}"),
             Self::Scene(error) => write!(f, "scene: {error}"),
             Self::Adapter(error) => write!(f, "no usable adapter: {error}"),
             Self::Device(error) => write!(f, "device creation failed: {error}"),
