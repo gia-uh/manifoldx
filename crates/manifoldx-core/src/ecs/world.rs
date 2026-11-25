@@ -452,6 +452,7 @@ pub struct F32Rows<'a> {
     target_members: &'a [u64],
     source_members: &'a [u64],
     width: usize,
+    excluded_slot: Option<usize>,
 }
 
 impl F32Rows<'_> {
@@ -465,7 +466,9 @@ impl F32Rows<'_> {
             .enumerate()
         {
             let bit = 1u64 << (slot % 64);
-            if self.target_members[slot / 64] & self.source_members[slot / 64] & bit != 0 {
+            if Some(slot) != self.excluded_slot
+                && self.target_members[slot / 64] & self.source_members[slot / 64] & bit != 0
+            {
                 visit(target, source);
                 count += 1;
             }
@@ -488,6 +491,19 @@ impl World {
     /// Lend two distinct, equally wide non-marker f32 columns to a native kernel.
     /// Dead rows never carry membership; callers cannot retain the borrow.
     pub fn f32_rows(&mut self, target: usize, source: usize) -> Result<F32Rows<'_>, &'static str> {
+        self.f32_rows_except(target, source, None)
+    }
+
+    /// Exclude a solver-owned identity, allowing a later occupant of its slot.
+    pub(crate) fn f32_rows_except(
+        &mut self,
+        target: usize,
+        source: usize,
+        excluded: Option<EntityId>,
+    ) -> Result<F32Rows<'_>, &'static str> {
+        let excluded_slot = excluded
+            .filter(|id| self.slots.validate_alive(std::slice::from_ref(id)).is_ok())
+            .map(|id| id.slot() as usize);
         if target == source {
             return Err("native columns must be distinct");
         }
@@ -518,6 +534,7 @@ impl World {
             target_members: &t.members,
             source_members: &s.members,
             width: t.schema.width as usize,
+            excluded_slot,
         })
     }
 

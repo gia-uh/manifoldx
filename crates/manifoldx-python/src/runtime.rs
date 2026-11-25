@@ -254,7 +254,7 @@ impl Drop for PyNativeRuntime {
         }
     }
 }
-fn stats_dict<'py>(py: Python<'py>, s: &Stats) -> PyResult<Bound<'py, PyDict>> {
+pub(crate) fn stats_dict<'py>(py: Python<'py>, s: &Stats) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     macro_rules! fields { ($($name:ident),*) => { $(d.set_item(stringify!($name), s.$name)?;)* }; }
     fields!(
@@ -272,6 +272,9 @@ fn stats_dict<'py>(py: Python<'py>, s: &Stats) -> PyResult<Bound<'py, PyDict>> {
         bytes_out,
         readback_bytes,
         native_ns,
+        vehicle_steps,
+        vehicle_ns,
+        publish_ns,
         frame_ns,
         max_frame_ns,
         paced_ns,

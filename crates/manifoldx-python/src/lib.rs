@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 mod frames;
 mod kernel;
 mod runtime;
+mod vehicles;
 
 use manifoldx_core::ecs::{
     ColumnData, ComponentPayload, ElementType, EntityError, EntityId, EntitySlots, SlotState,
@@ -926,5 +927,7 @@ fn _core_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<runtime::PyNativeRuntime>()?;
     frames::register(m)?;
     kernel::register(m)?;
+    m.add_class::<vehicles::PyVehicleSim>()?;
+    m.add_class::<vehicles::PyVehicleRuntime>()?;
     Ok(())
 }

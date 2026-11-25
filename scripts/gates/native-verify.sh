@@ -116,6 +116,18 @@ run_runtime() {
     echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
     return "$status"
 }
+run_vehicles() {
+    local label="$1" status
+    shift
+    if "$VENVPY" -I "$HERE/../../examples/native_vehicles.py" "$@" >"$SCRATCH/$label.log" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
 run_public_world() {
     local label="$1" status=0
     shift
@@ -143,6 +155,12 @@ run_smoke smoke-before
 run_entity_slots entity-slots-before
 run_component_world component-world-before
 run_runtime runtime-before
+run_vehicles vehicles-before
+if run_vehicles vehicles-negative --negative-control; then
+    fail "vehicle gate passed with tyre grip removed"
+fi
+grep -q 'negative control: zero grip did not accelerate' "$SCRATCH/vehicles-negative.log" \
+    || fail "vehicle negative control failed for an unrelated reason"
 if run_runtime runtime-drop-control --deterministic-only --control-drop-first; then
     fail "runtime gate passed after dropping the first submission"
 fi
@@ -189,6 +207,10 @@ if run_runtime runtime-missing --deterministic-only; then
     fail "runtime gate passed with extension removed"
 fi
 grep -q 'ImportError.*_core_native' "$SCRATCH/runtime-missing.log" || fail "runtime gate failed for unrelated reason"
+if run_vehicles vehicles-missing; then
+    fail "vehicle gate passed with extension removed"
+fi
+grep -q 'ImportError.*_core_native' "$SCRATCH/vehicles-missing.log" || fail "vehicle gate failed for unrelated reason"
 run_selection missing selection-missing
 # At the real extension path, a bad binary must enter the loader-error branch.
 printf 'not a loadable extension\n' >"$SO"
@@ -198,5 +220,6 @@ run_smoke smoke-restored
 run_entity_slots entity-slots-restored
 run_component_world component-world-restored
 run_runtime runtime-restored --deterministic-only
+run_vehicles vehicles-restored
 run_selection installed selection-restored
 echo "native-verify: passed for $PYVER/$ABI (installed -> missing -> restored)"
