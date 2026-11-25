@@ -355,7 +355,7 @@ single-shot frame runtime. Set up its schema and entities on the thread that
 will call `run`. The frame clock and command barriers use the same World.
 The Python `Engine` remains the entrypoint for the complete desktop renderer.
 
-```python
+```{python}
 import manifoldx as mx
 from manifoldx.components import Component
 
@@ -415,6 +415,8 @@ a graphics bridge stays detached from Python while the clock advances.
 `PythonGraphicsBridge` is an explicit main-thread adapter for a Python graphics
 owner. Supply its `present(snapshot)` callback and list the components it
 reads. The callback runs after the frame barrier with a single snapshot lease.
+Use `snapshot.overruns` to display the names and nanoseconds of synchronous
+callbacks that exceeded one millisecond at that barrier.
 Its sole graphics owner keeps the window, context, device, queue and renderer
 together. `run` reports bridge calls, rows offered, bytes offered and attached
 nanoseconds. The native World entrypoint has no implicit graphics fallback.

@@ -40,8 +40,8 @@ def outcomes(world):
     return result
 
 
-def contract(drop_first):
-    world = World(4, queue_capacity=6, batches_per_frame=6)
+def contract(drop_first, add_read):
+    world = World(4, queue_capacity=7, batches_per_frame=7)
     world.register(Speed)
     world.register("flags", kind="u32", width=1)
     speed = world.field(Speed, "value")
@@ -76,6 +76,7 @@ def contract(drop_first):
     # The second live match lacks flags and must reject the entire write.
     bad_id = world.set(cars.where(speed > 3), flags, 9)
     destroy_id = world.destroy([third])
+    double_id = world.destroy([third])
     spawn_id = world.submit_spawn(Speed(value=7))
     stale_id = world.destroy([third])
     set_id = world.set(cars.where(speed.eq(7)), speed, 8)
@@ -83,6 +84,8 @@ def contract(drop_first):
         with rejects(RuntimeError, "queue is full"):
             world.submit_spawn(payload={Speed: Exporter()})
         assert len(buffer_calls) == 2
+    if add_read:
+        cars.read()
     assert world.rows_read == before, "creating or queuing a selection read rows"
 
     snapshots = []
@@ -104,6 +107,7 @@ def contract(drop_first):
         assert seen[first_id] == (0, None), seen
         assert "does not carry" in seen[bad_id][1], seen
         assert seen[destroy_id] == seen[spawn_id] == seen[set_id] == (0, None), seen
+        assert seen[double_id][1] is not None, seen
         assert "stale" in seen[stale_id][1].lower(), seen
         assert snapshots[-1][2].numpy()[:, 0].tolist() == [1, 4, 8]
         writes.append(commands.set(snapshot.query(Speed).where(speed.eq(8)), speed, 10))
@@ -114,12 +118,14 @@ def contract(drop_first):
         assert snapshot.read(Speed).numpy()[:, 0].tolist() == [1, 4, 10]
         writes.append(commands.set(snapshot.query(Speed).where(speed.eq(10)), speed, 11))
         commands.emit("later", "committed")
+        time.sleep(0.004)
 
     bridge_values = []
 
     def present(snapshot):
         assert threading.current_thread() is threading.main_thread()
         bridge_values.append(snapshot.read(Speed).numpy()[:, 0].tolist())
+        assert any(name.endswith("later") and ns >= 1_000_000 for name, ns in snapshot.overruns)
 
     result = world.run(frames=1, paced=False, graphics=PythonGraphicsBridge(present, reads=[Speed]))
     assert result["frames"] == 1
@@ -251,7 +257,7 @@ def stress(mode, frames):
         gc.disable()
         try:
             while not ended.wait(0.7):
-                trash = [[None] for _ in range(250_000)]
+                trash = [[None] for _ in range(900_000)]
                 for item in trash:
                     item[0] = item
                 del item, trash
@@ -322,13 +328,14 @@ def stress(mode, frames):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--drop-first", action="store_true")
+    parser.add_argument("--add-read", action="store_true")
     parser.add_argument("--stress", choices=("base", "async", "async-gc", "sync-gc"))
     parser.add_argument("--frames", type=int, default=360)
     args = parser.parse_args()
     if args.stress:
         stress(args.stress, args.frames)
     else:
-        contract(args.drop_first)
+        contract(args.drop_first, args.add_read)
         overlap()
         shutdown()
 

@@ -144,6 +144,10 @@ if run_public_world public-world-drop-control --drop-first; then
     fail "public World passed after dropping the first command"
 fi
 grep -q 'first command ID missing' "$SCRATCH/public-world-drop-control.log" || fail "public World failed for an unrelated reason"
+if run_public_world public-world-read-control --add-read; then
+    fail "public World row control passed after inserting an explicit read"
+fi
+grep -q 'creating or queuing a selection read rows' "$SCRATCH/public-world-read-control.log" || fail "row control failed for an unrelated reason"
 run_selection installed selection-before
 SO="$("$VENVPY" -I -c 'import sys, manifoldx._core_native as m; sys.stdout.write(m.__file__)')"
 if command -v cygpath >/dev/null 2>&1; then
