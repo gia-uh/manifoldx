@@ -5,6 +5,15 @@ from manifoldx.engine import Engine
 from manifoldx import backends
 from manifoldx.types import Vector3, Vector4, Float, Color
 from manifoldx.ecs import EntityStore, ComponentView
+from manifoldx.world import (
+    Clock as Clock,
+    Entity as Entity,
+    PythonGraphicsBridge as PythonGraphicsBridge,
+    Readback as Readback,
+    World as World,
+)
+from manifoldx.compute.kernel import kernel as kernel
+from manifoldx.compute.shader import clamp as clamp, f32 as f32, vec3 as vec3
 from manifoldx.systems import Query
 from manifoldx.components import Transform, Mesh, Material, Colors, Layer, Tint, Fade, Palette
 from manifoldx.camera import Camera
@@ -91,6 +100,10 @@ colors = _ColorsProxy()
 
 __all__ = [
     "Engine",
+    "kernel",
+    "clamp",
+    "f32",
+    "vec3",
     "backends",
     "Camera",
     "Vector3",

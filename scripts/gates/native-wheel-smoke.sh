@@ -16,7 +16,7 @@ trap 'exit 143' TERM
 cd "$RUNDIR"
 unset PYTHONPATH PYTHONHOME
 
-"$PY" - "$ROOT" <<'PYTHON'
+"$PY" -I - "$ROOT" <<'PYTHON'
 import importlib.machinery
 import importlib.util
 import pathlib

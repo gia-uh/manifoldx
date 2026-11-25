@@ -16,6 +16,7 @@ from manifoldx.compute._core import (
     _DISPATCH_SYMBOLS,
 )
 from manifoldx.compute import shader
+from manifoldx.compute._resident import GpuKernelGroup
 from manifoldx.compute.transpile import (
     ComputeShaderCompileError,
     transpile_compute,
@@ -23,6 +24,7 @@ from manifoldx.compute.transpile import (
 
 __all__ = [
     "Compute",
+    "GpuKernelGroup",
     "ComputeRunner",
     "Reads",
     "Writes",

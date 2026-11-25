@@ -109,3 +109,34 @@ tests. The body box's corners are tested against the ground too, so a car on its
 `ShapeGround`: each frame it calls `advance` and moves the model with `place_car`, passing `rotation`, the
 wheels' `wheel_turn` and `steer`, and each wheel's `travel` from `Vehicles.travel`, which `Car.pose` uses to
 lift that wheel.
+
+## The native fleet
+
+With a native wheel, `NativeVehicles([spec], FlatGround())` owns the vehicle state in Rust.
+Set the starting position with `place`, then call `advance(controls, dt)` once per frame.
+Each call returns the number of fixed substeps, discarded time above 50 ms, and native
+solver time in nanoseconds. A body can have no wheel load and still collide with a wall or
+another body. The contact report gives the first body's index, the second body's index
+(or `None` for a wall), the outward normal and the impulse applied to the first body.
+Wheel load counts include all the substeps completed in that call. Rigid contact impulse
+counts a pair once. The body snapshot reports the impulse on that body in the last substep.
+
+The optional driving-assist strengths run the Python policy once per frame. The resulting
+controls and per-wheel corrections are applied to every fixed substep of that frame.
+Use `snapshot` for owned poses, wheel centres, compression, load, slip and motor state.
+Use `checkpoint` and `restore` to replay the same clock residue, tile updates and inputs.
+Draw using `pose` or `model_transform` for interpolation between fixed substeps.
+
+To stream ground, register `TiledGround` with a cell size and a sequence of `GroundTile`
+batches. A tile can contain a regular `Heightfield`, a list of `GroundTriangle` surfaces
+with level IDs and grip, and vertical `Obstacle` segments with strengths. Clip input
+geometry to its cell boundaries. Native lookup by XZ uses `near` to choose the closest
+height and returns a `GroundSample` with tile version, level, normal and grip.
+Use `update_ground` to stage edits and removals against positive, increasing tile
+versions. Use `rebase` to stage a local origin shift. Both become visible at the next
+actual substep. This API takes plain data. A custom Python `Ground` must prepare a tile batch
+before registration.
+
+Run `python examples/vehicle.py --native-physics-check` with the native wheel to drive
+the example's car for 360 fixed steps and read back the wheels and final pose.
+`--native-physics` selects the same fleet for the interactive example.
