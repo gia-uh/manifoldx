@@ -11,6 +11,6 @@ mod world;
 
 pub use entity_slots::{EntityError, EntityId, EntitySlots, SlotState, Snapshot};
 pub use world::{
-    ColumnData, ComponentPayload, ComponentReadout, ComponentSchema, ElementType, F32Rows, World,
-    WorldError, WorldSnapshot, MAX_COMPONENT_WIDTH,
+    ColumnData, Compare, ComponentPayload, ComponentReadout, ComponentSchema, ElementType, F32Rows,
+    Scalar, Selection, World, WorldError, WorldSnapshot, MAX_COMPONENT_WIDTH,
 };

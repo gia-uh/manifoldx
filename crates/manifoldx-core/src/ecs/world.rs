@@ -175,6 +175,8 @@ pub struct ComponentPayload {
 pub struct ComponentReadout {
     /// The component's registered schema.
     pub schema: ComponentSchema,
+    /// Committed column version.
+    pub version: u64,
     /// The entities read, in request order or ascending slot order.
     pub ids: Vec<EntityId>,
     /// Membership flags, parallel to `ids`.
@@ -382,6 +384,7 @@ impl From<EntityError> for WorldError {
 
 #[derive(Debug)]
 struct Column {
+    version: u64,
     schema: ComponentSchema,
     data: ColumnData,
     /// One bit per slot, in slot order.
@@ -408,6 +411,7 @@ impl Column {
             })?;
         members.resize(words, 0);
         Ok(Self {
+            version: 0,
             schema,
             data,
             members,
@@ -504,6 +508,7 @@ impl World {
             let (left, right) = self.columns.split_at_mut(target);
             (&mut right[0], &left[source])
         };
+        t.version = self.version;
         let (ColumnData::F32(target), ColumnData::F32(source)) = (&mut t.data, &s.data) else {
             unreachable!()
         };
@@ -682,6 +687,7 @@ impl World {
         }
         for payload in payloads {
             let column = &mut self.columns[payload.component];
+            column.version = self.version + 1;
             let width = column.schema.width as usize;
             for (row, id) in ids.iter().enumerate() {
                 let start = id.slot() as usize * width;
@@ -762,6 +768,7 @@ impl World {
             );
         }
         self.version += 1;
+        column.version = self.version;
         Ok(ids.len())
     }
 
@@ -838,6 +845,7 @@ impl World {
             _ => unreachable!("payload kind is validated before a field write"),
         }
         self.version += 1;
+        column.version = self.version;
         Ok(ids.len())
     }
 
@@ -852,7 +860,10 @@ impl World {
         self.slots.destroy(ids)?;
         for id in ids {
             for column in &mut self.columns {
-                column.clear_row(id.slot());
+                if column.is_member(id.slot()) {
+                    column.version = self.version + 1;
+                    column.clear_row(id.slot());
+                }
             }
         }
         self.version += 1;
@@ -929,6 +940,7 @@ impl World {
         }
         Ok(ComponentReadout {
             schema: column.schema.clone(),
+            version: column.version,
             ids: ids.to_vec(),
             membership: ids.iter().map(|id| column.is_member(id.slot())).collect(),
             data,
@@ -1297,5 +1309,135 @@ mod tests {
         );
         assert!(reused[0].generation() > ids[3].generation());
         assert_eq!(world.high_water(), 5);
+    }
+}
+
+/// A typed scalar in selection and command IR.
+#[derive(Clone, Copy, Debug)]
+pub enum Scalar {
+    F32(f32),
+    U32(u32),
+}
+
+/// Supported scalar comparisons at a command boundary.
+#[derive(Clone, Copy, Debug)]
+pub enum Compare {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+impl Compare {
+    fn test<T: PartialOrd>(self, lhs: T, rhs: T) -> bool {
+        match self {
+            Self::Eq => lhs == rhs,
+            Self::Ne => lhs != rhs,
+            Self::Lt => lhs < rhs,
+            Self::Le => lhs <= rhs,
+            Self::Gt => lhs > rhs,
+            Self::Ge => lhs >= rhs,
+        }
+    }
+}
+
+/// A lazy conjunction over fields of registered component rows.
+#[derive(Debug)]
+pub struct Selection {
+    pub component: usize,
+    pub predicates: Vec<(usize, usize, Compare, Scalar)>,
+}
+
+impl Column {
+    fn validate_scalar(&self, field: usize, scalar: Scalar) -> Result<(), String> {
+        if field >= self.schema.width as usize {
+            return Err(format!("field outside '{}' row", self.schema.name));
+        }
+        match (&self.data, scalar) {
+            (ColumnData::F32(_), Scalar::F32(value)) if value.is_finite() => Ok(()),
+            (ColumnData::U32(_), Scalar::U32(_)) => Ok(()),
+            _ => Err(format!("invalid scalar for '{}' field", self.schema.name)),
+        }
+    }
+}
+
+impl World {
+    fn ir_column(&self, index: usize) -> Result<&Column, String> {
+        self.columns
+            .get(index)
+            .ok_or_else(|| format!("unknown component {index}"))
+    }
+
+    pub fn entity_version(&self) -> u64 {
+        self.slots.version()
+    }
+
+    pub fn column_version(&self, component: usize) -> Result<u64, String> {
+        Ok(self.ir_column(component)?.version)
+    }
+
+    pub fn select(&self, selection: &Selection) -> Result<Vec<EntityId>, String> {
+        let root = self.ir_column(selection.component)?;
+        for &(index, field, _, value) in &selection.predicates {
+            self.ir_column(index)?.validate_scalar(field, value)?;
+        }
+        let mut ids = self.slots.alive_ids();
+        ids.retain(|id| {
+            root.is_member(id.slot())
+                && selection
+                    .predicates
+                    .iter()
+                    .all(|&(index, field, cmp, value)| {
+                        let column = &self.columns[index];
+                        if !column.is_member(id.slot()) {
+                            return false;
+                        }
+                        let offset = id.slot() as usize * column.schema.width as usize + field;
+                        match (&column.data, value) {
+                            (ColumnData::F32(data), Scalar::F32(value)) => {
+                                cmp.test(data[offset], value)
+                            }
+                            (ColumnData::U32(data), Scalar::U32(value)) => {
+                                cmp.test(data[offset], value)
+                            }
+                            _ => unreachable!("validated selection"),
+                        }
+                    })
+        });
+        Ok(ids)
+    }
+
+    pub fn set_selected(
+        &mut self,
+        selection: &Selection,
+        component: usize,
+        field: usize,
+        value: Scalar,
+    ) -> Result<usize, String> {
+        let target = self.ir_column(component)?;
+        target.validate_scalar(field, value)?;
+        let ids = self.select(selection)?;
+        for id in &ids {
+            if !target.is_member(id.slot()) {
+                return Err(format!("{id:?} does not carry '{}'", target.schema.name));
+            }
+        }
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let width = target.schema.width as usize;
+        let target = &mut self.columns[component];
+        for id in &ids {
+            let offset = id.slot() as usize * width + field;
+            match (&mut target.data, value) {
+                (ColumnData::F32(data), Scalar::F32(value)) => data[offset] = value,
+                (ColumnData::U32(data), Scalar::U32(value)) => data[offset] = value,
+                _ => unreachable!("validated assignment"),
+            }
+        }
+        self.version += 1;
+        target.version = self.version;
+        Ok(ids.len())
     }
 }
