@@ -220,6 +220,10 @@ impl FrameCommands {
 
 impl FrameCommands {
     fn check_structural(&self) -> PyResult<()> {
+        let active = self.live.lock().unwrap().is_some();
+        if !active {
+            return Err(PyRuntimeError::new_err("command lease expired"));
+        }
         if self.writes.contains(&STRUCTURAL) {
             Ok(())
         } else {

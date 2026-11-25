@@ -195,6 +195,39 @@ def uint32_components():
     print(json.dumps({"uint32_components": values}))
 
 
+def expired_structural_lease():
+    world = World(2)
+    world.register(Speed)
+    lease = []
+    touched = []
+
+    class Exporter:
+        def __buffer__(self, flags):
+            touched.append("buffer acquired")
+            return memoryview(rows(1))
+
+        def __release_buffer__(self, view):
+            touched.append("buffer released")
+
+    def handles():
+        touched.append("handles iterated")
+        yield from ()
+
+    @world.system(structural=True)
+    def verify(snapshot, commands):
+        if snapshot.clock.frame == 0:
+            lease.append(commands)
+            return
+        with rejects(RuntimeError, "command lease expired"):
+            lease[0].spawn(payload={Speed: Exporter()})
+        with rejects(RuntimeError, "command lease expired"):
+            lease[0].destroy(handles())
+        assert touched == [], touched
+
+    world.run(frames=2, paced=False)
+    print(json.dumps({"expired_lease_input_calls": touched}))
+
+
 def overlap():
     world = World(2)
     world.register(Speed)
@@ -351,6 +384,7 @@ def main():
     else:
         contract(args.drop_first, args.add_read)
         uint32_components()
+        expired_structural_lease()
         overlap()
         shutdown()
 
