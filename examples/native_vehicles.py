@@ -117,34 +117,34 @@ def column(world, name, ids):
     return np.frombuffer(result["data"], dtype=dtype).reshape(-1, result["width"]).copy()
 
 
-def controls_producer(runtime, events, failures):
+def wait_for_frame(runtime, target, deadline):
+    """Wait for a completed frame while yielding to the native runner."""
+    while time.monotonic() < deadline:
+        time.sleep(0.005)
+        phase = runtime.phase
+        frames = runtime.stats()["frames"]
+        if frames >= target:
+            return frames
+        if phase == "stopped":
+            break
+    raise AssertionError(f"native frames did not reach {target} while the control producer waited")
+
+
+def controls_producer(runtime, events, admissions, failures):
     """Submit bounded controls at frame boundaries while the main thread runs."""
-    seen = 0
     deadline = time.monotonic() + 10.0
-    while runtime.phase != "running":
-        require(time.monotonic() < deadline, "vehicle run never started")
-        time.sleep(0.0005)
-    while seen < len(events):
-        frame, controls = events[seen]
-        while runtime.stats()["frames"] < frame:
-            if runtime.phase == "stopped":
-                return
-            if time.monotonic() > deadline:
-                failures.append("control producer timed out")
-                runtime.stop()
-                return
-            time.sleep(0.0005)
-        result = runtime.set_controls(*controls)
-        if result["status"] != "admitted":
-            failures.append(f"control at frame {frame} was {result}")
-            runtime.stop()
-            return
-        seen += 1
-        before = runtime.stats()["frames"]
-        time.sleep(0.02)
-        after = runtime.stats()["frames"]
-        if runtime.phase == "running" and after <= before:
-            failures.append("native frames did not advance while the control producer slept")
+    try:
+        for frame, controls in events:
+            before = wait_for_frame(runtime, frame, deadline)
+            result = runtime.set_controls(*controls)
+            require(result["status"] == "admitted", f"control at frame {frame} was {result}")
+            after = runtime.stats()["frames"]
+            # The boundary at `after` may already have drained the queue.
+            admissions.append((result["sequence"], before, after + 1))
+            wait_for_frame(runtime, after + 1, min(deadline, time.monotonic() + 1.0))
+    except Exception as error:
+        failures.append(error)
+        runtime.stop()
 
 
 def run_case(name, spec, ground, place, frames, events=(), check=None, paced=False):
@@ -159,16 +159,20 @@ def run_case(name, spec, ground, place, frames, events=(), check=None, paced=Fal
     ids = spawn(world)
     runtime = native.NativeVehicleRuntime(world, ids, sim)
     events = list(events)
+    phase_ends = [frame for frame, _ in events[1:]] + [frames]
+    expected_controls = len(events)
+    admissions = []
     if events and events[0][0] == 0:
         admitted = runtime.set_controls(*events[0][1])
         require(admitted["status"] == "admitted", f"{name}: first controls {admitted}")
+        admissions.append((admitted["sequence"], 0, 0))
         events = events[1:]
     failures = []
     producer = None
     if events:
         producer = threading.Thread(
             target=controls_producer,
-            args=(runtime, events, failures),
+            args=(runtime, events, admissions, failures),
             name="vehicle-controls",
             daemon=True,
         )
@@ -177,16 +181,20 @@ def run_case(name, spec, ground, place, frames, events=(), check=None, paced=Fal
     if producer is not None:
         producer.join(timeout=6)
         require(not producer.is_alive(), f"{name}: control producer leaked")
-    require(not failures, f"{name}: {failures}")
+    if failures:
+        raise AssertionError(f"{name}: {failures[0]}") from failures[0]
     state = runtime.snapshot()
     outcomes = []
     while (outcome := runtime.take_outcome()) is not None:
         outcomes.append(outcome)
-    require(
-        [outcome["sequence"] for outcome in outcomes] == list(range(1, len(outcomes) + 1)),
-        f"{name}: out-of-order outcomes",
-    )
-    require(all(outcome["status"] == "applied" for outcome in outcomes), f"{name}: unapplied control")
+    require(len(admissions) == len(outcomes) == expected_controls, f"{name}: missing or extra controls")
+    for index, (outcome, (sequence, earliest, latest), phase_end) in enumerate(
+        zip(outcomes, admissions, phase_ends), start=1
+    ):
+        require(outcome["sequence"] == sequence == index, f"{name}: out-of-order outcome {outcome}")
+        require(outcome["status"] == "applied", f"{name}: unapplied control {outcome}")
+        latest = min(latest, phase_end - 1)
+        require(earliest <= outcome["frame"] <= latest, f"{name}: expected frames {earliest} to {latest}, got {outcome}")
     runtime.close()
     pose = {
         "position": column(world, "position", ids)[0],
