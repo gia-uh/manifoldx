@@ -52,6 +52,12 @@ cleanup() {
     if [ -n "${NATIVE_VERIFY_LOGS:-}" ]; then
         cp "$SCRATCH"/*.log "$NATIVE_VERIFY_LOGS/" || echo "FAIL: could not retain logs" >&2
     fi
+    if [ -n "${SO:-}" ] && [ -f "$SO.gate-removed" ]; then
+        mv -f "$SO.gate-removed" "$SO" || {
+            echo "FAIL: could not restore _core_native; preserved $SCRATCH" >&2
+            exit 1
+        }
+    fi
     rm -rf "$SCRATCH"
     exit "$status"
 }
@@ -124,6 +130,28 @@ run_vehicles() {
     else
         status=$?
     fi
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
+run_public_fleet() {
+    local label="$1" status=0
+    "$VENVPY" -I - >"$SCRATCH/$label.log" 2>&1 <<'PYTHON' || status=$?
+from importlib.util import find_spec
+
+from manifoldx.vehicles import FlatGround, NativeVehicles
+
+try:
+    NativeVehicles([], FlatGround())
+except RuntimeError as error:
+    if (
+        str(error) == "NativeVehicles requires the native ManifoldX wheel"
+        and isinstance(error.__cause__, ImportError)
+        and find_spec("manifoldx._core_native") is None
+    ):
+        raise SystemExit("FAIL: NativeVehicles requires the native ManifoldX wheel")
+    raise
+PYTHON
     cat "$SCRATCH/$label.log"
     echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
     return "$status"
@@ -233,6 +261,13 @@ if run_vehicles vehicles-missing; then
     fail "vehicle gate passed with extension removed"
 fi
 grep -q 'ImportError.*_core_native' "$SCRATCH/vehicles-missing.log" || fail "vehicle gate failed for unrelated reason"
+if run_public_fleet public-fleet-missing; then
+    fail "public fleet gate passed with _core_native removed"
+else
+    [ "$?" -eq 1 ] || fail "public fleet gate returned an unexpected exit status"
+fi
+tr -d '\r' <"$SCRATCH/public-fleet-missing.log" | grep -x 'FAIL: NativeVehicles requires the native ManifoldX wheel' >/dev/null \
+    || fail "public fleet gate failed for a reason other than missing _core_native"
 run_selection missing selection-missing
 # At the real extension path, a bad binary must enter the loader-error branch.
 printf 'not a loadable extension\n' >"$SO"
@@ -243,5 +278,6 @@ run_entity_slots entity-slots-restored
 run_component_world component-world-restored
 run_runtime runtime-restored --deterministic-only
 run_vehicles vehicles-restored
+run_public_fleet public-fleet-restored
 run_selection installed selection-restored
 echo "native-verify: passed for $PYVER/$ABI (installed -> missing -> restored)"
