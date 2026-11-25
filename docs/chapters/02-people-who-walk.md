@@ -347,3 +347,79 @@ holds: the store is a handful of arrays, the systems two functions over those
 arrays, and when the people get skeletons their joint matrices go in a
 `JointStore`, one block per posed entity, which chapter 7 uses. The next
 chapter gives the visitor a way to step into the plaza.
+
+## Native World
+
+The installed native wheel exposes `World`, a fixed-capacity ECS and a
+single-shot frame runtime. Set up its schema and entities on the thread that
+will call `run`. The frame clock and command barriers use the same World.
+The Python `Engine` remains the entrypoint for the complete desktop renderer.
+
+```{python}
+import manifoldx as mx
+from manifoldx.components import Component
+
+
+class Speed(Component):
+    value: mx.Float
+
+
+world = mx.World(64)
+world.register(Speed)
+world.spawn(Speed(value=3.0))
+speed = world.field(Speed, "value")
+world.set(world.query(Speed).where(speed > 2.0), speed, 1.0)
+world.run(frames=1, paced=False)
+assert world.query(Speed).numpy("value")[0, 0] == 1.0
+```
+
+`register` accepts component declarations or a name with an explicit `f32`
+or `u32` width. Register every component before the first `spawn`. `Entity`
+handles identify a World, a slot and a generation. A reused slot never
+accepts the previous generation. Buffers passed to `spawn`, `replace` or
+`submit_spawn` must have matching dtype, width, row count and C-contiguous
+layout. `replace` and setup `spawn` require the idle owner thread.
+
+A query builds selection IR. `where` accepts scalar field comparisons, and
+`set` evaluates them against the committed values at that command's FIFO
+position. `read` and `numpy` are explicit readbacks. `Readback` carries the
+column version, entity identities and membership. NumPy sees immutable owned
+bytes. An owned result can outlive the frame and the World. `rows_read`
+reports rows, bytes and calls at the Python boundary.
+
+`set`, `destroy` and `submit_spawn` return a command ID. `outcome` returns
+its ID, frame and optional error. Taking an outcome frees one queue credit.
+Full admission raises immediately. Every command validates all its affected
+rows before mutation. Stopping cancels commands that have not reached a
+barrier. Applications that submit continuously must consume outcomes while
+the loop runs.
+
+Use `@world.system(reads=[Speed], writes=[speed])` for an explicit synchronous
+system and add `hz=` (1–30) for a periodic async system. Both receive a snapshot
+and a command lease. `snapshot.clock` is a `Clock` with `frame`, `time` and
+`dt`. An async call reads a fixed version of its declared CPU components.
+Use `snapshot.read(Speed)` to pull rows or `snapshot.query(Speed)` to build a
+lazy selection for a command. Predicates and writes must be declared. A
+system that spawns or destroys entities must declare `structural=True`.
+Use `commands.emit(name, value)` for bounded string events in the run report.
+An escaped snapshot or command lease raises after the callback returns.
+
+The Rust loop applies external FIFO commands before settling ready systems in
+registration order. A synchronous callback sees preceding commits. Async
+systems with independent declarations can overlap. A busy or conflicting
+periodic start is skipped. An async result whose declared read or write
+versions changed is rejected at the barrier. Its command IDs report a stale
+result and its events are discarded. Closing discards unapplied work and
+joins workers.
+The run report records stale results, frame intervals, named system timings, calls over one
+millisecond, snapshot copies and bytes. `run` without synchronous systems or
+a graphics bridge stays detached from Python while the clock advances.
+
+`PythonGraphicsBridge` is an explicit main-thread adapter for a Python graphics
+owner. Supply its `present(snapshot)` callback and list the components it
+reads. The callback runs after the frame barrier with a single snapshot lease.
+Use `snapshot.overruns` to display the names and nanoseconds of synchronous
+callbacks that exceeded one millisecond at that barrier.
+Its sole graphics owner keeps the window, context, device, queue and renderer
+together. `run` reports bridge calls, rows offered, bytes offered and attached
+nanoseconds. The native World entrypoint has no implicit graphics fallback.
