@@ -52,6 +52,15 @@ def compare_speed(car: Car, dt: f32) -> None:
 
 
 @mx.kernel
+def branch_after_store(car: Car, dt: f32) -> None:
+    car.pos += car.forward * dt
+    if car.speed > 0.0:
+        car.speed += dt
+    else:
+        car.speed -= dt
+
+
+@mx.kernel
 def store_local(car: Car, dt: f32) -> None:
     direction: vec3 = car.forward
     direction *= dt
@@ -168,6 +177,13 @@ def isolated_cpu(program):
     assert dense.dispatch_kernel(program, dt=0.125, target="cpu") == 98
     for row in dense.query(Car).numpy():
         compare(pose(row), (0.25, 0.03125, 0, 0), "CPU dense membership")
+
+    branching = make_world(97)
+    speeds = [1.0] * 32 + [1.0, -1.0] * 16 + [-1.0] * 33
+    branching.spawn(Car(speed=speeds, forward=(1, 0, 0)), count=len(speeds))
+    assert branching.dispatch_kernel(branch_after_store, dt=0.25, target="cpu") == len(speeds)
+    for row, speed in zip(branching.query(Car).numpy(), speeds, strict=True):
+        compare(pose(row), (speed * 1.25, 0.25, 0, 0), "CPU branch after store")
 
     seq = CORPUS["sequence"]
     expected = list(checkpoints())

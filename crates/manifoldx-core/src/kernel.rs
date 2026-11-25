@@ -186,19 +186,26 @@ impl Program {
         }
         let mut single = vec![[[0.0; 1]; 3]; self.registers];
         single[0][0][0] = dt;
-        if self.branches {
-            return world.visit_kernel_runs(column, self.writes, |run| {
-                for row in run.chunks_exact_mut(self.width) {
-                    self.evaluate(row, &mut single);
-                }
-            });
-        }
         let mut block = vec![[[0.0; BLOCK]; 3]; self.registers];
         block[0][0].fill(dt);
+        // A branch may diverge after earlier stores. Until a whole block
+        // finishes, keep its speculative stores in scratch.
+        let mut staged = self.branches.then(|| vec![0.0; self.width * BLOCK]);
         world.visit_kernel_runs(column, self.writes, |run| {
             let mut groups = run.chunks_exact_mut(self.width * BLOCK);
             for rows in &mut groups {
-                self.evaluate(rows, &mut block);
+                if let Some(staged) = &mut staged {
+                    staged.copy_from_slice(rows);
+                    if self.evaluate(staged, &mut block) {
+                        rows.copy_from_slice(staged);
+                    } else {
+                        for row in rows.chunks_exact_mut(self.width) {
+                            self.evaluate(row, &mut single);
+                        }
+                    }
+                } else {
+                    self.evaluate(rows, &mut block);
+                }
             }
             for row in groups.into_remainder().chunks_exact_mut(self.width) {
                 self.evaluate(row, &mut single);
@@ -210,7 +217,8 @@ impl Program {
         &self.name
     }
 
-    fn evaluate<const N: usize>(&self, rows: &mut [f32], values: &mut [[[f32; N]; 3]]) {
+    /// Return false if the lanes take different paths at a branch.
+    fn evaluate<const N: usize>(&self, rows: &mut [f32], values: &mut [[[f32; N]; 3]]) -> bool {
         let mut pc = 0;
         while pc < self.code.len() {
             match self.code[pc] {
@@ -267,12 +275,17 @@ impl Program {
                         u8::from(op.test(values[a][0][lane], values[b][0][lane])) as f32
                     });
                 }
-                Instruction::Branch(src, target) if values[src][0][0] == 0.0 => {
-                    debug_assert_eq!(N, 1);
-                    pc = target;
-                    continue;
+                Instruction::Branch(src, target) => {
+                    let condition = &values[src][0];
+                    let take_jump = condition[0] == 0.0;
+                    if !condition.iter().all(|&value| (value == 0.0) == take_jump) {
+                        return false;
+                    }
+                    if take_jump {
+                        pc = target;
+                        continue;
+                    }
                 }
-                Instruction::Branch(..) => {}
                 Instruction::Jump(target) => {
                     pc = target;
                     continue;
@@ -280,6 +293,7 @@ impl Program {
             }
             pc += 1;
         }
+        true
     }
 }
 
