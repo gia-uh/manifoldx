@@ -121,6 +121,38 @@ def expect_diagnostic(source, line, category, snippet, *, column=5):
         raise AssertionError(f"invalid fixture imported: {source.name}")
 
 
+def vector_register_aliases():
+    from manifoldx._core_native import _KernelProgram
+
+    cases = (
+        # Both mixed operand orders permit overwriting the vector.
+        ("mul", 2, 1, 1),
+        ("mul", 1, 2, 2),
+        ("add", 1, 3, 3),
+        ("sub", 1, 3, 3),
+        ("mul", 1, 3, 3),
+    )
+    inputs = [
+        ("load", 1, 0, 3, 0, 0.0),
+        ("literal", 2, 0, 0, 0, 2.0),
+        ("load", 3, 0, 3, 0, 0.0),
+    ]
+    for op, left, right, widths in cases:
+        _KernelProgram(1, "vector_alias", "Car", 3, [*inputs, (op, 1, left, right, widths, 0.0)])
+    accepted = []
+    for _, left, right, widths in cases[:2]:
+        try:
+            _KernelProgram(
+                1, "scalar_alias", "Car", 3, [*inputs, ("mul", 2, left, right, widths, 0.0)]
+            )
+        except ValueError as error:
+            assert str(error) == "kernel vector destination aliases a scalar operand", str(error)
+        else:
+            accepted.append(widths)
+    assert not accepted, f"kernel accepted scalar destination aliases, widths={accepted}"
+    print("vector register validation: five legal cases and both scalar alias rejections")
+
+
 def car_row(speed, pos, target, forward):
     return Car(speed=speed, target_speed=target, pos=pos, forward=forward)
 
@@ -445,6 +477,7 @@ def main():
         GpuKernelGroup(None, program, rows=1, target="wgsl")
     if args.mode == "diagnostics":
         diagnostics()
+        vector_register_aliases()
     elif args.mode == "cpu":
         isolated_cpu(program)
     elif args.mode == "gpu":

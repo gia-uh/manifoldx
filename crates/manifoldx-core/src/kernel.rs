@@ -356,6 +356,10 @@ fn validate_registers(code: &[Instruction]) -> Result<(), &'static str> {
             Instruction::Vector(_, out, a, b, va, vb) => {
                 operand(a, if va { VEC3 } else { F32 })?;
                 operand(b, if vb { VEC3 } else { F32 })?;
+                // The scalar plane is read again for each output coordinate.
+                if (!va && out == a) || (!vb && out == b) {
+                    return Err("kernel vector destination aliases a scalar operand");
+                }
                 types[out] = VEC3;
             }
             Instruction::Clamp(out, src, lo, hi) => {
