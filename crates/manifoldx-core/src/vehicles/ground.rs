@@ -3,9 +3,18 @@
 //! bridge deck selected by the level nearest `near`. No callback crosses into
 //! Python.
 
+use std::sync::Arc;
+
+use super::sim::V3;
+use super::terrain::{Obstacle, Surface, Terrain};
+
 /// One native ground. `near` picks the level at a place where several exist.
 #[derive(Clone, Debug)]
 pub enum Ground {
+    Tiles {
+        terrain: Arc<Terrain>,
+        origin: V3,
+    },
     Flat {
         level: f64,
         grip: f64,
@@ -79,10 +88,57 @@ impl Ground {
         })
     }
 
+    pub fn terrain(terrain: Arc<Terrain>) -> Self {
+        Self::Tiles {
+            terrain,
+            origin: [0.0; 3],
+        }
+    }
+
+    pub fn surface(&self, x: f64, z: f64, near: f64) -> Option<Surface> {
+        let Self::Tiles { terrain, origin } = self else {
+            return None;
+        };
+        let mut sample = terrain.sample(x + origin[0], z + origin[2], near + origin[1])?;
+        sample.height -= origin[1];
+        Some(sample)
+    }
+
+    pub(super) fn obstacles(&self, low: [f64; 2], high: [f64; 2]) -> Vec<Obstacle> {
+        let Self::Tiles { terrain, origin } = self else {
+            return Vec::new();
+        };
+        terrain
+            .obstacles(
+                [low[0] + origin[0], low[1] + origin[2]],
+                [high[0] + origin[0], high[1] + origin[2]],
+            )
+            .map(|mut wall| {
+                for p in &mut wall.ends {
+                    p[0] -= origin[0];
+                    p[1] -= origin[2];
+                }
+                wall.y[0] -= origin[1];
+                wall.y[1] -= origin[1];
+                wall
+            })
+            .collect()
+    }
+
+    pub(super) fn height_if_present(&self, x: f64, z: f64, near: f64) -> Option<f64> {
+        match self {
+            Self::Tiles { .. } => self.surface(x, z, near).map(|sample| sample.height),
+            _ => Some(self.height(x, z, near)),
+        }
+    }
+
     /// The surface height under `(x, z)`; where several levels exist, the one
     /// nearest `near`.
-    pub fn height(&self, x: f64, _z: f64, near: f64) -> f64 {
+    pub fn height(&self, x: f64, z: f64, near: f64) -> f64 {
         match self {
+            Self::Tiles { .. } => self
+                .surface(x, z, near)
+                .map_or(f64::NEG_INFINITY, |s| s.height),
             Self::Flat { level, .. } => *level,
             Self::Profile {
                 points,
@@ -113,6 +169,7 @@ impl Ground {
     /// The surface's factor on each tyre's `mu`.
     pub fn grip(&self, _x: f64, _z: f64) -> f64 {
         match self {
+            Self::Tiles { .. } => self.surface(_x, _z, 0.0).map_or(0.0, |s| s.grip),
             Self::Flat { grip, .. } | Self::Profile { grip, .. } => *grip,
         }
     }
