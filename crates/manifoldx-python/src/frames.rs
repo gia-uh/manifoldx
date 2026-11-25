@@ -74,6 +74,7 @@ struct ReadCounts {
 
 struct Snapshot {
     clock: (u64, f64, f64),
+    overruns: Vec<(String, u64)>,
     columns: Vec<(usize, Arc<ComponentReadout>)>,
 }
 
@@ -93,6 +94,17 @@ impl FrameSnapshot {
             .as_ref()
             .map(|s| s.clock)
             .ok_or_else(|| PyRuntimeError::new_err("snapshot lease expired"))
+    }
+
+    #[getter]
+    fn overruns(&self) -> PyResult<Vec<(String, u64)>> {
+        let overruns = self
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.overruns.clone());
+        overruns.ok_or_else(|| PyRuntimeError::new_err("snapshot lease expired"))
     }
 
     fn read<'py>(&self, py: Python<'py>, column: usize) -> PyResult<Bound<'py, PyDict>> {
@@ -177,17 +189,25 @@ impl FrameCommands {
         self.stage(set_command(root, predicates, component, field, value)?)
     }
 
-    fn spawn(&self, py: Python<'_>, count: u32, payload: &Bound<'_, PyDict>) -> PyResult<u64> {
+    fn spawn(&self, py: Python<'_>, count: u32, payload: &Bound<'_, PyAny>) -> PyResult<u64> {
         self.check_structural()?;
         let credit = self.state.control.reserve().map_err(admission_error)?;
-        let command = spawn_command(py, &self.state.schemas, self.state.max_rows, count, payload)?;
+        let payload = payload.call0()?;
+        let command = spawn_command(
+            py,
+            &self.state.schemas,
+            self.state.max_rows,
+            count,
+            payload.cast::<PyDict>()?,
+        )?;
         self.stage_with(|| credit.stage(command))
     }
 
     fn destroy(&self, py: Python<'_>, handles: &Bound<'_, PyAny>) -> PyResult<u64> {
         self.check_structural()?;
         let credit = self.state.control.reserve().map_err(admission_error)?;
-        let ids = decode_handles_limited(py, handles, Some((self.state.max_rows, 16)))?;
+        let handles = handles.call0()?;
+        let ids = decode_handles_limited(py, &handles, Some((self.state.max_rows, 16)))?;
         self.stage_with(|| credit.stage(Command::Destroy(ids)))
     }
 
@@ -372,6 +392,7 @@ struct System {
     ns: u64,
     calls: u64,
     over_budget: u64,
+    last_ns: u64,
     skipped: u64,
     last_start: Option<u64>,
 }
@@ -390,6 +411,7 @@ impl System {
         tick: u64,
     ) -> Result<(), String> {
         self.ns = self.ns.max(completed.ns);
+        self.last_ns = completed.ns;
         self.calls += 1;
         self.over_budget += u64::from(completed.ns > 1_000_000);
         let batch = completed
@@ -454,6 +476,7 @@ fn capture(
     }
     Ok(Snapshot {
         clock: (clock.tick(), clock.time(), clock.dt()),
+        overruns: Vec::new(),
         columns,
     })
 }
@@ -471,8 +494,14 @@ impl Bridge {
         cache: &mut Cache,
         report: &mut Report,
         counts: &Arc<Mutex<ReadCounts>>,
+        systems: &[System],
     ) -> Result<(), String> {
-        let snapshot = capture(world, clock, &self.reads, cache, report)?;
+        let mut snapshot = capture(world, clock, &self.reads, cache, report)?;
+        snapshot.overruns = systems
+            .iter()
+            .filter(|s| matches!(s.work, Work::Sync(_)) && s.last_ns > 1_000_000)
+            .map(|s| (s.name.clone(), s.last_ns))
+            .collect();
         let rows: usize = snapshot
             .columns
             .iter()
@@ -539,6 +568,7 @@ impl Loop {
                 ns: 0,
                 calls: 0,
                 over_budget: 0,
+                last_ns: 0,
                 skipped: 0,
                 last_start: None,
             });
@@ -628,7 +658,14 @@ impl Loop {
                 }
             }
             if let Some(bridge) = &self.bridge {
-                bridge.present(world, &clock, &mut cache, &mut report, &self.state.counts)?;
+                bridge.present(
+                    world,
+                    &clock,
+                    &mut cache,
+                    &mut report,
+                    &self.state.counts,
+                    &self.systems,
+                )?;
             }
             control.record_frame();
             let deadline = clock.advance();
@@ -709,13 +746,14 @@ impl FrameLoop {
 
     fn destroy(&self, py: Python<'_>, handles: &Bound<'_, PyAny>) -> PyResult<u64> {
         let credit = self.control.reserve().map_err(admission_error)?;
-        let ids = decode_handles_limited(py, handles, Some((self.max_rows, 16)))?;
+        let handles = handles.call0()?;
+        let ids = decode_handles_limited(py, &handles, Some((self.max_rows, 16)))?;
         credit
             .submit(Command::Destroy(ids))
             .map_err(admission_error)
     }
 
-    fn spawn(&self, py: Python<'_>, count: u32, payload: &Bound<'_, PyDict>) -> PyResult<u64> {
+    fn spawn(&self, py: Python<'_>, count: u32, payload: &Bound<'_, PyAny>) -> PyResult<u64> {
         let credit = self.control.reserve().map_err(admission_error)?;
         let schemas = {
             let guard = self.owner.lock().unwrap();
@@ -726,7 +764,14 @@ impl FrameLoop {
         let schemas = schemas.ok_or_else(|| {
             PyRuntimeError::new_err("use a structural command lease during a frame")
         })?;
-        let command = spawn_command(py, &schemas, self.max_rows, count, payload)?;
+        let payload = payload.call0()?;
+        let command = spawn_command(
+            py,
+            &schemas,
+            self.max_rows,
+            count,
+            payload.cast::<PyDict>()?,
+        )?;
         credit.submit(command).map_err(admission_error)
     }
 

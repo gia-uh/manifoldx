@@ -126,6 +126,10 @@ class _Snapshot:
     def clock(self):
         return Clock(*self._lease.clock)
 
+    @property
+    def overruns(self):
+        return self._lease.overruns
+
     def query(self, component):
         # A selection remains a lazy command input. The lease controls reading.
         self._lease.clock
@@ -145,10 +149,10 @@ class _Commands:
 
     def spawn(self, *components, count=1, payload=None):
         count = self._world._checked_count(count)
-        return self._lease.spawn(count, self._world._payload(count, components, payload))
+        return self._lease.spawn(count, lambda: self._world._payload(count, components, payload))
 
     def destroy(self, entities):
-        return self._lease.destroy(self._world._handles(entities))
+        return self._lease.destroy(lambda: self._world._handles(entities, command=True))
 
     def emit(self, name, value):
         self._lease.emit(name, value)
@@ -234,8 +238,8 @@ class World:
                 raise ValueError("Component classes require their declared CPU layout")
             name, layout = component.__name__, component._layout.copy()
             kind = {"f4": "f32", "u4": "u32"}.get(component._dtype.str[1:])
-            if kind is None:
-                raise TypeError("native World supports float32 and uint32")
+            if kind is None or not component._dtype.isnative:
+                raise TypeError("native World supports native-endian float32 and uint32")
             width = component._shape[0]
         column = self._native.register_component(name, kind, width)
         self._schemas[component] = column
@@ -281,9 +285,12 @@ class World:
             for slot, generation in iter_unpack("<QQ", data)
         )
 
-    def _handles(self, entities):
+    def _handles(self, entities, *, command=False):
         data = bytearray()
-        for entity in entities:
+        limit = min(self._capacity, self._max_command_rows) if command else self._capacity
+        for row, entity in enumerate(entities):
+            if row >= limit:
+                raise ValueError("entity handles exceed the row limit")
             if not isinstance(entity, Entity) or entity._owner is not self._identity:
                 raise ValueError("entity belongs to a different World")
             data.extend(pack("=QQ", entity.slot, entity.generation))
@@ -362,13 +369,13 @@ class World:
     def destroy(self, entities):
         """Enqueue destruction using each entity's generation."""
         self._external()
-        return self._loop.destroy(self._handles(entities))
+        return self._loop.destroy(lambda: self._handles(entities, command=True))
 
     def submit_spawn(self, *components, count=1, payload=None):
         """Prepare a structural command for the next barrier."""
         self._owner()
         count = self._checked_count(count)
-        return self._loop.spawn(count, self._payload(count, components, payload))
+        return self._loop.spawn(count, lambda: self._payload(count, components, payload))
 
     def outcome(self):
         """Take a completion as (command ID, frame, error) and free its credit."""
