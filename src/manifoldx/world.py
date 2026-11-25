@@ -451,7 +451,7 @@ class World:
         self._systems.append((program.name, None, [], writes, (column, compiled)))
         return program
 
-    def run(self, *, frames, hz=60, paced=True, graphics=None):
+    def run(self, *, frames, hz=60, paced=True, graphics=None, _profile=False):
         """Run the native clock until the frame limit or a stop request."""
         self._owner()
         bridge = None
@@ -461,7 +461,7 @@ class World:
             bridge = graphics._bind(self)
         self._running = True
         try:
-            result = self._loop.run(frames, hz, paced, self._systems, bridge)
+            result = self._loop.run(frames, hz, paced, self._systems, bridge, _profile)
         finally:
             self._running = False
             self._started = self._loop.stopped

@@ -349,14 +349,15 @@ def residency(program, control):
     print(json.dumps({"backend": "wgsl", "timestamp_probe": stamp, **group.counters()}))
 
 
-def performance(frames):
+def performance(frames, profile):
     rows = 100_000
     world = make_world(rows)
     world.spawn(Car(forward=(1, 0, 0), target_speed=30), count=rows)
     for program in (drive, advance_x, reverse_x, compare_speed, store_local):
         world.kernel(program, target="cpu")
     start = time.perf_counter_ns()
-    report = world.run(frames=frames, paced=True)
+    options = {"_profile": True} if profile else {}
+    report = world.run(frames=frames, paced=True, **options)
     duration_ms = (time.perf_counter_ns() - start) / 1e6
     intervals = sorted(report["frame_intervals_ns"])
     assert len(intervals) == frames - 1 and report["frames"] == frames
@@ -365,6 +366,21 @@ def performance(frames):
     assert world.rows_read == (0, 0, 0) and report["snapshot_copies"] == 0
     p99_ms = intervals[math.ceil(0.99 * len(intervals)) - 1] / 1e6
     over_33 = sum(interval > 33e6 for interval in intervals)
+    timing = {}
+    if profile:
+        samples = report["frame_timing_ns"]
+        assert len(samples) == frames and all(0 < row[2] <= row[3] for row in samples)
+        timing = {
+            "frame_timing_fields": [
+                "start_late",
+                "command_barrier",
+                "kernels",
+                "active",
+                "wait_return_from_deadline",
+                "slowest_kernel_index_and_time",
+            ],
+            "frame_timing_ns": samples,
+        }
     print(
         json.dumps(
             {
@@ -378,6 +394,7 @@ def performance(frames):
                 "duration_ms": duration_ms,
                 "intervals_ns": report["frame_intervals_ns"],
                 "system_metrics": report["systems"],
+                **timing,
                 "snapshots": report["snapshot_copies"],
                 "rows_read": world.rows_read,
                 "kernel_rows": report["kernel_rows"],
@@ -392,6 +409,7 @@ def main():
     parser.add_argument("mode", choices=("cpu", "gpu", "residency", "performance", "diagnostics"))
     parser.add_argument("--control", choices=("clamp", "dispatch", "readback", "backend"))
     parser.add_argument("--frames", type=int, default=600)
+    parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()
     assert sys.flags.isolated and "site-packages" in Path(mx.__file__).parts, mx.__file__
     print(
@@ -418,7 +436,7 @@ def main():
     elif args.mode == "residency":
         residency(program, args.control)
     else:
-        performance(args.frames)
+        performance(args.frames, args.profile)
 
 
 if __name__ == "__main__":

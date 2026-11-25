@@ -514,8 +514,13 @@ impl System {
     }
 }
 
+// Start lateness, command barrier, kernel work, active frame work, return
+// from the pacing wait relative to the deadline, and the slowest kernel.
+type FrameTiming = (u64, u64, u64, u64, Option<i64>, Option<(usize, u64)>);
+
 #[derive(Default)]
 struct Report {
+    frame_timing_ns: Vec<FrameTiming>,
     frame_intervals_ns: Vec<u64>,
     events: Vec<(u64, String, String)>,
     system_commands: u64,
@@ -626,6 +631,7 @@ impl Bridge {
 struct Loop {
     systems: Vec<System>,
     bridge: Option<Bridge>,
+    profile: bool,
     state: CallState,
 }
 
@@ -634,6 +640,7 @@ impl Loop {
         registrations: Vec<Prepared>,
         bridge: Option<Bridge>,
         state: CallState,
+        profile: bool,
     ) -> std::io::Result<Self> {
         let mut systems = Vec::with_capacity(registrations.len());
         for (name, hz, reads, writes, participant) in registrations {
@@ -665,6 +672,7 @@ impl Loop {
             systems,
             bridge,
             state,
+            profile,
         })
     }
 
@@ -677,9 +685,14 @@ impl Loop {
         paced: bool,
         batches_per_frame: usize,
     ) -> Result<Report, String> {
+        let profile = self.profile;
         let mut report = Report::default();
         report.frame_intervals_ns.reserve(frames as usize);
+        if profile {
+            report.frame_timing_ns.reserve(frames as usize);
+        }
         let mut previous = None;
+        let mut scheduled = None;
         let mut clock = FrameClock::new(step);
         let mut cache = Cache::new();
         let mut due = Vec::with_capacity(self.systems.len());
@@ -688,6 +701,9 @@ impl Loop {
             if !control.frame_boundary(world, clock.tick(), batches_per_frame) {
                 break;
             }
+            let barrier = if profile { nanos(start.elapsed()) } else { 0 };
+            let mut kernels = 0;
+            let mut slowest = None;
             if let Some(previous) = previous.replace(start) {
                 report
                     .frame_intervals_ns
@@ -695,7 +711,7 @@ impl Loop {
             }
             // Settle ready work in registration order. A sync callback sees
             // the commits from all preceding registrations at this barrier.
-            for system in &mut self.systems {
+            for (index, system) in self.systems.iter_mut().enumerate() {
                 let (ready, current) = match &mut system.work {
                     Work::Kernel(column, program) => {
                         let start = Instant::now();
@@ -707,6 +723,12 @@ impl Loop {
                         system.calls += 1;
                         system.last_ns = nanos(start.elapsed());
                         system.ns = system.ns.max(system.last_ns);
+                        if profile {
+                            kernels += system.last_ns;
+                            if slowest.is_none_or(|(_, ns)| system.last_ns > ns) {
+                                slowest = Some((index, system.last_ns));
+                            }
+                        }
                         continue;
                     }
                     Work::Async(_, worker) => {
@@ -773,11 +795,30 @@ impl Loop {
             }
             control.record_frame();
             let deadline = clock.advance();
+            let active = if profile { nanos(start.elapsed()) } else { 0 };
+            let mut wake_offset = None;
             if paced {
                 control.wait_until(deadline - DEADLINE_GUARD.min(step / 10));
+                if profile {
+                    let wake = Instant::now();
+                    wake_offset = Some(if wake >= deadline {
+                        nanos(wake.duration_since(deadline)) as i64
+                    } else {
+                        -(nanos(deadline.duration_since(wake)) as i64)
+                    });
+                }
                 while Instant::now() < deadline {
                     std::hint::spin_loop();
                 }
+            }
+            if profile {
+                let late = scheduled.map_or(0, |deadline| {
+                    nanos(start.saturating_duration_since(deadline))
+                });
+                report
+                    .frame_timing_ns
+                    .push((late, barrier, kernels, active, wake_offset, slowest));
+                scheduled = paced.then_some(deadline);
             }
         }
         Ok(report)
@@ -961,6 +1002,8 @@ impl FrameLoop {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (frames, hz, paced, registrations, bridge, profile=false))]
+    #[allow(clippy::too_many_arguments)]
     fn run<'py>(
         &self,
         py: Python<'py>,
@@ -969,6 +1012,7 @@ impl FrameLoop {
         paced: bool,
         registrations: Vec<Registration>,
         bridge: Option<(Vec<usize>, Py<PyAny>)>,
+        profile: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         if thread::current().id() != self.owner_thread {
             return Err(PyRuntimeError::new_err("run on the World owner thread"));
@@ -1022,7 +1066,8 @@ impl FrameLoop {
         };
         let execution = py.detach(|| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut run = Loop::new(registrations, bridge, state).map_err(|e| e.to_string())?;
+                let mut run =
+                    Loop::new(registrations, bridge, state, profile).map_err(|e| e.to_string())?;
                 let report = run.execute(
                     &mut world,
                     &self.control,
@@ -1043,6 +1088,9 @@ impl FrameLoop {
         let result = PyDict::new(py);
         result.set_item("frames", self.control.stats().frames)?;
         result.set_item("frame_intervals_ns", report.frame_intervals_ns)?;
+        if profile {
+            result.set_item("frame_timing_ns", report.frame_timing_ns)?;
+        }
         result.set_item("events", report.events)?;
         result.set_item("system_commands", report.system_commands)?;
         result.set_item("stale_system_results", report.stale_system_results)?;
