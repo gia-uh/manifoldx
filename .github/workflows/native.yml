@@ -1,7 +1,6 @@
 # The rust-core branch carries the Rust migration, and its PRs run focused
-# checks instead of the whole suite: the phase-0 native gates. These are
-# blocking — the installed-wheel smoke and the missing-extension negative
-# control fail the PR when they fail. The full suite (test.yml) still runs
+# checks instead of the whole suite: the native gates and applicable
+# regressions. The full suite (test.yml) still runs
 # on main and release branches; main-parity for rust-core stays a
 # coordinator decision until the phase-0 policy adds it.
 name: Native
@@ -32,7 +31,7 @@ jobs:
           python-version: '3.14t'
 
       - name: Install dependencies
-        run: uv sync --locked --group native --group dev
+        run: uv sync --locked --extra offline --group native --group dev
 
       - name: Check the workspace crates
         run: make native-check
@@ -55,6 +54,25 @@ jobs:
           tests/test_ibl.py::test_engine_environment_intensity
           tests/test_ibl_loading.py::test_set_environment_alone_starts_no_work
           tests/test_web_engine_apis.py -q
+
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+
+      - name: Run compute and volume rendering regressions
+        env:
+          WGPU_BACKEND_TYPE: Vulkan
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run --no-sync pytest -o addopts= -q -rs \
+            tests/test_compute.py tests/test_compute_integration.py \
+            tests/test_compute_slots.py tests/test_compute_transpile.py \
+            tests/test_compute_transpile_integration.py tests/test_volume_render.py \
+            | tee "$RUNNER_TEMP/compute-regressions.log"
+          if grep -q '^SKIPPED ' "$RUNNER_TEMP/compute-regressions.log"; then
+            echo "Compute or volume rendering regression tests skipped" >&2
+            exit 1
+          fi
 
       - name: Rift coverage
         run: uvx --from git+https://github.com/apiad/rift@v0.9.0 rift check .
