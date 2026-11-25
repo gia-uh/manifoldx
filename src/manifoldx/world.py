@@ -372,8 +372,8 @@ class World:
         return self._loop.destroy(lambda: self._handles(entities, command=True))
 
     def submit_spawn(self, *components, count=1, payload=None):
-        """Prepare a structural command for the next barrier."""
-        self._owner()
+        """Enqueue a producer spawn for the next barrier."""
+        self._external()
         count = self._checked_count(count)
         return self._loop.spawn(count, lambda: self._payload(count, components, payload))
 

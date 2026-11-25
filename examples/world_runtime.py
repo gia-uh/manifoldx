@@ -6,6 +6,7 @@ import json
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import numpy as np
@@ -264,6 +265,57 @@ def overlap():
     )
 
 
+def external_spawn():
+    world = World(2, queue_capacity=1, batches_per_frame=1)
+    world.register(Speed)
+    cars = world.query(Speed)
+    active = threading.Event()
+    acquired = []
+    sequence = []
+
+    class Exporter:
+        def __buffer__(self, flags):
+            acquired.append("get")
+            return memoryview(rows(42))
+
+        def __release_buffer__(self, view):
+            acquired.append("release")
+
+    def produce():
+        assert active.wait(5), "the frame loop never entered its first callback"
+        with rejects(RuntimeError, "World owner thread"):
+            world.spawn(Speed(value=99))
+        sequence.append(world.submit_spawn(payload={Speed: Exporter()}))
+        with rejects(RuntimeError, "queue is full"):
+            world.submit_spawn(payload={Speed: Exporter()})
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        producer = pool.submit(produce)
+
+        @world.system(reads=[Speed])
+        def inspect(snapshot, commands):
+            if snapshot.clock.frame == 0:
+                with rejects(RuntimeError, "command lease"):
+                    world.submit_spawn(payload={Speed: Exporter()})
+                assert not acquired
+                active.set()
+                producer.result(timeout=5)
+                assert world.outcome() is None
+                assert snapshot.read(Speed).numpy().size == 0
+            else:
+                assert snapshot.read(Speed).numpy().ravel().tolist() == [42]
+                assert world.outcome() == (sequence[0], 1, None)
+
+        assert world.run(frames=2, paced=False)["frames"] == 2
+
+    assert world.queue_full == 1
+    with rejects(RuntimeError, "queue is stopped"):
+        world.submit_spawn(payload={Speed: Exporter()})
+    assert acquired == ["get", "release"]
+    assert cars.numpy().ravel().tolist() == [42]
+    print(json.dumps({"external_spawn": sequence[0], "frame": 1, "queue_full": world.queue_full}))
+
+
 def stale_async_result():
     world = World(2)
     world.register(Speed)
@@ -444,6 +496,7 @@ def main():
         uint32_components()
         expired_structural_lease()
         overlap()
+        external_spawn()
         stale_async_result()
         shutdown()
 

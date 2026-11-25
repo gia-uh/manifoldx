@@ -5,6 +5,7 @@ use manifoldx_core::ecs::{Compare, ComponentReadout, ComponentSchema, Scalar, Se
 use manifoldx_core::runtime::{Admission, Command, Control, Staged, MAX_COMMAND_BYTES};
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::OnceLock;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -759,6 +760,7 @@ impl Loop {
 #[pyclass(frozen)]
 struct FrameLoop {
     owner: Arc<Mutex<Option<World>>>,
+    schemas: OnceLock<Arc<[ComponentSchema]>>,
     control: Control,
     rows: Arc<Mutex<ReadCounts>>,
     batches_per_frame: usize,
@@ -787,6 +789,7 @@ impl FrameLoop {
         };
         Ok(Self {
             owner: Arc::clone(&world.inner),
+            schemas: OnceLock::new(),
             control,
             batches_per_frame,
             max_rows,
@@ -819,13 +822,13 @@ impl FrameLoop {
         let credit = self.control.reserve().map_err(admission_error)?;
         let schemas = {
             let guard = self.owner.lock().unwrap();
-            guard
-                .as_ref()
-                .map(|world| world.schemas().cloned().collect::<Vec<_>>())
+            self.schemas.get().cloned().or_else(|| {
+                guard
+                    .as_ref()
+                    .map(|world| world.schemas().cloned().collect())
+            })
         };
-        let schemas = schemas.ok_or_else(|| {
-            PyRuntimeError::new_err("use a structural command lease during a frame")
-        })?;
+        let schemas = schemas.ok_or_else(|| PyRuntimeError::new_err("World is unavailable"))?;
         let payload = payload.call0()?;
         let command = spawn_command(
             py,
@@ -926,6 +929,11 @@ impl FrameLoop {
             drop(guard);
             return Err(PyValueError::new_err(error));
         }
+        // Publish the startup schemas before moving the World out of the owner slot.
+        let schemas = self
+            .schemas
+            .get_or_init(|| guard.as_ref().unwrap().schemas().cloned().collect())
+            .clone();
         let mut world = guard.take().unwrap();
         drop(guard);
 
@@ -934,7 +942,7 @@ impl FrameLoop {
         let state = CallState {
             control: self.control.clone(),
             counts: Arc::clone(&self.rows),
-            schemas: world.schemas().cloned().collect(),
+            schemas,
             max_rows: self.max_rows,
         };
         let execution = py.detach(|| {
