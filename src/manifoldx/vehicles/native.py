@@ -118,9 +118,10 @@ class NativeVehicles:
         elif type(ground) is FlatGround:
             setup = {"flat": (ground.level, ground._grip)}
         else:
+            bridge = None if ground.bridge is None else tuple(ground.bridge)
             setup = {"profile": (
                 list(zip(ground._px.tolist(), ground._py.tolist(), strict=True)),
-                ground.kerbs.tolist(), ground.kerb_height, ground.bridge, ground._grip,
+                ground.kerbs.tolist(), ground.kerb_height, bridge, ground._grip,
             )}
         self._specs = list(specs)
         self._fleet = _core_native._VehicleFleet([asdict(s) for s in self._specs], contact_friction, **setup)
