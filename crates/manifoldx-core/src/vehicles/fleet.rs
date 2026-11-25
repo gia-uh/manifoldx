@@ -286,3 +286,63 @@ fn slerp(a: Quaternion, mut b: Quaternion, t: f64) -> Quaternion {
     let right = (t * angle).sin() / angle.sin();
     std::array::from_fn(|i| left * a[i] + right * b[i])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vehicles::sim::test_car;
+
+    #[test]
+    fn pose_midpoint_uses_the_short_arc() {
+        let mut fleet = Fleet::new(vec![test_car()], Ground::default(), 0.4).unwrap();
+        let yaw = 170.0_f64.to_radians();
+        fleet.place(0, [0.0; 3], yaw, [0.0; 3]).unwrap();
+        let previous = fleet.sims[0].pose();
+        fleet.place(0, [0.0; 3], -yaw, [0.0; 3]).unwrap();
+        fleet.previous[0] = previous;
+        let a = previous.1;
+        let b = fleet.sims[0].pose().1;
+        assert!(a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>() < 0.0);
+
+        // The short path from +170° to -170° crosses 180° around +Y.
+        // The long path crosses 0° instead, where |w| is 1.
+        let q = fleet.pose(Some(0.5)).unwrap()[0].1;
+        let norm = q.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() <= 1e-9, "midpoint norm: {norm}");
+        assert!(
+            q[0].abs() <= 1e-9
+                && (q[1].abs() - 1.0).abs() <= 1e-9
+                && q[2].abs() <= 1e-9
+                && q[3].abs() <= 1e-9,
+            "short-arc midpoint must face back: {q:?}"
+        );
+    }
+
+    #[test]
+    fn checkpoint_restores_already_admitted_controls() {
+        let mut fleet = Fleet::new(vec![test_car()], Ground::default(), 0.4).unwrap();
+        let drive = Controls::new(-0.25, 0.75, 0.125, 0.5).unwrap();
+        let frame = fleet.advance(DT / 2.0, &[drive], None).unwrap();
+        assert_eq!(frame.substeps, 0);
+        let checkpoint = fleet.clone();
+
+        let frame = fleet.advance(0.0, &[Controls::default()], None).unwrap();
+        assert_eq!(frame.substeps, 0);
+        assert_eq!(fleet.sims[0].controls().throttle, 0.0);
+        fleet.restore(&checkpoint).unwrap();
+
+        // Observe restored controls before advance can overwrite them.
+        let restored = fleet.sims[0].controls();
+        assert_eq!(
+            [
+                restored.steer,
+                restored.throttle,
+                restored.brake,
+                restored.handbrake
+            ],
+            [-0.25, 0.75, 0.125, 0.5],
+            "already-admitted controls must survive restore"
+        );
+        assert_eq!(fleet.residual, DT / 2.0);
+    }
+}

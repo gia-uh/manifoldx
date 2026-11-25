@@ -40,28 +40,37 @@ def close(actual, expected, absolute=1e-8, relative=0):
     return abs(actual - expected) <= absolute + relative * abs(expected)
 
 
+def assert_translated_pose(actual, reference, shift, label):
+    # Use the frozen f64 position and sign-aligned quaternion tolerances.
+    actual_position = [x + dx for x, dx in zip(actual["position"], shift, strict=True)]
+    assert all(close(x, y, 1e-8, 1e-9) for x, y in
+               zip(actual_position, reference["position"], strict=True)), f"{label}: translated position differs"
+    a, b = actual["rotation"], reference["rotation"]
+    sign = -1 if sum(x * y for x, y in zip(a, b, strict=True)) < 0 else 1
+    assert all(close(sign * x, y, 1e-9, 1e-9) for x, y in
+               zip(a, b, strict=True)), f"{label}: orientation differs"
+
+
 def check_levels(force_high=False):
     levels = [(-5, 0.5, 11), (0, 1, 22), (6, 0.25, 33)]
     fleet = NativeVehicles([SPEC()], terrain(levels))
     for (x, z), (y, grip, level) in zip(((1, 2), (2, 1), (2, 2)), levels, strict=True):
         sample = fleet.sample_ground(x, z, 6.5 if force_high else y + 0.5)
         assert (sample.level, sample.height, sample.grip) == (level, y, grip), "wrong native ground level"
+        base = NativeVehicles([SPEC()], FlatGround(grip=grip))
+        base.place(0, (0, 0.5, 0), 0)
         fleet.place(0, (0, y + 0.5, 0), 0)
         for _ in range(120):
-            assert fleet.advance([ZERO], DT)["substeps"] == 1
-        state = fleet.snapshot()[0]
-        assert state["ground_y"] == [y] * 4
-        assert close(state["position"][1] - y, 0.0, 0.6)
-    base = NativeVehicles([SPEC()], FlatGround(grip=0.25))
-    base.place(0, (0, 0, 0), 0)
-    fleet.place(0, (0, 6, 0), 0)
-    for _ in range(120):
-        base.advance([ZERO], DT)
-        fleet.advance([ZERO], DT)
-        a, b = base.snapshot()[0], fleet.snapshot()[0]
-        assert close(a["position"][1], b["position"][1] - 6)
-        assert all(close(x, y) for x, y in zip(a["compression"], b["compression"], strict=True))
-    print("levels: 11/22/33 with distinct grip, identity and wheel support")
+            assert base.advance([ZERO], DT)["substeps"] == fleet.advance([ZERO], DT)["substeps"] == 1
+        actual, reference = fleet.snapshot()[0], base.snapshot()[0]
+        label = f"level {level}"
+        assert_translated_pose(actual, reference, (0, -y, 0), label)
+        assert actual["ground_y"] == [y] * 4
+        assert [h - y for h in actual["ground_y"]] == reference["ground_y"], f"{label}: wheel floor differs"
+        for field, absolute, relative in (("compression", 1e-8, 1e-9), ("load", 1e-3, 1e-8)):
+            assert all(close(a, b, absolute, relative) for a, b in
+                       zip(actual[field], reference[field], strict=True)), f"{label}: suspension {field} differs"
+        print(f"{label}: 120 ticks, {grip=}, pose and suspension match the translated plane")
 
 
 def check_grids_and_tiles():
@@ -82,21 +91,25 @@ def check_grids_and_tiles():
     left = GroundTile((-1, 0), 1, triangles=rectangle(-16, 0, 0, 16, 0, 1, 51))
     right = GroundTile((0, 0), 2, triangles=rectangle(0, 0, 8, 16, 0, 1, 51)
                        + rectangle(8, 0, 16, 16, 0.125, 1, 52))
-    road = NativeVehicles([SPEC()], TiledGround(16, [left, right]))
+    ground = TiledGround(16, [left, right])
+    road = NativeVehicles([SPEC()], ground)
+    control = NativeVehicles([SPEC()], ground)
     for x, height in [(-0.125, 0), (0, 0), (0.125, 0), (7.875, 0), (8.125, 0.125)]:
         assert road.sample_ground(x, 1, 0).height == height
     road.place(0, (-4, 0, 1), 0)
+    control.place(0, (-4, 0, 1), 0)
     positions = []
     for _ in range(360):
-        road.advance([[0, 1, 0, 0]], DT)
+        assert road.advance([[0, 1, 0, 0]], DT)["substeps"] == control.advance([[0, 1, 0, 0]], DT)["substeps"] == 1
         positions.append(road.snapshot()[0])
     assert positions[-1]["position"][0] > 8.125
     assert any(0.125 in row["ground_y"] for row in positions), "wheels did not meet the kerb"
 
-    road.update_ground(remove=[((0, 0), 2)])
-    assert road.advance([ZERO], DT / 2)["substeps"] == 0
+    for fleet in (road, control):
+        fleet.update_ground(remove=[((0, 0), 2)])
+    assert road.advance([ZERO], DT / 2)["substeps"] == control.advance([ZERO], DT / 2)["substeps"] == 0
     assert road.sample_ground(0.125, 1, 0).version == 2
-    assert road.advance([ZERO], DT / 2)["substeps"] == 1
+    assert road.advance([ZERO], DT / 2)["substeps"] == control.advance([ZERO], DT / 2)["substeps"] == 1
     assert road.sample_ground(0.125, 1, 0) is None
     try:
         road.update_ground([right])
@@ -104,12 +117,17 @@ def check_grids_and_tiles():
         assert "new positive version" in str(error)
     else:
         raise AssertionError("an unloaded tile version was reused")
-    road.rebase((32, 2, 0))
+    control_state = control.snapshot()
+    assert road.snapshot() == control_state
+    shift = (32, 2, 0)
+    road.rebase(shift)
+    assert road.snapshot() == control_state, "staged rebase moved the body before the substep"
     assert road.sample_ground(-0.125, 1, 0).version == 1
-    road.advance([ZERO], DT)
+    assert road.advance([ZERO], DT)["substeps"] == control.advance([ZERO], DT)["substeps"] == 1
+    assert_translated_pose(road.snapshot()[0], control.snapshot()[0], shift, "rebase publication tick 362")
     shifted = road.sample_ground(-32.125, 1, -2)
     assert (shifted.height, shifted.tile, shifted.version) == (-2, (-1, 0), 1)
-    print("heightfield, kerb and cell edge: native normals, support, retire and rebase")
+    print("heightfield, kerb and cell edge: native normals, support, retire and relative pose at rebase tick 362")
 
 
 def check_grip_and_callbacks():
