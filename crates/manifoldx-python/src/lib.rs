@@ -928,6 +928,9 @@ fn _core_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     frames::register(m)?;
     kernel::register(m)?;
     m.add_class::<vehicles::PyVehicleSim>()?;
+    m.add_class::<vehicles::PyVehicleFleet>()?;
+    m.add_class::<vehicles::PyFleetCheckpoint>()?;
+    m.add_class::<vehicles::PyVehicleTerrain>()?;
     m.add_class::<vehicles::PyVehicleRuntime>()?;
     Ok(())
 }

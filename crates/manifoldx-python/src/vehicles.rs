@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use manifoldx_core::ecs::{EntityId, World};
 use manifoldx_core::runtime::{Admission, Command, Control, Phase, Runtime, VehicleColumns};
+use manifoldx_core::vehicles::terrain::{Heightfield, Obstacle, Terrain, Tile, TileKey, Triangle};
 use manifoldx_core::vehicles::{
-    Controls, Engine, Gearbox, Ground, Sim, Tyre, VehicleSpec, Wheel, DT,
+    Assist, Controls, Engine, Fleet, Gearbox, Ground, Pose, Sim, Tyre, VehicleSpec, Wheel, DT,
 };
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
@@ -220,6 +221,11 @@ fn snapshot_dict<'py>(
     out.set_item("shift_timer", state.shift_timer)?;
     out.set_item("rpm", state.rpm)?;
     out.set_item("impulse", state.impulse)?;
+    out.set_item("wheel_centres", &state.wheel_centres)?;
+    out.set_item("chassis_contacts", state.chassis_contacts)?;
+    out.set_item("drive_cut", state.drive_cut)?;
+    out.set_item("brake_scale", &state.brake_scale)?;
+    out.set_item("lit", state.lit)?;
     Ok(out)
 }
 
@@ -623,5 +629,223 @@ impl Drop for PyVehicleRuntime {
         if let Some(runtime) = self.runtime.get_mut().unwrap().take() {
             *self.owner.lock().unwrap() = Some(runtime.into_world());
         }
+    }
+}
+
+type GridInput = ([f64; 2], [f64; 2], [usize; 2], Vec<f64>, f64, u64);
+type TriangleInput = ([[f64; 3]; 3], f64, u64);
+type ObstacleInput = ([[f64; 2]; 2], [f64; 2], f64);
+type TileInput = (
+    TileKey,
+    u64,
+    Vec<GridInput>,
+    Vec<TriangleInput>,
+    Vec<ObstacleInput>,
+);
+type ProfileInput = (Vec<(f64, f64)>, Vec<f64>, f64, Option<(f64, f64, f64)>, f64);
+type AssistInput = (f64, Vec<f64>, Vec<f64>, [bool; 4]);
+type SampleOutput = (f64, [f64; 3], f64, u64, TileKey, u64);
+
+fn tile_inputs(inputs: Vec<TileInput>) -> Vec<Tile> {
+    inputs
+        .into_iter()
+        .map(|(key, version, grids, triangles, obstacles)| Tile {
+            key,
+            version,
+            heightfields: grids
+                .into_iter()
+                .map(
+                    |(origin, spacing, shape, heights, grip, level)| Heightfield {
+                        origin,
+                        spacing,
+                        shape,
+                        heights,
+                        grip,
+                        level,
+                    },
+                )
+                .collect(),
+            triangles: triangles
+                .into_iter()
+                .map(|(vertices, grip, level)| Triangle {
+                    vertices,
+                    grip,
+                    level,
+                })
+                .collect(),
+            obstacles: obstacles
+                .into_iter()
+                .map(|(ends, y, strength)| Obstacle { ends, y, strength })
+                .collect(),
+        })
+        .collect()
+}
+
+#[pyclass(name = "_VehicleTerrain", module = "manifoldx._core_native", frozen)]
+pub struct PyVehicleTerrain {
+    terrain: Arc<Terrain>,
+}
+
+#[pymethods]
+impl PyVehicleTerrain {
+    #[new]
+    fn new(size: f64, tiles: Vec<TileInput>) -> PyResult<Self> {
+        Ok(Self {
+            terrain: Arc::new(
+                Terrain::new(size, tile_inputs(tiles)).map_err(PyValueError::new_err)?,
+            ),
+        })
+    }
+}
+
+#[pyclass(name = "_FleetCheckpoint", module = "manifoldx._core_native", frozen)]
+pub struct PyFleetCheckpoint {
+    state: Fleet,
+}
+
+#[pyclass(name = "_VehicleFleet", module = "manifoldx._core_native", frozen)]
+pub struct PyVehicleFleet {
+    inner: Mutex<Fleet>,
+}
+
+impl PyVehicleFleet {
+    fn with<R>(&self, apply: impl FnOnce(&mut Fleet) -> Result<R, String>) -> PyResult<R> {
+        let mut fleet = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("vehicle fleet lock poisoned"))?;
+        apply(&mut fleet).map_err(PyValueError::new_err)
+    }
+}
+
+#[pymethods]
+impl PyVehicleFleet {
+    #[new]
+    #[pyo3(signature = (specs, friction, *, terrain=None, flat=None, profile=None))]
+    fn new(
+        specs: Vec<Bound<'_, PyDict>>,
+        friction: f64,
+        terrain: Option<&PyVehicleTerrain>,
+        flat: Option<(f64, f64)>,
+        profile: Option<ProfileInput>,
+    ) -> PyResult<Self> {
+        let specs = specs.iter().map(parse_spec).collect::<PyResult<_>>()?;
+        let ground = match (terrain, flat, profile) {
+            (Some(terrain), None, None) => Ok(Ground::terrain(Arc::clone(&terrain.terrain))),
+            (None, Some((height, grip)), None) => Ground::flat(height, grip),
+            (None, None, Some((points, kerbs, height, bridge, grip))) => {
+                Ground::profile(points, kerbs, height, bridge, grip)
+            }
+            _ => Err("expected exactly one native ground input".into()),
+        }
+        .map_err(PyValueError::new_err)?;
+        Ok(Self {
+            inner: Mutex::new(Fleet::new(specs, ground, friction).map_err(PyValueError::new_err)?),
+        })
+    }
+
+    fn add(&self, spec: &Bound<'_, PyDict>) -> PyResult<usize> {
+        let spec = parse_spec(spec)?;
+        self.with(|fleet| fleet.add(spec))
+    }
+
+    fn remove(&self, index: usize) -> PyResult<()> {
+        self.with(|fleet| fleet.remove(index))
+    }
+
+    fn place(
+        &self,
+        index: usize,
+        position: [f64; 3],
+        yaw: f64,
+        velocity: [f64; 3],
+    ) -> PyResult<()> {
+        self.with(|fleet| fleet.place(index, position, yaw, velocity))
+    }
+
+    fn update_ground(&self, tiles: Vec<TileInput>, removed: Vec<(TileKey, u64)>) -> PyResult<()> {
+        let tiles = tile_inputs(tiles);
+        self.with(|fleet| fleet.update(tiles, &removed))
+    }
+
+    fn rebase(&self, delta: [f64; 3]) -> PyResult<()> {
+        self.with(|fleet| fleet.rebase(delta))
+    }
+
+    fn sample(&self, x: f64, z: f64, near: f64) -> PyResult<Option<SampleOutput>> {
+        self.with(|fleet| fleet.sample(x, z, near))
+            .map(|sample| sample.map(|s| (s.height, s.normal, s.grip, s.level, s.tile, s.version)))
+    }
+
+    fn snapshot<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.with(|fleet| Ok(fleet.state()))?
+            .iter()
+            .map(|row| snapshot_dict(py, row))
+            .collect()
+    }
+
+    fn checkpoint(&self) -> PyResult<PyFleetCheckpoint> {
+        self.with(|fleet| {
+            Ok(PyFleetCheckpoint {
+                state: fleet.clone(),
+            })
+        })
+    }
+
+    fn restore(&self, checkpoint: &PyFleetCheckpoint) -> PyResult<()> {
+        self.with(|fleet| fleet.restore(&checkpoint.state))
+    }
+
+    fn pose(&self, alpha: Option<f64>) -> PyResult<Vec<Pose>> {
+        self.with(|fleet| fleet.pose(alpha))
+    }
+
+    fn advance<'py>(
+        &self,
+        py: Python<'py>,
+        dt: f64,
+        controls: Vec<[f64; 4]>,
+        assists: Option<Vec<AssistInput>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let controls: Vec<_> = controls
+            .into_iter()
+            .map(|[steer, throttle, brake, handbrake]| Controls {
+                steer,
+                throttle,
+                brake,
+                handbrake,
+            })
+            .collect();
+        let assists = assists.map(|rows| {
+            rows.into_iter()
+                .map(|(drive_cut, brake_scale, extra_brake, lit)| Assist {
+                    drive_cut,
+                    brake_scale,
+                    extra_brake,
+                    lit,
+                })
+                .collect::<Vec<_>>()
+        });
+        let frame =
+            py.detach(|| self.with(|fleet| fleet.advance(dt, &controls, assists.as_deref())))?;
+        let report = PyDict::new(py);
+        report.set_item("substeps", frame.substeps)?;
+        report.set_item("bodies", frame.bodies)?;
+        report.set_item("loaded_wheels", frame.loaded_wheels)?;
+        report.set_item("chassis_contacts", frame.chassis_contacts)?;
+        report.set_item("chassis_impulse", frame.chassis_impulse)?;
+        report.set_item(
+            "contacts",
+            frame
+                .contacts
+                .iter()
+                .map(|c| (c.a, c.b, c.normal, c.impulse))
+                .collect::<Vec<_>>(),
+        )?;
+        report.set_item("impulse", frame.impulse)?;
+        report.set_item("solver_ns", frame.solver_ns)?;
+        report.set_item("dropped_seconds", frame.dropped_seconds)?;
+        report.set_item("remainder_seconds", frame.remainder_seconds)?;
+        Ok(report)
     }
 }
