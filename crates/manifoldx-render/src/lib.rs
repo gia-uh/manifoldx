@@ -16,6 +16,8 @@ pub use scene::{
     read_instances, resolve_source, spawn_instances, used_geometry_ids, Instance, InstanceBatch,
     InstanceSource, MeshData, SceneError, DEFAULT_MAX_INSTANCES,
 };
+pub use wgpu;
+pub use winit;
 
 /// The name this slice reports in evidence.
 pub const SLICE_NAME: &str = "manifoldx-native-render/base-offscreen";

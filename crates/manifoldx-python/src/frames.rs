@@ -4,6 +4,12 @@ use manifoldx_core::clock::{conflicts, Cadence, FrameClock};
 use manifoldx_core::ecs::{Compare, ComponentReadout, ComponentSchema, Scalar, Selection};
 use manifoldx_core::kernel::Program;
 use manifoldx_core::runtime::{Admission, Command, Control, Staged, MAX_COMMAND_BYTES};
+use manifoldx_render::{
+    desktop::{self, DesktopApplication, DesktopInfo, DesktopOptions, PresentedFrame},
+    wgpu,
+    winit::{dpi::PhysicalSize, window::Window},
+    FrameTarget, NativeRenderer, RenderError, RenderStats, RendererOptions,
+};
 use pyo3::types::PyTuple;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
@@ -213,6 +219,56 @@ impl FrameCommands {
             ));
         }
         self.stage(set_command(root, predicates, component, field, value)?)
+    }
+
+    fn replace(
+        &self,
+        py: Python<'_>,
+        component: usize,
+        handles: &Bound<'_, PyAny>,
+        rows: &Bound<'_, PyAny>,
+    ) -> PyResult<u64> {
+        if self.live.lock().unwrap().is_none() {
+            return Err(PyRuntimeError::new_err("command lease expired"));
+        }
+        if !self.writes.contains(&component) {
+            return Err(PyValueError::new_err("column was not declared for writing"));
+        }
+        let schema = self
+            .state
+            .schemas
+            .get(component)
+            .ok_or_else(|| PyValueError::new_err("unknown replacement component"))?;
+        let credit = self.state.control.reserve().map_err(admission_error)?;
+        let width = schema.width as usize;
+        let handles = handles.call0()?;
+        let ids =
+            decode_handles_limited(py, &handles, Some((self.state.max_rows, 16 + width * 4)))?;
+        let data = match schema.element {
+            ElementType::F32 => ColumnData::F32(read_matrix::<f32>(
+                py,
+                rows,
+                ids.len(),
+                width,
+                schema.element,
+                "replacement rows",
+            )?),
+            ElementType::U32 => ColumnData::U32(read_matrix::<u32>(
+                py,
+                rows,
+                ids.len(),
+                width,
+                schema.element,
+                "replacement rows",
+            )?),
+        };
+        self.stage_with(|| {
+            credit.stage(Command::Update {
+                component,
+                ids,
+                data,
+            })
+        })
     }
 
     fn spawn(&self, py: Python<'_>, count: u32, payload: &Bound<'_, PyAny>) -> PyResult<u64> {
@@ -702,97 +758,13 @@ impl Loop {
                 break;
             }
             let barrier = if profile { nanos(start.elapsed()) } else { 0 };
-            let mut kernels = 0;
-            let mut slowest = None;
             if let Some(previous) = previous.replace(start) {
                 report
                     .frame_intervals_ns
                     .push(nanos(start.duration_since(previous)));
             }
-            // Settle ready work in registration order. A sync callback sees
-            // the commits from all preceding registrations at this barrier.
-            for (index, system) in self.systems.iter_mut().enumerate() {
-                let (ready, current) = match &mut system.work {
-                    Work::Kernel(column, program) => {
-                        let start = Instant::now();
-                        let rows = program
-                            .dispatch(world, *column, clock.dt() as f32)
-                            .map_err(|err| format!("Rust CPU kernel {}: {err}", program.name()))?;
-                        report.kernel_dispatches += 1;
-                        report.kernel_rows += rows as u64;
-                        system.calls += 1;
-                        system.last_ns = nanos(start.elapsed());
-                        system.ns = system.ns.max(system.last_ns);
-                        if profile {
-                            kernels += system.last_ns;
-                            if slowest.is_none_or(|(_, ns)| system.last_ns > ns) {
-                                slowest = Some((index, system.last_ns));
-                            }
-                        }
-                        continue;
-                    }
-                    Work::Async(_, worker) => {
-                        let Some((revision, completed)) = worker.take()? else {
-                            continue;
-                        };
-                        (completed, revision.matches(world))
-                    }
-                    Work::Sync(callback) => {
-                        let snap =
-                            capture(world, &clock, &system.access.reads, &mut cache, &mut report)?;
-                        (call(callback, snap, &system.access, &self.state), true)
-                    }
-                };
-                system.finish(world, ready, &mut report, clock.tick(), current)?;
-            }
-            // Prefer the least recently dispatched registration when starts
-            // conflict. Ties use registration order. No missed start is queued.
-            due.clear();
-            for (index, system) in self.systems.iter_mut().enumerate() {
-                if let Work::Async(cadence, _) = &mut system.work {
-                    if cadence.due(clock.time()) {
-                        due.push((system.last_start, index));
-                    }
-                }
-            }
-            due.sort_unstable();
-            for &(_, index) in &due {
-                let (before, current) = self.systems.split_at_mut(index);
-                let (system, after) = current.split_first_mut().unwrap();
-                let Work::Async(_, worker) = &mut system.work else {
-                    unreachable!()
-                };
-                let blocked = before.iter().chain(after.iter()).any(|other| {
-                    matches!(&other.work, Work::Async(_, worker) if worker.pending.is_some())
-                        && (system.access.writes.contains(&STRUCTURAL)
-                            || other.access.writes.contains(&STRUCTURAL)
-                            || conflicts(
-                                &system.access.reads,
-                                &system.access.writes,
-                                &other.access.reads,
-                                &other.access.writes,
-                            ))
-                });
-                if blocked || worker.pending.is_some() {
-                    system.skipped += 1;
-                } else {
-                    let snapshot =
-                        capture(world, &clock, &system.access.reads, &mut cache, &mut report)?;
-                    let revision = Revision::capture(world, &system.access)?;
-                    worker.launch(snapshot, revision)?;
-                    system.last_start = Some(clock.tick());
-                }
-            }
-            if let Some(bridge) = &self.bridge {
-                bridge.present(
-                    world,
-                    &clock,
-                    &mut cache,
-                    &mut report,
-                    &self.state.counts,
-                    &self.systems,
-                )?;
-            }
+            let (kernels, slowest) =
+                self.systems_at_barrier(world, &clock, &mut cache, &mut due, &mut report)?;
             control.record_frame();
             let deadline = clock.advance();
             let active = if profile { nanos(start.elapsed()) } else { 0 };
@@ -822,6 +794,102 @@ impl Loop {
             }
         }
         Ok(report)
+    }
+
+    fn systems_at_barrier(
+        &mut self,
+        world: &mut World,
+        clock: &FrameClock,
+        cache: &mut Cache,
+        due: &mut Vec<(Option<u64>, usize)>,
+        report: &mut Report,
+    ) -> Result<(u64, Option<(usize, u64)>), String> {
+        let profile = self.profile;
+        let mut kernels = 0;
+        let mut slowest = None;
+        // Settle ready work in registration order. A sync callback sees
+        // the commits from all preceding registrations at this barrier.
+        for (index, system) in self.systems.iter_mut().enumerate() {
+            let (ready, current) = match &mut system.work {
+                Work::Kernel(column, program) => {
+                    let start = Instant::now();
+                    let rows = program
+                        .dispatch(world, *column, clock.dt() as f32)
+                        .map_err(|err| format!("Rust CPU kernel {}: {err}", program.name()))?;
+                    report.kernel_dispatches += 1;
+                    report.kernel_rows += rows as u64;
+                    system.calls += 1;
+                    system.last_ns = nanos(start.elapsed());
+                    system.ns = system.ns.max(system.last_ns);
+                    if profile {
+                        kernels += system.last_ns;
+                        if slowest.is_none_or(|(_, ns)| system.last_ns > ns) {
+                            slowest = Some((index, system.last_ns));
+                        }
+                    }
+                    continue;
+                }
+                Work::Async(_, worker) => {
+                    let Some((revision, completed)) = worker.take()? else {
+                        continue;
+                    };
+                    (completed, revision.matches(world))
+                }
+                Work::Sync(callback) => {
+                    let snap = capture(world, clock, &system.access.reads, cache, report)?;
+                    (call(callback, snap, &system.access, &self.state), true)
+                }
+            };
+            system.finish(world, ready, report, clock.tick(), current)?;
+        }
+        // Prefer the least recently dispatched registration when starts
+        // conflict. Ties use registration order. No missed start is queued.
+        due.clear();
+        for (index, system) in self.systems.iter_mut().enumerate() {
+            if let Work::Async(cadence, _) = &mut system.work {
+                if cadence.due(clock.time()) {
+                    due.push((system.last_start, index));
+                }
+            }
+        }
+        due.sort_unstable();
+        for &(_, index) in due.iter() {
+            let (before, current) = self.systems.split_at_mut(index);
+            let (system, after) = current.split_first_mut().unwrap();
+            let Work::Async(_, worker) = &mut system.work else {
+                unreachable!()
+            };
+            let blocked = before.iter().chain(after.iter()).any(|other| {
+                matches!(&other.work, Work::Async(_, worker) if worker.pending.is_some())
+                    && (system.access.writes.contains(&STRUCTURAL)
+                        || other.access.writes.contains(&STRUCTURAL)
+                        || conflicts(
+                            &system.access.reads,
+                            &system.access.writes,
+                            &other.access.reads,
+                            &other.access.writes,
+                        ))
+            });
+            if blocked || worker.pending.is_some() {
+                system.skipped += 1;
+            } else {
+                let snapshot = capture(world, clock, &system.access.reads, cache, report)?;
+                let revision = Revision::capture(world, &system.access)?;
+                worker.launch(snapshot, revision)?;
+                system.last_start = Some(clock.tick());
+            }
+        }
+        if let Some(bridge) = &self.bridge {
+            bridge.present(
+                world,
+                clock,
+                cache,
+                report,
+                &self.state.counts,
+                &self.systems,
+            )?;
+        }
+        Ok((kernels, slowest))
     }
 
     fn join(&mut self) {
@@ -1001,6 +1069,129 @@ impl FrameLoop {
         Ok(result)
     }
 
+    fn run_desktop<'py>(
+        &self,
+        py: Python<'py>,
+        graphics: &graphics::NativeGraphics,
+        options: DesktopInput,
+        registrations: Vec<Registration>,
+        startup: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if thread::current().id() != self.owner_thread {
+            return Err(PyRuntimeError::new_err("run on the World owner thread"));
+        }
+        let (title, width, height, fullscreen, monitor, mode, hz, frame_limit) = options;
+        if width == 0
+            || height == 0
+            || !hz.is_finite()
+            || !(1.0..=1000.0).contains(&hz)
+            || frame_limit.is_some_and(|n| !(1..=100_000).contains(&n))
+            || registrations.len() > MAX_SYSTEMS
+        {
+            return Err(PyValueError::new_err(
+                "invalid desktop dimensions, frame limits or systems",
+            ));
+        }
+        let present_mode = match mode.as_str() {
+            "fifo" => wgpu::PresentMode::Fifo,
+            "mailbox" => wgpu::PresentMode::Mailbox,
+            "immediate" => wgpu::PresentMode::Immediate,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "present must be fifo, mailbox or immediate",
+                ))
+            }
+        };
+        let registrations = registrations
+            .into_iter()
+            .map(|item| prepare(py, item))
+            .collect::<PyResult<Vec<_>>>()?;
+        let mut frames = WindowFrames {
+            owner: self,
+            registrations: Some(registrations),
+            startup,
+            world: None,
+            runner: None,
+            scene: Arc::clone(&graphics.scene),
+            clock: FrameClock::new(Duration::from_secs_f64(1.0 / hz)),
+            report: Report::default(),
+            cache: Cache::new(),
+            due: Vec::new(),
+            display: None,
+            frames: Vec::new(),
+            frame_limit,
+        };
+        let options = DesktopOptions {
+            title,
+            physical_px: PhysicalSize::new(width, height),
+            fullscreen,
+            monitor,
+            present_mode,
+            renderer: RendererOptions::default(),
+        };
+        let presented = py.detach(|| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                desktop::run_desktop(options, &mut frames)
+            }));
+            frames.finish();
+            result
+                .map_err(|_| PyRuntimeError::new_err("native desktop frame loop panicked"))?
+                .map_err(graphics::render_error)
+        })?;
+        let result = PyDict::new(py);
+        result.set_item("presented", presented)?;
+        result.set_item("scheduler_frames", self.control.stats().frames)?;
+        result.set_item("bridge_calls", frames.report.bridge_calls)?;
+        result.set_item("system_commands", frames.report.system_commands)?;
+        result.set_item("snapshot_bytes", frames.report.snapshot_bytes)?;
+        if let Some((info, adapter)) = frames.display {
+            let monitors: Vec<_> = info
+                .monitors
+                .iter()
+                .map(|m| {
+                    (
+                        &m.name,
+                        m.physical_px.width,
+                        m.physical_px.height,
+                        m.scale_factor,
+                        m.refresh_millihertz,
+                        m.primary,
+                    )
+                })
+                .collect();
+            result.set_item("monitors", monitors)?;
+            result.set_item("monitor", info.selected_monitor)?;
+            result.set_item(
+                "initial_px",
+                (info.physical_px.width, info.physical_px.height),
+            )?;
+            result.set_item("scale", info.scale_factor)?;
+            result.set_item("present_mode", format!("{:?}", info.present_mode))?;
+            result.set_item("format", format!("{:?}", info.format))?;
+            result.set_item("adapter", adapter)?;
+        }
+        let samples: Vec<_> = frames
+            .frames
+            .iter()
+            .map(|frame| {
+                let sample = graphics::stats_dict(py, &frame.render)?;
+                sample.set_item("sequence", frame.sequence)?;
+                sample.set_item(
+                    "physical_px",
+                    (frame.physical_px.width, frame.physical_px.height),
+                )?;
+                sample.set_item("scale", frame.scale_factor)?;
+                sample.set_item("wall_interval_ns", frame.wall_interval.map(nanos))?;
+                sample.set_item("acquire_ns", nanos(frame.acquire))?;
+                sample.set_item("submit_ns", nanos(frame.submit))?;
+                sample.set_item("present_ns", nanos(frame.present))?;
+                Ok::<_, PyErr>(sample)
+            })
+            .collect::<PyResult<_>>()?;
+        result.set_item("samples", samples)?;
+        Ok(result)
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (frames, hz, paced, registrations, bridge, profile=false))]
     fn run<'py>(
@@ -1026,43 +1217,14 @@ impl FrameLoop {
             .into_iter()
             .map(|registration| prepare(py, registration))
             .collect::<PyResult<Vec<_>>>()?;
-        let mut guard = self.owner.lock().unwrap();
-        let world = guard.as_ref();
-        let preflight = world.ok_or("World already running").and_then(|world| {
-            for (_, hz, reads, writes, participant) in &registrations {
-                if let Participant::Kernel(column, program) = participant {
-                    program.validate_column(world, *column)?;
-                }
-                if hz.is_some_and(|hz| !hz.is_finite() || !(1.0..=30.0).contains(&hz)) {
-                    return Err("async rate must be between 1 and 30 Hz");
-                }
-                validate_columns(world, reads, writes)?;
-            }
-            if let Some((reads, _)) = &bridge {
-                validate_columns(world, reads, &[])?;
-            }
-            self.control.start()
-        });
-        if let Err(error) = preflight {
-            drop(guard);
-            return Err(PyValueError::new_err(error));
-        }
-        // Publish the startup schemas before moving the World out of the owner slot.
-        let schemas = self
-            .schemas
-            .get_or_init(|| guard.as_ref().unwrap().schemas().cloned().collect())
-            .clone();
-        let mut world = guard.take().unwrap();
-        drop(guard);
-
+        let (mut world, state) = self
+            .begin(
+                &registrations,
+                bridge.as_ref().map(|(reads, _)| reads.as_slice()),
+            )
+            .map_err(PyValueError::new_err)?;
         let step = Duration::from_secs_f64(1.0 / hz);
         let bridge = bridge.map(|(reads, callback)| Bridge { reads, callback });
-        let state = CallState {
-            control: self.control.clone(),
-            counts: Arc::clone(&self.rows),
-            schemas,
-            max_rows: self.max_rows,
-        };
         let execution = py.detach(|| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut run =
@@ -1124,11 +1286,171 @@ impl FrameLoop {
 }
 
 impl FrameLoop {
+    fn begin(
+        &self,
+        registrations: &[Prepared],
+        bridge_reads: Option<&[usize]>,
+    ) -> Result<(World, CallState), String> {
+        let mut guard = self.owner.lock().unwrap();
+        let world = guard.as_ref();
+        let preflight = world.ok_or("World already running").and_then(|world| {
+            for (_, hz, reads, writes, participant) in registrations {
+                if let Participant::Kernel(column, program) = participant {
+                    program.validate_column(world, *column)?;
+                }
+                if hz.is_some_and(|hz| !hz.is_finite() || !(1.0..=30.0).contains(&hz)) {
+                    return Err("async rate must be between 1 and 30 Hz");
+                }
+                validate_columns(world, reads, writes)?;
+            }
+            if let Some(reads) = bridge_reads {
+                validate_columns(world, reads, &[])?;
+            }
+            self.control.start()
+        });
+        preflight.map_err(str::to_owned)?;
+        // Publish the startup schemas before moving the World out of the owner slot.
+        let schemas = self
+            .schemas
+            .get_or_init(|| guard.as_ref().unwrap().schemas().cloned().collect())
+            .clone();
+        let world = guard.take().unwrap();
+        drop(guard);
+
+        let state = CallState {
+            control: self.control.clone(),
+            counts: Arc::clone(&self.rows),
+            schemas,
+            max_rows: self.max_rows,
+        };
+        Ok((world, state))
+    }
+
     fn admit(&self, command: Command) -> PyResult<u64> {
         match self.control.submit(command) {
             Admission::Admitted(id) => Ok(id),
             other => Err(admission_error(other)),
         }
+    }
+}
+
+type DesktopInput = (
+    String,
+    u32,
+    u32,
+    bool,
+    Option<String>,
+    String,
+    f64,
+    Option<u64>,
+);
+
+struct WindowFrames<'a> {
+    owner: &'a FrameLoop,
+    registrations: Option<Vec<Prepared>>,
+    startup: Py<PyAny>,
+    world: Option<World>,
+    runner: Option<Loop>,
+    scene: Arc<Mutex<graphics::Scene>>,
+    clock: FrameClock,
+    report: Report,
+    cache: Cache,
+    due: Vec<(Option<u64>, usize)>,
+    display: Option<(DesktopInfo, String)>,
+    frames: Vec<PresentedFrame>,
+    frame_limit: Option<u64>,
+}
+
+impl WindowFrames<'_> {
+    fn finish(&mut self) {
+        if let Some(world) = self.world.take() {
+            self.owner.control.complete();
+            if let Some(runner) = self.runner.as_mut() {
+                runner.join();
+            }
+            *self.owner.owner.lock().unwrap() = Some(world);
+        }
+    }
+}
+
+impl DesktopApplication for WindowFrames<'_> {
+    fn start(
+        &mut self,
+        _window: &Window,
+        renderer: &mut NativeRenderer,
+        info: &DesktopInfo,
+    ) -> Result<bool, RenderError> {
+        self.display = Some((info.clone(), renderer.adapter().to_json()));
+        let active = Python::attach(|py| self.startup.call0(py)?.extract::<bool>(py))
+            .map_err(|error| RenderError::Window(error.to_string()))?;
+        if !active {
+            return Ok(false);
+        }
+        let registrations = self
+            .registrations
+            .take()
+            .ok_or_else(|| RenderError::Window("cannot restart the desktop scheduler".into()))?;
+        let (world, state) = self
+            .owner
+            .begin(&registrations, None)
+            .map_err(RenderError::Window)?;
+        self.world = Some(world);
+        self.runner = Some(
+            Loop::new(registrations, None, state, self.frame_limit.is_some())
+                .map_err(|error| RenderError::Window(error.to_string()))?,
+        );
+        Ok(true)
+    }
+
+    fn draw(
+        &mut self,
+        _window: &Window,
+        renderer: &mut NativeRenderer,
+        encoder: &mut wgpu::CommandEncoder,
+        mut target: FrameTarget<'_>,
+    ) -> Result<Option<RenderStats>, RenderError> {
+        if self
+            .frame_limit
+            .is_some_and(|limit| self.frames.len() as u64 >= limit)
+        {
+            return Ok(None);
+        }
+        let world = self.world.as_mut().expect("desktop start owns the World");
+        let control = &self.owner.control;
+        if !control.frame_boundary(world, self.clock.tick(), self.owner.batches_per_frame) {
+            return Ok(None);
+        }
+        self.runner
+            .as_mut()
+            .expect("desktop start owns the scheduler")
+            .systems_at_barrier(
+                world,
+                &self.clock,
+                &mut self.cache,
+                &mut self.due,
+                &mut self.report,
+            )
+            .map_err(RenderError::Window)?;
+        self.report.events.clear();
+        let camera = self.scene.lock().unwrap().apply(renderer)?;
+        target.clear = renderer.background();
+        let draw = renderer.encode_world_to_target(
+            encoder,
+            target,
+            world,
+            graphics::source(world)?,
+            &camera,
+        )?;
+        control.record_frame();
+        self.clock.advance();
+        Ok(Some(draw))
+    }
+
+    fn presented(&mut self, frame: PresentedFrame) -> Result<(), RenderError> {
+        if self.frame_limit.is_some() {
+            self.frames.push(frame);
+        }
+        Ok(())
     }
 }
 

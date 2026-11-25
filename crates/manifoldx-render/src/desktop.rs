@@ -33,6 +33,7 @@ pub struct DesktopOptions {
     pub renderer: RendererOptions,
 }
 
+#[derive(Clone)]
 pub struct DesktopInfo {
     pub monitors: Vec<Monitor>,
     pub selected_monitor: Option<usize>,

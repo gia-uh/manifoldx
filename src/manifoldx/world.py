@@ -147,6 +147,11 @@ class _Commands:
     def set(self, selection, column, value):
         return self._lease.set(*self._world._assignment(selection, column, value))
 
+    def replace(self, component, entities, rows):
+        return self._lease.replace(
+            self._world._column(component), lambda: self._world._handles(entities, command=True), rows
+        )
+
     def spawn(self, *components, count=1, payload=None):
         count = self._world._checked_count(count)
         return self._lease.spawn(count, lambda: self._world._payload(count, components, payload))

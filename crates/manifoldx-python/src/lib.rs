@@ -18,6 +18,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 mod frames;
+mod graphics;
 mod kernel;
 mod runtime;
 mod vehicles;
@@ -925,6 +926,7 @@ fn _core_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEntitySlots>()?;
     m.add_class::<PyNativeWorld>()?;
     m.add_class::<runtime::PyNativeRuntime>()?;
+    graphics::register(m)?;
     frames::register(m)?;
     kernel::register(m)?;
     m.add_class::<vehicles::PyVehicleSim>()?;
