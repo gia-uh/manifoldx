@@ -423,3 +423,37 @@ callbacks that exceeded one millisecond at that barrier.
 Its sole graphics owner keeps the window, context, device, queue and renderer
 together. `run` reports bridge calls, rows offered, bytes offered and attached
 nanoseconds. The native World entrypoint has no implicit graphics fallback.
+
+### Restricted per-entity kernels
+
+Use `@kernel` for typed, repeatable work on a single entity at a time. A
+kernel takes one declared component and `dt: f32`, returns `None`, and
+can use `f32` and `vec3` fields and locals, arithmetic, comparisons,
+branches, and the `clamp` intrinsic. The import validates its Python AST.
+A `ComputeShaderCompileError` carries the original file, line, column,
+category and source text. See [kernel_drive.py](../../examples/kernel_drive.py)
+for one source of the drive rules. The example puts the Python `steer`
+system before the Rust `drive` dispatch, using the same frame clock and
+committed commands.
+
+Use `world.kernel(drive, target="cpu")` to register the kernel in frame
+order, or `world.dispatch_kernel(drive, dt=1/60, target="cpu")` for one
+dispatch while the World is idle. Both visit only members of the
+component, and hold the data on the Rust side of the API. The runtime
+reports its backend, dispatches and evaluated rows.
+
+For the isolated WGSL lane, construct a `GpuKernelGroup` from
+`manifoldx.compute` with an explicit device and `target="wgsl"`.
+`load` accepts packed little-endian component rows and a u32 slot mask.
+`dispatch` updates resident storage, and `wait` releases bounded
+submission credit without copying rows. A versioned `readback` returns
+owned bytes, and consumers of the same version share one transfer.
+`counters` reports calls, rows, bytes and waits. This lane shares the
+supplied device for its compute dispatches. Connecting it directly to
+the native renderer belongs to the render integration.
+
+The v1 numeric domain uses finite normal inputs and intermediates or
+zero, finite nonnegative `dt`, normalized forward input, and ordered
+inclusive clamp bounds. CPU evaluates operations in binary32 without
+fusing. Compare outputs on the selected WGSL adapter against the
+[frozen drive corpus](../../docs/rust-core-e0.md#numeric-domain-for-drive).

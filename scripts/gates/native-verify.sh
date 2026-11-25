@@ -124,6 +124,14 @@ run_public_world() {
     echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
     return "$status"
 }
+run_kernels() {
+    local label="$1" status=0
+    shift
+    "$VENVPY" -I "$HERE/native-kernels.py" "$@" >"$SCRATCH/$label.log" 2>&1 || status=$?
+    cat "$SCRATCH/$label.log"
+    echo "$label exit: $status" | tee -a "$SCRATCH/status.log"
+    return "$status"
+}
 run_selection() {
     local state="$1" label="$2" status=0
     "$VENVPY" -I "$HERE/native-selection-smoke.py" "$state" >"$SCRATCH/$label.log" 2>&1 || status=$?
@@ -148,6 +156,13 @@ if run_public_world public-world-read-control --add-read; then
     fail "public World row control passed after inserting an explicit read"
 fi
 grep -q 'creating or queuing a selection read rows' "$SCRATCH/public-world-read-control.log" || fail "row control failed for an unrelated reason"
+run_kernels kernel-diagnostics diagnostics
+run_kernels kernel-cpu cpu
+if run_kernels kernel-clamp-control cpu --control clamp; then
+    fail "kernel gate passed after changing clamp acceleration"
+fi
+grep -q 'drive oracle mismatch (upper-clamp)' "$SCRATCH/kernel-clamp-control.log" \
+    || fail "kernel clamp control failed for an unrelated reason"
 run_selection installed selection-before
 SO="$("$VENVPY" -I -c 'import sys, manifoldx._core_native as m; sys.stdout.write(m.__file__)')"
 if command -v cygpath >/dev/null 2>&1; then
