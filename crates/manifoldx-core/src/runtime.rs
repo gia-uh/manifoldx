@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::ecs::{
     ColumnData, ComponentPayload, ComponentReadout, EntityId, Scalar, Selection, World,
+    MAX_COMPONENT_WIDTH,
 };
 
 /// Maximum owned input or selected readback bytes per operation.
@@ -47,14 +48,18 @@ impl Command {
             Self::Spawn { count, .. } => *count as usize,
         }
     }
-    fn bytes(&self) -> usize {
-        self.rows() * 16
-            + match self {
-                Self::Update { data, .. } => data.byte_len(),
-                Self::Set { selection, .. } => 32 + selection.predicates.len() * 32,
-                Self::Spawn { payload, .. } => payload.iter().map(|p| p.data.byte_len() + 8).sum(),
-                _ => 0,
+    fn bytes(&self) -> Option<usize> {
+        let row_bytes = self.rows().checked_mul(16)?;
+        match self {
+            Self::Update { data, .. } => row_bytes.checked_add(data.byte_len()),
+            Self::Set { selection, .. } => {
+                32usize.checked_add(selection.predicates.len().checked_mul(32)?)
             }
+            Self::Spawn { payload, .. } => payload.iter().try_fold(row_bytes, |bytes, part| {
+                bytes.checked_add(8)?.checked_add(part.data.byte_len())
+            }),
+            _ => Some(row_bytes),
+        }
     }
 }
 
@@ -146,6 +151,27 @@ struct Shared {
     capacity: usize,
     max_rows: usize,
     read_row_bytes: Vec<usize>,
+}
+impl Shared {
+    fn command_bytes(&self, command: &Command) -> Result<usize, Admission> {
+        let limit = || Admission::Error("command exceeds row or scalar limit");
+        if command.rows() > self.max_rows
+            || matches!(command, Command::Update { data, ids, .. }
+                if data.len().div_ceil(MAX_COMPONENT_WIDTH as usize) > ids.len())
+        {
+            return Err(limit());
+        }
+        if let Command::Read { component, ids } = command {
+            let row_bytes = self.read_row_bytes.get(*component).ok_or_else(limit)?;
+            if ids.len().checked_mul(*row_bytes).ok_or_else(limit)? > MAX_COMMAND_BYTES {
+                return Err(limit());
+            }
+        }
+        command
+            .bytes()
+            .filter(|&bytes| bytes <= MAX_COMMAND_BYTES)
+            .ok_or_else(limit)
+    }
 }
 /// Cloneable producer handle; owns no World and launches no worker.
 #[derive(Clone)]
@@ -269,26 +295,12 @@ impl Control {
         );
     }
     pub fn submit(&self, command: Command) -> Admission {
-        // Bound input vectors too, including malformed core callers.
-        let output_bytes = match &command {
-            Command::Read { component, ids } => self
-                .0
-                .read_row_bytes
-                .get(*component)
-                .and_then(|width| ids.len().checked_mul(*width))
-                .unwrap_or(usize::MAX),
-            _ => 0,
+        let bytes = match self.0.command_bytes(&command) {
+            Ok(bytes) => bytes,
+            Err(error) => return error,
         };
-        if command.bytes() > MAX_COMMAND_BYTES
-            || output_bytes > MAX_COMMAND_BYTES
-            || command.rows() > self.0.max_rows
-            || matches!(&command,
-            Command::Update { data, ids, .. } if data.len() > ids.len().saturating_mul(256))
-        {
-            return Admission::Error("command exceeds row or scalar limit");
-        }
         let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        s.stats.bytes_in += command.bytes() as u64;
+        s.stats.bytes_in += bytes as u64;
         if s.stop || s.phase == Phase::Stopped {
             return Admission::Stopped;
         }
@@ -352,11 +364,7 @@ pub struct Credit {
 }
 
 impl Credit {
-    fn accept(&mut self, state: &mut State, command: &Command) -> Result<u64, Admission> {
-        let bytes = command.bytes();
-        if bytes > MAX_COMMAND_BYTES || command.rows() > self.control.0.max_rows {
-            return Err(Admission::Error("command exceeds row or byte limit"));
-        }
+    fn accept(&mut self, state: &mut State, bytes: usize) -> Result<u64, Admission> {
         if state.stop || state.phase == Phase::Stopped {
             return Err(Admission::Stopped);
         }
@@ -371,9 +379,10 @@ impl Credit {
     }
 
     pub fn stage(mut self, command: Command) -> Result<Staged, Admission> {
+        let bytes = self.control.0.command_bytes(&command)?;
         let control = self.control.clone();
         let mut state = control.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        let sequence = self.accept(&mut state, &command)?;
+        let sequence = self.accept(&mut state, bytes)?;
         drop(state);
         Ok(Staged {
             control,
@@ -384,9 +393,10 @@ impl Credit {
     }
 
     pub fn submit(mut self, command: Command) -> Result<u64, Admission> {
+        let bytes = self.control.0.command_bytes(&command)?;
         let control = self.control.clone();
         let mut state = control.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        let sequence = self.accept(&mut state, &command)?;
+        let sequence = self.accept(&mut state, bytes)?;
         state.staged -= 1;
         state.queue.push_back((sequence, command));
         Ok(sequence)
@@ -658,6 +668,108 @@ mod tests {
             component: 0,
             ids: ids.to_vec(),
         }
+    }
+    #[test]
+    fn command_bounds_match_across_admission_routes() {
+        let width = MAX_COMPONENT_WIDTH;
+        let read_row_bytes = 17 + width as usize * 4;
+        let allowed_rows = MAX_COMMAND_BYTES / read_row_bytes;
+        let mut world = World::new((allowed_rows + 1) as u32).unwrap();
+        let wide = world.register("wide", ElementType::F32, width).unwrap();
+        let ids = world.spawn((allowed_rows + 1) as u32, &[]).unwrap();
+        let control = Control::new(&world, 1, allowed_rows + 1);
+        fn settle(staged: Result<Staged, Admission>, world: &mut World) -> Admission {
+            match staged {
+                Ok(staged) => {
+                    let id = staged.id();
+                    assert!(staged.commit(world, 0));
+                    Admission::Admitted(id)
+                }
+                Err(error) => error,
+            }
+        }
+        type Route = fn(&Control, &mut World, Command) -> Admission;
+        let routes: [Route; 4] = [
+            |c, world, command| {
+                let admission = c.submit(command);
+                assert!(c.frame_boundary(world, 0, 1));
+                admission
+            },
+            |c, world, command| settle(c.stage(command), world),
+            |c, world, command| settle(c.reserve().unwrap().stage(command), world),
+            |c, world, command| {
+                let admission = c.reserve().unwrap().submit(command);
+                assert!(c.frame_boundary(world, 0, 1));
+                admission.map_or_else(|error| error, Admission::Admitted)
+            },
+        ];
+        for admit in routes {
+            let error = Admission::Error("command exceeds row or scalar limit");
+            assert_eq!(
+                admit(
+                    &control,
+                    &mut world,
+                    Command::Read {
+                        component: wide,
+                        ids: ids.clone(),
+                    },
+                ),
+                error
+            );
+            assert_eq!(
+                admit(
+                    &control,
+                    &mut world,
+                    Command::Destroy(vec![ids[0]; allowed_rows + 2]),
+                ),
+                error
+            );
+            assert_eq!(
+                admit(
+                    &control,
+                    &mut world,
+                    update(&ids[..1], &vec![0.; width as usize + 1]),
+                ),
+                error
+            );
+            let input_control = Control::new(&world, 1, usize::MAX);
+            assert_eq!(
+                admit(
+                    &input_control,
+                    &mut world,
+                    Command::Spawn {
+                        count: (MAX_COMMAND_BYTES / 16 + 1) as u32,
+                        payload: vec![],
+                    },
+                ),
+                error
+            );
+            assert!(control.frame_boundary(&mut world, 0, 1));
+            assert!(control.take().is_none());
+            let stats = control.stats();
+            assert_eq!((stats.backlog, stats.admitted, stats.bytes_in), (0, 0, 0));
+            assert_eq!(world.alive_count() as usize, ids.len());
+        }
+
+        for (i, admit) in routes.into_iter().enumerate() {
+            let command = Command::Read {
+                component: wide,
+                ids: ids[..allowed_rows].to_vec(),
+            };
+            let sequence = i as u64 + 1;
+            assert_eq!(
+                admit(&control, &mut world, command),
+                Admission::Admitted(sequence)
+            );
+            let read = control.take().unwrap().result.unwrap().unwrap();
+            assert_eq!(read.ids.len(), allowed_rows);
+        }
+        let stats = control.stats();
+        assert_eq!(stats.bytes_in, (routes.len() * allowed_rows * 16) as u64);
+        assert_eq!(
+            stats.bytes_out,
+            (routes.len() * allowed_rows * read_row_bytes) as u64
+        );
     }
     fn values(r: &Runtime, ids: &[EntityId]) -> Vec<f32> {
         let ColumnData::F32(data) = r
