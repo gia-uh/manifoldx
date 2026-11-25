@@ -2,7 +2,9 @@
 use super::*;
 use manifoldx_core::clock::{conflicts, Cadence, FrameClock};
 use manifoldx_core::ecs::{Compare, ComponentReadout, ComponentSchema, Scalar, Selection};
+use manifoldx_core::kernel::Program;
 use manifoldx_core::runtime::{Admission, Command, Control, Staged, MAX_COMMAND_BYTES};
+use pyo3::types::PyTuple;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::OnceLock;
@@ -15,9 +17,32 @@ const MAX_PREDICATES: usize = 16;
 const STRUCTURAL: usize = usize::MAX;
 const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FRAMES: u64 = 1_000_000;
+// Leave a short tail for the clock instead of letting a timed wait overshoot
+// the frame deadline. The stop request can still wake the blocking portion.
+const DEADLINE_GUARD: Duration = Duration::from_micros(1200);
 
 type Predicate = (usize, usize, String, (Option<f32>, Option<u32>));
 type Registration = (String, Option<f64>, Vec<usize>, Vec<usize>, Py<PyAny>);
+type Prepared = (String, Option<f64>, Vec<usize>, Vec<usize>, Participant);
+
+enum Participant {
+    Callback(Py<PyAny>),
+    Kernel(usize, Arc<Program>),
+}
+
+fn prepare(py: Python<'_>, registration: Registration) -> PyResult<Prepared> {
+    let (name, hz, reads, writes, callback) = registration;
+    let participant = if let Ok(spec) = callback.bind(py).cast::<PyTuple>() {
+        let (column, program): (usize, PyRef<'_, kernel::KernelProgram>) = spec.extract()?;
+        if hz.is_some() {
+            return Err(PyValueError::new_err("kernel must run on the frame lane"));
+        }
+        Participant::Kernel(column, Arc::clone(&program.0))
+    } else {
+        Participant::Callback(callback)
+    };
+    Ok((name, hz, reads, writes, participant))
+}
 
 fn scalar(value: (Option<f32>, Option<u32>)) -> PyResult<Scalar> {
     match value {
@@ -448,6 +473,7 @@ struct System {
 }
 
 enum Work {
+    Kernel(usize, Arc<Program>),
     Sync(Py<PyAny>),
     Async(Cadence, Worker),
 }
@@ -495,6 +521,8 @@ struct Report {
     system_commands: u64,
     stale_system_results: u64,
     snapshot_copies: u64,
+    kernel_dispatches: u64,
+    kernel_rows: u64,
     snapshot_bytes: u64,
     bridge_calls: u64,
     bridge_rows: u64,
@@ -603,22 +631,23 @@ struct Loop {
 
 impl Loop {
     fn new(
-        registrations: Vec<Registration>,
+        registrations: Vec<Prepared>,
         bridge: Option<Bridge>,
         state: CallState,
     ) -> std::io::Result<Self> {
         let mut systems = Vec::with_capacity(registrations.len());
-        for (name, hz, reads, writes, callback) in registrations {
+        for (name, hz, reads, writes, participant) in registrations {
             let access = Access {
                 reads: reads.into(),
                 writes: writes.into(),
             };
-            let work = match hz {
-                Some(hz) => Work::Async(
+            let work = match (hz, participant) {
+                (_, Participant::Kernel(column, program)) => Work::Kernel(column, program),
+                (Some(hz), Participant::Callback(callback)) => Work::Async(
                     Cadence::new(hz),
                     Worker::new(callback, access.clone(), state.clone())?,
                 ),
-                None => Work::Sync(callback),
+                (None, Participant::Callback(callback)) => Work::Sync(callback),
             };
             systems.push(System {
                 name,
@@ -668,6 +697,18 @@ impl Loop {
             // the commits from all preceding registrations at this barrier.
             for system in &mut self.systems {
                 let (ready, current) = match &mut system.work {
+                    Work::Kernel(column, program) => {
+                        let start = Instant::now();
+                        let rows = program
+                            .dispatch(world, *column, clock.dt() as f32)
+                            .map_err(|err| format!("Rust CPU kernel {}: {err}", program.name()))?;
+                        report.kernel_dispatches += 1;
+                        report.kernel_rows += rows as u64;
+                        system.calls += 1;
+                        system.last_ns = nanos(start.elapsed());
+                        system.ns = system.ns.max(system.last_ns);
+                        continue;
+                    }
                     Work::Async(_, worker) => {
                         let Some((revision, completed)) = worker.take()? else {
                             continue;
@@ -733,7 +774,10 @@ impl Loop {
             control.record_frame();
             let deadline = clock.advance();
             if paced {
-                control.wait_until(deadline);
+                control.wait_until(deadline - DEADLINE_GUARD.min(step / 10));
+                while Instant::now() < deadline {
+                    std::hint::spin_loop();
+                }
             }
         }
         Ok(report)
@@ -796,6 +840,30 @@ impl FrameLoop {
             rows: Arc::new(Mutex::new(ReadCounts::default())),
             owner_thread: thread::current().id(),
         })
+    }
+
+    fn dispatch_kernel(
+        &self,
+        py: Python<'_>,
+        column: usize,
+        program: &kernel::KernelProgram,
+        args: (u32, f32),
+    ) -> PyResult<usize> {
+        if thread::current().id() != self.owner_thread {
+            return Err(PyRuntimeError::new_err(
+                "dispatch on the World owner thread",
+            ));
+        }
+        let (version, dt) = args;
+        if version != manifoldx_core::kernel::VERSION {
+            return Err(PyValueError::new_err("unsupported kernel argument version"));
+        }
+        py.detach(|| {
+            let mut guard = self.owner.lock().unwrap();
+            let world = guard.as_mut().ok_or("World already running")?;
+            program.0.dispatch(world, column, dt)
+        })
+        .map_err(|error| PyValueError::new_err(format!("Rust CPU kernel: {error}")))
     }
 
     fn set(
@@ -911,10 +979,17 @@ impl FrameLoop {
         if registrations.len() > MAX_SYSTEMS {
             return Err(PyValueError::new_err("too many systems"));
         }
+        let registrations = registrations
+            .into_iter()
+            .map(|registration| prepare(py, registration))
+            .collect::<PyResult<Vec<_>>>()?;
         let mut guard = self.owner.lock().unwrap();
         let world = guard.as_ref();
         let preflight = world.ok_or("World already running").and_then(|world| {
-            for (_, hz, reads, writes, _) in &registrations {
+            for (_, hz, reads, writes, participant) in &registrations {
+                if let Participant::Kernel(column, program) = participant {
+                    program.validate_column(world, *column)?;
+                }
                 if hz.is_some_and(|hz| !hz.is_finite() || !(1.0..=30.0).contains(&hz)) {
                     return Err("async rate must be between 1 and 30 Hz");
                 }
@@ -972,6 +1047,9 @@ impl FrameLoop {
         result.set_item("system_commands", report.system_commands)?;
         result.set_item("stale_system_results", report.stale_system_results)?;
         result.set_item("snapshot_copies", report.snapshot_copies)?;
+        result.set_item("kernel_backend", "rust-cpu")?;
+        result.set_item("kernel_dispatches", report.kernel_dispatches)?;
+        result.set_item("kernel_rows", report.kernel_rows)?;
         result.set_item("snapshot_bytes", report.snapshot_bytes)?;
         result.set_item(
             "bridge",

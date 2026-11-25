@@ -521,6 +521,39 @@ impl World {
         })
     }
 
+    /// Visit native rows that currently own this component, in slot order.
+    pub(crate) fn visit_kernel_rows(
+        &mut self,
+        index: usize,
+        writes: bool,
+        mut visit: impl FnMut(&mut [f32]),
+    ) -> Result<usize, &'static str> {
+        let column = self.columns.get_mut(index).ok_or("unknown kernel column")?;
+        let ColumnData::F32(data) = &mut column.data else {
+            return Err("kernel column requires float32 rows");
+        };
+        let width = column.schema.width as usize;
+        if width == 0 {
+            return Err("kernel column cannot be a marker");
+        }
+        let mut count = 0;
+        for (word_id, &members) in column.members.iter().enumerate() {
+            let mut active = members;
+            while active != 0 {
+                let slot = word_id * 64 + active.trailing_zeros() as usize;
+                let start = slot * width;
+                visit(&mut data[start..start + width]);
+                count += 1;
+                active &= active - 1;
+            }
+        }
+        if writes && count != 0 {
+            self.version += 1;
+            column.version = self.version;
+        }
+        Ok(count)
+    }
+
     /// Allocate the fixed slot table and an empty schema.
     pub fn new(capacity: u32) -> Result<Self, WorldError> {
         Ok(Self {

@@ -18,6 +18,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 mod frames;
+mod kernel;
 mod runtime;
 
 use manifoldx_core::ecs::{
@@ -924,5 +925,6 @@ fn _core_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNativeWorld>()?;
     m.add_class::<runtime::PyNativeRuntime>()?;
     frames::register(m)?;
+    kernel::register(m)?;
     Ok(())
 }
