@@ -521,6 +521,41 @@ impl World {
         })
     }
 
+    /// Visit contiguous runs of native members, in ascending slot order.
+    pub(crate) fn visit_kernel_runs(
+        &mut self,
+        index: usize,
+        writes: bool,
+        mut visit: impl FnMut(&mut [f32]),
+    ) -> Result<usize, &'static str> {
+        let column = self.columns.get_mut(index).ok_or("unknown kernel column")?;
+        let ColumnData::F32(data) = &mut column.data else {
+            return Err("kernel column requires float32 rows");
+        };
+        let width = column.schema.width as usize;
+        if width == 0 {
+            return Err("kernel column cannot be a marker");
+        }
+        let mut count = 0;
+        for (word_id, &members) in column.members.iter().enumerate() {
+            let mut active = members;
+            while active != 0 {
+                let first = active.trailing_zeros();
+                let len = (active >> first).trailing_ones();
+                let start = (word_id * 64 + first as usize) * width;
+                let end = start + len as usize * width;
+                visit(&mut data[start..end]);
+                count += len as usize;
+                active &= !((u64::MAX >> (64 - len)) << first);
+            }
+        }
+        if writes && count != 0 {
+            self.version += 1;
+            column.version = self.version;
+        }
+        Ok(count)
+    }
+
     /// Allocate the fixed slot table and an empty schema.
     pub fn new(capacity: u32) -> Result<Self, WorldError> {
         Ok(Self {

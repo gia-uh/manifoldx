@@ -28,11 +28,12 @@ def _shape_from_annotation(tp) -> tuple:
     against compute-kernel arithmetic; the numpy forms predate Phase 2
     and stay supported.
     """
+    from manifoldx.compute.shader import f32 as _f32
     from manifoldx.compute.shader import vec3 as _vec3
     from manifoldx.compute.shader import vec4 as _vec4
     from manifoldx.types import Float, Vector3, Vector4
 
-    if tp is Float or tp is float:
+    if tp is Float or tp is float or tp is _f32:
         return (1,)
     if tp is Vector3 or tp is _vec3:
         return (3,)

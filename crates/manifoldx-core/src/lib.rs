@@ -11,6 +11,7 @@
 
 pub mod clock;
 pub mod ecs;
+pub mod kernel;
 pub mod runtime;
 
 /// The runtime's name, as the bindings' bootstrap reports it.

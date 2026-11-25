@@ -417,7 +417,41 @@ class World:
 
         return register if function is None else register(function)
 
-    def run(self, *, frames, hz=60, paced=True, graphics=None):
+    def _compile_kernel(self, program, target):
+        from manifoldx.compute.kernel import _Kernel, _native_words
+
+        self._owner()
+        if not isinstance(program, _Kernel):
+            raise TypeError("expected a declaration compiled by @kernel")
+        if target != "cpu":
+            raise ValueError("World supports target='cpu'; WGSL requires an explicit GPU group")
+        column = self._column(program.component)
+        name, kind, width, layout = self._metadata[column]
+        if kind != "f32" or width != program.width or tuple(layout.items()) != program.layout:
+            raise ValueError("kernel column differs from the compiled schema")
+        native = import_module("manifoldx._core_native")
+        program_type = getattr(native, "_KernelProgram", None)
+        if program_type is None:
+            raise RuntimeError("Rust CPU kernel backend is unavailable")
+        compiled = program_type(program.version, program.name, name, width, _native_words(program))
+        return column, compiled
+
+    def dispatch_kernel(self, program, *, dt, target):
+        """Apply one v1 kernel to the idle World, without copying its rows."""
+        column, compiled = self._compile_kernel(program, target)
+        return self._loop.dispatch_kernel(column, compiled, (program.version, dt))
+
+    def kernel(self, program, *, target):
+        """Schedule a compiled kernel on this World's native CPU frame lane."""
+        self._owner()
+        if self._started:
+            raise RuntimeError("registration closes when the runtime starts")
+        column, compiled = self._compile_kernel(program, target)
+        writes = [column] if program.writes else []
+        self._systems.append((program.name, None, [], writes, (column, compiled)))
+        return program
+
+    def run(self, *, frames, hz=60, paced=True, graphics=None, _profile=False):
         """Run the native clock until the frame limit or a stop request."""
         self._owner()
         bridge = None
@@ -427,7 +461,7 @@ class World:
             bridge = graphics._bind(self)
         self._running = True
         try:
-            result = self._loop.run(frames, hz, paced, self._systems, bridge)
+            result = self._loop.run(frames, hz, paced, self._systems, bridge, _profile)
         finally:
             self._running = False
             self._started = self._loop.stopped
