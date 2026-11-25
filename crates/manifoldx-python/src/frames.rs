@@ -1003,7 +1003,6 @@ impl FrameLoop {
 
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (frames, hz, paced, registrations, bridge, profile=false))]
-    #[allow(clippy::too_many_arguments)]
     fn run<'py>(
         &self,
         py: Python<'py>,
