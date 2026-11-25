@@ -12,6 +12,9 @@
 //! pixel. `--corrupt-normal` is its negative control: it uploads the normal
 //! that makes the corrected shader reproduce the old formula, so the check
 //! deliberately exits non-zero.
+//!
+//! `--check-draw-groups` checks the position and color of instances in two
+//! geometry groups sharing a single packed instance buffer.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -44,6 +47,7 @@ struct Options {
     check: bool,
     no_draw: bool,
     ignore_transform: bool,
+    check_draw_groups: bool,
     check_normals: bool,
     corrupt_normal: bool,
 }
@@ -57,6 +61,7 @@ impl Default for Options {
             check: false,
             no_draw: false,
             ignore_transform: false,
+            check_draw_groups: false,
             check_normals: false,
             corrupt_normal: false,
         }
@@ -72,6 +77,7 @@ impl Options {
                 "--check" => options.check = true,
                 "--no-draw" => options.no_draw = true,
                 "--ignore-transform" => options.ignore_transform = true,
+                "--check-draw-groups" => options.check_draw_groups = true,
                 "--check-normals" => options.check_normals = true,
                 "--corrupt-normal" => options.corrupt_normal = true,
                 "--out-dir" => {
@@ -94,7 +100,7 @@ impl Options {
                 "-h" | "--help" => {
                     println!(
                         "native-scene [--check] [--no-draw] [--ignore-transform]\n\
-                         \x20            [--check-normals] [--corrupt-normal]\n\
+                         \x20            [--check-draw-groups] [--check-normals] [--corrupt-normal]\n\
                          \x20            [--out-dir DIR] [--width N] [--height N]"
                     );
                     std::process::exit(0);
@@ -130,6 +136,9 @@ fn run(options: Options) -> Result<(), String> {
     let started = Instant::now();
     std::fs::create_dir_all(&options.out_dir).map_err(|error| error.to_string())?;
 
+    if options.check_draw_groups {
+        return run_draw_group_check(&options.out_dir);
+    }
     if options.check_normals || options.corrupt_normal {
         return run_normal_check(&options, started);
     }
@@ -271,6 +280,115 @@ fn run(options: Options) -> Result<(), String> {
         CheckResult::Pass => Ok(()),
         CheckResult::Control(message) => Err(message),
         CheckResult::Fail(message) => Err(message),
+    }
+}
+
+fn run_draw_group_check(out_dir: &std::path::Path) -> Result<(), String> {
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 96;
+    const TOLERANCE: u8 = 3;
+    const NORMAL: [f32; 3] = [0.0, 0.0, 1.0];
+    let mut renderer =
+        NativeRenderer::new(RendererOptions::default()).map_err(|error| error.to_string())?;
+    let quad = oblique_quad([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], NORMAL);
+    let triangle = MeshData {
+        positions: vec![[-0.65, -0.65, 0.0], [0.65, -0.65, 0.0], [0.0, 0.65, 0.0]],
+        normals: vec![NORMAL; 3],
+        indices: vec![0, 1, 2],
+    };
+    for (id, mesh) in [(1, quad), (2, triangle)] {
+        renderer
+            .upload_mesh(id, &mesh, [1.0; 3])
+            .map_err(|error| error.to_string())?;
+    }
+    let red = [0.90, 0.16, 0.14];
+    let green = [0.18, 0.78, 0.30];
+    let blue = [0.14, 0.28, 0.92];
+    for (id, color) in [(MAT_RED, red), (MAT_GREEN, green), (MAT_BLUE, blue)] {
+        renderer.register_material(id, color);
+    }
+
+    let mut world = World::new(3).map_err(|error| error.to_string())?;
+    for (name, kind, width) in [
+        ("Transform", ElementType::F32, 10),
+        ("Mesh", ElementType::U32, 1),
+        ("Material", ElementType::U32, 1),
+    ] {
+        world
+            .register(name, kind, width)
+            .map_err(|error| error.to_string())?;
+    }
+    // Interleave geometry ids in the World. Geometry 1 packs first with
+    // two distinct rows, and geometry 2 uses the global instance index 2.
+    let rows = [
+        row([-2.0, 0.0, 0.0], IDENTITY, [1.3; 3]),
+        row([0.0; 3], IDENTITY, [1.0; 3]),
+        row([2.0, 0.0, 0.0], IDENTITY, [1.3; 3]),
+    ];
+    spawn_instances(
+        &mut world,
+        &rows,
+        &[1, 2, 1],
+        &[MAT_RED, MAT_BLUE, MAT_GREEN],
+    )
+    .map_err(|error| error.to_string())?;
+    let source = resolve_source(&world, "Transform", "Mesh", Some("Material"), 3)
+        .map_err(|error| error.to_string())?;
+    let camera = Camera::new([0.0, 0.0, 3.0], [0.0; 3]);
+    let image = renderer
+        .render(&world, source, &camera, WIDTH, HEIGHT, false)
+        .map_err(|error| error.to_string())?;
+    write_ppm(&out_dir.join("draw-groups.ppm"), WIDTH, HEIGHT, &image.rgba)
+        .map_err(|error| error.to_string())?;
+
+    let mut pass =
+        image.stats.instances == 3 && image.stats.draw_calls == 2 && image.stats.triangles == 5;
+    let mut samples = Vec::new();
+    for (label, x, y, expected) in [
+        ("left_quad", 41, 48, shade_rgb(red, NORMAL)),
+        ("right_quad", 151, 48, shade_rgb(green, NORMAL)),
+        ("center_triangle", 96, 48, shade_rgb(blue, NORMAL)),
+        // Inside the triangle's bounding box, but outside its sloping edge.
+        ("outside_triangle", 108, 36, [0; 3]),
+    ] {
+        let index = ((y * WIDTH + x) * 4) as usize;
+        let actual = [
+            image.rgba[index],
+            image.rgba[index + 1],
+            image.rgba[index + 2],
+        ];
+        pass &= max_channel_diff(actual, expected) <= TOLERANCE;
+        samples.push(format!(
+            "{{\"label\":{},\"x\":{x},\"y\":{y},\"actual\":{},\"expected\":{}}}",
+            json_string(label),
+            rgb_json(actual),
+            rgb_json(expected)
+        ));
+    }
+    let source_sha = option_env!("MANIFOLDX_SOURCE_SHA").unwrap_or("uncommitted");
+    let result = if pass { "pass" } else { "fail" };
+    let summary = format!(
+        concat!(
+            "{{\"schema\":\"manifoldx-native-draw-groups/1\",\"source_sha\":{},",
+            "\"adapter\":{},\"width\":{},\"height\":{},\"state\":{},",
+            "\"tolerance\":{},\"samples\":[{}],\"result\":\"{}\"}}"
+        ),
+        json_string(source_sha),
+        renderer.adapter().to_json(),
+        WIDTH,
+        HEIGHT,
+        state_json(&image),
+        TOLERANCE,
+        samples.join(","),
+        result
+    );
+    std::fs::write(out_dir.join("draw-groups.json"), &summary)
+        .map_err(|error| error.to_string())?;
+    println!("{summary}");
+    if pass {
+        Ok(())
+    } else {
+        Err("draw group counts or pixel samples differ from the fixture".into())
     }
 }
 
