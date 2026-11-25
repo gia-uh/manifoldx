@@ -5,6 +5,13 @@ from manifoldx.engine import Engine
 from manifoldx import backends
 from manifoldx.types import Vector3, Vector4, Float, Color
 from manifoldx.ecs import EntityStore, ComponentView
+from manifoldx.world import (
+    Clock as Clock,
+    Entity as Entity,
+    PythonGraphicsBridge as PythonGraphicsBridge,
+    Readback as Readback,
+    World as World,
+)
 from manifoldx.systems import Query
 from manifoldx.components import Transform, Mesh, Material, Colors, Layer, Tint, Fade, Palette
 from manifoldx.camera import Camera

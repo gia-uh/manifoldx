@@ -17,6 +17,7 @@
 
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
+mod frames;
 mod runtime;
 
 use manifoldx_core::ecs::{
@@ -868,6 +869,7 @@ impl PyNativeWorld {
         dict.set_item("name", &readout.schema.name)?;
         dict.set_item("kind", readout.schema.element.as_str())?;
         dict.set_item("width", readout.schema.width)?;
+        dict.set_item("version", readout.version)?;
         dict.set_item("count", readout.ids.len())?;
         dict.set_item("handles", PyBytes::new(py, &handles))?;
         dict.set_item("membership", PyBytes::new(py, &membership))?;
@@ -921,5 +923,6 @@ fn _core_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEntitySlots>()?;
     m.add_class::<PyNativeWorld>()?;
     m.add_class::<runtime::PyNativeRuntime>()?;
+    frames::register(m)?;
     Ok(())
 }
