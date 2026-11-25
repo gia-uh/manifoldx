@@ -148,14 +148,15 @@ impl VehicleSpec {
                     return Err(format!("wheel {index} mount must be finite"));
                 }
             }
-            if !(wheel.radius.is_finite() && wheel.radius > 0.0) {
-                return Err(format!("wheel {index} radius must be finite and positive"));
+            for (name, value) in [("radius", wheel.radius), ("inertia", wheel.inertia)] {
+                if !(value.is_finite() && value > 0.0) {
+                    return Err(format!("wheel {index} {name} must be finite and positive"));
+                }
             }
             for (name, value) in [
                 ("travel", wheel.travel),
                 ("damper", wheel.damper),
                 ("brake_share", wheel.brake_share),
-                ("inertia", wheel.inertia),
                 ("tyre mu", wheel.tyre.mu),
                 ("tyre b_lat", wheel.tyre.b_lat),
                 ("tyre c_lat", wheel.tyre.c_lat),

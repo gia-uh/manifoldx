@@ -396,6 +396,29 @@ def cases():
     return rows
 
 
+def check_wheel_inertia():
+    spec = car_spec()
+    spec["wheels"][2]["inertia"] = 0.0
+    try:
+        native._VehicleSim(spec)
+    except ValueError as error:
+        require(str(error) == "wheel 2 inertia must be finite and positive", str(error))
+    else:
+        raise AssertionError("native solver accepted zero wheel inertia")
+
+    sim = native._VehicleSim(car_spec())
+    sim.place(0.0, 0.0, 0.0, 0.0)
+    sim.set_flat_ground(-10.0)
+    sim.set_controls(0.0, 1.0, 0.0, 0.0)
+    require(sim.step(1)["steps"] == 1, "expected one fixed substep")
+    state = sim.snapshot()
+    require(state["load"] == [0.0] * 4, "expected airborne wheels")
+    for value in state["omega"] + state["wheel_turn"]:
+        require(math.isfinite(value), "non-finite airborne wheel state")
+    require(state["omega"][2] > 0.0 and state["wheel_turn"][2] > 0.0, "driven wheel did not spin")
+    print("wheel inertia: zero rejected; airborne wheel spin finite after one fixed substep")
+
+
 def negative_control():
     """The accelerate assertion must fail when tyre grip is removed."""
     pose, stats, _state = run_case(
@@ -432,6 +455,7 @@ def main():
     if args.negative_control:
         negative_control()
         return
+    check_wheel_inertia()
     rows = cases()
     print("| case | substeps | solver ms/substep | publish ms/frame | gear | rpm | pose (x, y, z) |")
     print("|---|---:|---:|---:|---:|---:|---|")

@@ -1093,6 +1093,37 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_wheel_inertia_before_creating_a_sim() {
+        for inertia in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut spec = test_car();
+            spec.wheels[2].inertia = inertia;
+            assert_eq!(
+                Sim::new(spec).err().as_deref(),
+                Some("wheel 2 inertia must be finite and positive"),
+                "inertia: {inertia}"
+            );
+        }
+    }
+
+    #[test]
+    fn driven_airborne_wheels_spin_with_finite_state() {
+        let mut sim = flat_sim();
+        sim.set_ground(Ground::flat(-10.0, 1.0).unwrap());
+        sim.set_controls(Controls::new(0.0, 1.0, 0.0, 0.0).unwrap())
+            .unwrap();
+        sim.step();
+
+        let state = sim.snapshot();
+        assert_eq!(state.load, vec![0.0; 4]);
+        assert!(state
+            .omega
+            .iter()
+            .chain(&state.wheel_turn)
+            .all(|v| v.is_finite()));
+        assert!(state.omega[2] > 0.0 && state.wheel_turn[2] > 0.0);
+    }
+
+    #[test]
     fn place_rejects_non_finite_inputs_before_mutating() {
         let mut sim = flat_sim();
         sim.step_many(12).unwrap();
