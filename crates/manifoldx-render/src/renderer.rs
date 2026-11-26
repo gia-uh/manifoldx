@@ -12,14 +12,14 @@ use crate::math::Mat4;
 use crate::post::{PostOptions, PostPasses};
 use crate::rect::{RectPass, RectRow};
 use crate::scene::{
-    DEFAULT_MAX_INSTANCES, InstanceBatch, InstanceSource, MeshData, SceneError, read_instances,
+    read_instances, InstanceBatch, InstanceSource, MeshData, SceneError, DEFAULT_MAX_INSTANCES,
 };
 
 use crate::environment::EnvironmentData;
 use crate::fragment::{FragmentData, FragmentPipeline};
-use crate::manual::{ManualData, ManualFrame, ManualPipeline, MeshTexture, gpu_buffer};
+use crate::manual::{gpu_buffer, ManualData, ManualFrame, ManualPipeline, MeshTexture};
 use crate::shadow::{self, ShadowFrame, ShadowMap, ShadowOptions};
-use crate::skin::{JointMatrices, MAX_JOINTS, Skin};
+use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
 use crate::sprite::{SpriteData, SpritePass};
 use crate::volume::{VolumeMaterialData, VolumePass};
 
@@ -32,6 +32,7 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16 + 4 + 8 * 4 + 16 + 4 + 8 + 4) * 4;
 const INSTANCE_FLOATS: usize = 40;
 const PALETTE_SLOTS: usize = 8;
+const SURFACE_BAKED: f32 = 12.0;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
 const VERTEX_BYTES: usize = 13 * 4;
 const SURFACE_FLOATS: usize = 52;
@@ -226,6 +227,7 @@ pub struct StandardEffects {
     pub faded: bool,
     pub tinted: bool,
     pub paletted: bool,
+    pub baked: Option<u32>,
 }
 
 impl Default for StandardEffects {
@@ -241,6 +243,7 @@ impl Default for StandardEffects {
             faded: false,
             tinted: false,
             paletted: false,
+            baked: None,
         }
     }
 }
@@ -312,6 +315,7 @@ struct InstanceStyle {
     fade: f32,
     tint: [f32; 3],
     palette: [[f32; 4]; PALETTE_SLOTS],
+    baked_layer: f32,
 }
 
 impl Default for InstanceStyle {
@@ -320,15 +324,46 @@ impl Default for InstanceStyle {
             fade: 1.0,
             tint: [1.0; 3],
             palette: [[1.0; 4]; PALETTE_SLOTS],
+            baked_layer: -1.0,
         }
     }
 }
 
 struct SurfaceBinding {
     albedo: u32,
+    baked: Option<u32>,
     values: [f32; SURFACE_FLOATS],
     uniform: wgpu::Buffer,
     group: wgpu::BindGroup,
+}
+
+struct BakedArray {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+impl BakedArray {
+    fn new(device: &wgpu::Device, size: u32, layers: u32) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("native baked color array"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: size.ilog2() + 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        Self { texture, view }
+    }
 }
 
 struct GpuMesh {
@@ -612,6 +647,9 @@ pub struct NativeRenderer {
     translucent_pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
     textures: HashMap<u32, MeshTexture>,
+    baked_arrays: HashMap<u32, BakedArray>,
+    baked_sampler: wgpu::Sampler,
+    empty_baked: BakedArray,
     surface_default: wgpu::Buffer,
     surface_materials: HashMap<u32, SurfaceBinding>,
     point_lights: [[f32; 8]; 4],
@@ -694,6 +732,22 @@ impl NativeRenderer {
                             ty: wgpu::BindingType::Texture {
                                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                                 view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 4,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 5,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2Array,
                                 multisampled: false,
                             },
                             count: None,
@@ -860,6 +914,14 @@ impl NativeRenderer {
             pipeline(wgpu::FrontFace::Ccw, false, true),
             pipeline(wgpu::FrontFace::Cw, false, true),
         ];
+        let baked_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
+        let empty_baked = BakedArray::new(&gpu.device, 1, 1);
         let mut renderer = Self {
             gpu,
             skin,
@@ -892,6 +954,9 @@ impl NativeRenderer {
             translucent_pipeline: translucent,
             texture_layout,
             textures: HashMap::new(),
+            baked_arrays: HashMap::new(),
+            baked_sampler,
+            empty_baked,
             surface_default,
             surface_materials: HashMap::new(),
             point_lights: [[0.0; 8]; 4],
@@ -1180,12 +1245,15 @@ impl NativeRenderer {
             interleaved.extend_from_slice(position);
             interleaved.extend_from_slice(normal);
             interleaved.extend_from_slice(uvs.get(index).unwrap_or(&[0.0; 2]));
-            let color = colors
-                .get(index)
-                .map(|rgb| srgb_to_linear(*rgb))
-                .unwrap_or([1.0; 4]);
-            interleaved.extend_from_slice(&color[..3]);
-            interleaved.push(surfaces.get(index).copied().unwrap_or_default());
+            let surface = surfaces.get(index).copied().unwrap_or_default();
+            let color = colors.get(index).copied().unwrap_or([1.0; 3]);
+            if surface == SURFACE_BAKED {
+                // This surface carries baked UVs and a packed sRGB fallback in its color columns.
+                interleaved.extend_from_slice(&color);
+            } else {
+                interleaved.extend_from_slice(&srgb_to_linear(color)[..3]);
+            }
+            interleaved.push(surface);
             interleaved.push(f32::from_bits(
                 joints.get(index).copied().unwrap_or_default(),
             ));
@@ -1303,6 +1371,13 @@ impl NativeRenderer {
         effects.validate()?;
         if id == 0 || color_srgb.iter().any(|value| !value.is_finite()) {
             return Err(RenderError::Resource("invalid material id or color".into()));
+        }
+        if let Some(baked) = effects.baked {
+            if !self.baked_arrays.contains_key(&baked) {
+                return Err(RenderError::Resource(format!(
+                    "unknown baked texture array {baked}"
+                )));
+            }
         }
         let (style, albedo) = match shading {
             Shading::Basic => ([0.0, 0.0, 0.0, 1.0], 0),
@@ -1523,6 +1598,86 @@ impl NativeRenderer {
         Ok(())
     }
 
+    /// Reserve an sRGB array texture with its complete mip chain.
+    pub fn create_baked_array(
+        &mut self,
+        id: u32,
+        size: u32,
+        layers: u32,
+    ) -> Result<(), RenderError> {
+        let limits = self.device().limits();
+        if id == 0
+            || self.baked_arrays.contains_key(&id)
+            || !(1..=limits.max_texture_dimension_2d).contains(&size)
+            || !(1..=limits.max_texture_array_layers).contains(&layers)
+        {
+            return Err(RenderError::Resource(
+                "invalid baked array id, size or layer count".into(),
+            ));
+        }
+        let array = BakedArray::new(self.device(), size, layers);
+        self.baked_arrays.insert(id, array);
+        Ok(())
+    }
+
+    /// Update one layer. Validate every supplied level before writing any pixels.
+    pub fn write_baked_layer(
+        &self,
+        id: u32,
+        layer: u32,
+        levels: &[Vec<u8>],
+    ) -> Result<(), RenderError> {
+        let array = self
+            .baked_arrays
+            .get(&id)
+            .ok_or_else(|| RenderError::Resource(format!("unknown baked texture array {id}")))?;
+        let texture = &array.texture;
+        if layer >= texture.depth_or_array_layers()
+            || levels.is_empty()
+            || levels.len() > texture.mip_level_count() as usize
+        {
+            return Err(RenderError::Resource(
+                "invalid baked texture layer or mip count".into(),
+            ));
+        }
+        let side = |level| (texture.width() >> level).max(1);
+        for (level, pixels) in levels.iter().enumerate() {
+            let size = side(level) as usize;
+            if pixels.len() != size * size * 4 {
+                return Err(RenderError::Resource(format!(
+                    "invalid baked array mip {level} byte count"
+                )));
+            }
+        }
+        for (level, pixels) in levels.iter().enumerate() {
+            let size = side(level);
+            self.queue().write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size * 4),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        Ok(())
+    }
+
     fn make_texture(&self, width: u32, height: u32, levels: &[&[u8]]) -> MeshTexture {
         let texture = self.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("manifoldx-albedo"),
@@ -1580,13 +1735,11 @@ impl NativeRenderer {
         patterns: [[f32; 5]; 9],
         detail: bool,
     ) -> Result<(), RenderError> {
-        let albedo = self
-            .materials
-            .get(&id)
-            .ok_or_else(|| {
-                RenderError::Resource("surface patterns need a registered Standard material".into())
-            })?
-            .albedo;
+        let material = self.materials.get(&id).ok_or_else(|| {
+            RenderError::Resource("surface patterns need a registered Standard material".into())
+        })?;
+        let albedo = material.albedo;
+        let baked = material.effects.baked;
         if patterns
             .iter()
             .any(|row| row[0] <= 0.0 || row.iter().any(|x| !x.is_finite()))
@@ -1607,7 +1760,7 @@ impl NativeRenderer {
         if let Some(cached) = self
             .surface_materials
             .get_mut(&id)
-            .filter(|entry| entry.albedo == albedo)
+            .filter(|entry| entry.albedo == albedo && entry.baked == baked)
         {
             if cached.values != data {
                 queue.write_buffer(&cached.uniform, 0, bytemuck::cast_slice(&data));
@@ -1623,11 +1776,13 @@ impl NativeRenderer {
         );
         queue.write_buffer(&uniform, 0, bytemuck::cast_slice(&data));
         let texture = &self.textures[&albedo];
-        let group = self.albedo_group(&texture.view, &texture.sampler, &uniform);
+        let array = baked.map_or(&self.empty_baked, |id| &self.baked_arrays[&id]);
+        let group = self.albedo_group(&texture.view, &texture.sampler, &uniform, array);
         self.surface_materials.insert(
             id,
             SurfaceBinding {
                 albedo,
+                baked,
                 uniform,
                 group,
                 values: data,
@@ -1637,7 +1792,7 @@ impl NativeRenderer {
     }
 
     fn bind_albedo(&self, view: wgpu::TextureView, sampler: wgpu::Sampler) -> MeshTexture {
-        let group = self.albedo_group(&view, &sampler, &self.surface_default);
+        let group = self.albedo_group(&view, &sampler, &self.surface_default, &self.empty_baked);
         MeshTexture {
             group,
             view,
@@ -1650,6 +1805,7 @@ impl NativeRenderer {
         view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         surface: &wgpu::Buffer,
+        array: &BakedArray,
     ) -> wgpu::BindGroup {
         self.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("manifoldx-albedo"),
@@ -1662,6 +1818,14 @@ impl NativeRenderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.baked_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&array.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 64,
@@ -2080,7 +2244,9 @@ impl NativeRenderer {
         let fades = draw.ids.is_none() && self.materials.values().any(|m| m.effects.faded);
         let tints = draw.ids.is_none() && self.materials.values().any(|m| m.effects.tinted);
         let palettes = draw.ids.is_none() && self.materials.values().any(|m| m.effects.paletted);
-        let styles = instance_styles(world, &batch, fades, tints, palettes)?;
+        let baked =
+            draw.ids.is_none() && self.materials.values().any(|m| m.effects.baked.is_some());
+        let styles = instance_styles(world, &batch, fades, tints, palettes, baked)?;
         let layers = draw
             .secondary
             .map(|view| &view.layers)
@@ -2798,8 +2964,12 @@ impl NativeRenderer {
                 effects.opacity,
                 effects.mirror.unwrap_or_default(),
                 u8::from(mirrored) as f32,
-                if effects.paletted && !shadow {
+                if shadow {
+                    u8::from(effects.vertex_colors) as f32
+                } else if effects.paletted {
                     2.0
+                } else if effects.baked.is_some() {
+                    3.0
                 } else {
                     u8::from(effects.vertex_colors) as f32
                 },
@@ -2820,9 +2990,14 @@ impl NativeRenderer {
                 effects.ripple,
                 if effects.faded { style.fade } else { 1.0 },
             ]);
-            group
-                .values
-                .extend_from_slice(&if effects.tinted { style.tint } else { [1.0; 3] });
+            let tint_or_baked_layer = if effects.tinted {
+                style.tint
+            } else if effects.baked.is_some() {
+                [style.baked_layer, 0.0, 0.0]
+            } else {
+                [1.0; 3]
+            };
+            group.values.extend_from_slice(&tint_or_baked_layer);
             if effects.paletted && !shadow {
                 group.palettes.extend_from_slice(&style.palette);
             }
@@ -2863,9 +3038,10 @@ fn instance_styles(
     fades: bool,
     tints: bool,
     palettes: bool,
+    baked: bool,
 ) -> Result<HashMap<EntityId, InstanceStyle>, RenderError> {
     let mut styles = HashMap::<_, InstanceStyle>::new();
-    if !fades && !tints && !palettes {
+    if !fades && !tints && !palettes && !baked {
         return Ok(styles);
     }
     let ids: Vec<_> = batch
@@ -2877,6 +3053,7 @@ fn instance_styles(
         (fades, "Fade", 1),
         (tints, "Tint", 3),
         (palettes, "Palette", PALETTE_SLOTS * 3),
+        (baked, "Baked", 1),
     ] {
         if !enabled {
             continue;
@@ -2903,6 +3080,7 @@ fn instance_styles(
                 match name {
                     "Fade" => style.fade = row[0],
                     "Tint" => style.tint.copy_from_slice(row),
+                    "Baked" => style.baked_layer = row[0],
                     _ => {
                         for (color, rgb) in style.palette.iter_mut().zip(row.chunks_exact(3)) {
                             color[..3].copy_from_slice(rgb);
@@ -3162,6 +3340,8 @@ struct Camera {
 @group(0) @binding(1) var<storage, read> palettes: array<vec4<f32>>;
 @group(1) @binding(0) var albedo_sampler: sampler;
 @group(1) @binding(1) var albedo_texture: texture_2d<f32>;
+@group(1) @binding(4) var baked_sampler: sampler;
+@group(1) @binding(5) var baked_texture: texture_2d_array<f32>;
 struct SurfaceSettings {
     patterns: array<vec4<f32>, 9>,
     darks: array<vec4<f32>, 3>,
@@ -3239,6 +3419,7 @@ struct VertexOut {
     @location(8) @interpolate(flat) fade: f32,
     @location(9) surface: f32,
     @location(10) @interpolate(flat) material_color: vec3<f32>,
+    @location(11) @interpolate(flat) baked_layer: f32,
 };
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
@@ -3247,6 +3428,17 @@ fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
         return v * inverseSqrt(len_sq);
     }
     return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+fn decode_srgb(srgb: vec3<f32>) -> vec3<f32> {
+    return select(pow((srgb + 0.055) / 1.055, vec3<f32>(2.4)), srgb / 12.92,
+                  srgb <= vec3<f32>(0.04045));
+}
+
+fn baked_color(packed: f32) -> vec3<f32> {
+    let p = u32(round(packed));
+    let rgb = vec3<f32>(f32((p >> 16u) & 255u), f32((p >> 8u) & 255u), f32(p & 255u));
+    return decode_srgb(rgb / 255.0);
 }
 
 // The instance model is T * R * S. Its upper-left 3x3 columns are s_j * R e_j,
@@ -3350,6 +3542,17 @@ fn vs_main(in: VertexIn, instance: InstanceIn, @builtin(instance_index) index: u
     out.normal = transform_normal(model, normal);
     out.color = instance.color.rgb * select(vec3<f32>(1.0), in.color.xyz * instance.tint, instance.effects.w > 0.0);
     out.material_color = instance.color.rgb;
+    out.baked_layer = instance.tint.x;
+    if instance.effects.w == 3.0 {
+        out.color = instance.color.rgb * in.color.xyz;
+    }
+    if i32(in.color.w + 0.5) == 12 {
+        if instance.effects.w == 3.0 {
+            out.color = in.color.xyz;
+        } else if instance.effects.w > 0.0 {
+            out.color = instance.color.rgb * baked_color(in.color.z) * instance.tint;
+        }
+    }
     if instance.effects.w == 2.0 {
         let color = in.color.xyz;
         out.color = select(1.055 * pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055,
@@ -3540,11 +3743,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         || (all(in.world_position.xz > in.cut.xy) && all(in.world_position.xz < in.cut.zw)) {
         discard;
     }
+    let baked_dx = dpdx(in.color.xy);
+    let baked_dy = dpdy(in.color.xy);
     var albedo = in.color;
     if in.effects.w == 2.0 {
-        let srgb = in.color;
-        albedo = select(pow((srgb + 0.055) / 1.055, vec3<f32>(2.4)), srgb / 12.92,
-                        srgb <= vec3<f32>(0.04045)) * in.material_color;
+        albedo = decode_srgb(in.color) * in.material_color;
     }
     if mode == 4u {
         let texel = textureSampleGrad(albedo_texture, albedo_sampler, in.uv, uv_dx, uv_dy);
@@ -3560,6 +3763,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 distance(camera.position.xyz, in.world_position));
             albedo = details.xyz;
             roughness = clamp(roughness + details.w, 0.04, 1.0);
+        }
+    }
+    if mode == 3u && in.effects.w == 3.0 && i32(in.surface + 0.5) == 12 {
+        if in.baked_layer >= 0.0 {
+            let layer = i32(in.baked_layer + 0.5);
+            albedo = textureSampleGrad(baked_texture, baked_sampler, in.color.xy,
+                                       layer, baked_dx, baked_dy).rgb * in.material_color;
+        } else {
+            albedo = baked_color(in.color.z) * in.material_color;
         }
     }
     let v = safe_normalize(camera.position.xyz - in.world_position);

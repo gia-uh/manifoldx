@@ -208,6 +208,12 @@ def texture_array(engine, layers: int, size: int) -> TextureHandle:
     write_layer to fill one layer at a time; sampled trilinearly, clamped at the edges. A material reads it
     as a texture_2d_array (StandardMaterial's baked=). Asked for before the engine has a device (an app
     building its world before its window opens), it is made on first use."""
+    upload_native = getattr(engine, "_upload_native_baked_array", None)
+    if upload_native is not None:
+        if not 1 <= layers <= 2**32 - 1 or not 1 <= size <= 2**32 - 1:
+            raise ValueError("baked texture size and layer count must be positive")
+        return upload_native(int(layers), int(size))
+
     registry = engine._texture_registry
     handle = TextureHandle(id=registry.alloc_id(), texture=None, view=None, sampler=None, size=(size, size),
                            layers=int(layers))
@@ -262,6 +268,10 @@ def layer_mips(rgb: np.ndarray) -> list[np.ndarray]:
 @_deferred.deferred_in_pipeline
 def write_layer(engine, handle: TextureHandle, layer: int, levels: list[np.ndarray]) -> None:
     """Fill layer `layer` of a texture_array with `levels` (layer_mips of an image of the array's size)."""
+    write_native = getattr(engine, "_write_native_baked_layer", None)
+    if write_native is not None:
+        return write_native(handle, int(layer), levels)
+
     ready(handle)
     if levels[0].shape[:2] != (handle.size[1], handle.size[0]):
         raise ValueError(f"a {levels[0].shape[:2]} image does not fit a {handle.size} array")

@@ -12,13 +12,13 @@ use manifoldx_render::manual::ManualData;
 use manifoldx_render::rect::RectRow;
 use manifoldx_render::renderer::{ViewOptions, ViewOrder};
 use manifoldx_render::shadow::ShadowOptions;
-use manifoldx_render::skin::{JointMatrices, validate_matrices};
+use manifoldx_render::skin::{validate_matrices, JointMatrices};
 use manifoldx_render::sprite::SpriteData;
 use manifoldx_render::volume::VolumeMaterialData;
 use manifoldx_render::{
-    Camera, DEFAULT_MAX_INSTANCES, DirectionalLight, MeshData, NativeRenderer, PointLight,
-    PostOptions, RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight,
-    StandardEffects, resolve_source,
+    resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, PostOptions,
+    RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight, StandardEffects,
+    DEFAULT_MAX_INSTANCES,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -55,6 +55,7 @@ type EffectsInput = (
     bool,
     bool,
     bool,
+    Option<u32>,
 );
 type ShadowInput = (
     [f32; 3],
@@ -85,6 +86,8 @@ enum Upload {
     Material(u32, [f32; 3], Shading, StandardEffects),
     Surface(u32, Box<[[f32; 5]; 9]>, bool),
     Albedo(u32, u32, u32, Vec<Vec<u8>>),
+    BakedArray(u32, u32, u32),
+    BakedLayer(u32, u32, Vec<Vec<u8>>),
     Poses(Vec<PoseInput>),
     Bake(u32, Vec<JointMatrices>),
     Play(Vec<FrameInput>),
@@ -214,6 +217,12 @@ impl Scene {
                 }
                 Upload::Material(id, color, shading, effects) => {
                     renderer.set_material_effects(id, color, shading, effects)?
+                }
+                Upload::BakedArray(id, size, layers) => {
+                    renderer.create_baked_array(id, size, layers)?
+                }
+                Upload::BakedLayer(id, layer, levels) => {
+                    renderer.write_baked_layer(id, layer, &levels)?
                 }
                 Upload::Albedo(id, width, height, levels) => renderer.upload_albedo(
                     id,
@@ -723,6 +732,7 @@ impl NativeGraphics {
                 faded,
                 tinted,
                 paletted,
+                baked,
             )| {
                 StandardEffects {
                     vertex_colors,
@@ -735,6 +745,7 @@ impl NativeGraphics {
                     faded,
                     tinted,
                     paletted,
+                    baked,
                 }
             },
         );
@@ -913,6 +924,26 @@ impl NativeGraphics {
             .uploads
             .push_back(Upload::Environment(data));
         Ok(())
+    }
+
+    fn baked_array(&self, id: u32, size: u32, layers: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::BakedArray(id, size, layers));
+    }
+
+    fn baked_layer(&self, py: Python<'_>, id: u32, layer: u32, levels: Vec<Py<PyBytes>>) {
+        let levels = levels
+            .iter()
+            .map(|level| level.as_bytes(py).to_vec())
+            .collect();
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::BakedLayer(id, layer, levels));
     }
 
     fn albedo(&self, py: Python<'_>, id: u32, width: u32, height: u32, levels: Vec<Py<PyBytes>>) {

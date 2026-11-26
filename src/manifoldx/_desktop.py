@@ -28,6 +28,8 @@ from manifoldx.resources import (
     SpotLight,
     StandardMaterial,
     VolumeRegistry,
+    SURFACE_BAKED,
+    baked_columns,
 )
 from manifoldx.systems import Query
 from manifoldx.textures import TextureHandle, _mip_chain
@@ -430,6 +432,13 @@ class _NativeEngine:
             joints = pack_joints(indices, weights).tolist()
         if "indices" not in geometry:
             raise ValueError("native meshes require triangle indices")
+        surfaces = np.asarray(geometry.get("surfaces", []), dtype="f4").reshape(-1)
+        colors = np.asarray(geometry.get("colors", []))
+        baked = surfaces == SURFACE_BAKED
+        if baked.any():
+            colors = np.array(geometry.get("colors", np.ones((len(surfaces), 3))), dtype="f4")
+            uv = np.asarray(geometry.get("baked_uv", np.zeros((len(surfaces), 2))))
+            colors[baked] = baked_columns(colors[baked], uv[baked])
         self._graphics.mesh(
             index,
             np.asarray(geometry["positions"]).tolist(),
@@ -437,8 +446,7 @@ class _NativeEngine:
             np.asarray(geometry["indices"]).reshape(-1).tolist(),
             np.asarray(geometry.get("uvs", [])).tolist(),
             (
-                np.asarray(geometry.get("colors", [])).tolist(), joints,
-                np.asarray(geometry.get("surfaces", []), dtype="f4").reshape(-1).tolist(),
+                colors.tolist(), joints, surfaces.tolist(),
             ),
         )
         registry[key] = (index, geometry)
@@ -494,10 +502,9 @@ class _NativeEngine:
         params = None
         effects = None
         if kind == "standard":
-            if material.baked is not None:
-                raise NotImplementedError(
-                    "the requested Standard material effect needs a later native renderer"
-                )
+            baked = material.baked
+            if baked is not None and getattr(baked, "_native_owner", None) is not self:
+                raise ValueError("baked texture array belongs to a different graphics owner")
             texture = material.albedo_map
             if texture is not None and getattr(texture, "_native_owner", None) is not self:
                 raise ValueError("albedo texture belongs to a different graphics owner")
@@ -518,6 +525,7 @@ class _NativeEngine:
                 material.faded,
                 material.tinted,
                 material.paletted,
+                None if baked is None else baked.id,
             )
         shininess = material.shininess if kind == "phong" else None
         self._graphics.material(index, _color(material.color), kind, params, shininess, effects)
@@ -571,6 +579,30 @@ class _NativeEngine:
         texture = TextureHandle(index, None, None, None, (width, height), source)
         texture._native_owner = self
         return texture
+
+    def _upload_native_baked_array(self, layers, size):
+        self._textures += 1
+        index = self._textures
+        self._graphics.baked_array(index, size, layers)
+        texture = TextureHandle(index, None, None, None, (size, size), layers=layers)
+        texture._native_owner = self
+        return texture
+
+    def _write_native_baked_layer(self, handle, layer, levels):
+        if getattr(handle, "_native_owner", None) is not self:
+            raise ValueError("baked texture array belongs to a different graphics owner")
+        if not 0 <= layer < handle.layers:
+            raise ValueError("baked texture layer index is outside the array")
+        size = handle.size[0]
+        if not 1 <= len(levels) <= size.bit_length():
+            raise ValueError("invalid baked texture layer mip count")
+        payload = []
+        for level, image in enumerate(levels):
+            side = max(1, size >> level)
+            if image.shape != (side, side, 4) or image.dtype != np.uint8:
+                raise ValueError(f"baked texture mip {level} must be a {side}x{side} RGBA uint8 image")
+            payload.append(image.tobytes())
+        self._graphics.baked_layer(handle.id, layer, payload)
 
     def spawn(self, *components, n=1):
         if n == 0:
