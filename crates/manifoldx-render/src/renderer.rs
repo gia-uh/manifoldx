@@ -1999,7 +1999,7 @@ impl NativeRenderer {
             rgba.extend_from_slice(&row[..(width * 4) as usize]);
         }
         if self.format == wgpu::TextureFormat::Bgra8UnormSrgb {
-            for pixel in rgba.chunks_exact_mut(4) {
+            for pixel in rgba.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
         }
@@ -2424,7 +2424,7 @@ impl NativeRenderer {
             }
             let bytes = bytemuck::cast_slice(&colors);
             let needed = bytes.len() as u64;
-            let limit = u64::from(self.gpu.device.limits().max_storage_buffer_binding_size);
+            let limit = self.gpu.device.limits().max_storage_buffer_binding_size;
             if needed > limit {
                 return Err(RenderError::Resource(
                     "instance palette data exceeds device limits".into(),
@@ -3088,7 +3088,7 @@ fn instance_styles(
                     "Tint" => style.tint.copy_from_slice(row),
                     "Baked" => style.baked_layer = row[0],
                     _ => {
-                        for (color, rgb) in style.palette.iter_mut().zip(row.chunks_exact(3)) {
+                        for (color, rgb) in style.palette.iter_mut().zip(row.as_chunks::<3>().0) {
                             color[..3].copy_from_slice(rgb);
                         }
                     }
@@ -4047,7 +4047,7 @@ mod post_target_tests {
                 first.stats.post_target_generation + 1
             );
             assert!(second.stats.post_order.contains(&"fxaa"));
-            let center = ((28 * 72 + 36) * 4) as usize;
+            let center = (28 * 72 + 36) * 4;
             let pixel = &second.rgba[center..center + 4];
             assert!(pixel[0] > pixel[2] + 70, "expected a red center: {pixel:?}");
             second.rgba
