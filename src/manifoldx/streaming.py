@@ -413,10 +413,11 @@ class _Uploads:
                 if self._native.stream_result(draw.version) is None:
                     continue
             except ValueError as exc:
+                del self._results[key]
                 self._invalidate_result(key, exc)
             else:
+                del self._results[key]
                 self._retire_held_version(key, release_layers=True)
-            del self._results[key]
 
     def _retire_held_version(self, key, *, release_layers):
         previous = self._held_versions.pop(key, None)
@@ -638,7 +639,7 @@ class _Uploads:
         handle = self._drawn.pop(c)
         self._note("undrawn", c)
         if handle is not None:
-            self._destroy(handle)
+            self._destroy(c, handle)
             previous = self._held_versions.get(c)
             if previous is not None:
                 self._retire_held_version(c, release_layers=previous[2] is not handle)
@@ -662,10 +663,14 @@ class _Uploads:
         """Whether drawn nodes get layers: a baked material, and a device to write them on."""
         return self._baked is not None and (self._native is not None or self.engine._device is not None)
 
-    def _destroy(self, handle):
-        """Destroy the drawn node and return the baked layers it used."""
+    def _destroy(self, key, handle):
+        """Destroy the drawn node, discard its pending receipt, and return its layers."""
         if self._native is not None:
             self._native.stream_hide(handle.key, handle.version)
+            if self._results.get(key) is handle:
+                # This draw may still have a commit ahead of the hide in the queue.
+                self._native.stream_discard_results([handle.version])
+                del self._results[key]
             self._free_layers.extend(handle.layers)
             return
         layer = self._layers.pop(handle.index, None)
@@ -1154,7 +1159,7 @@ class QuadStreamer(_Uploads):
             self._todo = []  # no done callback submits to a pool shut down
         for c, (handle, _, out) in list(self._fading.items()):
             if out:
-                self._destroy(handle)
+                self._destroy(c, handle)
         self._fading.clear()
         super().close()
 
@@ -1300,7 +1305,7 @@ class QuadStreamer(_Uploads):
             if not out:
                 self._set_fade(handle, 1.0)
                 continue
-            self._destroy(handle)  # still built: the cache frees it when it must
+            self._destroy(c, handle)  # still built: the cache frees it when it must
 
     def drawn(self) -> set[tuple[int, int, int]]:
         """The nodes drawn now, empty ones (build returned None) included; not those fading out."""

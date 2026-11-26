@@ -407,6 +407,69 @@ def receipts():
         engine.close()
 
 
+def republish():
+    engine = engine_for("Republish a cell before the graphics barrier")
+    engine.world.register("ReceiptRows", kind="u32", width=1)
+    geometry = plane(2, 2)
+    mesh = MeshData(geometry["positions"], geometry["normals"],
+                    np.ones((4, 3), np.float32), geometry["indices"])
+
+    def queued(stream):
+        for _ in range(90):
+            stream.focus(0, 0)
+            if (0, 0) in stream.drawn():
+                return stream._results[(0, 0)].version
+            time.sleep(0.002)
+        raise AssertionError(stream.stats())
+
+    def missed_receipt(version):
+        try:
+            return engine._graphics.stream_result(version) is not None
+        except ValueError as error:
+            assert "payload" in str(error), str(error)
+            return True
+
+    old_closed = latest_closed = old_active = 0
+    try:
+        for close in (True, False):
+            for cycle in range(6):
+                value = 1
+
+                def convert(request, raw):
+                    invalid = not close and cycle % 2 == 1 and value == 1
+                    row = [value, 99] if invalid else [value]
+                    return [(1, {"ReceiptRows": np.array(row, np.uint32)})], ()
+
+                stream = Streamer(engine, 4, lambda *_: mesh, radius=0, ready_radius=0, convert=convert)
+                old = queued(stream)
+                stream.focus(4, 0)
+                value = 2
+                latest = queued(stream)
+                assert latest > old
+                assert engine._graphics.stream_result(latest) is None
+                if close:
+                    stream.close()
+                    stream.close()
+                engine.render_frame()
+                if close:
+                    old_closed += missed_receipt(old)
+                    latest_closed += missed_receipt(latest)
+                else:
+                    stream.focus(0, 0)
+                    assert stream.settled and stream.stats()["rejected"] == 0, stream.stats()
+                    assert engine.world.query("ReceiptRows").read().numpy().tolist() == [[2]]
+                    old_active += missed_receipt(old)
+                    stream.close()
+                    engine.render_frame()
+                assert engine.last_frame["streamed_cells"] == 0
+                assert engine.last_frame["stream_resources"] == [0, 0]
+        counts = {"old_closed": old_closed, "latest_closed": latest_closed, "old_active": old_active}
+        assert counts == {"old_closed": 0, "latest_closed": 0, "old_active": 0}, ("superseded receipts accumulated", counts)
+        return {**counts, "close_cycles": 6, "active_cycles": 6, "latest_active_row": 2}
+    finally:
+        engine.close()
+
+
 def capsule(output):
     import native
     from manifoldx._core_native import _StreamBuilder
@@ -465,7 +528,7 @@ def portable_rows(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade", "receipts"))
+    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade", "receipts", "republish"))
     parser.add_argument("--fault", choices=("refresh", "albedo", "atomic", "late", "layer"))
     args = parser.parse_args()
     assert sys.flags.isolated
@@ -479,6 +542,8 @@ def main():
         result = cancellation(args.output)
     elif args.case == "receipts":
         result = receipts()
+    elif args.case == "republish":
+        result = republish()
     elif args.case in ("invalidate", "facade"):
         result = invalidation(args.output, facade=args.case == "facade")
     else:
