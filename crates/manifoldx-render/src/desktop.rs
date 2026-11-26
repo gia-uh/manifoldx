@@ -221,9 +221,9 @@ impl GpuTimings {
             .map_err(|_| RenderError::ReadbackChannel)?
             .map_err(|error| RenderError::Readback(error.to_string()))?;
         let mapped = slice.get_mapped_range();
-        let stamps: &[u64] = bytemuck::cast_slice(&mapped);
+        let stamps: &[[u64; 2]] = bytemuck::cast_slice(&mapped);
         let samples = stamps
-            .chunks_exact(2)
+            .iter()
             .map(|pair| (pair[1].wrapping_sub(pair[0]) as f64 * self.period).round() as u64)
             .collect();
         drop(mapped);
