@@ -7,6 +7,7 @@ use manifoldx_core::ecs::{ColumnData, EntityId, World};
 use manifoldx_render::environment::EnvironmentData;
 use manifoldx_render::fragment::FragmentData;
 use manifoldx_render::lines::{LineLayer, LineOptions, LineRow};
+use manifoldx_render::manual::ManualData;
 use manifoldx_render::rect::RectRow;
 use manifoldx_render::renderer::{ViewOptions, ViewOrder};
 use manifoldx_render::shadow::ShadowOptions;
@@ -75,6 +76,7 @@ enum Upload {
     View(ViewOptions),
     Environment(EnvironmentData),
     Fragment(u32, FragmentData),
+    Manual(u32, ManualData),
 }
 
 pub(crate) struct Scene {
@@ -142,6 +144,7 @@ impl Scene {
         renderer.set_lines(self.lines.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
+                Upload::Manual(id, data) => renderer.upload_manual(id, &data)?,
                 Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
                 Upload::Environment(data) => renderer.upload_environment(&data)?,
                 Upload::View(options) => renderer.set_fixture_view(options)?,
@@ -656,6 +659,27 @@ impl NativeGraphics {
         }
         self.scene.lock().unwrap().environment = environment;
         Ok(())
+    }
+
+    fn manual(
+        &self,
+        id: u32,
+        source: String,
+        uniforms: Vec<f32>,
+        textures: Vec<(u32, u32)>,
+        blend: u8,
+    ) {
+        let data = ManualData {
+            source,
+            uniforms,
+            textures,
+            blend,
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Manual(id, data));
     }
 
     fn fragment(

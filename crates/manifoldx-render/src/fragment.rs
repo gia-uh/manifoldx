@@ -24,8 +24,7 @@ impl FragmentPipeline {
     ) -> Result<Self, RenderError> {
         let device = gpu.device();
         if data.uniforms.iter().any(|x| !x.is_finite())
-            || data.uniforms.len() as u64 * 4
-                > device.limits().max_uniform_buffer_binding_size
+            || data.uniforms.len() as u64 * 4 > device.limits().max_uniform_buffer_binding_size
             || data.textures.len() > device.limits().max_sampled_textures_per_shader_stage as usize
             || data.textures.len() > device.limits().max_samplers_per_shader_stage as usize
             || data.textures.iter().any(|bytes| {
@@ -89,7 +88,7 @@ impl FragmentPipeline {
                 vertex,
                 format,
                 "fs_custom",
-                front_face,
+                (front_face, None),
             )
         });
         if let Some(error) = pollster::block_on(scope.pop()) {
@@ -197,7 +196,7 @@ pub(crate) fn make_pipeline(
     vertex: &[wgpu::VertexBufferLayout<'_>],
     format: wgpu::TextureFormat,
     fragment: &str,
-    front_face: wgpu::FrontFace,
+    (front_face, blend): (wgpu::FrontFace, Option<wgpu::BlendState>),
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("native fragment pipeline"),
@@ -210,12 +209,12 @@ pub(crate) fn make_pipeline(
         },
         primitive: wgpu::PrimitiveState {
             front_face,
-            cull_mode: Some(wgpu::Face::Back),
+            cull_mode: blend.is_none().then_some(wgpu::Face::Back),
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(blend.is_none()),
             depth_compare: Some(wgpu::CompareFunction::Greater),
             stencil: Default::default(),
             bias: Default::default(),
@@ -227,7 +226,7 @@ pub(crate) fn make_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: None,
+                blend,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),

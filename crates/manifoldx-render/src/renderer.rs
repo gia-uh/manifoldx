@@ -17,6 +17,7 @@ use crate::scene::{
 
 use crate::environment::EnvironmentData;
 use crate::fragment::{FragmentData, FragmentPipeline};
+use crate::manual::{ManualData, ManualFrame, ManualPipeline, MeshTexture};
 use crate::shadow::{self, ShadowFrame, ShadowMap, ShadowOptions};
 use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
 
@@ -592,7 +593,7 @@ pub struct NativeRenderer {
     reversed_pipeline: wgpu::RenderPipeline,
     translucent_pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
-    textures: HashMap<u32, wgpu::BindGroup>,
+    textures: HashMap<u32, MeshTexture>,
     point_lights: [[f32; 8]; 4],
     sun: [f32; 8],
     spot: [f32; 16],
@@ -602,6 +603,9 @@ pub struct NativeRenderer {
     meshes: HashMap<u32, GpuMesh>,
     materials: HashMap<u32, Material>,
     fragments: HashMap<u32, FragmentPipeline>,
+    manual: HashMap<u32, ManualPipeline>,
+    manual_frames: [Option<ManualFrame>; 2],
+    invalid_materials: HashMap<u32, String>,
     instance_buffer: Option<InstanceBuffer>,
     max_instances: usize,
     position_pass: Option<PositionPass>,
@@ -837,6 +841,9 @@ impl NativeRenderer {
             meshes: HashMap::new(),
             materials: HashMap::new(),
             fragments: HashMap::new(),
+            manual: HashMap::new(),
+            manual_frames: [None, None],
+            invalid_materials: HashMap::new(),
             instance_buffer: None,
             max_instances,
             position_pass: None,
@@ -876,15 +883,63 @@ impl NativeRenderer {
     }
 
     pub fn upload_fragment(&mut self, id: u32, data: &FragmentData) -> Result<(), RenderError> {
-        let fragment = FragmentPipeline::new(
+        let pipeline = FragmentPipeline::new(
             &self.gpu,
             self.format,
             &[VERTEX_LAYOUT, INSTANCE_LAYOUT],
             SHADER,
             [&self.camera_layout, &self.skin.layout],
             data,
-        )?;
-        self.fragments.insert(id, fragment);
+        );
+        match pipeline {
+            Ok(fragment) => {
+                self.invalid_materials.remove(&id);
+                self.fragments.insert(id, fragment);
+            }
+            Err(error) => {
+                self.invalid_materials.insert(id, error.to_string());
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn upload_manual(&mut self, id: u32, data: &ManualData) -> Result<(), RenderError> {
+        let result = self.prepare_manual(id, data);
+        if let Err(error) = &result {
+            self.invalid_materials.insert(id, error.to_string());
+        } else {
+            self.invalid_materials.remove(&id);
+        }
+        result
+    }
+
+    fn prepare_manual(&mut self, id: u32, data: &ManualData) -> Result<(), RenderError> {
+        let existing = self
+            .manual
+            .get_mut(&id)
+            .map(|material| material.update(&self.gpu, data));
+        if existing.transpose()?.unwrap_or_default() {
+            return Ok(());
+        }
+        let attributes = [
+            VERTEX_ATTRIBUTES[0],
+            VERTEX_ATTRIBUTES[1],
+            wgpu::VertexAttribute {
+                shader_location: 2,
+                ..VERTEX_ATTRIBUTES[2]
+            },
+        ];
+        let vertex = wgpu::VertexBufferLayout {
+            array_stride: VERTEX_BYTES as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &attributes,
+        };
+        let pipeline = ManualPipeline::new(&self.gpu, data, vertex, self.format)?;
+        for frame in self.manual_frames.iter_mut().flatten() {
+            frame.groups.remove(&id);
+        }
+        self.manual.insert(id, pipeline);
         Ok(())
     }
 
@@ -1209,7 +1264,7 @@ impl NativeRenderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let bindings = self.bind_albedo(&color, &sampler);
+        let bindings = self.bind_albedo(color.clone(), sampler);
         let buffers = view_buffers(device, &self.camera_layout);
         self.textures.insert(options.texture_id, bindings);
         self.secondary = Some(SecondaryView {
@@ -1271,7 +1326,7 @@ impl NativeRenderer {
         Ok(())
     }
 
-    fn make_texture(&self, width: u32, height: u32, levels: &[&[u8]]) -> wgpu::BindGroup {
+    fn make_texture(&self, width: u32, height: u32, levels: &[&[u8]]) -> MeshTexture {
         let texture = self.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("manifoldx-albedo"),
             size: wgpu::Extent3d {
@@ -1319,24 +1374,29 @@ impl NativeRenderer {
             anisotropy_clamp: 8,
             ..Default::default()
         });
-        self.bind_albedo(&view, &sampler)
+        self.bind_albedo(view, sampler)
     }
 
-    fn bind_albedo(&self, view: &wgpu::TextureView, sampler: &wgpu::Sampler) -> wgpu::BindGroup {
-        self.device().create_bind_group(&wgpu::BindGroupDescriptor {
+    fn bind_albedo(&self, view: wgpu::TextureView, sampler: wgpu::Sampler) -> MeshTexture {
+        let group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("manifoldx-albedo"),
             layout: &self.texture_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Sampler(sampler),
+                    resource: wgpu::BindingResource::Sampler(&sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(view),
+                    resource: wgpu::BindingResource::TextureView(&view),
                 },
             ],
-        })
+        });
+        MeshTexture {
+            group,
+            view,
+            sampler,
+        }
     }
 
     /// Render the World's instances offscreen and return an owned RGBA image.
@@ -1715,6 +1775,10 @@ impl NativeRenderer {
                     .material_id
                     .and_then(|id| self.materials.get(&id))
                     .is_some_and(|material| material.albedo == view.texture_id)
+                    || instance
+                        .material_id
+                        .and_then(|id| self.manual.get(&id))
+                        .is_some_and(|manual| manual.samples(view.texture_id))
             })
         }) {
             return Err(RenderError::Resource(
@@ -1767,6 +1831,59 @@ impl NativeRenderer {
             if let Some(frame) = frame {
                 self.encode_shadows(encoder, shadow_batch, &frame, &styles)?;
                 stats.shadow_layers = frame.layers;
+            }
+        }
+        let manual_index = usize::from(draw.secondary.is_some());
+        if draw_groups.iter().any(|group| group.manual.is_some()) {
+            let mut manual_globals = [0.0; crate::manual::GLOBAL_FLOATS];
+            manual_globals[..16].copy_from_slice(&view_projection.to_columns());
+            manual_globals[16..32].copy_from_slice(&camera.view().to_columns());
+            manual_globals[32..48].copy_from_slice(&camera.projection(aspect).to_columns());
+            manual_globals[48..51].copy_from_slice(&camera.position);
+            manual_globals[51] = self.animation[0];
+            manual_globals[52..54].copy_from_slice(&[target.width as f32, target.height as f32]);
+            manual_globals[54..56].copy_from_slice(&self.animation[1..3]);
+            if let Some((intensity, _)) = self.environment {
+                manual_globals[56] = intensity;
+                manual_globals[57] = f32::from_bits(1);
+            }
+            if let Some(shadow) = &frame {
+                manual_globals[60..76].copy_from_slice(&shadow.matrices[0].to_columns());
+            }
+            manual_globals[76..84].copy_from_slice(&self.sun);
+            manual_globals[88..101].copy_from_slice(&self.spot[..13]);
+            if let Some((range, color)) = self.fog {
+                manual_globals[102..104].copy_from_slice(&range);
+                manual_globals[104..107].copy_from_slice(&color);
+                manual_globals[107] = f32::from_bits(1);
+            }
+            manual_globals[108..].copy_from_slice(self.benders.as_flattened());
+            let transforms: Vec<[f32; 16]> = draw_groups
+                .iter()
+                .flat_map(|group| {
+                    group.values.chunks_exact(INSTANCE_FLOATS).map(|row| {
+                        row[..16]
+                            .try_into()
+                            .expect("a packed row begins with a model matrix")
+                    })
+                })
+                .collect();
+            let device = &self.gpu.device;
+            if self.manual_frames[manual_index].is_none() {
+                self.manual_frames[manual_index] =
+                    Some(ManualFrame::new(device, self.max_instances)?);
+            }
+            let view = self.manual_frames[manual_index]
+                .as_mut()
+                .expect("created above");
+            view.write(
+                &self.gpu.queue,
+                &manual_globals,
+                &transforms,
+                &self.point_lights,
+            );
+            for id in draw_groups.iter().filter_map(|group| group.manual) {
+                view.bind(device, id, &self.manual[&id], &self.textures)?;
             }
         }
         let mut globals = [0.0; GLOBAL_BYTES / 4];
@@ -1876,7 +1993,7 @@ impl NativeRenderer {
             if !draw.omit_draw && environment.is_some_and(|(_, sky)| sky) {
                 pass.set_pipeline(&self.skybox_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_bind_group(1, &self.textures[&0], &[]);
+                pass.set_bind_group(1, &self.textures[&0].group, &[]);
                 pass.set_bind_group(2, &self.skin.group, &[]);
                 pass.set_bind_group(3, scene, &[]);
                 pass.draw(0..3, 0..1);
@@ -1891,12 +2008,22 @@ impl NativeRenderer {
                 pass.set_vertex_buffer(1, instance_buffer.slice(..));
                 let mut first_instance = 0u32;
                 for group in &draw_groups {
-                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                    if let Some(id) = group.fragment {
+                    if let Some(id) = group.manual {
+                        let manual = &self.manual[&id];
+                        let view = self.manual_frames[manual_index]
+                            .as_ref()
+                            .expect("manual frame prepared");
+                        pass.set_pipeline(&manual.pipelines[usize::from(group.reversed)]);
+                        pass.set_bind_group(0, &view.groups[&id], &[]);
+                    } else if let Some(id) = group.fragment {
+                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                        pass.set_bind_group(2, &self.skin.group, &[]);
                         let fragment = &self.fragments[&id];
                         pass.set_pipeline(&fragment.pipelines[usize::from(group.reversed)]);
                         pass.set_bind_group(1, &fragment.group, &[]);
                     } else {
+                        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                        pass.set_bind_group(2, &self.skin.group, &[]);
                         let pipeline = if group.rank.0 {
                             &self.translucent_pipeline
                         } else if group.reversed {
@@ -1905,10 +2032,9 @@ impl NativeRenderer {
                             &self.pipeline
                         };
                         pass.set_pipeline(pipeline);
-                        pass.set_bind_group(1, &self.textures[&group.albedo], &[]);
+                        pass.set_bind_group(1, &self.textures[&group.albedo].group, &[]);
                         pass.set_bind_group(3, scene, &[]);
                     }
-                    pass.set_bind_group(2, &self.skin.group, &[]);
                     let mesh = self
                         .meshes
                         .get(&group.geometry_id)
@@ -2064,7 +2190,7 @@ impl NativeRenderer {
                     let mesh = &self.meshes[&group.geometry_id];
                     pass.set_pipeline(&self.shadow_pipelines[usize::from(group.reversed)]);
                     pass.set_bind_group(0, &layer.camera_group, &[]);
-                    pass.set_bind_group(1, &self.textures[&0], &[]);
+                    pass.set_bind_group(1, &self.textures[&0].group, &[]);
                     pass.set_bind_group(2, &self.skin.group, &[]);
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -2119,6 +2245,14 @@ impl NativeRenderer {
                 .meshes
                 .get(&instance.geometry_id)
                 .ok_or(RenderError::UnknownGeometry(instance.geometry_id))?;
+            if ids.is_none() {
+                let invalid = instance
+                    .material_id
+                    .and_then(|id| self.invalid_materials.get(&id));
+                if let Some(error) = invalid {
+                    return Err(RenderError::Resource(error.clone()));
+                }
+            }
             let slot = instance.entity.slot();
             let bound = positions.is_some_and(|source| {
                 source.members.get(slot as usize) == Some(&Some(instance.entity))
@@ -2139,7 +2273,11 @@ impl NativeRenderer {
             };
             let effects = material.effects;
             let mirrored = effects.mirror.is_some();
-            let translucent = effects.opacity < 1.0;
+            let manual = instance
+                .material_id
+                .filter(|id| ids.is_none() && self.manual.contains_key(id));
+            let translucent =
+                effects.opacity < 1.0 || manual.is_some_and(|id| self.manual[&id].translucent);
             if shadow && (translucent || mirrored) {
                 continue;
             }
@@ -2161,6 +2299,7 @@ impl NativeRenderer {
             let fragment = instance
                 .material_id
                 .filter(|id| !shadow && ids.is_none() && self.fragments.contains_key(id));
+            let manual = manual.filter(|_| !shadow);
             let group = groups
                 .entry((
                     rank,
@@ -2169,12 +2308,14 @@ impl NativeRenderer {
                     albedo,
                     alpha_material,
                     fragment,
+                    manual,
                 ))
                 .or_insert_with(|| DrawGroup {
                     geometry_id,
                     reversed,
                     albedo,
                     fragment,
+                    manual,
                     rank,
                     first_slot: slot,
                     instances: 0,
@@ -2376,6 +2517,7 @@ struct DrawGroup {
     reversed: bool,
     albedo: u32,
     fragment: Option<u32>,
+    manual: Option<u32>,
     rank: (bool, bool),
     first_slot: u32,
     instances: u32,

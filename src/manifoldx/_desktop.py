@@ -21,6 +21,8 @@ from manifoldx.resources import (
     BasicMaterial,
     DirectionalLight,
     FlatMaterial,
+    Material as MaterialBase,
+    MaterialRegistry,
     PhongMaterial,
     PointLight,
     SpotLight,
@@ -143,6 +145,7 @@ class _NativeEngine:
         for name, kind, size in columns:
             self._world.register(name, kind=kind, width=size)
         self._registries = {"Mesh": {}, "Material": {}}
+        self._manual_registry = MaterialRegistry()
         self._textures = 0
         self._graphics = _NativeGraphics()
         self._handlers = {"startup": [], "shutdown": []}
@@ -383,7 +386,9 @@ class _NativeEngine:
         }
         kind = types.get(type(material))
         if kind is None:
-            raise NotImplementedError(f"native base renderer has no {type(material).__name__}")
+            self._manual_material(index, material)
+            registry[key] = (index, material, version)
+            return index
         params = None
         effects = None
         if kind == "standard":
@@ -416,6 +421,35 @@ class _NativeEngine:
         self._graphics.material(index, _color(material.color), kind, params, shininess, effects)
         registry[key] = (index, material, version)
         return index
+
+    def _manual_material(self, index, material):
+        if not isinstance(material, MaterialBase):
+            raise TypeError("a manual WGSL material must extend Material")
+        subtype = getattr(material, "pipeline_subtype", None)
+        textures = []
+        slots = {0, 1, 2, 3}
+        for binding, handle in sorted(material.get_texture_bindings().items()):
+            if type(binding) is not int or not 4 <= binding < 999:
+                raise ValueError("manual WGSL sampler indices must follow the fixed mesh bindings")
+            if binding in slots or binding + 1 in slots:
+                raise ValueError("manual WGSL sampler and texture binding indices overlap")
+            if getattr(handle, "_native_owner", None) is not self:
+                raise ValueError("manual WGSL texture belongs to a different graphics owner")
+            slots.update((binding, binding + 1))
+            textures.append((binding, handle.id))
+        if not isinstance(material.uniform_type(), dict):
+            raise TypeError("manual WGSL uniform_type() must return a dict")
+        self._manual_registry.register(material)
+        rows = np.asarray(material.get_data(1, self._manual_registry), dtype="f4")
+        if rows.ndim not in (1, 2) or (rows.ndim == 2 and len(rows) != 1):
+            raise ValueError("manual WGSL get_data() must return one uniform row")
+        pipeline_state = getattr(material, "pipeline_state", None) or (False, False)
+        blend = 2 if subtype == "scatter" else int(
+            subtype in ("glow", "cloud") or pipeline_state[0]
+        )
+        textured = subtype == "textured" and getattr(material, "albedo_map", None) is not None
+        source = material._compile(textured=True) if textured else material._compile()
+        self._graphics.manual(index, source, rows.reshape(-1).tolist(), textures, blend)
 
     def _upload_native_albedo(self, image, source):
         self._textures += 1

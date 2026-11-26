@@ -5,6 +5,7 @@ pub mod desktop;
 pub mod environment;
 pub mod fragment;
 pub mod lines;
+pub mod manual;
 pub mod math;
 pub mod post;
 pub mod rect;
