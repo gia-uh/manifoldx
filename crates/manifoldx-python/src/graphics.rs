@@ -12,13 +12,13 @@ use manifoldx_render::manual::ManualData;
 use manifoldx_render::rect::RectRow;
 use manifoldx_render::renderer::{ViewOptions, ViewOrder};
 use manifoldx_render::shadow::ShadowOptions;
-use manifoldx_render::skin::{validate_matrices, JointMatrices};
+use manifoldx_render::skin::{JointMatrices, validate_matrices};
 use manifoldx_render::sprite::SpriteData;
 use manifoldx_render::volume::VolumeMaterialData;
 use manifoldx_render::{
-    resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, PostOptions,
-    RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight, StandardEffects,
-    DEFAULT_MAX_INSTANCES,
+    Camera, DEFAULT_MAX_INSTANCES, DirectionalLight, MeshData, NativeRenderer, PointLight,
+    PostOptions, RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight,
+    StandardEffects, resolve_source,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -52,6 +52,7 @@ type EffectsInput = (
     f32,
     f32,
     f32,
+    bool,
     bool,
     bool,
 );
@@ -706,12 +707,23 @@ impl NativeGraphics {
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "unsupported base material {kind}"
-                )))
+                )));
             }
         };
         let effects = effects.map_or_else(
             StandardEffects::default,
-            |(vertex_colors, opacity, mirror, cut, sway, sway_reach, ripple, faded, tinted)| {
+            |(
+                vertex_colors,
+                opacity,
+                mirror,
+                cut,
+                sway,
+                sway_reach,
+                ripple,
+                faded,
+                tinted,
+                paletted,
+            )| {
                 StandardEffects {
                     vertex_colors,
                     opacity,
@@ -722,6 +734,7 @@ impl NativeGraphics {
                     ripple,
                     faded,
                     tinted,
+                    paletted,
                 }
             },
         );

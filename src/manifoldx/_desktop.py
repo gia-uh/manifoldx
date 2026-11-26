@@ -494,8 +494,7 @@ class _NativeEngine:
         params = None
         effects = None
         if kind == "standard":
-            unsupported = material.paletted or material.baked is not None
-            if unsupported:
+            if material.baked is not None:
                 raise NotImplementedError(
                     "the requested Standard material effect needs a later native renderer"
                 )
@@ -518,6 +517,7 @@ class _NativeEngine:
                 material.ripple,
                 material.faded,
                 material.tinted,
+                material.paletted,
             )
         shininess = material.shininess if kind == "phong" else None
         self._graphics.material(index, _color(material.color), kind, params, shininess, effects)

@@ -12,14 +12,14 @@ use crate::math::Mat4;
 use crate::post::{PostOptions, PostPasses};
 use crate::rect::{RectPass, RectRow};
 use crate::scene::{
-    read_instances, InstanceBatch, InstanceSource, MeshData, SceneError, DEFAULT_MAX_INSTANCES,
+    DEFAULT_MAX_INSTANCES, InstanceBatch, InstanceSource, MeshData, SceneError, read_instances,
 };
 
 use crate::environment::EnvironmentData;
 use crate::fragment::{FragmentData, FragmentPipeline};
-use crate::manual::{gpu_buffer, ManualData, ManualFrame, ManualPipeline, MeshTexture};
+use crate::manual::{ManualData, ManualFrame, ManualPipeline, MeshTexture, gpu_buffer};
 use crate::shadow::{self, ShadowFrame, ShadowMap, ShadowOptions};
-use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
+use crate::skin::{JointMatrices, MAX_JOINTS, Skin};
 use crate::sprite::{SpriteData, SpritePass};
 use crate::volume::{VolumeMaterialData, VolumePass};
 
@@ -31,6 +31,7 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16 + 4 + 8 * 4 + 16 + 4 + 8 + 4) * 4;
 const INSTANCE_FLOATS: usize = 40;
+const PALETTE_SLOTS: usize = 8;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
 const VERTEX_BYTES: usize = 13 * 4;
 const SURFACE_FLOATS: usize = 52;
@@ -224,6 +225,7 @@ pub struct StandardEffects {
     pub ripple: f32,
     pub faded: bool,
     pub tinted: bool,
+    pub paletted: bool,
 }
 
 impl Default for StandardEffects {
@@ -238,6 +240,7 @@ impl Default for StandardEffects {
             ripple: 0.0,
             faded: false,
             tinted: false,
+            paletted: false,
         }
     }
 }
@@ -308,6 +311,7 @@ struct PackOptions<'a> {
 struct InstanceStyle {
     fade: f32,
     tint: [f32; 3],
+    palette: [[f32; 4]; PALETTE_SLOTS],
 }
 
 impl Default for InstanceStyle {
@@ -315,6 +319,7 @@ impl Default for InstanceStyle {
         Self {
             fade: 1.0,
             tint: [1.0; 3],
+            palette: [[1.0; 4]; PALETTE_SLOTS],
         }
     }
 }
@@ -571,6 +576,7 @@ struct SecondaryView {
 struct ViewBuffers {
     camera: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
+    palettes: Option<InstanceBuffer>,
     instances: Option<InstanceBuffer>,
 }
 
@@ -614,6 +620,8 @@ pub struct NativeRenderer {
     clear: wgpu::Color,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    empty_palette: wgpu::Buffer,
+    palette_buffer: Option<InstanceBuffer>,
     meshes: HashMap<u32, GpuMesh>,
     materials: HashMap<u32, Material>,
     fragments: HashMap<u32, FragmentPipeline>,
@@ -646,16 +654,28 @@ impl NativeRenderer {
             gpu.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("manifoldx-native-camera-layout"),
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(GLOBAL_BYTES as u64),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: wgpu::BufferSize::new(GLOBAL_BYTES as u64),
+                            },
+                            count: None,
                         },
-                        count: None,
-                    }],
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: wgpu::BufferSize::new(16),
+                            },
+                            count: None,
+                        },
+                    ],
                 });
         let texture_layout =
             gpu.device
@@ -788,14 +808,18 @@ impl NativeRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let camera_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("manifoldx-native-camera-bind-group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-        });
+        let empty_palette = gpu_buffer(
+            &gpu.device,
+            "native empty palette",
+            16,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let camera_bind_group = camera_group(
+            &gpu.device,
+            &bind_group_layout,
+            &camera_buffer,
+            &empty_palette,
+        );
         let skybox_pipeline = gpu
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -876,6 +900,8 @@ impl NativeRenderer {
             clear: wgpu::Color::BLACK,
             camera_buffer,
             camera_bind_group,
+            empty_palette,
+            palette_buffer: None,
             meshes: HashMap::new(),
             materials: HashMap::new(),
             fragments: HashMap::new(),
@@ -1436,7 +1462,7 @@ impl NativeRenderer {
             ..Default::default()
         });
         let bindings = self.bind_albedo(color.clone(), sampler);
-        let buffers = view_buffers(device, &self.camera_layout);
+        let buffers = view_buffers(device, &self.camera_layout, &self.empty_palette);
         self.textures.insert(options.texture_id, bindings);
         self.secondary = Some(SecondaryView {
             options,
@@ -1896,6 +1922,7 @@ impl NativeRenderer {
         std::mem::swap(&mut self.camera_buffer, &mut view.buffers.camera);
         std::mem::swap(&mut self.camera_bind_group, &mut view.buffers.camera_group);
         std::mem::swap(&mut self.instance_buffer, &mut view.buffers.instances);
+        std::mem::swap(&mut self.palette_buffer, &mut view.buffers.palettes);
         let draw = DrawOptions {
             secondary: Some(&view.options),
             ..Default::default()
@@ -1904,6 +1931,7 @@ impl NativeRenderer {
         std::mem::swap(&mut self.camera_buffer, &mut view.buffers.camera);
         std::mem::swap(&mut self.camera_bind_group, &mut view.buffers.camera_group);
         std::mem::swap(&mut self.instance_buffer, &mut view.buffers.instances);
+        std::mem::swap(&mut self.palette_buffer, &mut view.buffers.palettes);
         self.secondary = Some(view);
         result.map(|_| ())
     }
@@ -2051,7 +2079,8 @@ impl NativeRenderer {
         }
         let fades = draw.ids.is_none() && self.materials.values().any(|m| m.effects.faded);
         let tints = draw.ids.is_none() && self.materials.values().any(|m| m.effects.tinted);
-        let styles = instance_styles(world, &batch, fades, tints)?;
+        let palettes = draw.ids.is_none() && self.materials.values().any(|m| m.effects.paletted);
+        let styles = instance_styles(world, &batch, fades, tints, palettes)?;
         let layers = draw
             .secondary
             .map(|view| &view.layers)
@@ -2203,6 +2232,61 @@ impl NativeRenderer {
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&globals));
 
+        if draw_groups.iter().any(|group| !group.palettes.is_empty()) {
+            let mut colors = Vec::with_capacity(
+                draw_groups
+                    .iter()
+                    .map(|group| group.instances as usize)
+                    .sum::<usize>()
+                    * PALETTE_SLOTS,
+            );
+            for group in &draw_groups {
+                if group.palettes.is_empty() {
+                    colors.resize(
+                        colors.len() + group.instances as usize * PALETTE_SLOTS,
+                        [1.0; 4],
+                    );
+                } else {
+                    colors.extend_from_slice(&group.palettes);
+                }
+            }
+            let bytes = bytemuck::cast_slice(&colors);
+            let needed = bytes.len() as u64;
+            let limit = u64::from(self.gpu.device.limits().max_storage_buffer_binding_size);
+            if needed > limit {
+                return Err(RenderError::Resource(
+                    "instance palette data exceeds device limits".into(),
+                ));
+            }
+            if self
+                .palette_buffer
+                .as_ref()
+                .is_none_or(|buffer| buffer.capacity_bytes < needed)
+            {
+                let capacity = needed.next_power_of_two().min(limit);
+                let buffer = gpu_buffer(
+                    &self.gpu.device,
+                    "native instance palettes",
+                    capacity,
+                    wgpu::BufferUsages::STORAGE,
+                );
+                self.camera_bind_group = camera_group(
+                    &self.gpu.device,
+                    &self.camera_layout,
+                    &self.camera_buffer,
+                    &buffer,
+                );
+                self.palette_buffer = Some(InstanceBuffer {
+                    buffer,
+                    capacity_bytes: capacity,
+                });
+            }
+            let palette = self
+                .palette_buffer
+                .as_ref()
+                .expect("palette buffer prepared");
+            self.gpu.queue.write_buffer(&palette.buffer, 0, bytes);
+        }
         let instance_data = self.pack_instance_bytes(&draw_groups);
         if !instance_data.is_empty() {
             let needed = instance_data.len() as u64;
@@ -2494,8 +2578,11 @@ impl NativeRenderer {
             )?;
             let data = self.pack_instance_bytes(&groups);
             if self.shadow_layers.len() <= index {
-                self.shadow_layers
-                    .push(view_buffers(device, &self.camera_layout));
+                self.shadow_layers.push(view_buffers(
+                    device,
+                    &self.camera_layout,
+                    &self.empty_palette,
+                ));
             }
             let layer = &mut self.shadow_layers[index];
             let mut globals = [0.0; GLOBAL_BYTES / 4];
@@ -2687,6 +2774,7 @@ impl NativeRenderer {
                     fragment,
                     manual,
                     surface,
+                    effects.paletted,
                 ))
                 .or_insert_with(|| DrawGroup {
                     geometry_id,
@@ -2701,6 +2789,7 @@ impl NativeRenderer {
                     instances: 0,
                     values: Vec::new(),
                     positions: Vec::new(),
+                    palettes: Vec::new(),
                 });
             group.values.extend_from_slice(&instance.model.to_columns());
             group.values.extend_from_slice(&material.color);
@@ -2709,7 +2798,11 @@ impl NativeRenderer {
                 effects.opacity,
                 effects.mirror.unwrap_or_default(),
                 u8::from(mirrored) as f32,
-                u8::from(effects.vertex_colors) as f32,
+                if effects.paletted && !shadow {
+                    2.0
+                } else {
+                    u8::from(effects.vertex_colors) as f32
+                },
             ]);
             group
                 .values
@@ -2730,6 +2823,9 @@ impl NativeRenderer {
             group
                 .values
                 .extend_from_slice(&if effects.tinted { style.tint } else { [1.0; 3] });
+            if effects.paletted && !shadow {
+                group.palettes.extend_from_slice(&style.palette);
+            }
             if positions.is_some() {
                 let [[lx, ly, lz], [hx, hy, hz]] = mesh.bounds;
                 group.positions.push([
@@ -2766,9 +2862,10 @@ fn instance_styles(
     batch: &InstanceBatch,
     fades: bool,
     tints: bool,
+    palettes: bool,
 ) -> Result<HashMap<EntityId, InstanceStyle>, RenderError> {
     let mut styles = HashMap::<_, InstanceStyle>::new();
-    if !fades && !tints {
+    if !fades && !tints && !palettes {
         return Ok(styles);
     }
     let ids: Vec<_> = batch
@@ -2776,7 +2873,11 @@ fn instance_styles(
         .iter()
         .map(|instance| instance.entity)
         .collect();
-    for (enabled, name, width) in [(fades, "Fade", 1), (tints, "Tint", 3)] {
+    for (enabled, name, width) in [
+        (fades, "Fade", 1),
+        (tints, "Tint", 3),
+        (palettes, "Palette", PALETTE_SLOTS * 3),
+    ] {
         if !enabled {
             continue;
         }
@@ -2799,10 +2900,14 @@ fn instance_styles(
         {
             if member {
                 let style = styles.entry(*id).or_default();
-                if name == "Fade" {
-                    style.fade = row[0];
-                } else {
-                    style.tint.copy_from_slice(row);
+                match name {
+                    "Fade" => style.fade = row[0],
+                    "Tint" => style.tint.copy_from_slice(row),
+                    _ => {
+                        for (color, rgb) in style.palette.iter_mut().zip(row.chunks_exact(3)) {
+                            color[..3].copy_from_slice(rgb);
+                        }
+                    }
                 }
             }
         }
@@ -2810,26 +2915,46 @@ fn instance_styles(
     Ok(styles)
 }
 
-fn view_buffers(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> ViewBuffers {
+fn view_buffers(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    empty_palette: &wgpu::Buffer,
+) -> ViewBuffers {
     let camera = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("native view camera"),
         size: GLOBAL_BYTES as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let camera_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("native view camera binding"),
-        layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: camera.as_entire_binding(),
-        }],
-    });
+    let camera_group = camera_group(device, layout, &camera, empty_palette);
     ViewBuffers {
         camera,
         camera_group,
+        palettes: None,
         instances: None,
     }
+}
+
+fn camera_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    camera: &wgpu::Buffer,
+    palettes: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("native view camera binding"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: palettes.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 fn filter_layers(
@@ -2905,6 +3030,7 @@ struct DrawGroup {
     instances: u32,
     values: Vec<f32>,
     positions: Vec<[u32; 8]>,
+    palettes: Vec<[f32; 4]>,
 }
 
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
@@ -3033,6 +3159,7 @@ struct Camera {
     origin_tile: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<storage, read> palettes: array<vec4<f32>>;
 @group(1) @binding(0) var albedo_sampler: sampler;
 @group(1) @binding(1) var albedo_texture: texture_2d<f32>;
 struct SurfaceSettings {
@@ -3111,6 +3238,7 @@ struct VertexOut {
     @location(7) @interpolate(flat) ripple: f32,
     @location(8) @interpolate(flat) fade: f32,
     @location(9) surface: f32,
+    @location(10) @interpolate(flat) material_color: vec3<f32>,
 };
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
@@ -3196,7 +3324,7 @@ fn sway_vertex(world: vec4<f32>, height: f32, strength: f32, reach: f32) -> vec4
 }
 
 @vertex
-fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
+fn vs_main(in: VertexIn, instance: InstanceIn, @builtin(instance_index) index: u32) -> VertexOut {
     let model = mat4x4<f32>(instance.m0, instance.m1, instance.m2, instance.m3);
     var position = in.position;
     var normal = in.normal;
@@ -3221,6 +3349,16 @@ fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     out.clip_position = select(vec4<f32>(0.0, 0.0, -1.0, 1.0), camera.view_proj * displayed, instance.m3.w != 0.0);
     out.normal = transform_normal(model, normal);
     out.color = instance.color.rgb * select(vec3<f32>(1.0), in.color.xyz * instance.tint, instance.effects.w > 0.0);
+    out.material_color = instance.color.rgb;
+    if instance.effects.w == 2.0 {
+        let color = in.color.xyz;
+        out.color = select(1.055 * pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055,
+                           color * 12.92, color <= vec3<f32>(0.0031308));
+        let slot = i32(in.color.w + 0.5) - 32;
+        if slot >= 0 && slot < 8 {
+            out.color *= palettes[index * 8u + u32(slot)].xyz;
+        }
+    }
     out.effects = instance.effects;
     out.cut = instance.cut;
     out.ripple = instance.motion.z;
@@ -3403,6 +3541,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         discard;
     }
     var albedo = in.color;
+    if in.effects.w == 2.0 {
+        let srgb = in.color;
+        albedo = select(pow((srgb + 0.055) / 1.055, vec3<f32>(2.4)), srgb / 12.92,
+                        srgb <= vec3<f32>(0.04045)) * in.material_color;
+    }
     if mode == 4u {
         let texel = textureSampleGrad(albedo_texture, albedo_sampler, in.uv, uv_dx, uv_dy);
         if texel.a < 0.5 { discard; }
