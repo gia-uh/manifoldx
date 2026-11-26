@@ -16,6 +16,9 @@
 //! `--check-draw-groups` checks the position and color of instances in two
 //! geometry groups sharing a single packed instance buffer.
 
+#[path = "../desktop_probe.rs"]
+mod desktop_probe;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
@@ -50,6 +53,7 @@ struct Options {
     check_draw_groups: bool,
     check_normals: bool,
     corrupt_normal: bool,
+    desktop: Option<desktop_probe::Probe>,
 }
 
 impl Default for Options {
@@ -64,6 +68,7 @@ impl Default for Options {
             check_draw_groups: false,
             check_normals: false,
             corrupt_normal: false,
+            desktop: None,
         }
     }
 }
@@ -80,6 +85,10 @@ impl Options {
                 "--check-draw-groups" => options.check_draw_groups = true,
                 "--check-normals" => options.check_normals = true,
                 "--corrupt-normal" => options.corrupt_normal = true,
+                "--desktop-check" => {
+                    let mode = args.next().ok_or("--desktop-check needs a mode")?;
+                    options.desktop = Some(desktop_probe::Probe::parse(&mode)?);
+                }
                 "--out-dir" => {
                     options.out_dir = PathBuf::from(args.next().ok_or("--out-dir needs a path")?);
                 }
@@ -101,6 +110,7 @@ impl Options {
                     println!(
                         "native-scene [--check] [--no-draw] [--ignore-transform]\n\
                          \x20            [--check-draw-groups] [--check-normals] [--corrupt-normal]\n\
+                         \x20            [--desktop-check positive|foreign-device|logical-as-physical]\n\
                          \x20            [--out-dir DIR] [--width N] [--height N]"
                     );
                     std::process::exit(0);
@@ -132,7 +142,10 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(options: Options) -> Result<(), String> {
+fn run(mut options: Options) -> Result<(), String> {
+    if let Some(control) = options.desktop.take() {
+        return control.run();
+    }
     let started = Instant::now();
     std::fs::create_dir_all(&options.out_dir).map_err(|error| error.to_string())?;
 
