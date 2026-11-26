@@ -216,7 +216,10 @@ impl GpuTimings {
             let _ = sender.send(result);
         });
         device
-            .poll(wgpu::PollType::wait_indefinitely())
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
             .map_err(|error| RenderError::Poll(error.to_string()))?;
         receiver
             .recv()
@@ -437,6 +440,11 @@ impl<A: DesktopApplication> Desktop<'_, A> {
             present,
             render,
         })?;
+        // A bounded session has completed. Do not acquire a texture the
+        // scheduler would immediately discard on a follow-up redraw.
+        if self.options.sample_limit == Some(self.presents) {
+            return Ok(false);
+        }
         if self.presents == 3 {
             if let Some(size) = self.options.resize_after_three {
                 if let Some(applied_size) = context.window.request_inner_size(size) {
