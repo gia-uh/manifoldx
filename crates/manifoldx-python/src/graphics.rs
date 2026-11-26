@@ -10,7 +10,7 @@ use manifoldx_render::frame_compute::{ComputeBinding, ComputeProgram, FrameCompu
 use manifoldx_render::lines::{LineLayer, LineOptions, LineRow};
 use manifoldx_render::manual::ManualData;
 use manifoldx_render::rect::RectRow;
-use manifoldx_render::renderer::{ViewOptions, ViewOrder};
+use manifoldx_render::renderer::{FixtureRenderFault, ViewOptions, ViewOrder};
 use manifoldx_render::shadow::ShadowOptions;
 use manifoldx_render::skin::{validate_matrices, JointMatrices};
 use manifoldx_render::sprite::SpriteData;
@@ -123,6 +123,7 @@ pub(crate) struct Scene {
     clips: HashMap<u32, usize>,
     uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
+    fixture_fault: Option<FixtureRenderFault>,
     compute: Option<FrameCompute>,
     compute_pending: VecDeque<ComputeProgram>,
     compute_callbacks: Vec<(u32, Py<PyAny>)>,
@@ -150,6 +151,7 @@ impl Scene {
             clips: HashMap::new(),
             uploads: VecDeque::new(),
             offscreen: None,
+            fixture_fault: None,
             compute: None,
             compute_pending: VecDeque::new(),
             compute_callbacks: Vec::new(),
@@ -268,6 +270,7 @@ impl Scene {
                 ..Default::default()
             })?,
         };
+        renderer.set_fixture_fault(self.fixture_fault.take());
         let result = (|| {
             if let Some(dt) = dt.filter(|_| labels.is_none()) {
                 self.run_compute(&renderer, world, dt, dispatch)?;
@@ -391,6 +394,17 @@ impl NativeGraphics {
     fn layers(&self, layers: Option<Vec<i32>>) {
         self.scene.lock().unwrap().layers =
             layers.map(|layers| Arc::new(layers.into_iter().collect()));
+    }
+
+    fn fixture_render_fault(&self, name: &str) -> PyResult<()> {
+        let fault = match name {
+            "late-shadow" => FixtureRenderFault::LateShadow,
+            "flat-post-depth" => FixtureRenderFault::FlatPostDepth,
+            "stale-offscreen-target" => FixtureRenderFault::StaleOffscreenTarget,
+            _ => return Err(PyValueError::new_err("unknown render fixture fault")),
+        };
+        self.scene.lock().unwrap().fixture_fault = Some(fault);
+        Ok(())
     }
 
     fn fixture_view(

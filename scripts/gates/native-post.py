@@ -46,7 +46,7 @@ REGIONS = {
 MAX_ERROR = 3
 
 
-def frame(name, enabled, disabled):
+def frame(name, enabled, disabled, *, flat_depth=False):
     assert sys.flags.isolated
     assert Path(mx.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()), mx.__file__
     engine = mx.Engine("Offscreen Post", width=WIDTH, height=HEIGHT, max_entities=16)
@@ -82,6 +82,8 @@ def frame(name, enabled, disabled):
         engine.set_sun(DirectionalLight("#fff6df", 2.0, (0, -0.30, 1)))
     if enabled and name != disabled:
         engine.set_post(**CASES[name])
+    if flat_depth:
+        engine._graphics.fixture_render_fault("flat-post-depth")
     rendered = engine.render_frame(supersample=1)
     order = None
     if os.environ["MANIFOLDX_CORE"] == "rust":
@@ -139,14 +141,66 @@ def region(frame, rectangle):
     return frame[y0:y1, x0:x1].astype(np.int16)
 
 
+
+def post_targets(output, reference, control):
+    expected = np.asarray(Image.open(reference / "ssao-on.png"))
+    frame_depth, order = frame("ssao", True, None, flat_depth=control == "flat-depth")
+    depth_error = np.abs(frame_depth.astype("i2") - expected)
+    Image.fromarray(frame_depth).save(output / "ssao-depth.png")
+    Image.fromarray(depth_error.astype("u1")).save(output / "ssao-depth-diff.png")
+    depth_p99 = float(np.percentile(region(depth_error, REGIONS["ssao"]), 99))
+
+    # Read back the real native target. Use the returned byte count before any
+    # wrapper can reshape it according to the requested dimensions.
+    engine = mx.Engine("Offscreen post target control", width=80, height=60, max_entities=4)
+    engine.camera.set_pose(position=(0, 0, 5), target=(0, 0, 0))
+    engine.spawn(Mesh(plane(2, 2)), Material(FlatMaterial("#b34d35")), Transform())
+    engine.set_post(grade=Grade(0.65, 1.1, 0), fxaa=True)
+    before = engine.render_frame()
+    before_generation = engine.last_frame["post_target_generation"]
+    width, height = 111, 72
+    if control == "stale":
+        engine._graphics.fixture_render_fault("stale-offscreen-target")
+    captured = engine._graphics.capture(engine.world._native, width, height)
+    size_bytes = len(captured["rgba"])
+    shape = (height, width) if size_bytes == width * height * 4 else before.shape[:2]
+    image = np.frombuffer(captured["rgba"], dtype="u1").reshape(*shape, 4)[..., :3]
+    Image.fromarray(before).save(output / "before-resize.png")
+    Image.fromarray(image).save(output / "after-resize.png")
+    roi = np.s_[height//2-4:height//2+4, width//2-4:width//2+4]
+    error = None
+    if image.shape == (height, width, 3) and (reference / "after-resize.png").is_file():
+        frozen = np.asarray(Image.open(reference / "after-resize.png"))
+        error = int(np.abs(image[roi].astype("i2") - frozen[roi]).max())
+    center = image[roi]
+    report = {
+        "ssao_roi_error_p99": depth_p99, "ssao_order": order,
+        "frame_bytes": size_bytes, "shape": list(image.shape), "expected_shape": [height, width, 3],
+        "generation": [before_generation, captured["post_target_generation"]],
+        "resize_roi_error": error, "resize_roi": np.median(center, axis=(0, 1)).tolist(),
+    }
+    (output / "post-targets.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report))
+    assert depth_p99 <= MAX_ERROR, "flat depth changed SSAO ROI"
+    assert image.shape == (height, width, 3), "stale framebuffer has the wrong physical dimensions"
+    assert captured["post_target_generation"] == before_generation + 1, "post targets did not resize"
+    assert error is None or error <= MAX_ERROR, "resized framebuffer missed its ROI"
+    assert np.median(center[..., 0]) > np.median(center[..., 2]) + 30, "resized mesh missed its ROI"
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--disable", choices=CASES)
     parser.add_argument("--case", choices=CASES)
+    parser.add_argument("--targets", action="store_true")
+    parser.add_argument("--target-control", choices=("flat-depth", "stale"))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    if args.targets:
+        assert args.reference is not None, "--targets requires the frozen SSAO reference"
+        post_targets(args.output, args.reference, args.target_control)
+        return
     cases = [args.case] if args.case else CASES
     result = {}
     for name in cases:

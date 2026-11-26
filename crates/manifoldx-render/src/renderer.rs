@@ -615,6 +615,15 @@ struct ViewBuffers {
     instances: Option<InstanceBuffer>,
 }
 
+/// Deliberate offscreen faults for the installed-wheel renderer gates.
+#[doc(hidden)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FixtureRenderFault {
+    LateShadow,
+    FlatPostDepth,
+    StaleOffscreenTarget,
+}
+
 pub struct NativeRenderer {
     gpu: Gpu,
     skin: Skin,
@@ -634,6 +643,7 @@ pub struct NativeRenderer {
     origin_tile: [f32; 2],
     format: wgpu::TextureFormat,
     offscreen: Option<OffscreenTarget>,
+    fixture_fault: Option<FixtureRenderFault>,
     post_options: Option<std::sync::Arc<PostOptions>>,
     post_passes: Option<PostPasses>,
     rects: std::sync::Arc<[RectRow]>,
@@ -941,6 +951,7 @@ impl NativeRenderer {
             origin_tile: [0.0; 2],
             format,
             offscreen: None,
+            fixture_fault: None,
             post_options: None,
             post_passes: None,
             rects: std::sync::Arc::default(),
@@ -983,6 +994,11 @@ impl NativeRenderer {
         let white = renderer.make_texture(1, 1, &[&[255, 255, 255, 255]]);
         renderer.textures.insert(0, white);
         renderer
+    }
+
+    #[doc(hidden)]
+    pub fn set_fixture_fault(&mut self, fault: Option<FixtureRenderFault>) {
+        self.fixture_fault = fault;
     }
 
     /// Adapter facts for evidence.
@@ -1901,7 +1917,10 @@ impl NativeRenderer {
         let offscreen = self
             .offscreen
             .take()
-            .filter(|target| target.size == [width, height])
+            .filter(|target| {
+                target.size == [width, height]
+                    || self.fixture_fault == Some(FixtureRenderFault::StaleOffscreenTarget)
+            })
             .unwrap_or_else(|| OffscreenTarget::new(self.device(), [width, height], self.format));
         let result = self.read_offscreen(world, source, camera, draw, &offscreen);
         self.offscreen = Some(offscreen);
@@ -2054,12 +2073,16 @@ impl NativeRenderer {
             order.push("view");
         }
         let mut stats = self.encode_primary(encoder, target, world, source, camera, draw)?;
-        if stats.shadow_layers > 0 {
+        let late_shadow = self.fixture_fault == Some(FixtureRenderFault::LateShadow);
+        if stats.shadow_layers > 0 && !late_shadow {
             order.push("shadow");
         }
         order.append(&mut stats.frame_order);
         if stats.line_draws > 0 {
             order.push("lines");
+        }
+        if stats.shadow_layers > 0 && late_shadow {
+            order.push("shadow");
         }
         order.extend(stats.post_order.iter().copied());
         if view_order == Some(ViewOrder::AfterMain) {
@@ -2143,6 +2166,22 @@ impl NativeRenderer {
             stats.post_target_generation = post.generation();
             if self.rect_before_post && self.draw_rects(encoder, post.scene(), size) {
                 stats.post_order.push("rect");
+            }
+            if self.fixture_fault == Some(FixtureRenderFault::FlatPostDepth) {
+                let depth = depth_target(self.device(), size[0], size[1]);
+                drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fixture flat post depth"),
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                }));
+                post.prepare(self.device(), size, &depth);
             }
             stats.post_order.extend(post.encode(
                 self.queue(),
@@ -2337,10 +2376,11 @@ impl NativeRenderer {
                     bounds,
                 )
             });
+        let late_shadow = self.fixture_fault == Some(FixtureRenderFault::LateShadow);
         if draw.secondary.is_none() {
             self.shadow
                 .prepare(&self.gpu.device, &self.gpu.queue, frame.as_ref())?;
-            if let Some(frame) = frame {
+            if let Some(frame) = frame.filter(|_| !late_shadow) {
                 self.encode_shadows(encoder, shadow_batch, &frame, &styles)?;
                 stats.shadow_layers = frame.layers;
             }
@@ -2687,6 +2727,10 @@ impl NativeRenderer {
                     .get_or_insert_with(|| LinePass::new(&self.gpu.device, self.format));
                 stats.line_draws = pass.encode(&self.gpu, encoder, &attach, camera, lines);
             }
+        }
+        if let Some(frame) = frame.filter(|_| late_shadow) {
+            self.encode_shadows(encoder, shadow_batch, &frame, &styles)?;
+            stats.shadow_layers = frame.layers;
         }
         Ok(stats)
     }
