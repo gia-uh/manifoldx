@@ -94,7 +94,7 @@ def views(output, fault):
     assert np.array_equal(engine.render_frame(), first)
     assert engine.last_frame["view_resources"] == [0, 1]
     engine.clear_scene()
-    assert rejected(lambda: source.transform.pos, "stale")
+    assert rejected(lambda: source.transform.pos, "is not alive")
     drained = engine.render_frame()
     save(output, "drained", drained)
     assert engine.last_frame["view_resources"] == [0, 0]
