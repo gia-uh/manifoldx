@@ -153,6 +153,20 @@ class Compute:
       will transpile it.)
 
     Then register with the engine: `engine.compute(MyCompute)`.
+
+    Native dispatch uses the same invocation row for all component bindings.
+    With `"entity_count"`, rows are live identities sorted by slot, including
+    live entities that lack a particular component. Other modes use physical
+    slot indices. `"max_entities"` dispatches the capacity, and a numeric or
+    callable dispatch dispatches that many indices. The `entity_count` uniform
+    always reports the number of live entities.
+
+    Missing component rows read as zero. Only live member rows in the declared
+    invocation range are published. GPU-only rows follow the live identity and
+    reset on slot reuse. The GPU still launches whole workgroups. WGSL that
+    writes across rows must guard its indices against padding. In registration
+    order, each program sees earlier writes before the renderer reads the
+    final mirrored results.
     """
 
     workgroup_size: int = 64

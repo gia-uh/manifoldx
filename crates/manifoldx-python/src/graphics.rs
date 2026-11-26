@@ -1,11 +1,24 @@
 //! Python scene declarations for the native graphics owner.
 
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use manifoldx_core::ecs::World;
+use manifoldx_core::ecs::{ColumnData, EntityId, World};
+use manifoldx_render::environment::EnvironmentData;
+use manifoldx_render::fragment::FragmentData;
+use manifoldx_render::frame_compute::{ComputeBinding, ComputeProgram, FrameCompute};
+use manifoldx_render::lines::{LineLayer, LineOptions, LineRow};
+use manifoldx_render::manual::ManualData;
+use manifoldx_render::rect::RectRow;
+use manifoldx_render::renderer::{FixtureRenderFault, ViewOptions, ViewOrder};
+use manifoldx_render::shadow::ShadowOptions;
+use manifoldx_render::skin::{validate_matrices, JointMatrices};
+use manifoldx_render::sprite::SpriteData;
+use manifoldx_render::volume::VolumeMaterialData;
 use manifoldx_render::{
-    resolve_source, Camera, MeshData, NativeRenderer, PointLight, RenderError, RenderStats,
-    RendererOptions, Shading, DEFAULT_MAX_INSTANCES,
+    resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, PostOptions,
+    RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight, StandardEffects,
+    DEFAULT_MAX_INSTANCES,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -13,22 +26,107 @@ use pyo3::types::{PyBytes, PyDict};
 
 use crate::PyNativeWorld;
 
+type ComputeColumn = (Option<usize>, String, u32, bool);
+type ComputeInput = (
+    u32,
+    String,
+    u32,
+    Vec<(u8, f32)>,
+    (u8, u32),
+    Vec<ComputeColumn>,
+);
+
 type CameraInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32);
 type LightInput = ([f32; 3], [f32; 3], f32);
+type SpotInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32, f32);
 type MaterialInput = (f32, f32, f32, Option<u32>);
+type VertexInput = (Vec<[f32; 3]>, Vec<u32>, Vec<f32>);
+type PoseIdentity = (u32, Option<u64>);
+type PoseInput = (PoseIdentity, JointMatrices);
+type FrameInput = (PoseIdentity, u32, f64);
+type EffectsInput = (
+    bool,
+    f32,
+    Option<f32>,
+    Option<[f32; 4]>,
+    f32,
+    f32,
+    f32,
+    bool,
+    bool,
+    bool,
+    Option<u32>,
+);
+type ShadowInput = (
+    [f32; 3],
+    f32,
+    u32,
+    f32,
+    f32,
+    f32,
+    u32,
+    bool,
+    u32,
+    Option<f32>,
+);
+type LineInput = (String, [f32; 2], Option<Vec<LineRow>>);
+type SkyInput = ([f32; 3], Option<[f32; 3]>, f32, f32, f32);
+type PostInput = (
+    Option<[f32; 5]>,
+    Option<[f32; 3]>,
+    Option<[f32; 4]>,
+    Option<[f32; 3]>,
+    Option<SkyInput>,
+    bool,
+    Vec<[f32; 4]>,
+);
 
 enum Upload {
-    Mesh(u32, MeshData, Vec<[f32; 2]>),
-    Material(u32, [f32; 3], Shading),
+    Mesh(u32, MeshData, Vec<[f32; 2]>, VertexInput),
+    Material(u32, [f32; 3], Shading, StandardEffects),
+    Surface(u32, Box<[[f32; 5]; 9]>, bool),
     Albedo(u32, u32, u32, Vec<Vec<u8>>),
+    BakedArray(u32, u32, u32),
+    BakedLayer(u32, u32, Vec<Vec<u8>>),
+    Poses(Vec<PoseInput>),
+    Bake(u32, Vec<JointMatrices>),
+    Play(Vec<FrameInput>),
+    View(ViewOptions),
+    Environment(EnvironmentData),
+    Fragment(u32, FragmentData),
+    Manual(u32, ManualData),
+    Sprite(u32, SpriteData),
+    Label(u32, SpriteData),
+    LabelTile(u32, Vec<u8>),
+    Volume(u32, [u32; 3], Vec<u8>),
+    VolumeMaterial(u32, VolumeMaterialData),
+    Axis(u32, [[f32; 3]; 2]),
 }
 
 pub(crate) struct Scene {
     camera: Camera,
     background: [f32; 3],
     lights: Vec<PointLight>,
-    uploads: Vec<Upload>,
+    sun: Option<DirectionalLight>,
+    spot: Option<SpotLight>,
+    post: Option<Arc<PostOptions>>,
+    environment: Option<(f32, bool)>,
+    fog: Option<([f32; 2], [f32; 3])>,
+    shadows: Option<ShadowOptions>,
+    rects: Arc<[RectRow]>,
+    lines: Option<Arc<LineOptions>>,
+    rect_before_post: bool,
+    layers: Option<Arc<BTreeSet<i32>>>,
+    time: f64,
+    origin: [f64; 2],
+    benders: Vec<[f64; 4]>,
+    clips: HashMap<u32, usize>,
+    uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
+    fixture_fault: Option<FixtureRenderFault>,
+    compute: Option<FrameCompute>,
+    compute_pending: VecDeque<ComputeProgram>,
+    compute_callbacks: Vec<(u32, Py<PyAny>)>,
 }
 
 impl Scene {
@@ -37,21 +135,96 @@ impl Scene {
             camera: Camera::new([0.0, 1.0, 2.0], [0.0; 3]),
             background: [0.1, 0.1, 0.2],
             lights: Vec::new(),
-            uploads: Vec::new(),
+            sun: None,
+            spot: None,
+            post: None,
+            environment: None,
+            fog: None,
+            shadows: None,
+            rects: Arc::default(),
+            lines: None,
+            rect_before_post: false,
+            layers: None,
+            time: 0.0,
+            origin: [0.0; 2],
+            benders: Vec::new(),
+            clips: HashMap::new(),
+            uploads: VecDeque::new(),
             offscreen: None,
+            fixture_fault: None,
+            compute: None,
+            compute_pending: VecDeque::new(),
+            compute_callbacks: Vec::new(),
         }
     }
 
-    pub(crate) fn apply(&mut self, renderer: &mut NativeRenderer) -> Result<Camera, RenderError> {
+    pub(crate) fn apply(
+        &mut self,
+        renderer: &mut NativeRenderer,
+        world: &World,
+    ) -> Result<Camera, RenderError> {
         renderer.set_background(self.background);
         renderer.set_point_lights(&self.lights);
-        for upload in self.uploads.drain(..) {
+        renderer.set_direct_lights(self.sun, self.spot);
+        renderer.set_post(self.post.clone());
+        renderer.set_shadows(self.shadows);
+        renderer.set_environment(self.environment);
+        renderer.set_fog(self.fog);
+        renderer.set_rects(self.rects.clone(), self.rect_before_post);
+        renderer.set_layers(self.layers.clone());
+        renderer.set_animation(self.time, self.origin, &self.benders);
+        renderer.set_lines(self.lines.clone());
+        while let Some(upload) = self.uploads.pop_front() {
             match upload {
-                Upload::Mesh(id, mesh, uv) => {
-                    renderer.upload_mesh_with_uv(id, &mesh, [1.0; 3], &uv)?
+                Upload::Axis(id, points) => renderer.upload_axis(id, points)?,
+                Upload::Volume(id, dims, bytes) => renderer.upload_volume(id, dims, &bytes)?,
+                Upload::VolumeMaterial(id, data) => renderer.upload_volume_material(id, data)?,
+                Upload::Label(id, data) => renderer.upload_label(id, data)?,
+                Upload::LabelTile(layer, rgba) => renderer.upload_label_tile(layer, &rgba)?,
+                Upload::Sprite(id, data) => renderer.upload_sprite(id, data)?,
+                Upload::Manual(id, data) => renderer.upload_manual(id, &data)?,
+                Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
+                Upload::Environment(data) => renderer.upload_environment(&data)?,
+                Upload::View(options) => renderer.set_fixture_view(options)?,
+                Upload::Mesh(id, mesh, uv, (colors, joints, surfaces)) => renderer
+                    .upload_mesh_surfaces(
+                        id,
+                        &mesh,
+                        [1.0; 3],
+                        &uv,
+                        (&colors, &surfaces),
+                        &joints,
+                    )?,
+                Upload::Surface(id, patterns, detail) => {
+                    renderer.set_surface_patterns(id, *patterns, detail)?
                 }
-                Upload::Material(id, color, shading) => {
-                    renderer.set_material(id, color, shading)?
+                Upload::Poses(poses) => {
+                    let entities = poses
+                        .iter()
+                        .map(|(identity, _)| skin_entity(world, renderer, *identity))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (entity, (_, matrices)) in entities.into_iter().zip(poses) {
+                        renderer.set_joints(entity, &matrices)?;
+                    }
+                }
+                Upload::Bake(clip, poses) => renderer.bake_poses(clip, &poses)?,
+                Upload::Play(frames) => {
+                    let entities = frames
+                        .iter()
+                        .map(|(identity, _, _)| skin_entity(world, renderer, *identity))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (entity, (_, clip, position)) in entities.into_iter().zip(frames) {
+                        renderer.play_poses(entity, clip, position)?;
+                    }
+                }
+                Upload::Material(id, color, shading, effects) => {
+                    renderer.set_material_effects(id, color, shading, effects)?
+                }
+                Upload::BakedArray(id, size, layers) => {
+                    renderer.create_baked_array(id, size, layers)?
+                }
+                Upload::BakedLayer(id, layer, levels) => {
+                    renderer.write_baked_layer(id, layer, &levels)?
                 }
                 Upload::Albedo(id, width, height, levels) => renderer.upload_albedo(
                     id,
@@ -64,11 +237,31 @@ impl Scene {
         Ok(self.camera)
     }
 
+    pub(crate) fn run_compute(
+        &mut self,
+        renderer: &NativeRenderer,
+        world: &mut World,
+        dt: f32,
+        dispatch: &HashMap<u32, u32>,
+    ) -> Result<(), RenderError> {
+        if self.compute.is_none() && self.compute_pending.is_empty() {
+            return Ok(());
+        }
+        let passes = self.compute.get_or_insert_with(FrameCompute::default);
+        while let Some(program) = self.compute_pending.pop_front() {
+            passes.register(renderer, world, program)?;
+        }
+        passes.run(renderer, world, dt, dispatch)
+    }
+
     fn capture(
         &mut self,
-        world: &World,
+        world: &mut World,
         width: u32,
         height: u32,
+        labels: Option<&HashMap<u32, u32>>,
+        dt: Option<f32>,
+        dispatch: &HashMap<u32, u32>,
     ) -> Result<manifoldx_render::RenderOutput, RenderError> {
         let mut renderer = match self.offscreen.take() {
             Some(renderer) => renderer,
@@ -77,13 +270,95 @@ impl Scene {
                 ..Default::default()
             })?,
         };
+        renderer.set_fixture_fault(self.fixture_fault.take());
         let result = (|| {
-            let camera = self.apply(&mut renderer)?;
-            renderer.render(world, source(world)?, &camera, width, height, false)
+            if let Some(dt) = dt.filter(|_| labels.is_none()) {
+                self.run_compute(&renderer, world, dt, dispatch)?;
+            }
+            let camera = self.apply(&mut renderer, world)?;
+            let source = source(world)?;
+            match labels {
+                Some(labels) => renderer.render_ids(world, source, &camera, width, height, labels),
+                None => renderer.render(world, source, &camera, width, height, false),
+            }
         })();
         self.offscreen = Some(renderer);
         result
     }
+}
+
+pub(crate) fn compute_overrides(scene: &Mutex<Scene>) -> Result<HashMap<u32, u32>, RenderError> {
+    if scene.lock().unwrap().compute_callbacks.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Python::attach(|py| {
+        let callbacks: Vec<_> = scene
+            .lock()
+            .unwrap()
+            .compute_callbacks
+            .iter()
+            .map(|(key, callback)| (*key, callback.clone_ref(py)))
+            .collect();
+        callbacks
+            .into_iter()
+            .map(|(key, callback)| {
+                let threads: i64 = callback.call0(py)?.extract(py)?;
+                let threads = u32::try_from(threads.max(0)).map_err(|_| {
+                    PyValueError::new_err("Compute callable dispatch exceeds u32 threads")
+                })?;
+                Ok((key, threads))
+            })
+            .collect::<PyResult<_>>()
+    })
+    .map_err(|error| RenderError::Resource(error.to_string()))
+}
+
+fn skin_entity(
+    world: &World,
+    renderer: &NativeRenderer,
+    (slot, generation): PoseIdentity,
+) -> Result<EntityId, RenderError> {
+    let invalid =
+        || RenderError::Resource(format!("skinning needs a live skinned mesh at slot {slot}"));
+    let entity = world
+        .live_identity(slot)
+        .filter(|id| generation.is_none_or(|version| version == id.generation()))
+        .ok_or_else(invalid)?;
+    let mesh = world.component_index("Mesh").ok_or_else(invalid)?;
+    let rows = world
+        .read_component(mesh, Some(&[entity]))
+        .map_err(|error| RenderError::Resource(error.to_string()))?;
+    match rows.data {
+        ColumnData::U32(ids) if ids.first().is_some_and(|id| renderer.mesh_is_skinned(*id)) => {
+            Ok(entity)
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn camera_from_input(args: CameraInput) -> PyResult<Camera> {
+    let (position, target, up, fov_y_degrees, near, far) = args;
+    if position
+        .iter()
+        .chain(&target)
+        .chain(&up)
+        .any(|value| !value.is_finite())
+        || !(0.0..180.0).contains(&fov_y_degrees)
+        || !near.is_finite()
+        || !far.is_finite()
+        || near <= 0.0
+        || near >= far
+    {
+        return Err(PyValueError::new_err("invalid perspective camera"));
+    }
+    Ok(Camera {
+        position,
+        target,
+        up,
+        fov_y_degrees,
+        near,
+        far,
+    })
 }
 
 pub(crate) fn source(world: &World) -> Result<manifoldx_render::InstanceSource, RenderError> {
@@ -111,33 +386,83 @@ impl NativeGraphics {
     }
 
     fn camera(&self, args: CameraInput) -> PyResult<()> {
-        let (position, target, up, fov_y_degrees, near, far) = args;
-        if position
-            .iter()
-            .chain(&target)
-            .chain(&up)
-            .any(|value| !value.is_finite())
-            || !(0.0..180.0).contains(&fov_y_degrees)
-            || !near.is_finite()
-            || !far.is_finite()
-            || near <= 0.0
-            || near >= far
-        {
-            return Err(PyValueError::new_err("invalid perspective camera"));
-        }
-        self.scene.lock().unwrap().camera = Camera {
-            position,
-            target,
-            up,
-            fov_y_degrees,
-            near,
-            far,
-        };
+        self.scene.lock().unwrap().camera = camera_from_input(args)?;
         Ok(())
     }
 
-    fn settings(&self, background: [f32; 3], lights: Vec<LightInput>) {
+    #[pyo3(signature = (layers))]
+    fn layers(&self, layers: Option<Vec<i32>>) {
+        self.scene.lock().unwrap().layers =
+            layers.map(|layers| Arc::new(layers.into_iter().collect()));
+    }
+
+    fn fixture_render_fault(&self, name: &str) -> PyResult<()> {
+        let fault = match name {
+            "late-shadow" => FixtureRenderFault::LateShadow,
+            "flat-post-depth" => FixtureRenderFault::FlatPostDepth,
+            "stale-offscreen-target" => FixtureRenderFault::StaleOffscreenTarget,
+            _ => return Err(PyValueError::new_err("unknown render fixture fault")),
+        };
+        self.scene.lock().unwrap().fixture_fault = Some(fault);
+        Ok(())
+    }
+
+    fn fixture_view(
+        &self,
+        texture_id: u32,
+        camera: CameraInput,
+        layers: Vec<i32>,
+        size: [u32; 2],
+        clear: [f32; 3],
+        mode: &str,
+    ) -> PyResult<()> {
+        let order = match mode {
+            "normal" => ViewOrder::BeforeMain,
+            "omit" => ViewOrder::Omit,
+            "late" => ViewOrder::AfterMain,
+            _ => return Err(PyValueError::new_err("unknown fixture view mode")),
+        };
+        let options = ViewOptions {
+            texture_id,
+            size,
+            layers: layers.into_iter().collect(),
+            camera: camera_from_input(camera)?,
+            clear,
+            order,
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::View(options));
+        Ok(())
+    }
+
+    #[pyo3(signature = (background, lights, sun=None, spot=None))]
+    fn settings(
+        &self,
+        background: [f32; 3],
+        lights: Vec<LightInput>,
+        sun: Option<LightInput>,
+        spot: Option<SpotInput>,
+    ) {
         let mut scene = self.scene.lock().unwrap();
+        scene.sun = sun.map(|(direction, color, intensity)| DirectionalLight {
+            direction,
+            color,
+            intensity,
+        });
+        scene.spot = spot.map(
+            |(position, direction, color, intensity, range, cos_inner, cos_outer)| SpotLight {
+                position,
+                direction,
+                color,
+                intensity,
+                range,
+                cos_inner,
+                cos_outer,
+            },
+        );
         scene.background = background;
         scene.lights = lights
             .into_iter()
@@ -150,6 +475,147 @@ impl NativeGraphics {
             .collect();
     }
 
+    fn animation(&self, time: f64, origin: [f64; 2], benders: Vec<[f64; 4]>) -> PyResult<()> {
+        if !time.is_finite()
+            || origin.iter().any(|x| !x.is_finite())
+            || benders.iter().flatten().any(|x| !x.is_finite())
+        {
+            return Err(PyValueError::new_err("invalid scene animation settings"));
+        }
+        let mut scene = self.scene.lock().unwrap();
+        scene.time = time;
+        scene.origin = origin;
+        scene.benders = benders;
+        Ok(())
+    }
+
+    fn lines(
+        &self,
+        visible: bool,
+        bias: f32,
+        feather: f32,
+        layers: Vec<LineInput>,
+    ) -> PyResult<()> {
+        if !bias.is_finite() || !feather.is_finite() || bias < 0.0 || feather < 0.0 {
+            return Err(PyValueError::new_err("invalid line settings"));
+        }
+        let mut scene = self.scene.lock().unwrap();
+        let previous: HashMap<_, _> = scene
+            .lines
+            .iter()
+            .flat_map(|lines| &lines.layers)
+            .map(|layer| (&layer.key, &layer.rows))
+            .collect();
+        let mut next = Vec::with_capacity(layers.len());
+        for (key, look, rows) in layers {
+            if look.iter().any(|x| !x.is_finite()) {
+                return Err(PyValueError::new_err("invalid line layer look"));
+            }
+            let rows = if let Some(rows) = rows {
+                if rows.len() > 1_000_000 || rows.iter().flatten().any(|x| !x.is_finite()) {
+                    return Err(PyValueError::new_err("invalid line segments"));
+                }
+                Arc::from(rows)
+            } else {
+                previous
+                    .get(&key)
+                    .map(|rows| Arc::clone(rows))
+                    .ok_or_else(|| PyValueError::new_err("unknown line layer"))?
+            };
+            next.push(LineLayer { key, rows, look });
+        }
+        scene.lines = Some(Arc::new(LineOptions {
+            visible,
+            bias,
+            feather,
+            layers: next,
+        }));
+        Ok(())
+    }
+
+    fn fixture_rects(&self, rows: Vec<RectRow>, before_post: bool) -> PyResult<()> {
+        if rows.len() > 4096
+            || rows
+                .iter()
+                .flatten()
+                .any(|component| !component.is_finite())
+        {
+            return Err(PyValueError::new_err("invalid Rect instance rows"));
+        }
+        let mut scene = self.scene.lock().unwrap();
+        scene.rects = rows.into();
+        scene.rect_before_post = before_post;
+        Ok(())
+    }
+
+    #[pyo3(signature = (options))]
+    fn shadows(&self, options: Option<ShadowInput>) -> PyResult<()> {
+        let options = options.map(
+            |(
+                target,
+                extent,
+                resolution,
+                near,
+                far,
+                bias,
+                pcf_radius,
+                auto_fit,
+                cascades,
+                distance,
+            )| ShadowOptions {
+                target,
+                extent,
+                resolution,
+                near,
+                far,
+                bias,
+                pcf_radius,
+                auto_fit,
+                cascades,
+                distance,
+            },
+        );
+        if let Some(options) = options {
+            options
+                .validate()
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        }
+        self.scene.lock().unwrap().shadows = options;
+        Ok(())
+    }
+
+    #[pyo3(signature = (settings))]
+    fn post(&self, settings: Option<PostInput>) -> PyResult<()> {
+        let post = if let Some((ssao, bloom, shafts, grade, sky, fxaa, kernel)) = settings {
+            let kernel = kernel
+                .try_into()
+                .map_err(|_| PyValueError::new_err("post kernel must have 32 rows"))?;
+            let sky = sky.map(
+                |(zenith, horizon, sun_size_degrees, sun_intensity, glow)| Sky {
+                    zenith,
+                    horizon,
+                    sun_size_degrees,
+                    sun_intensity,
+                    glow,
+                },
+            );
+            Some(Arc::new(PostOptions {
+                ssao,
+                bloom,
+                shafts,
+                grade,
+                sky,
+                fxaa,
+                kernel,
+            }))
+        } else {
+            None
+        };
+        self.scene.lock().unwrap().post = post;
+        Ok(())
+    }
+
+    #[pyo3(signature = (id, positions, normals, indices, uvs, attributes=None))]
     fn mesh(
         &self,
         id: u32,
@@ -157,6 +623,7 @@ impl NativeGraphics {
         normals: Vec<[f32; 3]>,
         indices: Vec<u32>,
         uvs: Vec<[f32; 2]>,
+        attributes: Option<VertexInput>,
     ) -> PyResult<()> {
         let mesh = MeshData {
             positions,
@@ -165,27 +632,96 @@ impl NativeGraphics {
         };
         mesh.validate()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        self.scene.lock().unwrap().uploads.push_back(Upload::Mesh(
+            id,
+            mesh,
+            uvs,
+            attributes.unwrap_or_default(),
+        ));
+        Ok(())
+    }
+
+    fn joint_poses(&self, poses: Vec<PoseInput>) -> PyResult<()> {
+        for (_, matrices) in &poses {
+            validate_matrices(matrices)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
         self.scene
             .lock()
             .unwrap()
             .uploads
-            .push(Upload::Mesh(id, mesh, uvs));
+            .push_back(Upload::Poses(poses));
         Ok(())
     }
 
-    #[pyo3(signature = (id, color, kind, standard=None))]
+    #[pyo3(signature = (poses, into=None))]
+    fn bake_poses(&self, poses: Vec<JointMatrices>, into: Option<u32>) -> PyResult<u32> {
+        if poses.is_empty() {
+            return Err(PyValueError::new_err(
+                "a skin clip must have at least one frame",
+            ));
+        }
+        for matrices in &poses {
+            validate_matrices(matrices)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        let mut scene = self.scene.lock().unwrap();
+        let id = if let Some(id) = into {
+            if scene.clips.get(&id) != Some(&poses.len()) {
+                return Err(PyValueError::new_err(
+                    "a replacement clip must keep its frame count",
+                ));
+            }
+            id
+        } else {
+            let id = u32::try_from(scene.clips.len() + 1)
+                .map_err(|_| PyValueError::new_err("skin clip identifiers exhausted"))?;
+            scene.clips.insert(id, poses.len());
+            id
+        };
+        scene.uploads.push_back(Upload::Bake(id, poses));
+        Ok(id)
+    }
+
+    fn pose_frames(&self, frames: Vec<FrameInput>) -> PyResult<()> {
+        let mut scene = self.scene.lock().unwrap();
+        for (_, clip, position) in &frames {
+            let count = scene
+                .clips
+                .get(clip)
+                .ok_or_else(|| PyValueError::new_err("unknown skin clip"))?;
+            if !(0.0..=(count - 1) as f64).contains(position) {
+                return Err(PyValueError::new_err(
+                    "position is outside the skin clip's frames",
+                ));
+            }
+        }
+        scene.uploads.push_back(Upload::Play(frames));
+        Ok(())
+    }
+
+    #[pyo3(signature = (id, color, kind, standard=None, shininess=None, effects=None))]
     fn material(
         &self,
         id: u32,
         color: [f32; 3],
         kind: &str,
         standard: Option<MaterialInput>,
+        shininess: Option<f32>,
+        effects: Option<EffectsInput>,
     ) -> PyResult<()> {
-        let shading = match (kind, standard) {
-            ("basic", None) => Shading::Basic,
-            ("flat", None) => Shading::Flat,
-            ("phong", None) => Shading::Phong,
-            ("standard", Some((roughness, metallic, ao, albedo))) => Shading::Standard {
+        let shading = match (kind, standard, shininess) {
+            ("basic", None, None) => Shading::Basic,
+            ("flat", None, None) => Shading::Flat,
+            ("phong", None, Some(shininess)) if shininess.is_finite() && shininess > 0.0 => {
+                Shading::Phong { shininess }
+            }
+            ("phong", None, _) => {
+                return Err(PyValueError::new_err(
+                    "Phong shininess must be finite and positive",
+                ));
+            }
+            ("standard", Some((roughness, metallic, ao, albedo)), None) => Shading::Standard {
                 roughness,
                 metallic,
                 ao,
@@ -194,15 +730,234 @@ impl NativeGraphics {
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "unsupported base material {kind}"
-                )))
+                )));
             }
+        };
+        let effects = effects.map_or_else(
+            StandardEffects::default,
+            |(
+                vertex_colors,
+                opacity,
+                mirror,
+                cut,
+                sway,
+                sway_reach,
+                ripple,
+                faded,
+                tinted,
+                paletted,
+                baked,
+            )| {
+                StandardEffects {
+                    vertex_colors,
+                    opacity,
+                    mirror,
+                    cut,
+                    sway,
+                    sway_reach,
+                    ripple,
+                    faded,
+                    tinted,
+                    paletted,
+                    baked,
+                }
+            },
+        );
+        effects
+            .validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Material(id, color, shading, effects));
+        Ok(())
+    }
+
+    fn fog(&self, fog: Option<([f32; 2], [f32; 3])>) {
+        self.scene.lock().unwrap().fog = fog;
+    }
+
+    fn environment(&self, environment: Option<(f32, bool)>) -> PyResult<()> {
+        if environment.is_some_and(|(intensity, _)| !intensity.is_finite()) {
+            return Err(PyValueError::new_err(
+                "environment intensity must be finite",
+            ));
+        }
+        self.scene.lock().unwrap().environment = environment;
+        Ok(())
+    }
+
+    fn axis(&self, id: u32, points: [[f32; 3]; 2]) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Axis(id, points));
+    }
+
+    fn surface_patterns(&self, id: u32, patterns: [[f32; 5]; 9], detail: bool) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Surface(id, Box::new(patterns), detail));
+    }
+
+    fn volume(&self, id: u32, dims: [u32; 3], bytes: &Bound<'_, PyBytes>) {
+        self.scene.lock().unwrap().uploads.push_back(Upload::Volume(
+            id,
+            dims,
+            bytes.as_bytes().to_vec(),
+        ));
+    }
+
+    fn volume_material(
+        &self,
+        id: u32,
+        params: ([f32; 3], Option<f32>, u32),
+        color: &Bound<'_, PyBytes>,
+        opacity: Vec<f32>,
+    ) {
+        let (range_density, step, max_steps) = params;
+        let data = VolumeMaterialData {
+            range_density,
+            step,
+            max_steps,
+            color: color.as_bytes().to_vec(),
+            opacity,
         };
         self.scene
             .lock()
             .unwrap()
             .uploads
-            .push(Upload::Material(id, color, shading));
+            .push_back(Upload::VolumeMaterial(id, data));
+    }
+
+    fn label_material(&self, id: u32, source: String, values: [f32; 4]) {
+        let data = SpriteData {
+            source,
+            values,
+            rgba: Vec::new(),
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Label(id, data));
+    }
+
+    fn label_tile(&self, layer: u32, rgba: &Bound<'_, PyBytes>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::LabelTile(layer, rgba.as_bytes().to_vec()));
+    }
+
+    fn sprite(&self, id: u32, source: String, values: [f32; 4], rgba: &Bound<'_, PyBytes>) {
+        let data = SpriteData {
+            source,
+            values,
+            rgba: rgba.as_bytes().to_vec(),
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Sprite(id, data));
+    }
+
+    fn manual(
+        &self,
+        id: u32,
+        source: String,
+        uniforms: Vec<f32>,
+        textures: Vec<(u32, u32)>,
+        blend: u8,
+        axis: bool,
+    ) {
+        let data = ManualData {
+            source,
+            uniforms,
+            textures,
+            blend,
+            axis,
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Manual(id, data));
+    }
+
+    fn fragment(
+        &self,
+        py: Python<'_>,
+        id: u32,
+        source: String,
+        uniforms: Vec<f32>,
+        textures: Vec<Py<PyBytes>>,
+    ) {
+        let data = FragmentData {
+            source,
+            uniforms,
+            textures: textures
+                .iter()
+                .map(|tex| tex.as_bytes(py).to_vec())
+                .collect(),
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Fragment(id, data));
+    }
+
+    #[pyo3(signature = (irradiance, prefiltered, brdf=None))]
+    fn environment_maps(
+        &self,
+        py: Python<'_>,
+        irradiance: &Bound<'_, PyBytes>,
+        prefiltered: Vec<Py<PyBytes>>,
+        brdf: Option<&Bound<'_, PyBytes>>,
+    ) -> PyResult<()> {
+        let data = EnvironmentData {
+            irradiance: irradiance.as_bytes().to_vec(),
+            prefiltered: prefiltered
+                .iter()
+                .map(|mip| mip.as_bytes(py).to_vec())
+                .collect(),
+            brdf: brdf.map(|lut| lut.as_bytes().to_vec()),
+        };
+        data.validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Environment(data));
         Ok(())
+    }
+
+    fn baked_array(&self, id: u32, size: u32, layers: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::BakedArray(id, size, layers));
+    }
+
+    fn baked_layer(&self, py: Python<'_>, id: u32, layer: u32, levels: Vec<Py<PyBytes>>) {
+        let levels = levels
+            .iter()
+            .map(|level| level.as_bytes(py).to_vec())
+            .collect();
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::BakedLayer(id, layer, levels));
     }
 
     fn albedo(&self, py: Python<'_>, id: u32, width: u32, height: u32, levels: Vec<Py<PyBytes>>) {
@@ -214,22 +969,75 @@ impl NativeGraphics {
             .lock()
             .unwrap()
             .uploads
-            .push(Upload::Albedo(id, width, height, levels));
+            .push_back(Upload::Albedo(id, width, height, levels));
     }
 
+    #[pyo3(signature = (declaration, callback=None))]
+    fn compute(&self, declaration: ComputeInput, callback: Option<Py<PyAny>>) {
+        let (key, source, workgroup_size, uniforms, threads, columns) = declaration;
+        let bindings = columns
+            .into_iter()
+            .map(|(column, name, width, write)| ComputeBinding {
+                column,
+                name,
+                width,
+                write,
+            })
+            .collect();
+        let mut scene = self.scene.lock().unwrap();
+        scene.compute_pending.push_back(ComputeProgram {
+            key,
+            source,
+            workgroup_size,
+            uniforms,
+            threads,
+            bindings,
+        });
+        if let Some(callback) = callback {
+            scene.compute_callbacks.push((key, callback));
+        }
+    }
+
+    fn compute_transfers(&self) -> [usize; 3] {
+        self.scene
+            .lock()
+            .unwrap()
+            .compute
+            .as_ref()
+            .map_or([0; 3], FrameCompute::transfers)
+    }
+
+    fn compute_timings(&self, py: Python<'_>) -> PyResult<Vec<Option<u64>>> {
+        py.detach(|| {
+            let scene = self.scene.lock().unwrap();
+            match (&scene.compute, &scene.offscreen) {
+                (Some(compute), Some(renderer)) => compute.timings(renderer).map_err(render_error),
+                _ => Ok(Vec::new()),
+            }
+        })
+    }
+
+    #[pyo3(signature = (world, width, height, labels=None, dt=None))]
     fn capture<'py>(
         &self,
         py: Python<'py>,
         world: &PyNativeWorld,
         width: u32,
         height: u32,
+        labels: Option<HashMap<u32, u32>>,
+        dt: Option<f32>,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let dispatch = if labels.is_none() && dt.is_some() {
+            compute_overrides(&self.scene).map_err(render_error)?
+        } else {
+            HashMap::new()
+        };
         let output = py.detach(|| {
-            let world = world.lock()?;
+            let mut world = world.lock()?;
             self.scene
                 .lock()
                 .unwrap()
-                .capture(&world, width, height)
+                .capture(&mut world, width, height, labels.as_ref(), dt, &dispatch)
                 .map_err(render_error)
         })?;
         let result = stats_dict(py, &output.stats)?;
@@ -253,6 +1061,11 @@ pub(crate) fn stats_dict<'py>(
     result.set_item("instances", stats.instances)?;
     result.set_item("draw_calls", stats.draw_calls)?;
     result.set_item("triangles", stats.triangles)?;
+    result.set_item("post_order", &stats.post_order)?;
+    result.set_item("frame_order", &stats.frame_order)?;
+    result.set_item("line_draws", stats.line_draws)?;
+    result.set_item("shadow_layers", stats.shadow_layers)?;
+    result.set_item("post_target_generation", stats.post_target_generation)?;
     result.set_item("read_ns", stats.read_ns)?;
     result.set_item("upload_ns", stats.upload_ns)?;
     result.set_item("encode_submit_ns", stats.encode_submit_ns)?;
