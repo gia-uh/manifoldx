@@ -1823,12 +1823,13 @@ impl NativeRenderer {
             .or(self.layer_filter.as_deref());
         // A layer can hide a caster from the camera without hiding its shadow.
         let sprite_view = usize::from(draw.secondary.is_some());
-        if draw.ids.is_none() && !draw.omit_draw && self.sprites.is_some() {
-            let globals = self.material_globals(camera, &target, None);
-            self.sprites
-                .as_mut()
-                .expect("sprite materials uploaded")
-                .prepare(&self.gpu, world, source, layers, &globals, sprite_view)?;
+        if draw.ids.is_none() && !draw.omit_draw {
+            if let Some(mut sprites) = self.sprites.take() {
+                let globals = self.material_globals(camera, &target, None);
+                let result = sprites.prepare(&self.gpu, world, source, layers, &globals, sprite_view);
+                self.sprites = Some(sprites);
+                result?;
+            }
         }
         let shadow_batch = (layers.is_some()
             && self.shadow_options.is_some()
