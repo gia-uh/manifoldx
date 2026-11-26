@@ -25,7 +25,7 @@ impl FragmentPipeline {
         let device = gpu.device();
         if data.uniforms.iter().any(|x| !x.is_finite())
             || data.uniforms.len() as u64 * 4
-                > u64::from(device.limits().max_uniform_buffer_binding_size)
+                > device.limits().max_uniform_buffer_binding_size
             || data.textures.len() > device.limits().max_sampled_textures_per_shader_stage as usize
             || data.textures.len() > device.limits().max_samplers_per_shader_stage as usize
             || data.textures.iter().any(|bytes| {
