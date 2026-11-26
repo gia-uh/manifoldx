@@ -14,7 +14,7 @@ from PIL import Image
 from manifoldx.camera import Camera
 from manifoldx.components import Baked, Layer, Material, Mesh, Transform
 from manifoldx.resources import SURFACE_BAKED, DirectionalLight, FlatMaterial, StandardMaterial, plane
-from manifoldx.streaming import CellResult, MeshData, Streamer, _pack_native_vertices
+from manifoldx.streaming import CellResult, MeshData, Streamer, _pack_native_vertices, _pack_now
 from manifoldx.textures import layer_mips, texture_array, write_layer, write_texture
 from manifoldx.vehicles import GroundTile, Heightfield
 
@@ -281,7 +281,7 @@ def patch(output, fault):
     return {"changed_pixels_by_layer": counts}
 
 
-def invalidation(output):
+def invalidation(output, *, facade=False):
     engine = engine_for("Visible cell invalidation")
     engine.configure_stream_collision(4)
     engine.world.register("FixtureRows", kind="u32", width=1)
@@ -292,12 +292,18 @@ def invalidation(output):
         color = (0.9, 0.05, 0.05) if current == 1 else (0.05, 0.9, 0.05)
         mesh = MeshData(geometry["positions"], geometry["normals"],
                         np.tile(np.array(color, np.float32), (4, 1)), geometry["indices"])
+        if facade and current == 2:
+            attributes = np.tile(np.array([8, 4, 2, 13], np.float32), (4, 1))
+            mesh = mesh._replace(facade=attributes)
+            packed = _pack_now(lambda: mesh, ())
+            assert packed.info["has_facade"]
+            assert np.array_equal(np.frombuffer(packed.vbytes, np.float32).reshape(4, 14)[:, -4:], attributes)
         return CellResult(((mesh, 0),), ((0, 1, bytes([current])),))
 
     def convert(request, rows):
         height = rows[0][2][0]
         grid = Heightfield((request.x, request.y), (4, 4), [[height] * 2] * 2)
-        batches = [(1, {"FixtureRows": np.array([height, 99] if height == 2 else [height], np.uint32)})]
+        batches = [(1, {"FixtureRows": np.array([height, 99] if not facade and height == 2 else [height], np.uint32)})]
         return batches, [GroundTile((0, 0), 1, heightfields=[grid])]
 
     stream = Streamer(engine, 4, build, radius=0, ready_radius=0, request=True, convert=convert,
@@ -310,18 +316,25 @@ def invalidation(output):
             if check():
                 return image
             if continuity is not None:
-                assert np.array_equal(image, continuity)
+                assert np.array_equal(image, continuity), ("invalid cell changed the visible image", stream.stats())
             time.sleep(0.002)
         raise AssertionError(stream.stats())
 
     before = draw_until(lambda: stream.settled)
-    assert engine.sample_stream_collision(2, 2, 1)[0] == 1
+    ground = engine.sample_stream_collision(2, 2, 1)
+    assert ground[0] == 1
     assert save(output, "retained", before)[0] > 100
+    initial_upload_bytes = stream.stats()["upload_bytes"]
     current = 2
     stream.invalidate(0, 0)
     rejected = draw_until(lambda: stream.stats()["rejected"] == 1, before)
     assert np.array_equal(rejected, before)
-    assert engine.sample_stream_collision(2, 2, 1)[0] == 1
+    assert engine.sample_stream_collision(2, 2, 1) == ground
+    assert engine.world.query("FixtureRows").read().numpy().tolist() == [[1]]
+    if facade:
+        assert "MeshData.facade" in stream.stats()["last_error"], stream.stats()
+        assert stream.stats()["upload_bytes"] == initial_upload_bytes
+        assert engine.last_frame["stream_resources"] == [0, 1]
     current = 3
     stream.invalidate(0, 0)
     after = draw_until(lambda: engine.sample_stream_collision(2, 2, 3)[0] == 3, before)
@@ -393,7 +406,7 @@ def portable_rows(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate"))
+    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade"))
     parser.add_argument("--fault", choices=("refresh", "albedo", "atomic", "late", "layer"))
     args = parser.parse_args()
     assert sys.flags.isolated
@@ -405,8 +418,8 @@ def main():
         result = capsule(args.output)
     elif args.case == "cancel":
         result = cancellation(args.output)
-    elif args.case == "invalidate":
-        result = invalidation(args.output)
+    elif args.case in ("invalidate", "facade"):
+        result = invalidation(args.output, facade=args.case == "facade")
     else:
         case = {"views": views, "albedo": albedo, "transaction": transaction, "patch": patch}[args.case]
         result = case(args.output, args.fault)

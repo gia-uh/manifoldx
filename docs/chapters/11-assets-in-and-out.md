@@ -415,7 +415,9 @@ Call `configure_stream_collision` once with the collision index's tile size befo
 publishing tiles. `sample_stream_collision` returns the published surface and version.
 `Streamer.invalidate(i, j)` rebuilds a grid cell while its previous version stays
 visible. The frame barrier replaces the mesh, World rows and collision tiles
-after validation.
+after validation. Streamer statistics report rejected builds through `rejected`
+and `last_error`. The Rust renderer still needs `facade_albedo` support before
+streamed cells can use `MeshData.facade`.
 
 
 A coarse node can look like the finer ones it stands for when it carries a

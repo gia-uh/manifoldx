@@ -206,6 +206,8 @@ def _pack_mesh(data, side, *, native):
     if data.surfaces is not None:
         geo["surfaces"] = np.asarray(data.surfaces, np.int32)
     if data.facade is not None:
+        if native:
+            raise ValueError("MeshData.facade requires facade_albedo support in the Rust renderer")
         geo["facade"] = np.asarray(data.facade, np.float32)
     levels = None
     if getattr(data, "albedo", None) is not None and side and data.surfaces is not None:
