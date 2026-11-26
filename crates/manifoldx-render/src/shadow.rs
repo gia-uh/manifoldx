@@ -1,6 +1,7 @@
 //! Directional and spot shadow projections and the depth-map array.
 
 use crate::camera::Camera;
+use crate::environment::{EnvironmentData, EnvironmentGpu};
 use crate::math::Mat4;
 use crate::renderer::{DirectionalLight, RenderError, SpotLight};
 
@@ -259,40 +260,46 @@ pub(crate) struct ShadowMap {
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     active: bool,
+    environment: EnvironmentGpu,
+    view: wgpu::TextureView,
+    inactive_view: wgpu::TextureView,
+    inactive: wgpu::Buffer,
 }
 
 impl ShadowMap {
     pub(crate) fn new(device: &wgpu::Device) -> Self {
+        let mut entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                count: None,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                count: None,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                count: None,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            },
+        ];
+        entries.extend(EnvironmentGpu::layout());
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("native shadow sample layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    count: None,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    count: None,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    count: None,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                },
-            ],
+            label: Some("native shadow and environment sample layout"),
+            entries: &entries,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             compare: Some(wgpu::CompareFunction::Less),
@@ -304,14 +311,24 @@ impl ShadowMap {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let (group, depth) = allocate_map(device, &layout, &sampler, &uniform, 1, 1);
+        let (view, depth) = allocate_map(device, 1, 1);
+        let environment = EnvironmentGpu::new(device);
+        let group = bind_map(device, &layout, &sampler, &uniform, &view, &environment);
         let inactive = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("inactive shadow parameters"),
             size: (UNIFORM_FLOATS * size_of::<f32>()) as u64,
             usage: wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
-        let (inactive_group, _) = allocate_map(device, &layout, &sampler, &inactive, 1, 1);
+        let (inactive_view, _) = allocate_map(device, 1, 1);
+        let inactive_group = bind_map(
+            device,
+            &layout,
+            &sampler,
+            &inactive,
+            &inactive_view,
+            &environment,
+        );
         Self {
             layout,
             group,
@@ -321,7 +338,41 @@ impl ShadowMap {
             sampler,
             uniform,
             active: false,
+            environment,
+            view,
+            inactive_view,
+            inactive,
         }
+    }
+
+    pub(crate) fn upload_environment(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &EnvironmentData,
+    ) -> Result<(), RenderError> {
+        self.environment.load(device, queue, data)?;
+        self.rebind(device);
+        self.inactive_group = bind_map(
+            device,
+            &self.layout,
+            &self.sampler,
+            &self.inactive,
+            &self.inactive_view,
+            &self.environment,
+        );
+        Ok(())
+    }
+
+    fn rebind(&mut self, device: &wgpu::Device) {
+        self.group = bind_map(
+            device,
+            &self.layout,
+            &self.sampler,
+            &self.uniform,
+            &self.view,
+            &self.environment,
+        );
     }
 
     pub(crate) fn prepare(
@@ -337,14 +388,8 @@ impl ShadowMap {
                 ));
             }
             if self.size != frame.resolution || self.depth.len() != frame.layers {
-                (self.group, self.depth) = allocate_map(
-                    device,
-                    &self.layout,
-                    &self.sampler,
-                    &self.uniform,
-                    frame.resolution,
-                    frame.layers,
-                );
+                (self.view, self.depth) = allocate_map(device, frame.resolution, frame.layers);
+                self.rebind(device);
                 self.size = frame.resolution;
             }
             queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&frame.data()));
@@ -362,12 +407,9 @@ impl ShadowMap {
 
 fn allocate_map(
     device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    sampler: &wgpu::Sampler,
-    uniform: &wgpu::Buffer,
     size: u32,
     layers: usize,
-) -> (wgpu::BindGroup, Vec<wgpu::TextureView>) {
+) -> (wgpu::TextureView, Vec<wgpu::TextureView>) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("native shadow-map array"),
         size: wgpu::Extent3d {
@@ -386,24 +428,6 @@ fn allocate_map(
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
-    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("native shadow map"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: uniform.as_entire_binding(),
-            },
-        ],
-    });
     let layers = (0..layers)
         .map(|i| {
             texture.create_view(&wgpu::TextureViewDescriptor {
@@ -414,5 +438,35 @@ fn allocate_map(
             })
         })
         .collect();
-    (group, layers)
+    (view, layers)
+}
+
+fn bind_map(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    uniform: &wgpu::Buffer,
+    view: &wgpu::TextureView,
+    environment: &EnvironmentGpu,
+) -> wgpu::BindGroup {
+    let mut entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        },
+        wgpu::BindGroupEntry {
+            binding: 2,
+            resource: uniform.as_entire_binding(),
+        },
+    ];
+    entries.extend(environment.bindings());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("native shadow and environment maps"),
+        layout,
+        entries: &entries,
+    })
 }

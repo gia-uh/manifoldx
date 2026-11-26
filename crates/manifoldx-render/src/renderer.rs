@@ -15,6 +15,7 @@ use crate::scene::{
     read_instances, InstanceBatch, InstanceSource, MeshData, SceneError, DEFAULT_MAX_INSTANCES,
 };
 
+use crate::environment::EnvironmentData;
 use crate::shadow::{self, ShadowFrame, ShadowMap, ShadowOptions};
 use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
 
@@ -24,7 +25,7 @@ pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 /// Reversed-depth float buffer; the pass clears 0 and compares `Greater`.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16 + 4 + 8 * 4) * 4;
+const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16 + 4 + 8 * 4 + 16 + 4) * 4;
 const INSTANCE_FLOATS: usize = 40;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
 const VERTEX_BYTES: usize = 12 * 4;
@@ -565,6 +566,8 @@ pub struct NativeRenderer {
     skin: Skin,
     camera_layout: wgpu::BindGroupLayout,
     shadow: ShadowMap,
+    environment: Option<(f32, bool)>,
+    skybox_pipeline: wgpu::RenderPipeline,
     shadow_options: Option<ShadowOptions>,
     shadow_pipelines: [wgpu::RenderPipeline; 2],
     shadow_layers: Vec<ViewBuffers>,
@@ -751,6 +754,39 @@ impl NativeRenderer {
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
+        let skybox_pipeline = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("native environment skybox"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_sky"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                primitive: Default::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_sky"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
         let regular = pipeline(wgpu::FrontFace::Ccw, false, false);
         let reversed = pipeline(wgpu::FrontFace::Cw, false, false);
         let translucent = pipeline(wgpu::FrontFace::Ccw, true, false);
@@ -763,6 +799,8 @@ impl NativeRenderer {
             skin,
             camera_layout: bind_group_layout,
             shadow,
+            environment: None,
+            skybox_pipeline,
             shadow_options: None,
             shadow_pipelines,
             shadow_layers: Vec::new(),
@@ -817,6 +855,15 @@ impl NativeRenderer {
     /// Borrow the queue paired with this renderer's device.
     pub fn queue(&self) -> &wgpu::Queue {
         self.gpu.queue()
+    }
+
+    pub fn set_environment(&mut self, environment: Option<(f32, bool)>) {
+        self.environment = environment;
+    }
+
+    pub fn upload_environment(&mut self, data: &EnvironmentData) -> Result<(), RenderError> {
+        self.shadow
+            .upload_environment(&self.gpu.device, &self.gpu.queue, data)
     }
 
     pub fn prepare_resident_positions(&mut self) -> Result<(), RenderError> {
@@ -1707,7 +1754,13 @@ impl NativeRenderer {
         globals[52..60].copy_from_slice(&self.sun);
         globals[60..76].copy_from_slice(&self.spot);
         globals[76..80].copy_from_slice(&self.animation);
-        globals[80..].copy_from_slice(self.benders.as_flattened());
+        globals[80..112].copy_from_slice(self.benders.as_flattened());
+        let environment = draw.ids.is_none().then_some(self.environment).flatten();
+        if let Some((intensity, _)) = environment {
+            let projection = camera.projection(aspect);
+            globals[112..128].copy_from_slice(&camera.view().to_columns());
+            globals[128..132].copy_from_slice(&[intensity, 1.0, projection.0[0], projection.0[5]]);
+        }
         self.gpu
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&globals));
@@ -1789,6 +1842,19 @@ impl NativeRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            let scene = if draw.secondary.is_some() {
+                &self.shadow.inactive_group
+            } else {
+                &self.shadow.group
+            };
+            if !draw.omit_draw && environment.is_some_and(|(_, sky)| sky) {
+                pass.set_pipeline(&self.skybox_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_bind_group(1, &self.textures[&0], &[]);
+                pass.set_bind_group(2, &self.skin.group, &[]);
+                pass.set_bind_group(3, scene, &[]);
+                pass.draw(0..3, 0..1);
+            }
             if !draw.omit_draw && !draw_groups.is_empty() {
                 let instance_buffer = &self
                     .instance_buffer
@@ -1810,12 +1876,7 @@ impl NativeRenderer {
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_bind_group(1, &self.textures[&group.albedo], &[]);
                     pass.set_bind_group(2, &self.skin.group, &[]);
-                    let shadow = if draw.secondary.is_some() {
-                        &self.shadow.inactive_group
-                    } else {
-                        &self.shadow.group
-                    };
-                    pass.set_bind_group(3, shadow, &[]);
+                    pass.set_bind_group(3, scene, &[]);
                     let mesh = self
                         .meshes
                         .get(&group.geometry_id)
@@ -2396,6 +2457,8 @@ struct Camera {
     spot: SpotLight,
     animation: vec4<f32>,
     benders: array<vec4<f32>, 8>,
+    view: mat4x4<f32>,
+    environment: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var albedo_sampler: sampler;
@@ -2413,6 +2476,30 @@ struct ShadowData {
 @group(3) @binding(0) var shadow_map: texture_depth_2d_array;
 @group(3) @binding(1) var shadow_sampler: sampler_comparison;
 @group(3) @binding(2) var<uniform> shadows: ShadowData;
+@group(3) @binding(3) var env_sampler: sampler;
+@group(3) @binding(4) var irradiance_map: texture_cube<f32>;
+@group(3) @binding(5) var prefiltered_map: texture_cube<f32>;
+@group(3) @binding(6) var brdf_lut: texture_2d<f32>;
+
+struct SkyOutput {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) direction: vec3<f32>,
+};
+@vertex
+fn vs_sky(@builtin(vertex_index) index: u32) -> SkyOutput {
+    let points = array(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+    let p = points[index];
+    let ray = vec3<f32>(p / camera.environment.zw, -1.0);
+    return SkyOutput(vec4<f32>(p, 0.0, 1.0), vec3<f32>(
+        dot(camera.view[0].xyz, ray), dot(camera.view[1].xyz, ray), dot(camera.view[2].xyz, ray),
+    ));
+}
+@fragment
+fn fs_sky(in: SkyOutput) -> @location(0) vec4<f32> {
+    let color = textureSampleLevel(prefiltered_map, env_sampler, normalize(in.direction), 0.0).rgb
+        * camera.environment.x;
+    return vec4<f32>(color / (color + 1.0), 1.0);
+}
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -2735,6 +2822,18 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     let v = safe_normalize(camera.position.xyz - in.world_position);
     var color = 0.03 * albedo * in.style.z;
+    if camera.environment.y > 0.0 {
+        let metallic = in.style.x;
+        let roughness = in.style.y;
+        let nv = max(dot(n, v), 0.0001);
+        let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+        let f = f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * pow(1.0 - nv, 5.0);
+        let irradiance = textureSampleLevel(irradiance_map, env_sampler, n, 0.0).rgb;
+        let diffuse = (1.0 - f) * (1.0 - metallic) * irradiance * albedo;
+        let prefiltered = textureSampleLevel(prefiltered_map, env_sampler, reflect(-v, n), roughness * 7.0).rgb;
+        let brdf = textureSampleLevel(brdf_lut, env_sampler, vec2<f32>(nv, roughness), 0.0).rg;
+        color = (diffuse + prefiltered * (f * brdf.x + brdf.y)) * in.style.z * camera.environment.x;
+    }
     for (var i = 0u; i < 4u; i++) {
         let light = camera.lights[i];
         if light.rgb_intensity.a > 0.0 {

@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
+use manifoldx_render::environment::EnvironmentData;
 use manifoldx_render::lines::{LineLayer, LineOptions, LineRow};
 use manifoldx_render::rect::RectRow;
 use manifoldx_render::renderer::{ViewOptions, ViewOrder};
@@ -71,6 +72,7 @@ enum Upload {
     Bake(u32, Vec<JointMatrices>),
     Play(Vec<FrameInput>),
     View(ViewOptions),
+    Environment(EnvironmentData),
 }
 
 pub(crate) struct Scene {
@@ -80,6 +82,7 @@ pub(crate) struct Scene {
     sun: Option<DirectionalLight>,
     spot: Option<SpotLight>,
     post: Option<Arc<PostOptions>>,
+    environment: Option<(f32, bool)>,
     shadows: Option<ShadowOptions>,
     rects: Arc<[RectRow]>,
     lines: Option<Arc<LineOptions>>,
@@ -102,6 +105,7 @@ impl Scene {
             sun: None,
             spot: None,
             post: None,
+            environment: None,
             shadows: None,
             rects: Arc::default(),
             lines: None,
@@ -126,12 +130,14 @@ impl Scene {
         renderer.set_direct_lights(self.sun, self.spot);
         renderer.set_post(self.post.clone());
         renderer.set_shadows(self.shadows);
+        renderer.set_environment(self.environment);
         renderer.set_rects(self.rects.clone(), self.rect_before_post);
         renderer.set_layers(self.layers.clone());
         renderer.set_animation(self.time, self.origin, &self.benders);
         renderer.set_lines(self.lines.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
+                Upload::Environment(data) => renderer.upload_environment(&data)?,
                 Upload::View(options) => renderer.set_fixture_view(options)?,
                 Upload::Mesh(id, mesh, uv, (colors, joints)) => {
                     renderer.upload_mesh_attributes(id, &mesh, [1.0; 3], &uv, &colors, &joints)?
@@ -629,6 +635,42 @@ impl NativeGraphics {
             .unwrap()
             .uploads
             .push_back(Upload::Material(id, color, shading, effects));
+        Ok(())
+    }
+
+    fn environment(&self, environment: Option<(f32, bool)>) -> PyResult<()> {
+        if environment.is_some_and(|(intensity, _)| !intensity.is_finite()) {
+            return Err(PyValueError::new_err(
+                "environment intensity must be finite",
+            ));
+        }
+        self.scene.lock().unwrap().environment = environment;
+        Ok(())
+    }
+
+    #[pyo3(signature = (irradiance, prefiltered, brdf=None))]
+    fn environment_maps(
+        &self,
+        py: Python<'_>,
+        irradiance: &Bound<'_, PyBytes>,
+        prefiltered: Vec<Py<PyBytes>>,
+        brdf: Option<&Bound<'_, PyBytes>>,
+    ) -> PyResult<()> {
+        let data = EnvironmentData {
+            irradiance: irradiance.as_bytes().to_vec(),
+            prefiltered: prefiltered
+                .iter()
+                .map(|mip| mip.as_bytes(py).to_vec())
+                .collect(),
+            brdf: brdf.map(|lut| lut.as_bytes().to_vec()),
+        };
+        data.validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Environment(data));
         Ok(())
     }
 

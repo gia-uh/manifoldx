@@ -122,6 +122,8 @@ class _NativeEngine:
         self._sun = None
         self._spot = None
         self._post = None
+        self._environment = None
+        self._native_environment = None
         self._shadow_options = None
         self._capacity = max_entities
         self.input = InputState()
@@ -549,7 +551,40 @@ class _NativeEngine:
         self._post = post
         return post
 
+    def set_environment(self, env):
+        """Set the image-based lighting environment, preset, or None."""
+        from manifoldx.ibl import EnvironmentMap, PRESETS
+
+        if isinstance(env, str):
+            if env not in PRESETS:
+                raise ValueError(f"Unknown preset {env!r}. Known: {list(PRESETS)}")
+            env = PRESETS[env]()
+        elif env is not None and not isinstance(env, EnvironmentMap):
+            raise TypeError(f"Expected EnvironmentMap, preset string, or None; got {type(env)}")
+        self._environment = env
+
+    @property
+    def environment(self):
+        """The active image-based lighting environment."""
+        return self._environment
+
+    def _sync_environment(self):
+        from manifoldx.ibl import load_brdf_lut
+
+        env = self._environment
+        if env is not None and env is not self._native_environment:
+            env._precompute()
+            brdf = load_brdf_lut() if self._native_environment is None else None
+            self._graphics.environment_maps(
+                env._irradiance.astype("<f2", copy=False).tobytes(),
+                [mip.astype("<f2", copy=False).tobytes() for mip in env._prefiltered],
+                None if brdf is None else brdf.astype("<f2", copy=False).tobytes(),
+            )
+            self._native_environment = env
+        self._graphics.environment(None if env is None else (env.intensity, env.show_skybox))
+
     def _sync_scene(self):
+        self._sync_environment()
         self._graphics.animation(self.elapsed, self._origin, list(self.benders)[:8])
         lines = self.lines
         if lines.layers or self._line_rows:
