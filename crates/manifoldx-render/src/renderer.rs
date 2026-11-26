@@ -22,6 +22,7 @@ const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8) * 4;
 const INSTANCE_FLOATS: usize = 24;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
 const VERTEX_BYTES: usize = 8 * 4;
+const FLAT_STYLE: [f32; 4] = [0.0, 0.0, 0.0, 2.0];
 /// Largest offscreen side accepted by this slice.
 pub const MAX_SIDE: u32 = 4096;
 
@@ -197,6 +198,13 @@ impl Material {
             albedo: 0,
         }
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct DrawOptions<'a> {
+    ids: Option<&'a HashMap<u32, u32>>,
+    ignore_transform: bool,
+    omit_draw: bool,
 }
 
 struct GpuMesh {
@@ -650,7 +658,7 @@ impl NativeRenderer {
                 }
                 ([shininess, 0.0, 0.0, 5.0], 0)
             }
-            Shading::Flat => ([0.0, 0.0, 0.0, 2.0], 0),
+            Shading::Flat => (FLAT_STYLE, 0),
             Shading::Standard {
                 roughness,
                 metallic,
@@ -819,12 +827,36 @@ impl NativeRenderer {
             camera,
             width,
             height,
-            ignore_transform,
-            false,
+            DrawOptions {
+                ignore_transform,
+                ..Default::default()
+            },
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Capture exact group labels. Opaque unlabelled meshes still occlude.
+    pub fn render_ids(
+        &mut self,
+        world: &World,
+        source: InstanceSource,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        labels: &HashMap<u32, u32>,
+    ) -> Result<RenderOutput, RenderError> {
+        self.render_inner(
+            world,
+            source,
+            camera,
+            width,
+            height,
+            DrawOptions {
+                ids: Some(labels),
+                ..Default::default()
+            },
+        )
+    }
+
     fn render_inner(
         &mut self,
         world: &World,
@@ -832,8 +864,7 @@ impl NativeRenderer {
         camera: &Camera,
         width: u32,
         height: u32,
-        ignore_transform: bool,
-        omit_draw: bool,
+        draw: DrawOptions<'_>,
     ) -> Result<RenderOutput, RenderError> {
         let started = Instant::now();
         if !(1..=MAX_SIDE).contains(&width) || !(1..=MAX_SIDE).contains(&height) {
@@ -868,19 +899,15 @@ impl NativeRenderer {
             depth: &depth_view,
             width,
             height,
-            clear: self.clear,
+            clear: if draw.ids.is_some() {
+                wgpu::Color::BLACK
+            } else {
+                self.clear
+            },
             timestamps: None,
             positions: None,
         };
-        let mut stats = self.encode_world(
-            &mut encoder,
-            target,
-            world,
-            source,
-            camera,
-            ignore_transform,
-            omit_draw,
-        )?;
+        let mut stats = self.encode_world(&mut encoder, target, world, source, camera, draw)?;
 
         let padded_bytes_per_row = align_to(width * 4, 256);
         let readback_size = padded_bytes_per_row as u64 * height as u64;
@@ -960,10 +987,16 @@ impl NativeRenderer {
         source: InstanceSource,
         camera: &Camera,
     ) -> Result<RenderStats, RenderError> {
-        self.encode_world(encoder, target, world, source, camera, false, false)
+        self.encode_world(
+            encoder,
+            target,
+            world,
+            source,
+            camera,
+            DrawOptions::default(),
+        )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn encode_world(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -971,8 +1004,7 @@ impl NativeRenderer {
         world: &World,
         source: InstanceSource,
         camera: &Camera,
-        ignore_transform: bool,
-        omit_draw: bool,
+        draw: DrawOptions<'_>,
     ) -> Result<RenderStats, RenderError> {
         if source.max_instances > self.max_instances {
             return Err(RenderError::InstanceBound {
@@ -982,7 +1014,7 @@ impl NativeRenderer {
         }
 
         let read_started = Instant::now();
-        let batch = read_instances(world, source, ignore_transform)?;
+        let batch = read_instances(world, source, draw.ignore_transform)?;
         let mut stats = RenderStats {
             entities_examined: batch.entities_examined,
             ..Default::default()
@@ -993,6 +1025,7 @@ impl NativeRenderer {
             &batch,
             &view_projection,
             target.positions.as_ref(),
+            draw.ids,
             &mut stats,
         )?;
         stats.read_ns = elapsed_ns(read_started.elapsed());
@@ -1078,7 +1111,7 @@ impl NativeRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if !omit_draw && !draw_groups.is_empty() {
+            if !draw.omit_draw && !draw_groups.is_empty() {
                 let instance_buffer = &self
                     .instance_buffer
                     .as_ref()
@@ -1127,7 +1160,18 @@ impl NativeRenderer {
         height: u32,
         ignore_transform: bool,
     ) -> Result<RenderOutput, RenderError> {
-        self.render_inner(world, source, camera, width, height, ignore_transform, true)
+        self.render_inner(
+            world,
+            source,
+            camera,
+            width,
+            height,
+            DrawOptions {
+                ignore_transform,
+                omit_draw: true,
+                ..Default::default()
+            },
+        )
     }
 
     fn pack_instances(
@@ -1135,6 +1179,7 @@ impl NativeRenderer {
         batch: &InstanceBatch,
         view_projection: &Mat4,
         positions: Option<&ResidentPositions<'_>>,
+        ids: Option<&HashMap<u32, u32>>,
         stats: &mut RenderStats,
     ) -> Result<Vec<DrawGroup>, RenderError> {
         let mut groups = BTreeMap::<_, DrawGroup>::new();
@@ -1151,10 +1196,19 @@ impl NativeRenderer {
             if !bound && outside_frustum(&clip, mesh.bounds) {
                 continue;
             }
-            let material = instance
-                .material_id
-                .and_then(|id| self.materials.get(&id).copied())
-                .unwrap_or(Material::diffuse(mesh.color));
+            let material = if let Some(labels) = ids {
+                let [r, g, b, _] = labels.get(&slot).copied().unwrap_or_default().to_le_bytes();
+                Material {
+                    color: srgb_to_linear([r, g, b].map(|value| f32::from(value) / 255.0)),
+                    style: FLAT_STYLE,
+                    albedo: 0,
+                }
+            } else {
+                instance
+                    .material_id
+                    .and_then(|id| self.materials.get(&id).copied())
+                    .unwrap_or(Material::diffuse(mesh.color))
+            };
             let geometry_id = instance.geometry_id;
             let reversed = flips_winding(&instance.model);
             let albedo = material.albedo;

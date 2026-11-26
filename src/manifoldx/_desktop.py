@@ -520,24 +520,54 @@ class _NativeEngine:
             raise RuntimeError("presented and offscreen targets require separate Engine sessions")
         if self._position_binding is not None:
             raise NotImplementedError("resident position binding requires the native desktop mode")
-        if supersample != 1 or pass_ != "beauty" or groups is not None:
-            raise NotImplementedError("native base capture supports one beauty sample per pixel")
+        if pass_ not in ("beauty", "ids"):
+            raise ValueError(f"pass_ must be 'beauty' or 'ids', got {pass_!r}")
+        if not isinstance(supersample, (int, np.integer)) or supersample < 1:
+            raise ValueError("supersample must be a positive integer")
+        supersample = int(supersample)
+        if pass_ == "beauty" and groups is not None:
+            raise ValueError("groups are only used for the ID pass")
         if not self._start():
             raise RuntimeError("native Engine quit during startup")
-        step = self._fixed_dt if self._fixed_dt is not None else dt
-        self._world._loop = self._frame_loop(self._world._native, 64, 8, 4096)
-        self._world._running = True
-        self._time_base = self.elapsed
-        try:
-            self._world._loop.run(1, 1 / step, False, self._world._systems, None)
-        finally:
-            self._world._running = False
-        self.elapsed = self._time_base + step
+
+        labels = None
+        if pass_ == "ids":
+            labels = {}
+            if groups is not None:
+                for label, members in enumerate(groups, start=1):
+                    if label >= 1 << 24:
+                        raise ValueError("the ID pass supports at most 16,777,215 groups")
+                    for member in members:
+                        slot = int(member)
+                        if 0 <= slot < self._capacity:
+                            labels[slot] = label
+        else:
+            step = self._fixed_dt if self._fixed_dt is not None else dt
+            self._world._loop = self._frame_loop(self._world._native, 64, 8, 4096)
+            self._world._running = True
+            self._time_base = self.elapsed
+            try:
+                self._world._loop.run(1, 1 / step, False, self._world._systems, None)
+            finally:
+                self._world._running = False
+            self.elapsed = self._time_base + step
+
         self._sync_scene()
-        captured = self._graphics.capture(self._world._native, self.w, self.h)
+        width, height = self.w * supersample, self.h * supersample
+        captured = self._graphics.capture(self._world._native, width, height, labels)
         rgba = captured.pop("rgba")
         self.last_frame = captured
-        return np.frombuffer(rgba, dtype=np.uint8).reshape(self.h, self.w, 4)[:, :, :3].copy()
+        rgb = np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4)[:, :, :3]
+        if labels is not None:
+            from manifoldx.engine import _block_mode
+
+            red, green, blue = np.moveaxis(rgb.astype(np.int32), -1, 0)
+            return _block_mode(red | (green << 8) | (blue << 16), supersample)
+        if supersample == 1:
+            return rgb.copy()
+        return np.round(
+            rgb.reshape(self.h, supersample, self.w, supersample, 3).mean(axis=(1, 3))
+        ).astype(np.uint8)
 
     def cli(self, **options):
         from manifoldx.engine import Engine

@@ -1,5 +1,6 @@
 //! Python scene declarations for the native graphics owner.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::World;
@@ -69,6 +70,7 @@ impl Scene {
         world: &World,
         width: u32,
         height: u32,
+        labels: Option<&HashMap<u32, u32>>,
     ) -> Result<manifoldx_render::RenderOutput, RenderError> {
         let mut renderer = match self.offscreen.take() {
             Some(renderer) => renderer,
@@ -79,7 +81,11 @@ impl Scene {
         };
         let result = (|| {
             let camera = self.apply(&mut renderer)?;
-            renderer.render(world, source(world)?, &camera, width, height, false)
+            let source = source(world)?;
+            match labels {
+                Some(labels) => renderer.render_ids(world, source, &camera, width, height, labels),
+                None => renderer.render(world, source, &camera, width, height, false),
+            }
         })();
         self.offscreen = Some(renderer);
         result
@@ -225,19 +231,21 @@ impl NativeGraphics {
             .push(Upload::Albedo(id, width, height, levels));
     }
 
+    #[pyo3(signature = (world, width, height, labels=None))]
     fn capture<'py>(
         &self,
         py: Python<'py>,
         world: &PyNativeWorld,
         width: u32,
         height: u32,
+        labels: Option<HashMap<u32, u32>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let output = py.detach(|| {
             let world = world.lock()?;
             self.scene
                 .lock()
                 .unwrap()
-                .capture(&world, width, height)
+                .capture(&world, width, height, labels.as_ref())
                 .map_err(render_error)
         })?;
         let result = stats_dict(py, &output.stats)?;
