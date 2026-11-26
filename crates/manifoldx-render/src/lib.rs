@@ -2,6 +2,7 @@
 
 pub mod camera;
 pub mod desktop;
+pub mod lines;
 pub mod math;
 pub mod post;
 pub mod rect;

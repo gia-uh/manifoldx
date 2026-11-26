@@ -7,6 +7,7 @@ use std::time::Instant;
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
 
 use crate::camera::Camera;
+use crate::lines::{LineOptions, LinePass};
 use crate::math::Mat4;
 use crate::post::{PostOptions, PostPasses};
 use crate::rect::{RectPass, RectRow};
@@ -453,6 +454,7 @@ pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wg
 /// mapping. The desktop diagnostic measures GPU execution separately.
 #[derive(Clone, Debug, Default)]
 pub struct RenderStats {
+    pub line_draws: usize,
     pub frame_order: Vec<&'static str>,
     /// Number of actual shadow depth layers encoded before scene colour.
     pub shadow_layers: usize,
@@ -539,6 +541,8 @@ pub struct NativeRenderer {
     post_passes: Option<PostPasses>,
     rects: std::sync::Arc<[RectRow]>,
     rect_pass: Option<RectPass>,
+    lines: Option<std::sync::Arc<LineOptions>>,
+    line_pass: Option<LinePass>,
     rect_before_post: bool,
     post_sun: Option<DirectionalLight>,
     pipeline: wgpu::RenderPipeline,
@@ -732,6 +736,8 @@ impl NativeRenderer {
             post_passes: None,
             rects: std::sync::Arc::default(),
             rect_pass: None,
+            lines: None,
+            line_pass: None,
             rect_before_post: false,
             post_sun: None,
             pipeline: regular,
@@ -1090,6 +1096,10 @@ impl NativeRenderer {
         self.shadow_options = options;
     }
 
+    pub fn set_lines(&mut self, lines: Option<std::sync::Arc<LineOptions>>) {
+        self.lines = lines;
+    }
+
     /// Submit already laid-out, physical-pixel rectangles. The order override is for fixtures.
     pub fn set_rects(&mut self, rows: std::sync::Arc<[RectRow]>, before_post: bool) {
         self.rects = rows;
@@ -1417,6 +1427,9 @@ impl NativeRenderer {
             order.push("shadow");
         }
         order.push(if draw.ids.is_some() { "ids" } else { "main" });
+        if stats.line_draws > 0 {
+            order.push("lines");
+        }
         order.extend(stats.post_order.iter().copied());
         if view_order == Some(ViewOrder::AfterMain) {
             self.draw_secondary(encoder, world, source)?;
@@ -1745,6 +1758,27 @@ impl NativeRenderer {
             }
         }
 
+        if draw.ids.is_none() && draw.secondary.is_none() && !draw.omit_draw {
+            let attach = FrameTarget {
+                color: target.color,
+                depth: target.depth,
+                width: target.width,
+                height: target.height,
+                clear: target.clear,
+                timestamps: None,
+                positions: None,
+            };
+            if let Some(lines) = self
+                .lines
+                .as_ref()
+                .filter(|lines| !lines.layers.is_empty() || self.line_pass.is_some())
+            {
+                let pass = self
+                    .line_pass
+                    .get_or_insert_with(|| LinePass::new(&self.gpu.device, self.format));
+                stats.line_draws = pass.encode(&self.gpu, encoder, &attach, camera, lines);
+            }
+        }
         Ok(stats)
     }
 

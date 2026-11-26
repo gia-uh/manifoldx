@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
+use manifoldx_render::lines::{LineLayer, LineOptions, LineRow};
 use manifoldx_render::rect::RectRow;
 use manifoldx_render::renderer::{ViewOptions, ViewOrder};
 use manifoldx_render::shadow::ShadowOptions;
@@ -40,6 +41,7 @@ type ShadowInput = (
     u32,
     Option<f32>,
 );
+type LineInput = (String, [f32; 2], Option<Vec<LineRow>>);
 type SkyInput = ([f32; 3], Option<[f32; 3]>, f32, f32, f32);
 type PostInput = (
     Option<[f32; 5]>,
@@ -70,6 +72,7 @@ pub(crate) struct Scene {
     post: Option<Arc<PostOptions>>,
     shadows: Option<ShadowOptions>,
     rects: Arc<[RectRow]>,
+    lines: Option<Arc<LineOptions>>,
     rect_before_post: bool,
     layers: Option<Arc<BTreeSet<i32>>>,
     clips: HashMap<u32, usize>,
@@ -88,6 +91,7 @@ impl Scene {
             post: None,
             shadows: None,
             rects: Arc::default(),
+            lines: None,
             rect_before_post: false,
             layers: None,
             clips: HashMap::new(),
@@ -108,6 +112,7 @@ impl Scene {
         renderer.set_shadows(self.shadows);
         renderer.set_rects(self.rects.clone(), self.rect_before_post);
         renderer.set_layers(self.layers.clone());
+        renderer.set_lines(self.lines.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
                 Upload::View(options) => renderer.set_fixture_view(options)?,
@@ -323,6 +328,50 @@ impl NativeGraphics {
                 intensity,
             })
             .collect();
+    }
+
+    fn lines(
+        &self,
+        visible: bool,
+        bias: f32,
+        feather: f32,
+        layers: Vec<LineInput>,
+    ) -> PyResult<()> {
+        if !bias.is_finite() || !feather.is_finite() || bias < 0.0 || feather < 0.0 {
+            return Err(PyValueError::new_err("invalid line settings"));
+        }
+        let mut scene = self.scene.lock().unwrap();
+        let previous: HashMap<_, _> = scene
+            .lines
+            .iter()
+            .flat_map(|lines| &lines.layers)
+            .map(|layer| (&layer.key, &layer.rows))
+            .collect();
+        let mut next = Vec::with_capacity(layers.len());
+        for (key, look, rows) in layers {
+            if look.iter().any(|x| !x.is_finite()) {
+                return Err(PyValueError::new_err("invalid line layer look"));
+            }
+            let rows = if let Some(rows) = rows {
+                if rows.len() > 1_000_000 || rows.iter().flatten().any(|x| !x.is_finite()) {
+                    return Err(PyValueError::new_err("invalid line segments"));
+                }
+                Arc::from(rows)
+            } else {
+                previous
+                    .get(&key)
+                    .map(|rows| Arc::clone(rows))
+                    .ok_or_else(|| PyValueError::new_err("unknown line layer"))?
+            };
+            next.push(LineLayer { key, rows, look });
+        }
+        scene.lines = Some(Arc::new(LineOptions {
+            visible,
+            bias,
+            feather,
+            layers: next,
+        }));
+        Ok(())
     }
 
     fn fixture_rects(&self, rows: Vec<RectRow>, before_post: bool) -> PyResult<()> {
@@ -597,6 +646,7 @@ pub(crate) fn stats_dict<'py>(
     result.set_item("triangles", stats.triangles)?;
     result.set_item("post_order", &stats.post_order)?;
     result.set_item("frame_order", &stats.frame_order)?;
+    result.set_item("line_draws", stats.line_draws)?;
     result.set_item("shadow_layers", stats.shadow_layers)?;
     result.set_item("post_target_generation", stats.post_target_generation)?;
     result.set_item("read_ns", stats.read_ns)?;

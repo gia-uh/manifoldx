@@ -15,6 +15,7 @@ from manifoldx.camera import Camera
 from manifoldx.components import Component, Material, Mesh, Transform
 from manifoldx.ecs import ComponentView, _make_component_class
 from manifoldx.input import InputState
+from manifoldx.lines import Lines
 from manifoldx.resources import (
     BasicMaterial,
     DirectionalLight,
@@ -124,6 +125,8 @@ class _NativeEngine:
         self._shadow_options = None
         self._capacity = max_entities
         self.input = InputState()
+        self.lines = Lines()
+        self._line_rows = {}
         self._world = World(max_entities)
         self._position_binding = None
         self._desktop_probe = (False, False, False, None)
@@ -544,6 +547,18 @@ class _NativeEngine:
         return post
 
     def _sync_scene(self):
+        lines = self.lines
+        if lines.layers or self._line_rows:
+            layers = [
+                (
+                    key,
+                    lines.looks.get(key, (1.0, 1.0)),
+                    None if self._line_rows.get(key) is data else data.tolist(),
+                )
+                for key, data in lines.layers.items()
+            ]
+            self._graphics.lines(lines.visible, lines.bias, lines.feather, layers)
+            self._line_rows = lines.layers
         for _, material, version in self._registries["Material"].values():
             if material._version.value != version:
                 self._material(material)
