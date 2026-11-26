@@ -3,14 +3,14 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use manifoldx_core::ecs::{ColumnData, EntityId, World};
+use manifoldx_core::ecs::{ColumnData, ComponentPayload, EntityId, World};
 use manifoldx_render::environment::EnvironmentData;
 use manifoldx_render::fragment::FragmentData;
 use manifoldx_render::frame_compute::{ComputeBinding, ComputeProgram, FrameCompute};
 use manifoldx_render::lines::{LineLayer, LineOptions, LineRow};
 use manifoldx_render::manual::ManualData;
 use manifoldx_render::rect::RectRow;
-use manifoldx_render::renderer::{FixtureRenderFault, ViewOptions, ViewOrder};
+use manifoldx_render::renderer::{FixtureRenderFault, ViewOptions, ViewOrder, ViewRead};
 use manifoldx_render::shadow::ShadowOptions;
 use manifoldx_render::skin::{validate_matrices, JointMatrices};
 use manifoldx_render::sprite::SpriteData;
@@ -82,6 +82,12 @@ type PostInput = (
 );
 
 enum Upload {
+    StreamBegin(u32, [[f32; 3]; 2], u64, u64),
+    StreamWrite(u32, bool, Vec<u8>),
+    StreamShow(u32, u32, [f64; 3], Option<f32>, Option<f32>),
+    StreamHide(u32),
+    StreamFade(u32, f32),
+    StreamRetire(u32),
     Mesh(u32, MeshData, Vec<[f32; 2]>, VertexInput),
     Material(u32, [f32; 3], Shading, StandardEffects),
     Surface(u32, Box<[[f32; 5]; 9]>, bool),
@@ -91,7 +97,11 @@ enum Upload {
     Poses(Vec<PoseInput>),
     Bake(u32, Vec<JointMatrices>),
     Play(Vec<FrameInput>),
-    View(ViewOptions),
+    View(ViewOptions, bool),
+    ViewUpdate(u32, Camera, Option<BTreeSet<i32>>, bool, bool),
+    ViewDrop(u32),
+    ViewRelease(u32),
+    ViewRead(u32, ViewRead),
     Environment(EnvironmentData),
     Fragment(u32, FragmentData),
     Manual(u32, ManualData),
@@ -123,6 +133,9 @@ pub(crate) struct Scene {
     clips: HashMap<u32, usize>,
     uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
+    view_reads: HashMap<u64, ViewRead>,
+    next_read: u64,
+    stream_entities: HashMap<u32, EntityId>,
     fixture_fault: Option<FixtureRenderFault>,
     compute: Option<FrameCompute>,
     compute_pending: VecDeque<ComputeProgram>,
@@ -151,6 +164,9 @@ impl Scene {
             clips: HashMap::new(),
             uploads: VecDeque::new(),
             offscreen: None,
+            view_reads: HashMap::new(),
+            next_read: 0,
+            stream_entities: HashMap::new(),
             fixture_fault: None,
             compute: None,
             compute_pending: VecDeque::new(),
@@ -161,7 +177,7 @@ impl Scene {
     pub(crate) fn apply(
         &mut self,
         renderer: &mut NativeRenderer,
-        world: &World,
+        world: &mut World,
     ) -> Result<Camera, RenderError> {
         renderer.set_background(self.background);
         renderer.set_point_lights(&self.lights);
@@ -176,6 +192,52 @@ impl Scene {
         renderer.set_lines(self.lines.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
+                Upload::StreamBegin(id, bounds, vertices, indices) => {
+                    renderer.begin_stream_mesh(id, bounds, vertices, indices)?
+                }
+                Upload::StreamWrite(id, vertex, bytes) => {
+                    renderer.write_stream_mesh(id, vertex, &bytes)?
+                }
+                Upload::StreamShow(id, material, pos, fade, baked) => {
+                    let pos = [
+                        (pos[0] - self.origin[0]) as f32,
+                        pos[1] as f32,
+                        (pos[2] - self.origin[1]) as f32,
+                    ];
+                    let row = [pos[0], pos[1], pos[2], 0., 0., 0., 1., 1., 1., 1.];
+                    let mut payload = vec![
+                        stream_payload(world, "Transform", ColumnData::F32(row.to_vec()))?,
+                        stream_payload(world, "Mesh", ColumnData::U32(vec![id]))?,
+                        stream_payload(world, "Material", ColumnData::U32(vec![material]))?,
+                    ];
+                    for (name, value) in [("Fade", fade), ("Baked", baked)] {
+                        if let Some(value) = value {
+                            payload.push(stream_payload(
+                                world,
+                                name,
+                                ColumnData::F32(vec![value]),
+                            )?);
+                        }
+                    }
+                    let entity = world.spawn(1, &payload).map_err(stream_world_error)?[0];
+                    self.stream_entities.insert(id, entity);
+                }
+                Upload::StreamHide(id) | Upload::StreamRetire(id) => {
+                    if let Some(entity) = self.stream_entities.remove(&id) {
+                        world.destroy(&[entity]).map_err(stream_world_error)?;
+                    }
+                    if matches!(upload, Upload::StreamRetire(_)) {
+                        renderer.retire_stream_mesh(id);
+                    }
+                }
+                Upload::StreamFade(id, value) => {
+                    if let Some(&entity) = self.stream_entities.get(&id) {
+                        let fade = stream_payload(world, "Fade", ColumnData::F32(vec![value]))?;
+                        world
+                            .update_rows(fade.component, &[entity], fade.data)
+                            .map_err(stream_world_error)?;
+                    }
+                }
                 Upload::Axis(id, points) => renderer.upload_axis(id, points)?,
                 Upload::Volume(id, dims, bytes) => renderer.upload_volume(id, dims, &bytes)?,
                 Upload::VolumeMaterial(id, data) => renderer.upload_volume_material(id, data)?,
@@ -185,7 +247,13 @@ impl Scene {
                 Upload::Manual(id, data) => renderer.upload_manual(id, &data)?,
                 Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
                 Upload::Environment(data) => renderer.upload_environment(&data)?,
-                Upload::View(options) => renderer.set_fixture_view(options)?,
+                Upload::View(options, live) => renderer.create_view(options, live)?,
+                Upload::ViewUpdate(id, camera, layers, live, refresh) => {
+                    renderer.update_view(id, camera, layers, live, refresh)?
+                }
+                Upload::ViewDrop(id) => renderer.drop_view(id),
+                Upload::ViewRelease(id) => renderer.release_view(id),
+                Upload::ViewRead(id, result) => renderer.read_view(id, result),
                 Upload::Mesh(id, mesh, uv, (colors, joints, surfaces)) => renderer
                     .upload_mesh_surfaces(
                         id,
@@ -285,6 +353,21 @@ impl Scene {
         self.offscreen = Some(renderer);
         result
     }
+}
+
+fn stream_world_error(error: manifoldx_core::ecs::WorldError) -> RenderError {
+    RenderError::Resource(error.to_string())
+}
+
+fn stream_payload(
+    world: &World,
+    name: &str,
+    data: ColumnData,
+) -> Result<ComponentPayload, RenderError> {
+    let component = world
+        .component_index(name)
+        .ok_or_else(|| RenderError::Resource(format!("missing stream column {name}")))?;
+    Ok(ComponentPayload { component, data })
 }
 
 pub(crate) fn compute_overrides(scene: &Mutex<Scene>) -> Result<HashMap<u32, u32>, RenderError> {
@@ -425,17 +508,113 @@ impl NativeGraphics {
         let options = ViewOptions {
             texture_id,
             size,
-            layers: layers.into_iter().collect(),
+            layers: Some(layers.into_iter().collect()),
             camera: camera_from_input(camera)?,
-            clear,
+            clear: [clear[0], clear[1], clear[2], 1.0],
+            fog: true,
             order,
         };
         self.scene
             .lock()
             .unwrap()
             .uploads
-            .push_back(Upload::View(options));
+            .push_back(Upload::View(options, true));
         Ok(())
+    }
+
+    #[pyo3(signature = (texture_id, camera, layers, size, clear, live, fog))]
+    fn create_view(
+        &self,
+        texture_id: u32,
+        camera: CameraInput,
+        layers: Option<Vec<i32>>,
+        size: [u32; 2],
+        clear: [f32; 4],
+        live: bool,
+        fog: bool,
+    ) -> PyResult<()> {
+        let options = ViewOptions {
+            texture_id,
+            size,
+            layers: layers.map(|layers| layers.into_iter().collect()),
+            camera: camera_from_input(camera)?,
+            clear,
+            fog,
+            order: ViewOrder::BeforeMain,
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::View(options, live));
+        Ok(())
+    }
+
+    #[pyo3(signature = (id, camera, layers, live, refresh))]
+    fn update_view(
+        &self,
+        id: u32,
+        camera: CameraInput,
+        layers: Option<Vec<i32>>,
+        live: bool,
+        refresh: bool,
+    ) -> PyResult<()> {
+        let command = Upload::ViewUpdate(
+            id,
+            camera_from_input(camera)?,
+            layers.map(|layers| layers.into_iter().collect()),
+            live,
+            refresh,
+        );
+        self.scene.lock().unwrap().uploads.push_back(command);
+        Ok(())
+    }
+
+    fn drop_view(&self, id: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::ViewDrop(id));
+    }
+
+    fn release_view(&self, id: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::ViewRelease(id));
+    }
+
+    fn read_view(&self, id: u32) -> u64 {
+        let mut scene = self.scene.lock().unwrap();
+        let ticket = scene.next_read;
+        scene.next_read += 1;
+        let result = ViewRead::default();
+        scene.view_reads.insert(ticket, result.clone());
+        scene.uploads.push_back(Upload::ViewRead(id, result));
+        ticket
+    }
+
+    fn take_view_read<'py>(
+        &self,
+        py: Python<'py>,
+        ticket: u64,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let mut scene = self.scene.lock().unwrap();
+        let value = scene
+            .view_reads
+            .get(&ticket)
+            .and_then(|result| result.lock().unwrap().take());
+        match value {
+            None => Ok(None),
+            Some(value) => {
+                scene.view_reads.remove(&ticket);
+                value
+                    .map(|bytes| Some(PyBytes::new(py, &bytes)))
+                    .map_err(PyRuntimeError::new_err)
+            }
+        }
     }
 
     #[pyo3(signature = (background, lights, sun=None, spot=None))]
@@ -639,6 +818,62 @@ impl NativeGraphics {
             attributes.unwrap_or_default(),
         ));
         Ok(())
+    }
+
+    fn stream_begin(&self, id: u32, bounds: [[f32; 3]; 2], vertices: u64, indices: u64) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamBegin(id, bounds, vertices, indices));
+    }
+
+    fn stream_write(&self, id: u32, vertex: bool, data: &Bound<'_, PyBytes>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamWrite(id, vertex, data.as_bytes().to_vec()));
+    }
+
+    #[pyo3(signature = (id, material, pos, fade, baked))]
+    fn stream_show(
+        &self,
+        id: u32,
+        material: u32,
+        pos: [f64; 3],
+        fade: Option<f32>,
+        baked: Option<f32>,
+    ) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamShow(id, material, pos, fade, baked));
+    }
+
+    fn stream_hide(&self, id: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamHide(id));
+    }
+
+    fn stream_fade(&self, id: u32, value: f32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamFade(id, value));
+    }
+
+    fn stream_retire(&self, id: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamRetire(id));
     }
 
     fn joint_poses(&self, poses: Vec<PoseInput>) -> PyResult<()> {
@@ -1049,6 +1284,7 @@ impl NativeGraphics {
             .expect("completed offscreen capture");
         result.set_item("adapter", renderer.adapter().to_json())?;
         result.set_item("target", "rgba8unorm-srgb")?;
+        result.set_item("view_resources", renderer.view_counts())?;
         Ok(result)
     }
 }

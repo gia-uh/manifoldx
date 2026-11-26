@@ -366,6 +366,11 @@ impl BakedArray {
     }
 }
 
+struct StreamUpload {
+    mesh: GpuMesh,
+    offsets: [u64; 2],
+}
+
 struct GpuMesh {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -595,14 +600,19 @@ pub enum ViewOrder {
 pub struct ViewOptions {
     pub texture_id: u32,
     pub size: [u32; 2],
-    pub layers: BTreeSet<i32>,
+    pub layers: Option<BTreeSet<i32>>,
     pub camera: Camera,
-    pub clear: [f32; 3],
+    pub clear: [f32; 4],
+    pub fog: bool,
     pub order: ViewOrder,
 }
 
+pub type ViewRead = std::sync::Arc<std::sync::Mutex<Option<Result<Vec<u8>, String>>>>;
+
 struct SecondaryView {
     options: ViewOptions,
+    live: bool,
+    pending: bool,
     color: wgpu::TextureView,
     depth: wgpu::TextureView,
     buffers: ViewBuffers,
@@ -636,7 +646,9 @@ pub struct NativeRenderer {
     shadow_pipelines: [wgpu::RenderPipeline; 2],
     shadow_layers: Vec<ViewBuffers>,
     layer_filter: Option<std::sync::Arc<BTreeSet<i32>>>,
-    secondary: Option<SecondaryView>,
+    secondary: BTreeMap<u32, SecondaryView>,
+    view_textures: HashMap<u32, wgpu::Texture>,
+    view_reads: Vec<(u32, ViewRead)>,
     spot_light: Option<SpotLight>,
     animation: [f32; 4],
     benders: [[f32; 4]; 8],
@@ -671,6 +683,7 @@ pub struct NativeRenderer {
     empty_palette: wgpu::Buffer,
     palette_buffer: Option<InstanceBuffer>,
     meshes: HashMap<u32, GpuMesh>,
+    stream_uploads: HashMap<u32, StreamUpload>,
     materials: HashMap<u32, Material>,
     fragments: HashMap<u32, FragmentPipeline>,
     manual: HashMap<u32, ManualPipeline>,
@@ -944,7 +957,9 @@ impl NativeRenderer {
             shadow_pipelines,
             shadow_layers: Vec::new(),
             layer_filter: None,
-            secondary: None,
+            secondary: BTreeMap::new(),
+            view_textures: HashMap::new(),
+            view_reads: Vec::new(),
             spot_light: None,
             animation: [0.0; 4],
             benders: [[0.0; 4]; 8],
@@ -979,6 +994,7 @@ impl NativeRenderer {
             empty_palette,
             palette_buffer: None,
             meshes: HashMap::new(),
+            stream_uploads: HashMap::new(),
             materials: HashMap::new(),
             fragments: HashMap::new(),
             manual: HashMap::new(),
@@ -1306,6 +1322,92 @@ impl NativeRenderer {
         Ok(())
     }
 
+    pub fn begin_stream_mesh(
+        &mut self,
+        id: u32,
+        bounds: [[f32; 3]; 2],
+        vertex_bytes: u64,
+        index_bytes: u64,
+    ) -> Result<(), RenderError> {
+        let limit = self.device().limits().max_buffer_size;
+        if id == 0
+            || self.meshes.contains_key(&id)
+            || self.stream_uploads.contains_key(&id)
+            || vertex_bytes == 0
+            || vertex_bytes > limit
+            || !vertex_bytes.is_multiple_of(VERTEX_BYTES as u64)
+            || index_bytes == 0
+            || index_bytes > limit
+            || !index_bytes.is_multiple_of(12)
+            || index_bytes / 4 > u64::from(u32::MAX)
+            || bounds.as_flattened().iter().any(|value| !value.is_finite())
+        {
+            return Err(RenderError::Resource(
+                "invalid streamed mesh allocation".into(),
+            ));
+        }
+        let vertex_buffer = gpu_buffer(
+            self.device(),
+            "streamed vertices",
+            vertex_bytes,
+            wgpu::BufferUsages::VERTEX,
+        );
+        let index_buffer = gpu_buffer(
+            self.device(),
+            "streamed indices",
+            index_bytes,
+            wgpu::BufferUsages::INDEX,
+        );
+        self.stream_uploads.insert(
+            id,
+            StreamUpload {
+                mesh: GpuMesh {
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: (index_bytes / 4) as u32,
+                    color: [1.0; 4],
+                    bounds,
+                    skinned: false,
+                    axis: false,
+                },
+                offsets: [0, 0],
+            },
+        );
+        Ok(())
+    }
+
+    pub fn write_stream_mesh(
+        &mut self,
+        id: u32,
+        vertex: bool,
+        bytes: &[u8],
+    ) -> Result<(), RenderError> {
+        let upload = self
+            .stream_uploads
+            .get_mut(&id)
+            .ok_or_else(|| RenderError::Resource(format!("no pending streamed mesh {id}")))?;
+        let buffers = [&upload.mesh.vertex_buffer, &upload.mesh.index_buffer];
+        let index = usize::from(!vertex);
+        let offset = &mut upload.offsets[index];
+        let end = *offset + bytes.len() as u64;
+        if bytes.is_empty() || !bytes.len().is_multiple_of(4) || end > buffers[index].size() {
+            return Err(RenderError::Resource("invalid streamed mesh write".into()));
+        }
+        self.gpu.queue.write_buffer(buffers[index], *offset, bytes);
+        *offset = end;
+        if upload.offsets == buffers.map(wgpu::Buffer::size) {
+            self.meshes
+                .insert(id, self.stream_uploads.remove(&id).unwrap().mesh);
+        }
+        Ok(())
+    }
+
+    pub fn retire_stream_mesh(&mut self, id: u32) {
+        self.stream_uploads.remove(&id);
+        // wgpu keeps the submitted buffers alive until their last use has finished.
+        self.meshes.remove(&id);
+    }
+
     pub fn upload_axis(&mut self, id: u32, points: [[f32; 3]; 2]) -> Result<(), RenderError> {
         if id == 0 || points.as_flattened().iter().any(|value| !value.is_finite()) {
             return Err(RenderError::Resource("invalid native axis geometry".into()));
@@ -1518,17 +1620,21 @@ impl NativeRenderer {
         self.layer_filter = layers;
     }
 
-    /// Declares the single test view used to verify same-frame dependencies.
-    pub fn set_fixture_view(&mut self, options: ViewOptions) -> Result<(), RenderError> {
+    /// Create a secondary view, with an initial draw even in snapshot mode.
+    pub fn create_view(&mut self, options: ViewOptions, live: bool) -> Result<(), RenderError> {
         let [width, height] = options.size;
+        let limit = self
+            .device()
+            .limits()
+            .max_texture_dimension_2d
+            .min(MAX_SIDE);
         if options.texture_id == 0
             || self.textures.contains_key(&options.texture_id)
-            || !(1..=MAX_SIDE).contains(&width)
-            || !(1..=MAX_SIDE).contains(&height)
-            || self.secondary.is_some()
+            || !(1..=limit).contains(&width)
+            || !(1..=limit).contains(&height)
         {
             return Err(RenderError::Resource(
-                "invalid secondary fixture view".into(),
+                "invalid secondary view id or size".into(),
             ));
         }
         let device = self.device();
@@ -1543,7 +1649,9 @@ impl NativeRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let color = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1556,13 +1664,112 @@ impl NativeRenderer {
         let bindings = self.bind_albedo(color.clone(), sampler);
         let buffers = view_buffers(device, &self.camera_layout, &self.empty_palette);
         self.textures.insert(options.texture_id, bindings);
-        self.secondary = Some(SecondaryView {
-            options,
-            color,
-            depth,
-            buffers,
-        });
+        self.view_textures.insert(options.texture_id, texture);
+        self.secondary.insert(
+            options.texture_id,
+            SecondaryView {
+                options,
+                live,
+                pending: true,
+                color,
+                depth,
+                buffers,
+            },
+        );
         Ok(())
+    }
+
+    pub fn update_view(
+        &mut self,
+        id: u32,
+        camera: Camera,
+        layers: Option<BTreeSet<i32>>,
+        live: bool,
+        refresh: bool,
+    ) -> Result<(), RenderError> {
+        let view = self
+            .secondary
+            .get_mut(&id)
+            .ok_or_else(|| RenderError::Resource(format!("unknown secondary view {id}")))?;
+        view.options.camera = camera;
+        view.options.layers = layers;
+        view.live = live;
+        view.pending |= refresh;
+        Ok(())
+    }
+
+    pub fn drop_view(&mut self, id: u32) {
+        self.secondary.remove(&id);
+    }
+
+    pub fn release_view(&mut self, id: u32) {
+        self.drop_view(id);
+        self.view_textures.remove(&id);
+        self.textures.remove(&id);
+        self.surface_materials
+            .retain(|_, binding| binding.albedo != id);
+    }
+
+    pub fn view_counts(&self) -> [usize; 2] {
+        [self.secondary.len(), self.view_textures.len()]
+    }
+
+    pub fn read_view(&mut self, id: u32, result: ViewRead) {
+        self.view_reads.push((id, result));
+    }
+
+    fn encode_view_reads(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        for (id, result) in std::mem::take(&mut self.view_reads) {
+            let Some(texture) = self.view_textures.get(&id) else {
+                *result.lock().unwrap() = Some(Err(format!("unknown view texture {id}")));
+                continue;
+            };
+            let size = texture.size();
+            let row = size.width * 4;
+            let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let buffer = self.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("native view readback"),
+                size: u64::from(padded) * u64::from(size.height),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded),
+                        rows_per_image: Some(size.height),
+                    },
+                },
+                size,
+            );
+            let mapped = buffer.clone();
+            let bgra = self.format == wgpu::TextureFormat::Bgra8UnormSrgb;
+            encoder.map_buffer_on_submit(&buffer, wgpu::MapMode::Read, .., move |status| {
+                let pixels = status.map_err(|error| error.to_string()).map(|()| {
+                    let bytes = mapped.get_mapped_range(..);
+                    let mut rgb =
+                        Vec::with_capacity(size.width as usize * size.height as usize * 3);
+                    for line in bytes.chunks_exact(padded as usize) {
+                        for pixel in line[..row as usize].chunks_exact(4) {
+                            let [r, g, b] = if bgra {
+                                [pixel[2], pixel[1], pixel[0]]
+                            } else {
+                                [pixel[0], pixel[1], pixel[2]]
+                            };
+                            rgb.extend([r, g, b]);
+                        }
+                    }
+                    drop(bytes);
+                    mapped.unmap();
+                    rgb
+                });
+                *result.lock().unwrap() = Some(pixels);
+            });
+        }
     }
 
     pub fn set_shadows(&mut self, options: Option<ShadowOptions>) {
@@ -1611,8 +1818,28 @@ impl NativeRenderer {
             }
         }
         let texture = self.make_texture(width, height, levels);
-        self.textures.insert(id, texture);
+        self.replace_albedo(id, texture);
         Ok(())
+    }
+
+    fn replace_albedo(&mut self, id: u32, texture: MeshTexture) {
+        let refreshed: Vec<_> = self
+            .surface_materials
+            .iter()
+            .filter(|(_, binding)| binding.albedo == id)
+            .map(|(&material, binding)| {
+                let array = binding
+                    .baked
+                    .map_or(&self.empty_baked, |id| &self.baked_arrays[&id]);
+                let group =
+                    self.albedo_group(&texture.view, &texture.sampler, &binding.uniform, array);
+                (material, group)
+            })
+            .collect();
+        self.textures.insert(id, texture);
+        for (material, group) in refreshed {
+            self.surface_materials.get_mut(&material).unwrap().group = group;
+        }
     }
 
     /// Reserve an sRGB array texture with its complete mip chain.
@@ -2062,14 +2289,20 @@ impl NativeRenderer {
         camera: &Camera,
         draw: DrawOptions<'_>,
     ) -> Result<RenderStats, RenderError> {
-        let view_order = self
-            .secondary
-            .as_ref()
-            .filter(|_| draw.ids.is_none() && !draw.omit_draw)
-            .map(|view| view.options.order);
         let mut order = Vec::new();
-        if view_order == Some(ViewOrder::BeforeMain) {
-            self.draw_secondary(encoder, world, source)?;
+        let (before, after): (Vec<_>, Vec<_>) = self
+            .secondary
+            .iter()
+            .filter(|(_, view)| {
+                draw.ids.is_none()
+                    && !draw.omit_draw
+                    && (view.live || view.pending)
+                    && view.options.order != ViewOrder::Omit
+            })
+            .map(|(&id, view)| (id, view.options.order))
+            .partition(|(_, order)| *order == ViewOrder::BeforeMain);
+        for (id, _) in before {
+            self.draw_secondary(id, encoder, world, source)?;
             order.push("view");
         }
         let mut stats = self.encode_primary(encoder, target, world, source, camera, draw)?;
@@ -2085,9 +2318,12 @@ impl NativeRenderer {
             order.push("shadow");
         }
         order.extend(stats.post_order.iter().copied());
-        if view_order == Some(ViewOrder::AfterMain) {
-            self.draw_secondary(encoder, world, source)?;
+        for (id, _) in after {
+            self.draw_secondary(id, encoder, world, source)?;
             order.push("view");
+        }
+        if draw.ids.is_none() && !draw.omit_draw {
+            self.encode_view_reads(encoder);
         }
         stats.frame_order = order;
         Ok(stats)
@@ -2095,18 +2331,22 @@ impl NativeRenderer {
 
     fn draw_secondary(
         &mut self,
+        id: u32,
         encoder: &mut wgpu::CommandEncoder,
         world: &World,
         source: InstanceSource,
     ) -> Result<(), RenderError> {
-        let mut view = self.secondary.take().expect("scheduled secondary view");
-        let [r, g, b] = view.options.clear.map(f64::from);
+        let mut view = self
+            .secondary
+            .remove(&id)
+            .expect("scheduled secondary view");
+        let [r, g, b, a] = view.options.clear.map(f64::from);
         let target = FrameTarget {
             color: &view.color,
             depth: &view.depth,
             width: view.options.size[0],
             height: view.options.size[1],
-            clear: wgpu::Color { r, g, b, a: 1.0 },
+            clear: wgpu::Color { r, g, b, a },
             timestamps: None,
             positions: None,
         };
@@ -2120,12 +2360,18 @@ impl NativeRenderer {
             secondary: Some(&view.options),
             ..Default::default()
         };
+        let fog = self.fog;
+        if !view.options.fog {
+            self.fog = None;
+        }
         let result = self.encode_world(encoder, target, world, source, &view.options.camera, draw);
+        self.fog = fog;
         std::mem::swap(&mut self.camera_buffer, &mut view.buffers.camera);
         std::mem::swap(&mut self.camera_bind_group, &mut view.buffers.camera_group);
         std::mem::swap(&mut self.instance_buffer, &mut view.buffers.instances);
         std::mem::swap(&mut self.palette_buffer, &mut view.buffers.palettes);
-        self.secondary = Some(view);
+        view.pending = result.is_err();
+        self.secondary.insert(id, view);
         result.map(|_| ())
     }
 
@@ -2292,10 +2538,10 @@ impl NativeRenderer {
         let baked =
             draw.ids.is_none() && self.materials.values().any(|m| m.effects.baked.is_some());
         let styles = instance_styles(world, &batch, fades, tints, palettes, baked)?;
-        let layers = draw
-            .secondary
-            .map(|view| &view.layers)
-            .or(self.layer_filter.as_deref());
+        let layers = match draw.secondary {
+            Some(view) => view.layers.as_ref(),
+            None => self.layer_filter.as_deref(),
+        };
         // A layer can hide a caster from the camera without hiding its shadow.
         let view_index = usize::from(draw.secondary.is_some());
         if draw.ids.is_none()
