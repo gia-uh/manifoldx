@@ -383,3 +383,28 @@ the hot path is a Python `for`.
 
 The next chapter loads the plaza's models from disk and hands the scene to other
 programs.
+
+### Drive instances from a resident position column
+
+On the experimental Rust desktop Engine, register the kernel's component in
+`engine.world`, then call `engine.bind_position(drive, field="pos", target="wgsl")`
+before `run()`. The field must be a registered `vec3<f32>` that the v1 Python
+kernel writes. One binding is supported. Run the example from a graphics session
+with `MANIFOLDX_CORE=rust python examples/kernel_drive.py --desktop`. Hold W to
+accelerate the red car and release it to brake. Its steering uses the live
+`engine.input.pressed_keys` state. The second car stays in place.
+
+At the frame barrier, Rust applies field commands before submitting the kernel
+and rendering on one device and queue. The GPU supplies translation and culling
+for mesh instances with a live row in the bound column. `Transform` supplies
+rotation and scale. Instances without the bound component use their `Transform`
+position. New entity generations upload their initial rows. CPU assignments to
+fields that the kernel does not write upload only those scalar cells.
+
+An unregistered component, wrong field width, field outside the kernel's writes,
+or target other than `wgsl` fails at binding. The desktop rejects a device that
+cannot dispatch the column. CPU snapshots, predicates, whole-row updates and
+CPU kernels on the bound column are unavailable while it is resident. The
+column also cannot be read from the CPU World after the desktop device closes.
+The binding rejects offscreen rendering and origin changes. Other desktop
+scenes can keep using `Transform` without declaring a binding.
