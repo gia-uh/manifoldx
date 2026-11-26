@@ -1,7 +1,7 @@
 use manifoldx_render::desktop::{run_desktop, DesktopApplication, DesktopOptions};
 use manifoldx_render::winit::{dpi::LogicalSize, window::Window};
 use manifoldx_render::{
-    wgpu, FrameTarget, Gpu, NativeRenderer, RenderError, RenderStats, RendererOptions,
+    wgpu, FrameTarget, NativeRenderer, RenderError, RenderStats, RendererOptions,
 };
 
 #[derive(Clone, Debug)]
@@ -39,8 +39,14 @@ impl Probe {
             suppress_present: false,
             resize_after_three: None,
         };
-        let (presents, _) =
-            run_desktop(options, &mut SurfaceProbe(self)).map_err(|error| error.to_string())?;
+        let (presents, _) = run_desktop(
+            options,
+            &mut SurfaceProbe {
+                mode: self,
+                foreign: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
         if presents != 1 {
             return Err(format!(
                 "surface probe expected one present, observed {presents}"
@@ -51,7 +57,10 @@ impl Probe {
     }
 }
 
-struct SurfaceProbe(Probe);
+struct SurfaceProbe {
+    mode: Probe,
+    foreign: Option<(wgpu::Device, wgpu::Queue)>,
+}
 
 impl DesktopApplication for SurfaceProbe {
     fn start(
@@ -59,7 +68,18 @@ impl DesktopApplication for SurfaceProbe {
         _: &Window,
         _: &mut NativeRenderer,
         _: &manifoldx_render::desktop::DesktopInfo,
+        adapter: &wgpu::Adapter,
     ) -> Result<bool, RenderError> {
+        if matches!(self.mode, Probe::ForeignDevice) {
+            let descriptor = wgpu::DeviceDescriptor {
+                label: Some("foreign surface control device"),
+                ..Default::default()
+            };
+            self.foreign = Some(
+                pollster::block_on(adapter.request_device(&descriptor))
+                    .map_err(|error| RenderError::Device(error.to_string()))?,
+            );
+        }
         Ok(true)
     }
 
@@ -82,26 +102,27 @@ impl DesktopApplication for SurfaceProbe {
                 target.width, target.height
             )));
         }
-        if matches!(self.0, Probe::ForeignDevice) {
-            let foreign = Gpu::new(false)?;
-            let scope = foreign
-                .device()
-                .push_error_scope(wgpu::ErrorFilter::Validation);
-            let mut foreign_encoder = foreign.device().create_command_encoder(&Default::default());
-            clear(&mut foreign_encoder, target.color);
-            foreign.queue().submit([foreign_encoder.finish()]);
+        if let Some((device, queue)) = &self.foreign {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut foreign_encoder = device.create_command_encoder(&Default::default());
+            clear(&mut foreign_encoder, target.color, None);
+            queue.submit([foreign_encoder.finish()]);
             if let Some(error) = pollster::block_on(scope.pop()) {
                 return Err(RenderError::Device(format!(
                     "foreign surface device rejected: {error}"
                 )));
             }
         }
-        clear(encoder, target.color);
+        clear(encoder, target.color, target.timestamps);
         Ok(Some(RenderStats::default()))
     }
 }
 
-fn clear(encoder: &mut wgpu::CommandEncoder, color: &wgpu::TextureView) {
+fn clear(
+    encoder: &mut wgpu::CommandEncoder,
+    color: &wgpu::TextureView,
+    timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+) {
     let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: color,
@@ -112,6 +133,7 @@ fn clear(encoder: &mut wgpu::CommandEncoder, color: &wgpu::TextureView) {
                 store: wgpu::StoreOp::Store,
             },
         })],
+        timestamp_writes,
         ..Default::default()
     });
 }

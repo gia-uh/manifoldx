@@ -64,6 +64,7 @@ pub trait DesktopApplication {
         window: &Window,
         renderer: &mut NativeRenderer,
         info: &DesktopInfo,
+        adapter: &wgpu::Adapter,
     ) -> Result<bool, RenderError>;
 
     // None exits without submitting the pending encoder or presenting the texture.
@@ -335,9 +336,12 @@ impl<A: DesktopApplication> Desktop<'_, A> {
             format,
             present_mode: context.config.present_mode,
         };
-        let keep_running = self
-            .app
-            .start(&context.window, &mut context.renderer, &info)?;
+        let keep_running = self.app.start(
+            &context.window,
+            &mut context.renderer,
+            &info,
+            &context.adapter,
+        )?;
         self.context = Some(context);
         Ok(keep_running)
     }

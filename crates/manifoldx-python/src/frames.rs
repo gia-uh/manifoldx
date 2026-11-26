@@ -1480,6 +1480,7 @@ impl DesktopApplication for WindowFrames<'_> {
         _window: &Window,
         renderer: &mut NativeRenderer,
         info: &DesktopInfo,
+        _: &wgpu::Adapter,
     ) -> Result<bool, RenderError> {
         self.display = Some((info.clone(), renderer.adapter().to_json()));
         let active = Python::attach(|py| self.startup.call0(py)?.extract::<bool>(py))
