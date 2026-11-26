@@ -1128,8 +1128,9 @@ impl FrameLoop {
             monitor,
             present_mode,
             renderer: RendererOptions::default(),
+            sample_limit: frame_limit,
         };
-        let presented = py.detach(|| {
+        let (presented, gpu_ns) = py.detach(|| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 desktop::run_desktop(options, &mut frames)
             }));
@@ -1185,6 +1186,7 @@ impl FrameLoop {
                 sample.set_item("acquire_ns", nanos(frame.acquire))?;
                 sample.set_item("submit_ns", nanos(frame.submit))?;
                 sample.set_item("present_ns", nanos(frame.present))?;
+                sample.set_item("gpu_render_ns", gpu_ns.get(frame.sequence as usize - 1))?;
                 Ok::<_, PyErr>(sample)
             })
             .collect::<PyResult<_>>()?;

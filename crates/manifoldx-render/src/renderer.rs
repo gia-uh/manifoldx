@@ -211,13 +211,13 @@ struct InstanceBuffer {
 }
 
 /// Physical color and reverse-depth target for one frame.
-#[derive(Clone, Copy)]
 pub struct FrameTarget<'a> {
     pub color: &'a wgpu::TextureView,
     pub depth: &'a wgpu::TextureView,
     pub width: u32,
     pub height: u32,
     pub clear: wgpu::Color,
+    pub timestamps: Option<wgpu::RenderPassTimestampWrites<'a>>,
 }
 
 pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
@@ -241,8 +241,7 @@ pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wg
 /// Per-frame counters and wall times.
 ///
 /// `wait_readback_ns` is CPU wall time around submission, GPU execution and
-/// mapping. It is **not** a timestamp-query GPU time; this slice does not
-/// enable timestamp queries.
+/// mapping. The desktop diagnostic measures GPU execution separately.
 #[derive(Clone, Debug, Default)]
 pub struct RenderStats {
     /// Live entities the World read examined.
@@ -755,6 +754,7 @@ impl NativeRenderer {
             width,
             height,
             clear: self.clear,
+            timestamps: None,
         };
         let mut stats = self.encode_world(
             &mut encoder,
@@ -929,7 +929,7 @@ impl NativeRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: target.timestamps,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

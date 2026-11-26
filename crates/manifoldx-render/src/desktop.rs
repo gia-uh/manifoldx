@@ -31,6 +31,7 @@ pub struct DesktopOptions {
     pub monitor: Option<String>,
     pub present_mode: wgpu::PresentMode,
     pub renderer: RendererOptions,
+    pub sample_limit: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -84,7 +85,7 @@ pub trait DesktopApplication {
 pub fn run_desktop(
     options: DesktopOptions,
     app: &mut impl DesktopApplication,
-) -> Result<u64, RenderError> {
+) -> Result<(u64, Vec<u64>), RenderError> {
     let event_loop = EventLoop::new().map_err(window_error)?;
     let mut handler = Desktop {
         options,
@@ -94,11 +95,12 @@ pub fn run_desktop(
         error: None,
         presents: 0,
         last_present: None,
+        gpu_ns: Vec::new(),
     };
     event_loop.run_app(&mut handler).map_err(window_error)?;
     match handler.error {
         Some(error) => Err(error),
-        None => Ok(handler.presents),
+        None => Ok((handler.presents, handler.gpu_ns)),
     }
 }
 
@@ -113,6 +115,7 @@ struct Context {
     size: PhysicalSize<u32>,
     occluded: bool,
     device_loss: Arc<Mutex<Option<String>>>,
+    timings: Option<GpuTimings>,
 }
 
 impl Context {
@@ -156,6 +159,79 @@ impl Context {
     }
 }
 
+// Reuse two query slots in queue order and map the compact results once
+// after presentation ends, outside the interval being measured.
+struct GpuTimings {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    readback: wgpu::Buffer,
+    limit: u64,
+    period: f64,
+}
+
+impl GpuTimings {
+    const FRAME_BYTES: u64 = 16;
+
+    fn new(renderer: &NativeRenderer, limit: u64) -> Option<Self> {
+        let device = renderer.device();
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("desktop render queries"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("desktop render query resolve"),
+            size: Self::FRAME_BYTES,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("desktop render query readback"),
+            size: limit * Self::FRAME_BYTES,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        Some(Self {
+            queries,
+            resolve,
+            readback,
+            limit,
+            period: renderer.queue().get_timestamp_period().into(),
+        })
+    }
+
+    fn finish(&self, device: &wgpu::Device, count: u64) -> Result<Vec<u64>, RenderError> {
+        let count = count.min(self.limit);
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let slice = self.readback.slice(..count * Self::FRAME_BYTES);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| RenderError::Poll(error.to_string()))?;
+        receiver
+            .recv()
+            .map_err(|_| RenderError::ReadbackChannel)?
+            .map_err(|error| RenderError::Readback(error.to_string()))?;
+        let mapped = slice.get_mapped_range();
+        let stamps: &[u64] = bytemuck::cast_slice(&mapped);
+        let samples = stamps
+            .chunks_exact(2)
+            .map(|pair| (pair[1].wrapping_sub(pair[0]) as f64 * self.period).round() as u64)
+            .collect();
+        drop(mapped);
+        self.readback.unmap();
+        Ok(samples)
+    }
+}
+
 struct Desktop<'a, A> {
     options: DesktopOptions,
     app: &'a mut A,
@@ -164,6 +240,7 @@ struct Desktop<'a, A> {
     error: Option<RenderError>,
     presents: u64,
     last_present: Option<Instant>,
+    gpu_ns: Vec<u64>,
 }
 
 impl<A: DesktopApplication> Desktop<'_, A> {
@@ -226,6 +303,10 @@ impl<A: DesktopApplication> Desktop<'_, A> {
                     Some(format!("{reason:?}: {message}"));
             }
         });
+        let timings = self
+            .options
+            .sample_limit
+            .and_then(|limit| GpuTimings::new(&renderer, limit));
         let size = window.inner_size();
         let mut context = Context {
             surface,
@@ -238,6 +319,7 @@ impl<A: DesktopApplication> Desktop<'_, A> {
             size,
             occluded: false,
             device_loss,
+            timings,
         };
         context.configure(size)?;
         let info = DesktopInfo {
@@ -289,12 +371,21 @@ impl<A: DesktopApplication> Desktop<'_, A> {
         };
         let acquire = acquired_at.elapsed();
         let color = texture.texture.create_view(&Default::default());
+        let timing = context
+            .timings
+            .as_ref()
+            .filter(|timing| self.presents < timing.limit);
         let target = FrameTarget {
             color: &color,
             depth,
             width: context.size.width,
             height: context.size.height,
             clear: context.renderer.background(),
+            timestamps: timing.map(|timing| wgpu::RenderPassTimestampWrites {
+                query_set: &timing.queries,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            }),
         };
         let mut encoder = context
             .renderer
@@ -306,6 +397,16 @@ impl<A: DesktopApplication> Desktop<'_, A> {
         else {
             return Ok(false);
         };
+        if let Some(timing) = timing {
+            encoder.resolve_query_set(&timing.queries, 0..2, &timing.resolve, 0);
+            encoder.copy_buffer_to_buffer(
+                &timing.resolve,
+                0,
+                &timing.readback,
+                self.presents * GpuTimings::FRAME_BYTES,
+                GpuTimings::FRAME_BYTES,
+            );
+        }
         let submitted_at = Instant::now();
         context.renderer.queue().submit([encoder.finish()]);
         let submit = submitted_at.elapsed();
@@ -335,7 +436,14 @@ impl<A: DesktopApplication> Desktop<'_, A> {
 
     fn close(&mut self, loop_: &ActiveEventLoop, error: Option<RenderError>) {
         self.error = error;
-        drop(self.context.take());
+        if let Some(context) = self.context.take() {
+            if let (None, Some(timings)) = (&self.error, context.timings) {
+                match timings.finish(context.renderer.device(), self.presents) {
+                    Ok(samples) => self.gpu_ns = samples,
+                    Err(error) => self.error = Some(error),
+                }
+            }
+        }
         loop_.exit();
     }
 }
