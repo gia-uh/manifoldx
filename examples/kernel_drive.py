@@ -63,6 +63,7 @@ def desktop_scene():
     """Show both cars. Hold W to accelerate the red car and release to brake."""
     import manifoldx as mx
     from manifoldx.components import Material, Mesh, Transform
+    from manifoldx.resources import FlatMaterial
 
     engine = mx.Engine("Resident Drive", width=800, height=600, max_entities=32)
     world = engine.world
@@ -72,14 +73,14 @@ def desktop_scene():
     mesh = mx.geometry.cube(0.65, 0.65, 0.65)
     engine.spawn(
         Mesh(mesh),
-        Material(mx.material.flat("#ff3010")),
+        Material(FlatMaterial("#ff3010")),
         Transform(pos=(-200, 0, 0)),
         Car(pos=(-2, 0, 0), forward=(1, 0, 0)),
         Player(),
     )
     engine.spawn(
         Mesh(mesh),
-        Material(mx.material.flat("#10e040")),
+        Material(FlatMaterial("#10e040")),
         Transform(pos=(200, 0, 0)),
         Car(pos=(-2, 0, -1.6), forward=(1, 0, 0)),
     )
