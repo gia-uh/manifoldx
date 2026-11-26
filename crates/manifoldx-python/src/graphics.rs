@@ -984,6 +984,15 @@ impl NativeGraphics {
         }
     }
 
+    fn compute_transfers(&self) -> [usize; 3] {
+        self.scene
+            .lock()
+            .unwrap()
+            .compute
+            .as_ref()
+            .map_or([0; 3], FrameCompute::transfers)
+    }
+
     fn compute_timings(&self, py: Python<'_>) -> PyResult<Vec<Option<u64>>> {
         py.detach(|| {
             let scene = self.scene.lock().unwrap();
