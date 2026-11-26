@@ -318,6 +318,7 @@ class _Uploads:
         self._use_request, self._seed = bool(request), seed
         self._convert = convert
         self._results = {}
+        self._held_versions = {}
         self._invalid = set()
         if material is None:
             from manifoldx.resources import StandardMaterial
@@ -375,13 +376,7 @@ class _Uploads:
         self._last = now
         got = 0
         if self._native is not None:
-            for key, draw in list(self._results.items()):
-                try:
-                    if self._native.stream_result(draw.version) is None:
-                        continue
-                except ValueError as exc:
-                    self._invalidate_result(key, exc)
-                del self._results[key]
+            self._collect_publications()
             finished = {future for future in self._abandoned if future.done()}
             self._stats["stale"] += len(finished)
             self._abandoned.difference_update(finished)
@@ -410,14 +405,41 @@ class _Uploads:
             got += 1
         return got
 
+    def _collect_publications(self):
+        for key, draw in list(self._results.items()):
+            try:
+                if self._native.stream_result(draw.version) is None:
+                    continue
+            except ValueError as exc:
+                self._invalidate_result(key, exc)
+            else:
+                self._retire_held_version(key, release_layers=True)
+            del self._results[key]
+
+    def _retire_held_version(self, key, *, release_layers):
+        previous = self._held_versions.pop(key, None)
+        if previous is not None:
+            _, gpu, draw = previous
+            for identity in gpu.get("ids", ()):
+                self._native.stream_retire(identity)
+            if release_layers:
+                self._free_layers.extend(draw.layers)
+
     def _invalidate_result(self, key, error):
         self._stats["rejected"] += 1
         self._stats["last_error"] = str(error)
         self._invalid.add(key)
         self._ready.pop(key, None)
-        if key in self._drawn:
-            self._undraw(key)
         self._unload(key)
+        previous = self._held_versions.pop(key, None)
+        if previous is not None:
+            cell, gpu, old_draw = previous
+            new_draw = self._drawn.get(key)
+            if new_draw is not old_draw:
+                self._free_layers.extend(new_draw.layers)
+            self._ready[key], self._gpu[key], self._drawn[key] = cell, gpu, old_draw
+        elif key in self._drawn:
+            self._undraw(key)
 
     def _native_key(self, key):
         return (self._serial, *(key if len(key) == 3 else (0, *key)))
@@ -564,7 +586,7 @@ class _Uploads:
     @_deferred.deferred_in_pipeline(find=_streamer_engine)
     def _draw(self, c, pos):
         cell = self._ready[c]
-        if cell is None:
+        if cell is None and c not in self._held_versions:
             self._drawn[c] = None
             return
         from manifoldx.components import Baked, Fade, Material, Mesh, Transform
@@ -573,20 +595,22 @@ class _Uploads:
             version = next(self.engine._cell_versions)
             identity = self._native_key(c)
             updates, layers = [], []
-            mesh_ids = self._gpu[c]["ids"]
+            mesh_ids = self._gpu.get(c, {}).get("ids", ())
+            parts = () if cell is None else cell.parts
             try:
-                materials = [self.engine._material(self._materials[material]) for _, material in cell.parts]
+                materials = [self.engine._material(self._materials[material]) for _, material in parts]
             except (KeyError, ValueError) as exc:
                 self._invalidate_result(c, exc)
                 return
-            for mesh, material, (part, _) in zip(mesh_ids, materials, cell.parts):
+            for mesh, material, (part, _) in zip(mesh_ids, materials, parts):
                 layer = self._take_layer(part)
                 if layer >= 0:
                     layers.append(layer)
                 updates.append((mesh, material, 0.0 if getattr(self, "crossfade", None) else None,
                                 float(layer) if self._baked is not None else None))
             draw = _NativeDraw(identity, version, tuple(layers), len(updates))
-            self._native.stream_commit(identity, version, updates, pos, cell.rows, cell.tiles, True)
+            rows, tiles = ((), ()) if cell is None else (cell.rows, cell.tiles)
+            self._native.stream_commit(identity, version, updates, pos, rows, tiles, True)
             self._results[c] = self._drawn[c] = draw
             self._stats["uploaded"] += 1
             self._note("drawn", c)
@@ -613,6 +637,9 @@ class _Uploads:
         self._note("undrawn", c)
         if handle is not None:
             self._destroy(handle)
+            previous = self._held_versions.get(c)
+            if previous is not None:
+                self._retire_held_version(c, release_layers=previous[2] is not handle)
 
     def _take_layer(self, cell) -> int:
         """A free layer of the baked array holding cell's image, or -1: no image, or every layer taken (the
@@ -658,6 +685,7 @@ class _Uploads:
         for c in list(self._gpu):
             self._unload(c)
         self._pending.clear()
+        self._results.clear()
         self._abandoned.clear()
         self._submitted.clear()
         self._ready.clear()
@@ -741,12 +769,32 @@ class Streamer(_Uploads):
                 break
             if (
                 ring(c) <= self.radius
-                and c not in self._drawn
+                and (c not in self._drawn or (c in self._held_versions and c not in self._results))
                 and c in self._ready
                 and self._on_gpu(c)
             ):
                 self._draw(c, (c[0] * self.cell, 0.0, c[1] * self.cell))
                 budget -= 1
+
+    def invalidate(self, i: int, j: int) -> None:
+        """Rebuild a Rust-streamed cell and retain its visible version until publication."""
+        if self._native is None or self._closed:
+            raise RuntimeError("cell invalidation requires an open Rust streamer")
+        key = (i, j)
+        self._collect_publications()
+        if key in self._results:
+            raise RuntimeError("consume the queued cell publication before invalidating it")
+        if key in self._pending:
+            self._abandon(key)
+        self._invalid.discard(key)
+        draw = self._drawn.get(key)
+        if draw is not None and key not in self._held_versions:
+            self._held_versions[key] = (self._ready.pop(key), self._gpu.pop(key, {}), draw)
+        else:
+            if draw is None:
+                self._drawn.pop(key, None)
+            self._ready.pop(key, None)
+            self._unload(key)
 
     def drawn(self) -> set[tuple[int, int]]:
         """The cells drawn now, empty cells (build returned None) included."""
@@ -756,7 +804,8 @@ class Streamer(_Uploads):
     def settled(self) -> bool:
         """Nothing building or uploading, and every cell the camera needs is drawn."""
         want = getattr(self, "_want", None)
-        return want is not None and not self._pending and want <= self._drawn.keys()
+        return (want is not None and not self._pending and not self._held_versions
+                and not self._results and want <= self._drawn.keys())
 
     def stats(self) -> dict:
         """built, uploaded and dropped cell counts, and the longest gap between

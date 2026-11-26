@@ -413,6 +413,9 @@ NumPy arrays of `float32` or `uint32`. Register the application columns before
 starting the Engine. `tiles` contains the E3 terrain tiles covering the cell.
 Call `configure_stream_collision` once with the collision index's tile size before
 publishing tiles. `sample_stream_collision` returns the published surface and version.
+`Streamer.invalidate(i, j)` rebuilds a grid cell while its previous version stays
+visible. The frame barrier replaces the mesh, World rows and collision tiles
+after validation.
 
 
 A coarse node can look like the finer ones it stands for when it carries a
