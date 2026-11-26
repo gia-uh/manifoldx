@@ -110,6 +110,10 @@ def texture_from_array(engine, rgba: np.ndarray, *, _source: Path | None = None)
     img = Image.fromarray(np.ascontiguousarray(rgba)).convert("RGBA")
     w, h = img.size
 
+    upload_native = getattr(engine, "_upload_native_albedo", None)
+    if upload_native is not None:
+        return upload_native(img, _source)
+
     device = getattr(engine, "_device", None)
     if device is None:
         raise RuntimeError(

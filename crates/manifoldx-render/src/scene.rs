@@ -81,6 +81,8 @@ pub struct InstanceSource {
 /// One instance extracted from the World, before GPU upload.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Instance {
+    /// Live generational identity for optional resident attributes.
+    pub entity: EntityId,
     /// Registered geometry id from the Mesh row.
     pub geometry_id: u32,
     /// Optional material id from the Material row.
@@ -229,6 +231,7 @@ pub fn read_instances(
             _ => None,
         };
         instances.push(Instance {
+            entity: entities[index],
             geometry_id,
             material_id,
             model,

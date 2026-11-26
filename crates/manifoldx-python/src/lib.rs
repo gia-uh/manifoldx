@@ -18,6 +18,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 mod frames;
+mod graphics;
 mod kernel;
 mod runtime;
 mod vehicles;
@@ -39,6 +40,7 @@ fn bootstrap(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     info.set_item("core", manifoldx_core::RUNTIME_NAME)?;
     info.set_item("version", manifoldx_core::VERSION)?;
     info.set_item("runtime", manifoldx_core::RUNTIME_STATUS)?;
+    info.set_item("graphics", "native desktop base")?;
     info.set_item("python", format!("{}.{}", pyver.major, pyver.minor))?;
     Ok(info)
 }
@@ -925,6 +927,7 @@ fn _core_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEntitySlots>()?;
     m.add_class::<PyNativeWorld>()?;
     m.add_class::<runtime::PyNativeRuntime>()?;
+    graphics::register(m)?;
     frames::register(m)?;
     kernel::register(m)?;
     m.add_class::<vehicles::PyVehicleSim>()?;

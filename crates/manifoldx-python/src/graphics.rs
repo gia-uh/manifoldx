@@ -1,0 +1,270 @@
+//! Python scene declarations for the native graphics owner.
+
+use std::sync::{Arc, Mutex};
+
+use manifoldx_core::ecs::World;
+use manifoldx_render::{
+    resolve_source, Camera, MeshData, NativeRenderer, PointLight, RenderError, RenderStats,
+    RendererOptions, Shading, DEFAULT_MAX_INSTANCES,
+};
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict};
+
+use crate::PyNativeWorld;
+
+type CameraInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32);
+type LightInput = ([f32; 3], [f32; 3], f32);
+type MaterialInput = (f32, f32, f32, Option<u32>);
+
+enum Upload {
+    Mesh(u32, MeshData, Vec<[f32; 2]>),
+    Material(u32, [f32; 3], Shading),
+    Albedo(u32, u32, u32, Vec<Vec<u8>>),
+}
+
+pub(crate) struct Scene {
+    camera: Camera,
+    background: [f32; 3],
+    lights: Vec<PointLight>,
+    uploads: Vec<Upload>,
+    offscreen: Option<NativeRenderer>,
+}
+
+impl Scene {
+    fn new() -> Self {
+        Self {
+            camera: Camera::new([0.0, 1.0, 2.0], [0.0; 3]),
+            background: [0.1, 0.1, 0.2],
+            lights: Vec::new(),
+            uploads: Vec::new(),
+            offscreen: None,
+        }
+    }
+
+    pub(crate) fn apply(&mut self, renderer: &mut NativeRenderer) -> Result<Camera, RenderError> {
+        renderer.set_background(self.background);
+        renderer.set_point_lights(&self.lights);
+        for upload in self.uploads.drain(..) {
+            match upload {
+                Upload::Mesh(id, mesh, uv) => {
+                    renderer.upload_mesh_with_uv(id, &mesh, [1.0; 3], &uv)?
+                }
+                Upload::Material(id, color, shading) => {
+                    renderer.set_material(id, color, shading)?
+                }
+                Upload::Albedo(id, width, height, levels) => renderer.upload_albedo(
+                    id,
+                    width,
+                    height,
+                    &levels.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+                )?,
+            }
+        }
+        Ok(self.camera)
+    }
+
+    fn capture(
+        &mut self,
+        world: &World,
+        width: u32,
+        height: u32,
+    ) -> Result<manifoldx_render::RenderOutput, RenderError> {
+        let mut renderer = match self.offscreen.take() {
+            Some(renderer) => renderer,
+            None => NativeRenderer::new(RendererOptions {
+                allow_software: true,
+                ..Default::default()
+            })?,
+        };
+        let result = (|| {
+            let camera = self.apply(&mut renderer)?;
+            renderer.render(world, source(world)?, &camera, width, height, false)
+        })();
+        self.offscreen = Some(renderer);
+        result
+    }
+}
+
+pub(crate) fn source(world: &World) -> Result<manifoldx_render::InstanceSource, RenderError> {
+    Ok(resolve_source(
+        world,
+        "Transform",
+        "Mesh",
+        Some("Material"),
+        (world.capacity() as usize).min(DEFAULT_MAX_INSTANCES),
+    )?)
+}
+
+#[pyclass(frozen, module = "manifoldx._core_native", name = "_NativeGraphics")]
+pub(crate) struct NativeGraphics {
+    pub(crate) scene: Arc<Mutex<Scene>>,
+}
+
+#[pymethods]
+impl NativeGraphics {
+    #[new]
+    fn new() -> Self {
+        Self {
+            scene: Arc::new(Mutex::new(Scene::new())),
+        }
+    }
+
+    fn camera(&self, args: CameraInput) -> PyResult<()> {
+        let (position, target, up, fov_y_degrees, near, far) = args;
+        if position
+            .iter()
+            .chain(&target)
+            .chain(&up)
+            .any(|value| !value.is_finite())
+            || !(0.0..180.0).contains(&fov_y_degrees)
+            || !near.is_finite()
+            || !far.is_finite()
+            || near <= 0.0
+            || near >= far
+        {
+            return Err(PyValueError::new_err("invalid perspective camera"));
+        }
+        self.scene.lock().unwrap().camera = Camera {
+            position,
+            target,
+            up,
+            fov_y_degrees,
+            near,
+            far,
+        };
+        Ok(())
+    }
+
+    fn settings(&self, background: [f32; 3], lights: Vec<LightInput>) {
+        let mut scene = self.scene.lock().unwrap();
+        scene.background = background;
+        scene.lights = lights
+            .into_iter()
+            .take(4)
+            .map(|(position, color, intensity)| PointLight {
+                position,
+                color,
+                intensity,
+            })
+            .collect();
+    }
+
+    fn mesh(
+        &self,
+        id: u32,
+        positions: Vec<[f32; 3]>,
+        normals: Vec<[f32; 3]>,
+        indices: Vec<u32>,
+        uvs: Vec<[f32; 2]>,
+    ) -> PyResult<()> {
+        let mesh = MeshData {
+            positions,
+            normals,
+            indices,
+        };
+        mesh.validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push(Upload::Mesh(id, mesh, uvs));
+        Ok(())
+    }
+
+    #[pyo3(signature = (id, color, kind, standard=None))]
+    fn material(
+        &self,
+        id: u32,
+        color: [f32; 3],
+        kind: &str,
+        standard: Option<MaterialInput>,
+    ) -> PyResult<()> {
+        let shading = match (kind, standard) {
+            ("basic", None) => Shading::Basic,
+            ("flat", None) => Shading::Flat,
+            ("phong", None) => Shading::Phong,
+            ("standard", Some((roughness, metallic, ao, albedo))) => Shading::Standard {
+                roughness,
+                metallic,
+                ao,
+                albedo,
+            },
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported base material {kind}"
+                )))
+            }
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push(Upload::Material(id, color, shading));
+        Ok(())
+    }
+
+    fn albedo(&self, py: Python<'_>, id: u32, width: u32, height: u32, levels: Vec<Py<PyBytes>>) {
+        let levels = levels
+            .iter()
+            .map(|level| level.as_bytes(py).to_vec())
+            .collect();
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push(Upload::Albedo(id, width, height, levels));
+    }
+
+    fn capture<'py>(
+        &self,
+        py: Python<'py>,
+        world: &PyNativeWorld,
+        width: u32,
+        height: u32,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let output = py.detach(|| {
+            let world = world.lock()?;
+            self.scene
+                .lock()
+                .unwrap()
+                .capture(&world, width, height)
+                .map_err(render_error)
+        })?;
+        let result = stats_dict(py, &output.stats)?;
+        result.set_item("rgba", PyBytes::new(py, &output.rgba))?;
+        let scene = self.scene.lock().unwrap();
+        let renderer = scene
+            .offscreen
+            .as_ref()
+            .expect("completed offscreen capture");
+        result.set_item("adapter", renderer.adapter().to_json())?;
+        result.set_item("target", "rgba8unorm-srgb")?;
+        Ok(result)
+    }
+}
+
+pub(crate) fn stats_dict<'py>(
+    py: Python<'py>,
+    stats: &RenderStats,
+) -> PyResult<Bound<'py, PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("instances", stats.instances)?;
+    result.set_item("draw_calls", stats.draw_calls)?;
+    result.set_item("triangles", stats.triangles)?;
+    result.set_item("read_ns", stats.read_ns)?;
+    result.set_item("upload_ns", stats.upload_ns)?;
+    result.set_item("encode_submit_ns", stats.encode_submit_ns)?;
+    result.set_item("readback_wait_ns", stats.wait_readback_ns)?;
+    result.set_item("total_ns", stats.total_ns)?;
+    Ok(result)
+}
+
+pub(crate) fn render_error(error: RenderError) -> PyErr {
+    PyRuntimeError::new_err(error.to_string())
+}
+
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<NativeGraphics>()
+}

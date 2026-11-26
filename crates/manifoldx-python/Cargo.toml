@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 manifoldx-core = { path = "../manifoldx-core" }
+manifoldx-render = { path = "../manifoldx-render" }
 # Same major version the spike crates on this branch were verified with. The
 # extension-module feature is enabled by maturin at wheel build time (see
 # [tool.maturin] in pyproject.toml), so `cargo test` keeps linking libpython.
