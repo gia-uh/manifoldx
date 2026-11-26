@@ -1372,12 +1372,13 @@ impl NativeRenderer {
         if id == 0 || color_srgb.iter().any(|value| !value.is_finite()) {
             return Err(RenderError::Resource("invalid material id or color".into()));
         }
-        if let Some(baked) = effects.baked {
-            if !self.baked_arrays.contains_key(&baked) {
-                return Err(RenderError::Resource(format!(
-                    "unknown baked texture array {baked}"
-                )));
-            }
+        if let Some(baked) = effects
+            .baked
+            .filter(|id| !self.baked_arrays.contains_key(id))
+        {
+            return Err(RenderError::Resource(format!(
+                "unknown baked texture array {baked}"
+            )));
         }
         let (style, albedo) = match shading {
             Shading::Basic => ([0.0, 0.0, 0.0, 1.0], 0),
@@ -1640,7 +1641,7 @@ impl NativeRenderer {
                 "invalid baked texture layer or mip count".into(),
             ));
         }
-        let side = |level| (texture.width() >> level).max(1);
+        let side = |level: usize| (texture.width() >> level).max(1);
         for (level, pixels) in levels.iter().enumerate() {
             let size = side(level) as usize;
             if pixels.len() != size * size * 4 {
