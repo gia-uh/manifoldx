@@ -1861,11 +1861,16 @@ impl NativeRenderer {
             let transforms: Vec<[f32; 16]> = draw_groups
                 .iter()
                 .flat_map(|group| {
-                    group.values.chunks_exact(INSTANCE_FLOATS).map(|row| {
-                        row[..16]
-                            .try_into()
-                            .expect("a packed row begins with a model matrix")
-                    })
+                    group
+                        .values
+                        .as_chunks::<INSTANCE_FLOATS>()
+                        .0
+                        .iter()
+                        .map(|row| {
+                            row[..16]
+                                .try_into()
+                                .expect("a packed row begins with a model matrix")
+                        })
                 })
                 .collect();
             let device = &self.gpu.device;
