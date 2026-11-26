@@ -702,7 +702,7 @@ impl World {
             count = count.checked_add(n).ok_or(WorldError::LengthOverflow {
                 component: "spawn batch".into(),
                 rows: count as usize,
-                width: n as usize,
+                width: n,
             })?;
         }
         if count == 0 {
