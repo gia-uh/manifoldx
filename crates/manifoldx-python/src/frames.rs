@@ -1570,6 +1570,7 @@ impl DesktopApplication for WindowFrames<'_> {
         }
         self.report.events.clear();
         let camera = self.scene.lock().unwrap().apply(renderer, world)?;
+        renderer.set_frame_time(self.clock.time() + self.clock.dt());
         if let Some(resident) = &mut self.resident {
             resident.dispatch(world, encoder, self.clock.dt() as f32, self.skip_dispatch)?;
         }

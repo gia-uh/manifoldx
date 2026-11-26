@@ -28,7 +28,17 @@ type VertexInput = (Vec<[f32; 3]>, Vec<u32>);
 type PoseIdentity = (u32, Option<u64>);
 type PoseInput = (PoseIdentity, JointMatrices);
 type FrameInput = (PoseIdentity, u32, f64);
-type EffectsInput = (bool, f32, Option<f32>, Option<[f32; 4]>);
+type EffectsInput = (
+    bool,
+    f32,
+    Option<f32>,
+    Option<[f32; 4]>,
+    f32,
+    f32,
+    f32,
+    bool,
+    bool,
+);
 type ShadowInput = (
     [f32; 3],
     f32,
@@ -75,6 +85,9 @@ pub(crate) struct Scene {
     lines: Option<Arc<LineOptions>>,
     rect_before_post: bool,
     layers: Option<Arc<BTreeSet<i32>>>,
+    time: f64,
+    origin: [f64; 2],
+    benders: Vec<[f64; 4]>,
     clips: HashMap<u32, usize>,
     uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
@@ -94,6 +107,9 @@ impl Scene {
             lines: None,
             rect_before_post: false,
             layers: None,
+            time: 0.0,
+            origin: [0.0; 2],
+            benders: Vec::new(),
             clips: HashMap::new(),
             uploads: VecDeque::new(),
             offscreen: None,
@@ -112,6 +128,7 @@ impl Scene {
         renderer.set_shadows(self.shadows);
         renderer.set_rects(self.rects.clone(), self.rect_before_post);
         renderer.set_layers(self.layers.clone());
+        renderer.set_animation(self.time, self.origin, &self.benders);
         renderer.set_lines(self.lines.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
@@ -328,6 +345,20 @@ impl NativeGraphics {
                 intensity,
             })
             .collect();
+    }
+
+    fn animation(&self, time: f64, origin: [f64; 2], benders: Vec<[f64; 4]>) -> PyResult<()> {
+        if !time.is_finite()
+            || origin.iter().any(|x| !x.is_finite())
+            || benders.iter().flatten().any(|x| !x.is_finite())
+        {
+            return Err(PyValueError::new_err("invalid scene animation settings"));
+        }
+        let mut scene = self.scene.lock().unwrap();
+        scene.time = time;
+        scene.origin = origin;
+        scene.benders = benders;
+        Ok(())
     }
 
     fn lines(
@@ -576,11 +607,18 @@ impl NativeGraphics {
         };
         let effects = effects.map_or_else(
             StandardEffects::default,
-            |(vertex_colors, opacity, mirror, cut)| StandardEffects {
-                vertex_colors,
-                opacity,
-                mirror,
-                cut,
+            |(vertex_colors, opacity, mirror, cut, sway, sway_reach, ripple, faded, tinted)| {
+                StandardEffects {
+                    vertex_colors,
+                    opacity,
+                    mirror,
+                    cut,
+                    sway,
+                    sway_reach,
+                    ripple,
+                    faded,
+                    tinted,
+                }
             },
         );
         effects

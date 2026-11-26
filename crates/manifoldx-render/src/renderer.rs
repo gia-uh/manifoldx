@@ -24,8 +24,8 @@ pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 /// Reversed-depth float buffer; the pass clears 0 and compares `Greater`.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16) * 4;
-const INSTANCE_FLOATS: usize = 33;
+const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16 + 4 + 8 * 4) * 4;
+const INSTANCE_FLOATS: usize = 40;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
 const VERTEX_BYTES: usize = 12 * 4;
 const FLAT_STYLE: [f32; 4] = [0.0, 0.0, 0.0, 2.0];
@@ -213,6 +213,11 @@ pub struct StandardEffects {
     pub opacity: f32,
     pub mirror: Option<f32>,
     pub cut: Option<[f32; 4]>,
+    pub sway: f32,
+    pub sway_reach: f32,
+    pub ripple: f32,
+    pub faded: bool,
+    pub tinted: bool,
 }
 
 impl Default for StandardEffects {
@@ -222,13 +227,22 @@ impl Default for StandardEffects {
             opacity: 1.0,
             mirror: None,
             cut: None,
+            sway: 0.0,
+            sway_reach: 4.0,
+            ripple: 0.0,
+            faded: false,
+            tinted: false,
         }
     }
 }
 
 impl StandardEffects {
     pub fn validate(self) -> Result<(), RenderError> {
-        if !self.opacity.is_finite()
+        if !self.sway.is_finite()
+            || !self.sway_reach.is_finite()
+            || !self.ripple.is_finite()
+            || (self.sway > 0.0 && self.sway_reach <= 0.0)
+            || !self.opacity.is_finite()
             || self.opacity < 0.0
             || self.mirror.is_some_and(|height| !height.is_finite())
             || self
@@ -275,6 +289,28 @@ struct DrawOptions<'a> {
     ignore_transform: bool,
     omit_draw: bool,
     secondary: Option<&'a ViewOptions>,
+}
+
+struct PackOptions<'a> {
+    positions: Option<&'a ResidentPositions<'a>>,
+    ids: Option<&'a HashMap<u32, u32>>,
+    styles: &'a HashMap<EntityId, InstanceStyle>,
+    shadow: bool,
+}
+
+#[derive(Clone, Copy)]
+struct InstanceStyle {
+    fade: f32,
+    tint: [f32; 3],
+}
+
+impl Default for InstanceStyle {
+    fn default() -> Self {
+        Self {
+            fade: 1.0,
+            tint: [1.0; 3],
+        }
+    }
 }
 
 struct GpuMesh {
@@ -535,6 +571,8 @@ pub struct NativeRenderer {
     layer_filter: Option<std::sync::Arc<BTreeSet<i32>>>,
     secondary: Option<SecondaryView>,
     spot_light: Option<SpotLight>,
+    animation: [f32; 4],
+    benders: [[f32; 4]; 8],
     format: wgpu::TextureFormat,
     offscreen: Option<OffscreenTarget>,
     post_options: Option<std::sync::Arc<PostOptions>>,
@@ -641,6 +679,15 @@ impl NativeRenderer {
                 immediate_size: 0,
             });
         let pipeline = |front_face, translucent: bool, depth_only: bool| {
+            let color_target = [Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(if translucent {
+                    wgpu::BlendState::ALPHA_BLENDING
+                } else {
+                    wgpu::BlendState::REPLACE
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("manifoldx-native-opaque-pipeline"),
@@ -680,19 +727,11 @@ impl NativeRenderer {
                         bias: Default::default(),
                     }),
                     multisample: wgpu::MultisampleState::default(),
-                    fragment: (!depth_only).then_some(wgpu::FragmentState {
+                    fragment: Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: Some("fs_main"),
+                        entry_point: Some(if depth_only { "fs_shadow" } else { "fs_main" }),
                         compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: Some(if translucent {
-                                wgpu::BlendState::ALPHA_BLENDING
-                            } else {
-                                wgpu::BlendState::REPLACE
-                            }),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
+                        targets: if depth_only { &[] } else { &color_target },
                     }),
                     multiview_mask: None,
                     cache: None,
@@ -730,6 +769,8 @@ impl NativeRenderer {
             layer_filter: None,
             secondary: None,
             spot_light: None,
+            animation: [0.0; 4],
+            benders: [[0.0; 4]; 8],
             format,
             offscreen: None,
             post_options: None,
@@ -1039,6 +1080,25 @@ impl NativeRenderer {
                 0.0,
             ]
         });
+    }
+
+    pub fn set_animation(&mut self, time: f64, origin: [f64; 2], benders: &[[f64; 4]]) {
+        self.set_frame_time(time);
+        self.animation[1] = origin[0].rem_euclid(256.0) as f32;
+        self.animation[2] = origin[1].rem_euclid(256.0) as f32;
+        self.benders = [[0.0; 4]; 8];
+        for (target, &[x, z, radius, strength]) in self.benders.iter_mut().zip(benders) {
+            *target = [
+                (x - origin[0]) as f32,
+                (z - origin[1]) as f32,
+                radius as f32,
+                strength as f32,
+            ];
+        }
+    }
+
+    pub fn set_frame_time(&mut self, time: f64) {
+        self.animation[0] = time.rem_euclid(64.0) as f32;
     }
 
     pub fn set_layers(&mut self, layers: Option<std::sync::Arc<BTreeSet<i32>>>) {
@@ -1562,13 +1622,24 @@ impl NativeRenderer {
 
         let read_started = Instant::now();
         let mut batch = read_instances(world, source, draw.ignore_transform)?;
+        let fades = draw.ids.is_none() && self.materials.values().any(|m| m.effects.faded);
+        let tints = draw.ids.is_none() && self.materials.values().any(|m| m.effects.tinted);
+        let styles = instance_styles(world, &batch, fades, tints)?;
         let layers = draw
             .secondary
             .map(|view| &view.layers)
             .or(self.layer_filter.as_deref());
+        // A layer can hide a caster from the camera without hiding its shadow.
+        let shadow_batch = (layers.is_some()
+            && self.shadow_options.is_some()
+            && draw.ids.is_none()
+            && draw.secondary.is_none()
+            && !draw.omit_draw)
+            .then(|| batch.clone());
         if let Some(layers) = layers {
             filter_layers(world, &mut batch, layers)?;
         }
+        let shadow_batch = shadow_batch.as_ref().unwrap_or(&batch);
         if draw.secondary.is_some_and(|view| {
             batch.instances.iter().any(|instance| {
                 instance
@@ -1590,9 +1661,12 @@ impl NativeRenderer {
         let draw_groups = self.pack_instances(
             &batch,
             &view_projection,
-            target.positions.as_ref(),
-            draw.ids,
-            false,
+            PackOptions {
+                positions: target.positions.as_ref(),
+                ids: draw.ids,
+                styles: &styles,
+                shadow: false,
+            },
             &mut stats,
         )?;
         stats.read_ns = elapsed_ns(read_started.elapsed());
@@ -1601,11 +1675,11 @@ impl NativeRenderer {
         self.skin.upload(&self.gpu);
         let frame = self
             .shadow_options
-            .filter(|_| draw.ids.is_none() && !draw.omit_draw)
+            .filter(|_| draw.ids.is_none() && !draw.omit_draw && draw.secondary.is_none())
             .and_then(|options| {
                 let bounds =
                     if options.auto_fit && options.cascades == 1 && self.spot_light.is_none() {
-                        self.scene_bounds(&batch)
+                        self.scene_bounds(shadow_batch)
                     } else {
                         None
                     };
@@ -1622,7 +1696,7 @@ impl NativeRenderer {
             self.shadow
                 .prepare(&self.gpu.device, &self.gpu.queue, frame.as_ref())?;
             if let Some(frame) = frame {
-                self.encode_shadows(encoder, &batch, &frame)?;
+                self.encode_shadows(encoder, shadow_batch, &frame, &styles)?;
                 stats.shadow_layers = frame.layers;
             }
         }
@@ -1631,7 +1705,9 @@ impl NativeRenderer {
         globals[16..19].copy_from_slice(&camera.position);
         globals[20..52].copy_from_slice(self.point_lights.as_flattened());
         globals[52..60].copy_from_slice(&self.sun);
-        globals[60..].copy_from_slice(&self.spot);
+        globals[60..76].copy_from_slice(&self.spot);
+        globals[76..80].copy_from_slice(&self.animation);
+        globals[80..].copy_from_slice(self.benders.as_flattened());
         self.gpu
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&globals));
@@ -1818,20 +1894,33 @@ impl NativeRenderer {
         encoder: &mut wgpu::CommandEncoder,
         batch: &InstanceBatch,
         frame: &ShadowFrame,
+        styles: &HashMap<EntityId, InstanceStyle>,
     ) -> Result<(), RenderError> {
         let device = &self.gpu.device;
         let queue = &self.gpu.queue;
         for index in 0..frame.layers {
             let matrix = &frame.matrices[index];
-            let groups =
-                self.pack_instances(batch, matrix, None, None, true, &mut RenderStats::default())?;
+            let groups = self.pack_instances(
+                batch,
+                matrix,
+                PackOptions {
+                    positions: None,
+                    ids: None,
+                    styles,
+                    shadow: true,
+                },
+                &mut RenderStats::default(),
+            )?;
             let data = self.pack_instance_bytes(&groups);
             if self.shadow_layers.len() <= index {
                 self.shadow_layers
                     .push(view_buffers(device, &self.camera_layout));
             }
             let layer = &mut self.shadow_layers[index];
-            queue.write_buffer(&layer.camera, 0, bytemuck::cast_slice(&matrix.to_columns()));
+            let mut globals = [0.0; GLOBAL_BYTES / 4];
+            globals[..16].copy_from_slice(&matrix.to_columns());
+            globals[79] = 1.0; // Shadow positions exclude wind and benders.
+            queue.write_buffer(&layer.camera, 0, bytemuck::cast_slice(&globals));
             if !data.is_empty() {
                 let size = data.len() as u64;
                 if layer
@@ -1922,11 +2011,15 @@ impl NativeRenderer {
         &self,
         batch: &InstanceBatch,
         view_projection: &Mat4,
-        positions: Option<&ResidentPositions<'_>>,
-        ids: Option<&HashMap<u32, u32>>,
-        shadow: bool,
+        options: PackOptions<'_>,
         stats: &mut RenderStats,
     ) -> Result<Vec<DrawGroup>, RenderError> {
+        let PackOptions {
+            positions,
+            ids,
+            styles,
+            shadow,
+        } = options;
         let mut groups = BTreeMap::<_, DrawGroup>::new();
         for instance in &batch.instances {
             let mesh = self
@@ -1961,8 +2054,9 @@ impl NativeRenderer {
             let displayed = effects.mirror.map_or(instance.model, |height| {
                 reflection(height).multiply(&instance.model)
             });
+            let deformed = mesh.skinned || (!shadow && effects.sway > 0.0);
             if !bound
-                && !mesh.skinned
+                && !deformed
                 && outside_frustum(&view_projection.multiply(&displayed), mesh.bounds)
             {
                 continue;
@@ -2001,6 +2095,16 @@ impl NativeRenderer {
                 0
             };
             group.values.push(f32::from_bits(skin));
+            let style = styles.get(&instance.entity).copied().unwrap_or_default();
+            group.values.extend_from_slice(&[
+                effects.sway,
+                effects.sway_reach,
+                effects.ripple,
+                if effects.faded { style.fade } else { 1.0 },
+            ]);
+            group
+                .values
+                .extend_from_slice(&if effects.tinted { style.tint } else { [1.0; 3] });
             if positions.is_some() {
                 let [[lx, ly, lz], [hx, hy, hz]] = mesh.bounds;
                 group.positions.push([
@@ -2011,7 +2115,7 @@ impl NativeRenderer {
                     hx.to_bits(),
                     hy.to_bits(),
                     hz.to_bits(),
-                    u32::from(mesh.skinned),
+                    u32::from(deformed),
                 ]);
             }
             group.instances += 1;
@@ -2030,6 +2134,55 @@ impl NativeRenderer {
         }
         bytemuck::cast_slice(&floats).to_vec()
     }
+}
+
+fn instance_styles(
+    world: &World,
+    batch: &InstanceBatch,
+    fades: bool,
+    tints: bool,
+) -> Result<HashMap<EntityId, InstanceStyle>, RenderError> {
+    let mut styles = HashMap::<_, InstanceStyle>::new();
+    if !fades && !tints {
+        return Ok(styles);
+    }
+    let ids: Vec<_> = batch
+        .instances
+        .iter()
+        .map(|instance| instance.entity)
+        .collect();
+    for (enabled, name, width) in [(fades, "Fade", 1), (tints, "Tint", 3)] {
+        if !enabled {
+            continue;
+        }
+        let Some(column) = world.component_index(name) else {
+            continue;
+        };
+        let rows = world
+            .read_component(column, Some(&ids))
+            .map_err(|error| RenderError::Resource(error.to_string()))?;
+        let ColumnData::F32(values) = rows.data else {
+            return Err(RenderError::Resource(format!("{name} has invalid storage")));
+        };
+        if rows.schema.width as usize != width {
+            return Err(RenderError::Resource(format!("{name} has invalid width")));
+        }
+        for ((id, member), row) in ids
+            .iter()
+            .zip(rows.membership)
+            .zip(values.chunks_exact(width))
+        {
+            if member {
+                let style = styles.entry(*id).or_default();
+                if name == "Fade" {
+                    style.fade = row[0];
+                } else {
+                    style.tint.copy_from_slice(row);
+                }
+            }
+        }
+    }
+    Ok(styles)
 }
 
 fn view_buffers(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> ViewBuffers {
@@ -2157,7 +2310,7 @@ const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     step_mode: wgpu::VertexStepMode::Vertex,
     attributes: &VERTEX_ATTRIBUTES,
 };
-const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = [
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 11] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
         offset: 0,
@@ -2203,6 +2356,16 @@ const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = [
         offset: 128,
         shader_location: 13,
     },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 132,
+        shader_location: 14,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 148,
+        shader_location: 15,
+    },
 ];
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: INSTANCE_BYTES as u64,
@@ -2231,6 +2394,8 @@ struct Camera {
     lights: array<PointLight, 4>,
     sun: DirectionalLight,
     spot: SpotLight,
+    animation: vec4<f32>,
+    benders: array<vec4<f32>, 8>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var albedo_sampler: sampler;
@@ -2266,6 +2431,8 @@ struct InstanceIn {
     @location(10) effects: vec4<f32>,
     @location(11) cut: vec4<f32>,
     @location(13) joint_pose: u32,
+    @location(14) motion: vec4<f32>,
+    @location(15) tint: vec3<f32>,
 };
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -2276,6 +2443,8 @@ struct VertexOut {
     @location(4) @interpolate(flat) style: vec4<f32>,
     @location(5) @interpolate(flat) effects: vec4<f32>,
     @location(6) @interpolate(flat) cut: vec4<f32>,
+    @location(7) @interpolate(flat) ripple: f32,
+    @location(8) @interpolate(flat) fade: f32,
 };
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
@@ -2337,6 +2506,29 @@ fn posed_normal(m: mat4x4<f32>, normal: vec3<f32>) -> vec3<f32> {
     return safe_normalize(cofactors * normal * sign(det));
 }
 
+fn sway_vertex(world: vec4<f32>, height: f32, strength: f32, reach: f32) -> vec4<f32> {
+    let tau = 6.28318530718;
+    let p = world.xz + camera.animation.yz;
+    let t = camera.animation.x;
+    let a = tau * (27.0 * t / 64.0 - (23.0 * p.x + 13.0 * p.y) / 256.0);
+    let b = tau * (61.0 * t / 64.0 - (-31.0 * p.x + 41.0 * p.y) / 256.0);
+    let h = reach * tanh(max(height, 0.0) / reach);
+    let low = h * (1.0 - smoothstep(0.8, 1.2, height));
+    var offset = vec3<f32>(h * strength * (sin(a) + 0.35 * sin(b)), 0.0,
+                          h * strength * 0.5 * (cos(a) + 0.35 * sin(b + 1.3)));
+    for (var i = 0u; i < 8u; i++) {
+        let bender = camera.benders[i];
+        let off = world.xz - bender.xy;
+        let distance = length(off);
+        if bender.z > 0.0 && distance < bender.z && distance >= 1e-4 {
+            let f = 1.0 - distance / bender.z;
+            let lean = bender.w * f * f * low;
+            offset += vec3<f32>(off.x / distance, -0.4, off.y / distance) * lean;
+        }
+    }
+    return world + vec4<f32>(offset, 0.0);
+}
+
 @vertex
 fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     let model = mat4x4<f32>(instance.m0, instance.m1, instance.m2, instance.m3);
@@ -2351,7 +2543,10 @@ fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
         position = (blended * vec4<f32>(position, 1.0)).xyz;
         normal = posed_normal(blended, normal);
     }
-    let world = model * vec4<f32>(position, 1.0);
+    var world = model * vec4<f32>(position, 1.0);
+    if instance.motion.x > 0.0 && camera.animation.w == 0.0 {
+        world = sway_vertex(world, position.y, instance.motion.x, instance.motion.y);
+    }
     var out: VertexOut;
     var displayed = world;
     if instance.effects.z > 0.0 {
@@ -2359,9 +2554,11 @@ fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     }
     out.clip_position = select(vec4<f32>(0.0, 0.0, -1.0, 1.0), camera.view_proj * displayed, instance.m3.w != 0.0);
     out.normal = transform_normal(model, normal);
-    out.color = instance.color.rgb * select(vec3<f32>(1.0), in.color, instance.effects.w > 0.0);
+    out.color = instance.color.rgb * select(vec3<f32>(1.0), in.color * instance.tint, instance.effects.w > 0.0);
     out.effects = instance.effects;
     out.cut = instance.cut;
+    out.ripple = instance.motion.z;
+    out.fade = instance.motion.w;
     out.world_position = world.xyz;
     out.uv = in.uv;
     out.style = instance.style;
@@ -2484,10 +2681,30 @@ fn phong_color(in: VertexOut, n: vec3<f32>) -> vec3<f32> {
     return color;
 }
 
+const BAYER: array<u32, 16> = array<u32, 16>(
+    0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u,
+);
+
+fn fade_dropped(pixel: vec2<f32>, fade: f32) -> bool {
+    let p = vec2<u32>(pixel) % vec2<u32>(4u);
+    let threshold = (f32(BAYER[p.y * 4u + p.x]) + 0.5) / 16.0;
+    return select(threshold >= fade, threshold < 1.0 + fade, fade < 0.0);
+}
+
+@fragment
+fn fs_shadow(in: VertexOut) {
+    if in.fade < 1.0 && fade_dropped(in.clip_position.xy, in.fade) {
+        discard;
+    }
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let uv_dx = dpdx(in.uv);
     let uv_dy = dpdy(in.uv);
+    if in.fade < 1.0 && fade_dropped(in.clip_position.xy, in.fade) {
+        discard;
+    }
     let mode = u32(in.style.w);
     let n = safe_normalize(in.normal);
     if mode == 0u {
@@ -2546,6 +2763,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let radiance = spot.rgb_intensity.rgb * spot.rgb_intensity.a * attenuation
                      * shadow_factor(2.0, in.world_position, n, l);
         color += standard_light(n, v, l, albedo, in.style.x, in.style.y, radiance);
+    }
+    if in.ripple > 0.0 {
+        let tau = 6.28318530718;
+        let p = in.world_position.xz + camera.animation.yz;
+        let t = camera.animation.x;
+        let bend = 1.5 * sin(tau * ((96.0 * p.x - 24.0 * p.y) / 256.0 + 9.0 * t / 64.0));
+        let wave = sin(tau * ((40.0 * p.x + 160.0 * p.y) / 256.0 - 16.0 * t / 64.0) + bend);
+        let gap = sin(tau * ((112.0 * p.x + 8.0 * p.y) / 256.0 + 5.0 * t / 64.0));
+        let band = smoothstep(0.86, 0.93, wave) * smoothstep(-0.35, 0.05, gap);
+        color += in.ripple * band * (0.25 * color + vec3<f32>(0.12, 0.16, 0.18));
     }
     return vec4<f32>(color / (color + vec3<f32>(1.0)), in.effects.x);
 }

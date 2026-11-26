@@ -126,6 +126,7 @@ class _NativeEngine:
         self._capacity = max_entities
         self.input = InputState()
         self.lines = Lines()
+        self.benders = []
         self._line_rows = {}
         self._world = World(max_entities)
         self._position_binding = None
@@ -373,15 +374,7 @@ class _NativeEngine:
         params = None
         effects = None
         if kind == "standard":
-            unsupported = (
-                material.sway
-                or material.ripple
-                or material.tinted
-                or material.faded
-                or material.detail
-                or material.paletted
-                or material.baked is not None
-            )
+            unsupported = material.detail or material.paletted or material.baked is not None
             if unsupported:
                 raise NotImplementedError(
                     "the requested Standard material effect needs a later native renderer"
@@ -395,7 +388,17 @@ class _NativeEngine:
                 material.ao,
                 None if texture is None else texture.id,
             )
-            effects = (material.vertex_colors, material.opacity, material.mirror, material.cut)
+            effects = (
+                material.vertex_colors,
+                material.opacity,
+                material.mirror,
+                material.cut,
+                material.sway,
+                material.sway_reach,
+                material.ripple,
+                material.faded,
+                material.tinted,
+            )
         shininess = material.shininess if kind == "phong" else None
         self._graphics.material(index, _color(material.color), kind, params, shininess, effects)
         registry[key] = (index, material, version)
@@ -547,6 +550,7 @@ class _NativeEngine:
         return post
 
     def _sync_scene(self):
+        self._graphics.animation(self.elapsed, self._origin, list(self.benders)[:8])
         lines = self.lines
         if lines.layers or self._line_rows:
             layers = [
