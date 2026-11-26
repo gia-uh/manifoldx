@@ -354,7 +354,7 @@ class _NativeEngine:
         for bindings, write in ((cls._reads, False), (cls._writes, True)):
             for component in bindings.values():
                 name = component.__name__
-                if component._gpu_only:
+                if getattr(component, "_gpu_only", False):
                     index, width = None, component._shape[0]
                 else:
                     key = name if name in self._world._schemas else component
