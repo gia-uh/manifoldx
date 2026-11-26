@@ -253,6 +253,7 @@ fn ortho(
 pub(crate) struct ShadowMap {
     pub(crate) layout: wgpu::BindGroupLayout,
     pub(crate) group: wgpu::BindGroup,
+    pub(crate) inactive_group: wgpu::BindGroup,
     pub(crate) depth: Vec<wgpu::TextureView>,
     size: u32,
     sampler: wgpu::Sampler,
@@ -304,9 +305,17 @@ impl ShadowMap {
             mapped_at_creation: false,
         });
         let (group, depth) = allocate_map(device, &layout, &sampler, &uniform, 1, 1);
+        let inactive = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("inactive shadow parameters"),
+            size: (UNIFORM_FLOATS * size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let (inactive_group, _) = allocate_map(device, &layout, &sampler, &inactive, 1, 1);
         Self {
             layout,
             group,
+            inactive_group,
             depth,
             size: 1,
             sampler,

@@ -1,10 +1,11 @@
 //! Python scene declarations for the native graphics owner.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
 use manifoldx_render::rect::RectRow;
+use manifoldx_render::renderer::{ViewOptions, ViewOrder};
 use manifoldx_render::shadow::ShadowOptions;
 use manifoldx_render::skin::{validate_matrices, JointMatrices};
 use manifoldx_render::{
@@ -57,6 +58,7 @@ enum Upload {
     Poses(Vec<PoseInput>),
     Bake(u32, Vec<JointMatrices>),
     Play(Vec<FrameInput>),
+    View(ViewOptions),
 }
 
 pub(crate) struct Scene {
@@ -69,6 +71,7 @@ pub(crate) struct Scene {
     shadows: Option<ShadowOptions>,
     rects: Arc<[RectRow]>,
     rect_before_post: bool,
+    layers: Option<Arc<BTreeSet<i32>>>,
     clips: HashMap<u32, usize>,
     uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
@@ -86,6 +89,7 @@ impl Scene {
             shadows: None,
             rects: Arc::default(),
             rect_before_post: false,
+            layers: None,
             clips: HashMap::new(),
             uploads: VecDeque::new(),
             offscreen: None,
@@ -103,8 +107,10 @@ impl Scene {
         renderer.set_post(self.post.clone());
         renderer.set_shadows(self.shadows);
         renderer.set_rects(self.rects.clone(), self.rect_before_post);
+        renderer.set_layers(self.layers.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
+                Upload::View(options) => renderer.set_fixture_view(options)?,
                 Upload::Mesh(id, mesh, uv, (colors, joints)) => {
                     renderer.upload_mesh_attributes(id, &mesh, [1.0; 3], &uv, &colors, &joints)?
                 }
@@ -191,6 +197,31 @@ fn skin_entity(
     }
 }
 
+fn camera_from_input(args: CameraInput) -> PyResult<Camera> {
+    let (position, target, up, fov_y_degrees, near, far) = args;
+    if position
+        .iter()
+        .chain(&target)
+        .chain(&up)
+        .any(|value| !value.is_finite())
+        || !(0.0..180.0).contains(&fov_y_degrees)
+        || !near.is_finite()
+        || !far.is_finite()
+        || near <= 0.0
+        || near >= far
+    {
+        return Err(PyValueError::new_err("invalid perspective camera"));
+    }
+    Ok(Camera {
+        position,
+        target,
+        up,
+        fov_y_degrees,
+        near,
+        far,
+    })
+}
+
 pub(crate) fn source(world: &World) -> Result<manifoldx_render::InstanceSource, RenderError> {
     Ok(resolve_source(
         world,
@@ -216,28 +247,44 @@ impl NativeGraphics {
     }
 
     fn camera(&self, args: CameraInput) -> PyResult<()> {
-        let (position, target, up, fov_y_degrees, near, far) = args;
-        if position
-            .iter()
-            .chain(&target)
-            .chain(&up)
-            .any(|value| !value.is_finite())
-            || !(0.0..180.0).contains(&fov_y_degrees)
-            || !near.is_finite()
-            || !far.is_finite()
-            || near <= 0.0
-            || near >= far
-        {
-            return Err(PyValueError::new_err("invalid perspective camera"));
-        }
-        self.scene.lock().unwrap().camera = Camera {
-            position,
-            target,
-            up,
-            fov_y_degrees,
-            near,
-            far,
+        self.scene.lock().unwrap().camera = camera_from_input(args)?;
+        Ok(())
+    }
+
+    #[pyo3(signature = (layers))]
+    fn layers(&self, layers: Option<Vec<i32>>) {
+        self.scene.lock().unwrap().layers =
+            layers.map(|layers| Arc::new(layers.into_iter().collect()));
+    }
+
+    fn fixture_view(
+        &self,
+        texture_id: u32,
+        camera: CameraInput,
+        layers: Vec<i32>,
+        size: [u32; 2],
+        clear: [f32; 3],
+        mode: &str,
+    ) -> PyResult<()> {
+        let order = match mode {
+            "normal" => ViewOrder::BeforeMain,
+            "omit" => ViewOrder::Omit,
+            "late" => ViewOrder::AfterMain,
+            _ => return Err(PyValueError::new_err("unknown fixture view mode")),
         };
+        let options = ViewOptions {
+            texture_id,
+            size,
+            layers: layers.into_iter().collect(),
+            camera: camera_from_input(camera)?,
+            clear,
+            order,
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::View(options));
         Ok(())
     }
 
@@ -549,6 +596,7 @@ pub(crate) fn stats_dict<'py>(
     result.set_item("draw_calls", stats.draw_calls)?;
     result.set_item("triangles", stats.triangles)?;
     result.set_item("post_order", &stats.post_order)?;
+    result.set_item("frame_order", &stats.frame_order)?;
     result.set_item("shadow_layers", stats.shadow_layers)?;
     result.set_item("post_target_generation", stats.post_target_generation)?;
     result.set_item("read_ns", stats.read_ns)?;

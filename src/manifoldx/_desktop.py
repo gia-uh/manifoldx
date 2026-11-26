@@ -548,10 +548,9 @@ class _NativeEngine:
             if material._version.value != version:
                 self._material(material)
         camera = self.camera
-        if camera.layers is not None or camera.vertical_scale != 1:
-            raise NotImplementedError(
-                "layers and vertical scale are unavailable in the native base renderer"
-            )
+        if camera.vertical_scale != 1:
+            raise NotImplementedError("vertical scale is unavailable in the native renderer")
+        self._graphics.layers(None if camera.layers is None else sorted(camera.layers))
         self._graphics.camera(
             (
                 camera.position.tolist(),

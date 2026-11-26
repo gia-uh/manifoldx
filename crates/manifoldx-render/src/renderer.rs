@@ -1,10 +1,10 @@
 //! Native indexed instancing with shared drawing for desktop and offscreen targets.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Instant;
 
-use manifoldx_core::ecs::{EntityId, World};
+use manifoldx_core::ecs::{ColumnData, EntityId, World};
 
 use crate::camera::Camera;
 use crate::math::Mat4;
@@ -273,6 +273,7 @@ struct DrawOptions<'a> {
     ids: Option<&'a HashMap<u32, u32>>,
     ignore_transform: bool,
     omit_draw: bool,
+    secondary: Option<&'a ViewOptions>,
 }
 
 struct GpuMesh {
@@ -452,6 +453,7 @@ pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wg
 /// mapping. The desktop diagnostic measures GPU execution separately.
 #[derive(Clone, Debug, Default)]
 pub struct RenderStats {
+    pub frame_order: Vec<&'static str>,
     /// Number of actual shadow depth layers encoded before scene colour.
     pub shadow_layers: usize,
     /// Actual encoded screen-space effects after the main pass.
@@ -491,7 +493,30 @@ pub struct RenderOutput {
 }
 
 /// Native GPU resources and drawing for one target format.
-struct ShadowLayer {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewOrder {
+    BeforeMain,
+    Omit,
+    AfterMain,
+}
+
+pub struct ViewOptions {
+    pub texture_id: u32,
+    pub size: [u32; 2],
+    pub layers: BTreeSet<i32>,
+    pub camera: Camera,
+    pub clear: [f32; 3],
+    pub order: ViewOrder,
+}
+
+struct SecondaryView {
+    options: ViewOptions,
+    color: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    buffers: ViewBuffers,
+}
+
+struct ViewBuffers {
     camera: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     instances: Option<InstanceBuffer>,
@@ -504,7 +529,9 @@ pub struct NativeRenderer {
     shadow: ShadowMap,
     shadow_options: Option<ShadowOptions>,
     shadow_pipelines: [wgpu::RenderPipeline; 2],
-    shadow_layers: Vec<ShadowLayer>,
+    shadow_layers: Vec<ViewBuffers>,
+    layer_filter: Option<std::sync::Arc<BTreeSet<i32>>>,
+    secondary: Option<SecondaryView>,
     spot_light: Option<SpotLight>,
     format: wgpu::TextureFormat,
     offscreen: Option<OffscreenTarget>,
@@ -696,6 +723,8 @@ impl NativeRenderer {
             shadow_options: None,
             shadow_pipelines,
             shadow_layers: Vec::new(),
+            layer_filter: None,
+            secondary: None,
             spot_light: None,
             format,
             offscreen: None,
@@ -1006,6 +1035,57 @@ impl NativeRenderer {
         });
     }
 
+    pub fn set_layers(&mut self, layers: Option<std::sync::Arc<BTreeSet<i32>>>) {
+        self.layer_filter = layers;
+    }
+
+    /// Declares the single test view used to verify same-frame dependencies.
+    pub fn set_fixture_view(&mut self, options: ViewOptions) -> Result<(), RenderError> {
+        let [width, height] = options.size;
+        if options.texture_id == 0
+            || self.textures.contains_key(&options.texture_id)
+            || !(1..=MAX_SIDE).contains(&width)
+            || !(1..=MAX_SIDE).contains(&height)
+            || self.secondary.is_some()
+        {
+            return Err(RenderError::Resource(
+                "invalid secondary fixture view".into(),
+            ));
+        }
+        let device = self.device();
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("native sampled view"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let color = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = depth_target(device, width, height);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bindings = self.bind_albedo(&color, &sampler);
+        let buffers = view_buffers(device, &self.camera_layout);
+        self.textures.insert(options.texture_id, bindings);
+        self.secondary = Some(SecondaryView {
+            options,
+            color,
+            depth,
+            buffers,
+        });
+        Ok(())
+    }
+
     pub fn set_shadows(&mut self, options: Option<ShadowOptions>) {
         self.shadow_options = options;
     }
@@ -1100,17 +1180,21 @@ impl NativeRenderer {
             anisotropy_clamp: 8,
             ..Default::default()
         });
+        self.bind_albedo(&view, &sampler)
+    }
+
+    fn bind_albedo(&self, view: &wgpu::TextureView, sampler: &wgpu::Sampler) -> wgpu::BindGroup {
         self.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("manifoldx-albedo"),
             layout: &self.texture_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
+                    resource: wgpu::BindingResource::TextureView(view),
                 },
             ],
         })
@@ -1318,6 +1402,73 @@ impl NativeRenderer {
         camera: &Camera,
         draw: DrawOptions<'_>,
     ) -> Result<RenderStats, RenderError> {
+        let view_order = self
+            .secondary
+            .as_ref()
+            .filter(|_| draw.ids.is_none() && !draw.omit_draw)
+            .map(|view| view.options.order);
+        let mut order = Vec::new();
+        if view_order == Some(ViewOrder::BeforeMain) {
+            self.draw_secondary(encoder, world, source)?;
+            order.push("view");
+        }
+        let mut stats = self.encode_primary(encoder, target, world, source, camera, draw)?;
+        if stats.shadow_layers > 0 {
+            order.push("shadow");
+        }
+        order.push(if draw.ids.is_some() { "ids" } else { "main" });
+        order.extend(stats.post_order.iter().copied());
+        if view_order == Some(ViewOrder::AfterMain) {
+            self.draw_secondary(encoder, world, source)?;
+            order.push("view");
+        }
+        stats.frame_order = order;
+        Ok(stats)
+    }
+
+    fn draw_secondary(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        world: &World,
+        source: InstanceSource,
+    ) -> Result<(), RenderError> {
+        let mut view = self.secondary.take().expect("scheduled secondary view");
+        let [r, g, b] = view.options.clear.map(f64::from);
+        let target = FrameTarget {
+            color: &view.color,
+            depth: &view.depth,
+            width: view.options.size[0],
+            height: view.options.size[1],
+            clear: wgpu::Color { r, g, b, a: 1.0 },
+            timestamps: None,
+            positions: None,
+        };
+        // Each view has independent uniform and instance uploads. Queue writes
+        // for the later main pass cannot change what the earlier pass reads.
+        std::mem::swap(&mut self.camera_buffer, &mut view.buffers.camera);
+        std::mem::swap(&mut self.camera_bind_group, &mut view.buffers.camera_group);
+        std::mem::swap(&mut self.instance_buffer, &mut view.buffers.instances);
+        let draw = DrawOptions {
+            secondary: Some(&view.options),
+            ..Default::default()
+        };
+        let result = self.encode_world(encoder, target, world, source, &view.options.camera, draw);
+        std::mem::swap(&mut self.camera_buffer, &mut view.buffers.camera);
+        std::mem::swap(&mut self.camera_bind_group, &mut view.buffers.camera_group);
+        std::mem::swap(&mut self.instance_buffer, &mut view.buffers.instances);
+        self.secondary = Some(view);
+        result.map(|_| ())
+    }
+
+    fn encode_primary(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: FrameTarget<'_>,
+        world: &World,
+        source: InstanceSource,
+        camera: &Camera,
+        draw: DrawOptions<'_>,
+    ) -> Result<RenderStats, RenderError> {
         let output = target.color;
         let size = [target.width, target.height];
         let Some(options) = self.post_options.clone().filter(|_| draw.ids.is_none()) else {
@@ -1397,7 +1548,26 @@ impl NativeRenderer {
         }
 
         let read_started = Instant::now();
-        let batch = read_instances(world, source, draw.ignore_transform)?;
+        let mut batch = read_instances(world, source, draw.ignore_transform)?;
+        let layers = draw
+            .secondary
+            .map(|view| &view.layers)
+            .or(self.layer_filter.as_deref());
+        if let Some(layers) = layers {
+            filter_layers(world, &mut batch, layers)?;
+        }
+        if draw.secondary.is_some_and(|view| {
+            batch.instances.iter().any(|instance| {
+                instance
+                    .material_id
+                    .and_then(|id| self.materials.get(&id))
+                    .is_some_and(|material| material.albedo == view.texture_id)
+            })
+        }) {
+            return Err(RenderError::Resource(
+                "a secondary view cannot sample its own target".into(),
+            ));
+        }
         let mut stats = RenderStats {
             entities_examined: batch.entities_examined,
             ..Default::default()
@@ -1435,11 +1605,13 @@ impl NativeRenderer {
                     bounds,
                 )
             });
-        self.shadow
-            .prepare(&self.gpu.device, &self.gpu.queue, frame.as_ref())?;
-        if let Some(frame) = frame {
-            self.encode_shadows(encoder, &batch, &frame)?;
-            stats.shadow_layers = frame.layers;
+        if draw.secondary.is_none() {
+            self.shadow
+                .prepare(&self.gpu.device, &self.gpu.queue, frame.as_ref())?;
+            if let Some(frame) = frame {
+                self.encode_shadows(encoder, &batch, &frame)?;
+                stats.shadow_layers = frame.layers;
+            }
         }
         let mut globals = [0.0; GLOBAL_BYTES / 4];
         globals[..16].copy_from_slice(&view_projection.to_columns());
@@ -1549,7 +1721,12 @@ impl NativeRenderer {
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_bind_group(1, &self.textures[&group.albedo], &[]);
                     pass.set_bind_group(2, &self.skin.group, &[]);
-                    pass.set_bind_group(3, &self.shadow.group, &[]);
+                    let shadow = if draw.secondary.is_some() {
+                        &self.shadow.inactive_group
+                    } else {
+                        &self.shadow.group
+                    };
+                    pass.set_bind_group(3, shadow, &[]);
                     let mesh = self
                         .meshes
                         .get(&group.geometry_id)
@@ -1616,25 +1793,8 @@ impl NativeRenderer {
                 self.pack_instances(batch, matrix, None, None, true, &mut RenderStats::default())?;
             let data = self.pack_instance_bytes(&groups);
             if self.shadow_layers.len() <= index {
-                let camera = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("native shadow camera"),
-                    size: GLOBAL_BYTES as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let camera_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("native shadow camera binding"),
-                    layout: &self.camera_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: camera.as_entire_binding(),
-                    }],
-                });
-                self.shadow_layers.push(ShadowLayer {
-                    camera,
-                    camera_group,
-                    instances: None,
-                });
+                self.shadow_layers
+                    .push(view_buffers(device, &self.camera_layout));
             }
             let layer = &mut self.shadow_layers[index];
             queue.write_buffer(&layer.camera, 0, bytemuck::cast_slice(&matrix.to_columns()));
@@ -1836,6 +1996,64 @@ impl NativeRenderer {
         }
         bytemuck::cast_slice(&floats).to_vec()
     }
+}
+
+fn view_buffers(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> ViewBuffers {
+    let camera = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("native view camera"),
+        size: GLOBAL_BYTES as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let camera_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("native view camera binding"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: camera.as_entire_binding(),
+        }],
+    });
+    ViewBuffers {
+        camera,
+        camera_group,
+        instances: None,
+    }
+}
+
+fn filter_layers(
+    world: &World,
+    batch: &mut InstanceBatch,
+    layers: &BTreeSet<i32>,
+) -> Result<(), RenderError> {
+    let Some(index) = world.component_index("Layer") else {
+        if !layers.contains(&0) {
+            batch.instances.clear();
+        }
+        return Ok(());
+    };
+    let ids: Vec<_> = batch
+        .instances
+        .iter()
+        .map(|instance| instance.entity)
+        .collect();
+    let rows = world
+        .read_component(index, Some(&ids))
+        .map_err(|error| RenderError::Resource(error.to_string()))?;
+    let ColumnData::F32(values) = rows.data else {
+        return Err(RenderError::Resource(
+            "Layer requires one f32 column".into(),
+        ));
+    };
+    if rows.schema.width != 1 {
+        return Err(RenderError::Resource(
+            "Layer requires one f32 column".into(),
+        ));
+    }
+    let mut values = values.into_iter();
+    batch
+        .instances
+        .retain(|_| layers.contains(&(values.next().expect("one layer per mesh") as i32)));
+    Ok(())
 }
 
 fn flips_winding(model: &Mat4) -> bool {
