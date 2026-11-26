@@ -16,6 +16,7 @@ use crate::scene::{
 };
 
 use crate::environment::EnvironmentData;
+use crate::fragment::{FragmentData, FragmentPipeline};
 use crate::shadow::{self, ShadowFrame, ShadowMap, ShadowOptions};
 use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
 
@@ -600,6 +601,7 @@ pub struct NativeRenderer {
     camera_bind_group: wgpu::BindGroup,
     meshes: HashMap<u32, GpuMesh>,
     materials: HashMap<u32, Material>,
+    fragments: HashMap<u32, FragmentPipeline>,
     instance_buffer: Option<InstanceBuffer>,
     max_instances: usize,
     position_pass: Option<PositionPass>,
@@ -834,6 +836,7 @@ impl NativeRenderer {
             camera_bind_group,
             meshes: HashMap::new(),
             materials: HashMap::new(),
+            fragments: HashMap::new(),
             instance_buffer: None,
             max_instances,
             position_pass: None,
@@ -870,6 +873,19 @@ impl NativeRenderer {
     pub fn upload_environment(&mut self, data: &EnvironmentData) -> Result<(), RenderError> {
         self.shadow
             .upload_environment(&self.gpu.device, &self.gpu.queue, data)
+    }
+
+    pub fn upload_fragment(&mut self, id: u32, data: &FragmentData) -> Result<(), RenderError> {
+        let fragment = FragmentPipeline::new(
+            &self.gpu,
+            self.format,
+            &[VERTEX_LAYOUT, INSTANCE_LAYOUT],
+            SHADER,
+            [&self.camera_layout, &self.skin.layout],
+            data,
+        )?;
+        self.fragments.insert(id, fragment);
+        Ok(())
     }
 
     pub fn prepare_resident_positions(&mut self) -> Result<(), RenderError> {
@@ -1875,18 +1891,24 @@ impl NativeRenderer {
                 pass.set_vertex_buffer(1, instance_buffer.slice(..));
                 let mut first_instance = 0u32;
                 for group in &draw_groups {
-                    let pipeline = if group.rank.0 {
-                        &self.translucent_pipeline
-                    } else if group.reversed {
-                        &self.reversed_pipeline
-                    } else {
-                        &self.pipeline
-                    };
-                    pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                    pass.set_bind_group(1, &self.textures[&group.albedo], &[]);
+                    if let Some(id) = group.fragment {
+                        let fragment = &self.fragments[&id];
+                        pass.set_pipeline(&fragment.pipelines[usize::from(group.reversed)]);
+                        pass.set_bind_group(1, &fragment.group, &[]);
+                    } else {
+                        let pipeline = if group.rank.0 {
+                            &self.translucent_pipeline
+                        } else if group.reversed {
+                            &self.reversed_pipeline
+                        } else {
+                            &self.pipeline
+                        };
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(1, &self.textures[&group.albedo], &[]);
+                        pass.set_bind_group(3, scene, &[]);
+                    }
                     pass.set_bind_group(2, &self.skin.group, &[]);
-                    pass.set_bind_group(3, scene, &[]);
                     let mesh = self
                         .meshes
                         .get(&group.geometry_id)
@@ -2136,12 +2158,23 @@ impl NativeRenderer {
             let reversed = flips_winding(&displayed);
             let albedo = material.albedo;
             let alpha_material = translucent.then_some(instance.material_id).flatten();
+            let fragment = instance
+                .material_id
+                .filter(|id| !shadow && ids.is_none() && self.fragments.contains_key(id));
             let group = groups
-                .entry((rank, geometry_id, reversed, albedo, alpha_material))
+                .entry((
+                    rank,
+                    geometry_id,
+                    reversed,
+                    albedo,
+                    alpha_material,
+                    fragment,
+                ))
                 .or_insert_with(|| DrawGroup {
                     geometry_id,
                     reversed,
                     albedo,
+                    fragment,
                     rank,
                     first_slot: slot,
                     instances: 0,
@@ -2342,6 +2375,7 @@ struct DrawGroup {
     geometry_id: u32,
     reversed: bool,
     albedo: u32,
+    fragment: Option<u32>,
     rank: (bool, bool),
     first_slot: u32,
     instances: u32,

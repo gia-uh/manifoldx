@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
 use manifoldx_render::environment::EnvironmentData;
+use manifoldx_render::fragment::FragmentData;
 use manifoldx_render::lines::{LineLayer, LineOptions, LineRow};
 use manifoldx_render::rect::RectRow;
 use manifoldx_render::renderer::{ViewOptions, ViewOrder};
@@ -73,6 +74,7 @@ enum Upload {
     Play(Vec<FrameInput>),
     View(ViewOptions),
     Environment(EnvironmentData),
+    Fragment(u32, FragmentData),
 }
 
 pub(crate) struct Scene {
@@ -140,6 +142,7 @@ impl Scene {
         renderer.set_lines(self.lines.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
+                Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
                 Upload::Environment(data) => renderer.upload_environment(&data)?,
                 Upload::View(options) => renderer.set_fixture_view(options)?,
                 Upload::Mesh(id, mesh, uv, (colors, joints)) => {
@@ -653,6 +656,29 @@ impl NativeGraphics {
         }
         self.scene.lock().unwrap().environment = environment;
         Ok(())
+    }
+
+    fn fragment(
+        &self,
+        py: Python<'_>,
+        id: u32,
+        source: String,
+        uniforms: Vec<f32>,
+        textures: Vec<Py<PyBytes>>,
+    ) {
+        let data = FragmentData {
+            source,
+            uniforms,
+            textures: textures
+                .iter()
+                .map(|tex| tex.as_bytes(py).to_vec())
+                .collect(),
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Fragment(id, data));
     }
 
     #[pyo3(signature = (irradiance, prefiltered, brdf=None))]

@@ -16,6 +16,7 @@ from manifoldx.components import Component, Material, Mesh, Transform
 from manifoldx.ecs import ComponentView, _make_component_class
 from manifoldx.input import InputState
 from manifoldx.lines import Lines
+from manifoldx.shader import ShaderMaterial
 from manifoldx.resources import (
     BasicMaterial,
     DirectionalLight,
@@ -368,6 +369,12 @@ class _NativeEngine:
         if cached is not None and cached[2] == version:
             return cached[0]
         index = len(registry) + 1 if cached is None else cached[0]
+        if isinstance(material, ShaderMaterial):
+            self._graphics.fragment(
+                index, material._fragment.source, material._uniforms, material._textures
+            )
+            registry[key] = (index, material, version)
+            return index
         types = {
             BasicMaterial: "basic",
             FlatMaterial: "flat",
@@ -424,6 +431,14 @@ class _NativeEngine:
     def spawn(self, *components, n=1):
         if n == 0:
             return None
+        geometry = next((c._geometry for c in components if isinstance(c, Mesh)), None)
+        material = next((c._material for c in components if isinstance(c, Material)), None)
+        if (
+            isinstance(material, ShaderMaterial)
+            and material._fragment.requires_uv
+            and (geometry is None or "uvs" not in geometry)
+        ):
+            raise ValueError("the fragment requires mesh UV coordinates")
         payload = {}
         for component in components:
             key = self._column_key(type(component))

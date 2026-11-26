@@ -13,6 +13,8 @@ from manifoldx.world import (
     World as World,
 )
 from manifoldx.compute.kernel import kernel as kernel
+from manifoldx import shader as shader
+from manifoldx.shader import ShaderMaterial
 from manifoldx.compute.shader import clamp as clamp, f32 as f32, vec3 as vec3
 from manifoldx.systems import Query
 from manifoldx.components import Transform, Mesh, Material, Colors, Layer, Tint, Fade, Palette
@@ -101,6 +103,8 @@ colors = _ColorsProxy()
 __all__ = [
     "Engine",
     "kernel",
+    "shader",
+    "ShaderMaterial",
     "clamp",
     "f32",
     "vec3",

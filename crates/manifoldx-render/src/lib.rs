@@ -3,6 +3,7 @@
 pub mod camera;
 pub mod desktop;
 pub mod environment;
+pub mod fragment;
 pub mod lines;
 pub mod math;
 pub mod post;
