@@ -495,7 +495,7 @@ struct OffscreenTarget {
 }
 
 impl OffscreenTarget {
-    fn new(device: &wgpu::Device, [width, height]: [u32; 2]) -> Self {
+    fn new(device: &wgpu::Device, [width, height]: [u32; 2], format: wgpu::TextureFormat) -> Self {
         let color = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("manifoldx-native-color"),
             size: wgpu::Extent3d {
@@ -506,7 +506,7 @@ impl OffscreenTarget {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: COLOR_FORMAT,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -1902,7 +1902,7 @@ impl NativeRenderer {
             .offscreen
             .take()
             .filter(|target| target.size == [width, height])
-            .unwrap_or_else(|| OffscreenTarget::new(self.device(), [width, height]));
+            .unwrap_or_else(|| OffscreenTarget::new(self.device(), [width, height], self.format));
         let result = self.read_offscreen(world, source, camera, draw, &offscreen);
         self.offscreen = Some(offscreen);
         result.map(|mut output| {
@@ -1997,6 +1997,11 @@ impl NativeRenderer {
             .take(height as usize)
         {
             rgba.extend_from_slice(&row[..(width * 4) as usize]);
+        }
+        if self.format == wgpu::TextureFormat::Bgra8UnormSrgb {
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
         }
         drop(mapped);
         readback.unmap();
@@ -3982,5 +3987,73 @@ impl std::error::Error for RenderError {}
 impl From<SceneError> for RenderError {
     fn from(error: SceneError) -> Self {
         Self::Scene(error)
+    }
+}
+
+#[cfg(test)]
+mod post_target_tests {
+    use super::*;
+    use crate::scene::{resolve_source, spawn_instances};
+    use manifoldx_core::ecs::ElementType;
+
+    #[test]
+    fn post_uses_the_active_srgb_target_format() {
+        let Ok(rgba_gpu) = Gpu::new(true) else {
+            eprintln!("skip sRGB target test: no native adapter");
+            return;
+        };
+        let bgra_gpu = Gpu::new(true).expect("same adapter selection");
+        let mut world = World::new(2).unwrap();
+        world.register("Transform", ElementType::F32, 10).unwrap();
+        world.register("Mesh", ElementType::U32, 1).unwrap();
+        world.register("Material", ElementType::U32, 1).unwrap();
+        spawn_instances(
+            &mut world,
+            &[[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]],
+            &[1],
+            &[1],
+        )
+        .unwrap();
+        let source = resolve_source(&world, "Transform", "Mesh", Some("Material"), 2).unwrap();
+        let camera = Camera::new([0.0, 0.0, 3.0], [0.0; 3]);
+        let mesh = MeshData {
+            positions: vec![[-0.8, -0.8, 0.0], [0.8, -0.8, 0.0], [0.0, 0.8, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+        };
+        let capture = |gpu, format| {
+            let mut renderer = NativeRenderer::with_gpu(gpu, format, 2);
+            renderer.upload_mesh(1, &mesh, [1.0; 3]).unwrap();
+            renderer
+                .set_material(1, [0.85, 0.2, 0.1], Shading::Flat)
+                .unwrap();
+            renderer.set_post(Some(std::sync::Arc::new(PostOptions {
+                ssao: None,
+                bloom: None,
+                shafts: None,
+                grade: Some([0.75, 1.0, 0.0]),
+                sky: None,
+                fxaa: true,
+                kernel: [[0.0; 4]; 32],
+            })));
+            let first = renderer
+                .render(&world, source, &camera, 64, 48, false)
+                .unwrap();
+            let second = renderer
+                .render(&world, source, &camera, 72, 56, false)
+                .unwrap();
+            assert_eq!(
+                second.stats.post_target_generation,
+                first.stats.post_target_generation + 1
+            );
+            assert!(second.stats.post_order.contains(&"fxaa"));
+            let center = ((28 * 72 + 36) * 4) as usize;
+            let pixel = &second.rgba[center..center + 4];
+            assert!(pixel[0] > pixel[2] + 70, "expected a red center: {pixel:?}");
+            second.rgba
+        };
+        let rgba = capture(rgba_gpu, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let bgra = capture(bgra_gpu, wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert!(rgba.iter().zip(bgra).all(|(a, b)| a.abs_diff(b) <= 1));
     }
 }
