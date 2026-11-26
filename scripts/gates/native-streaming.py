@@ -348,6 +348,65 @@ def invalidation(output, *, facade=False):
     return stream.stats()
 
 
+def receipts():
+    engine = engine_for("Streaming receipt teardown")
+    engine.world.register("ReceiptRows", kind="u32", width=1)
+    geometry = plane(2, 2)
+    mesh = MeshData(geometry["positions"], geometry["normals"],
+                    np.ones((4, 3), np.float32), geometry["indices"])
+
+    def enqueue(convert=None):
+        stream = Streamer(engine, 4, lambda *_: mesh, radius=0, ready_radius=0, convert=convert)
+        for _ in range(90):
+            stream.focus(0, 0)
+            if stream._results:
+                return stream, stream._results[(0, 0)].version
+            time.sleep(0.002)
+        raise AssertionError(stream.stats())
+
+    try:
+        engine.render_frame()
+        baseline = engine.last_frame["streamed_cells"]
+        active, active_version = enqueue()
+        bad_active, bad_version = enqueue(lambda *_: ([(1, {"ReceiptRows": np.array([1, 2], np.uint32)})], ()))
+        assert engine._graphics.stream_result(active_version) is None
+        assert engine._graphics.stream_result(bad_version) is None
+        closed = {"before_commit": [], "after_commit": []}
+        for _ in range(6):
+            for order, versions in closed.items():
+                stream, version = enqueue()
+                if order == "after_commit":
+                    engine.render_frame()
+                    assert engine.last_frame["streamed_cells"] == baseline + 2
+                else:
+                    assert engine._graphics.stream_result(version) is None
+                stream.close()
+                stream.close()
+                engine.render_frame()
+                assert engine.last_frame["streamed_cells"] == baseline + 1
+                assert engine.last_frame["stream_resources"] == [0, 2]
+                versions.append(version)
+
+        active.focus(0, 0)
+        assert active.settled, active.stats()
+        bad_active.focus(0, 0)
+        assert bad_active.stats()["rejected"] == 1
+        assert "payload" in bad_active.stats()["last_error"], bad_active.stats()
+        active.close()
+        bad_active.close()
+        engine.render_frame()
+        assert engine.last_frame["streamed_cells"] == baseline
+        assert engine.last_frame["stream_resources"] == [0, 0]
+        leaked = {order: sum(engine._graphics.stream_result(version) is not None for version in versions)
+                  for order, versions in closed.items()}
+        assert leaked == {"before_commit": 0, "after_commit": 0}, ("closed receipts accumulated", leaked)
+        return {"cycles": {order: len(versions) for order, versions in closed.items()},
+                "closed_receipts": leaked, "live_success_delivered": True, "live_error_delivered": True,
+                "drained_cells": baseline, "drained_meshes": engine.last_frame["stream_resources"]}
+    finally:
+        engine.close()
+
+
 def capsule(output):
     import native
     from manifoldx._core_native import _StreamBuilder
@@ -406,7 +465,7 @@ def portable_rows(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade"))
+    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade", "receipts"))
     parser.add_argument("--fault", choices=("refresh", "albedo", "atomic", "late", "layer"))
     args = parser.parse_args()
     assert sys.flags.isolated
@@ -418,6 +477,8 @@ def main():
         result = capsule(args.output)
     elif args.case == "cancel":
         result = cancellation(args.output)
+    elif args.case == "receipts":
+        result = receipts()
     elif args.case in ("invalidate", "facade"):
         result = invalidation(args.output, facade=args.case == "facade")
     else:

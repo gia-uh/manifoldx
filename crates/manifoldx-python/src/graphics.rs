@@ -87,6 +87,7 @@ enum Upload {
     StreamBegin(u32, [[f32; 3]; 2], u64, u64),
     StreamWrite(u32, bool, Vec<u8>),
     StreamCommit(CellCommit, bool),
+    StreamDiscardResults(Vec<u64>),
     StreamHide(CellKey, u64),
     StreamFade(CellKey, usize, f32),
     StreamRetire(u32),
@@ -216,6 +217,11 @@ impl Scene {
                             .insert(version, result.map_err(|error| error.to_string()));
                     } else {
                         result?;
+                    }
+                }
+                Upload::StreamDiscardResults(versions) => {
+                    for version in versions {
+                        self.stream_results.remove(&version);
                     }
                 }
                 Upload::StreamHide(key, version) => self.stream_cells.hide(world, key, version)?,
@@ -862,6 +868,14 @@ impl NativeGraphics {
             .remove(&version)
             .map(|result| result.map(|()| true).map_err(PyValueError::new_err))
             .transpose()
+    }
+
+    fn stream_discard_results(&self, versions: Vec<u64>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamDiscardResults(versions));
     }
 
     fn stream_hide(&self, key: CellKey, version: u64) {

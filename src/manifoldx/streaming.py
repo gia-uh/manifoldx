@@ -687,7 +687,10 @@ class _Uploads:
         for c in list(self._gpu):
             self._unload(c)
         self._pending.clear()
-        self._results.clear()
+        if self._results:
+            # Earlier commits can still produce receipts when the queue drains.
+            self._native.stream_discard_results([draw.version for draw in self._results.values()])
+            self._results.clear()
         self._abandoned.clear()
         self._submitted.clear()
         self._ready.clear()
