@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
+use manifoldx_render::rect::RectRow;
 use manifoldx_render::shadow::ShadowOptions;
 use manifoldx_render::skin::{validate_matrices, JointMatrices};
 use manifoldx_render::{
@@ -66,6 +67,8 @@ pub(crate) struct Scene {
     spot: Option<SpotLight>,
     post: Option<Arc<PostOptions>>,
     shadows: Option<ShadowOptions>,
+    rects: Arc<[RectRow]>,
+    rect_before_post: bool,
     clips: HashMap<u32, usize>,
     uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
@@ -81,6 +84,8 @@ impl Scene {
             spot: None,
             post: None,
             shadows: None,
+            rects: Arc::default(),
+            rect_before_post: false,
             clips: HashMap::new(),
             uploads: VecDeque::new(),
             offscreen: None,
@@ -97,6 +102,7 @@ impl Scene {
         renderer.set_direct_lights(self.sun, self.spot);
         renderer.set_post(self.post.clone());
         renderer.set_shadows(self.shadows);
+        renderer.set_rects(self.rects.clone(), self.rect_before_post);
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
                 Upload::Mesh(id, mesh, uv, (colors, joints)) => {
@@ -270,6 +276,21 @@ impl NativeGraphics {
                 intensity,
             })
             .collect();
+    }
+
+    fn fixture_rects(&self, rows: Vec<RectRow>, before_post: bool) -> PyResult<()> {
+        if rows.len() > 4096
+            || rows
+                .iter()
+                .flatten()
+                .any(|component| !component.is_finite())
+        {
+            return Err(PyValueError::new_err("invalid Rect instance rows"));
+        }
+        let mut scene = self.scene.lock().unwrap();
+        scene.rects = rows.into();
+        scene.rect_before_post = before_post;
+        Ok(())
     }
 
     #[pyo3(signature = (options))]

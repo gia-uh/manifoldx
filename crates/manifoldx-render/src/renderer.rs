@@ -9,6 +9,7 @@ use manifoldx_core::ecs::{EntityId, World};
 use crate::camera::Camera;
 use crate::math::Mat4;
 use crate::post::{PostOptions, PostPasses};
+use crate::rect::{RectPass, RectRow};
 use crate::scene::{
     read_instances, InstanceBatch, InstanceSource, MeshData, SceneError, DEFAULT_MAX_INSTANCES,
 };
@@ -509,6 +510,9 @@ pub struct NativeRenderer {
     offscreen: Option<OffscreenTarget>,
     post_options: Option<std::sync::Arc<PostOptions>>,
     post_passes: Option<PostPasses>,
+    rects: std::sync::Arc<[RectRow]>,
+    rect_pass: Option<RectPass>,
+    rect_before_post: bool,
     post_sun: Option<DirectionalLight>,
     pipeline: wgpu::RenderPipeline,
     reversed_pipeline: wgpu::RenderPipeline,
@@ -697,6 +701,9 @@ impl NativeRenderer {
             offscreen: None,
             post_options: None,
             post_passes: None,
+            rects: std::sync::Arc::default(),
+            rect_pass: None,
+            rect_before_post: false,
             post_sun: None,
             pipeline: regular,
             reversed_pipeline: reversed,
@@ -1003,6 +1010,12 @@ impl NativeRenderer {
         self.shadow_options = options;
     }
 
+    /// Submit already laid-out, physical-pixel rectangles. The order override is for fixtures.
+    pub fn set_rects(&mut self, rows: std::sync::Arc<[RectRow]>, before_post: bool) {
+        self.rects = rows;
+        self.rect_before_post = before_post;
+    }
+
     pub fn set_post(&mut self, options: Option<std::sync::Arc<PostOptions>>) {
         self.post_options = options;
     }
@@ -1305,15 +1318,20 @@ impl NativeRenderer {
         camera: &Camera,
         draw: DrawOptions<'_>,
     ) -> Result<RenderStats, RenderError> {
+        let output = target.color;
+        let size = [target.width, target.height];
         let Some(options) = self.post_options.clone().filter(|_| draw.ids.is_none()) else {
-            return self.encode_world(encoder, target, world, source, camera, draw);
+            let mut stats = self.encode_world(encoder, target, world, source, camera, draw)?;
+            if draw.ids.is_none() && self.draw_rects(encoder, output, size) {
+                stats.post_order.push("rect");
+            }
+            return Ok(stats);
         };
         let mut post = self
             .post_passes
             .take()
             .unwrap_or_else(|| PostPasses::new(self.device(), self.format));
-        post.prepare(self.device(), [target.width, target.height], target.depth);
-        let output = target.color;
+        post.prepare(self.device(), size, target.depth);
         let clear = [
             target.clear.r as f32,
             target.clear.g as f32,
@@ -1326,7 +1344,10 @@ impl NativeRenderer {
         let mut result = self.encode_world(encoder, scene, world, source, camera, draw);
         if let Ok(stats) = &mut result {
             stats.post_target_generation = post.generation();
-            stats.post_order = post.encode(
+            if self.rect_before_post && self.draw_rects(encoder, post.scene(), size) {
+                stats.post_order.push("rect");
+            }
+            stats.post_order.extend(post.encode(
                 self.queue(),
                 encoder,
                 output,
@@ -1334,10 +1355,29 @@ impl NativeRenderer {
                 camera,
                 self.post_sun,
                 clear,
-            );
+            ));
+            if !self.rect_before_post && self.draw_rects(encoder, output, size) {
+                stats.post_order.push("rect");
+            }
         }
         self.post_passes = Some(post);
         result
+    }
+
+    fn draw_rects(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &wgpu::TextureView,
+        size: [u32; 2],
+    ) -> bool {
+        if self.rects.is_empty() {
+            return false;
+        }
+        let pass = self
+            .rect_pass
+            .get_or_insert_with(|| RectPass::new(&self.gpu.device, self.format));
+        pass.draw(&self.gpu, encoder, output, size, &self.rects);
+        true
     }
 
     fn encode_world(

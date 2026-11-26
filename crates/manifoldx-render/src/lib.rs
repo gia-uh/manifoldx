@@ -4,6 +4,7 @@ pub mod camera;
 pub mod desktop;
 pub mod math;
 pub mod post;
+pub mod rect;
 pub mod renderer;
 pub mod resident;
 pub mod scene;
