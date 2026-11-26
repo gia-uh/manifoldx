@@ -1431,6 +1431,16 @@ impl DesktopApplication for WindowFrames<'_> {
                 &mut self.report,
             )
             .map_err(RenderError::Window)?;
+        // The desktop Engine owns this queue and has no external receipt consumer.
+        // Return credit after each barrier and surface any rejected scene edit.
+        while let Some(outcome) = control.take() {
+            if let Err(error) = outcome.result {
+                return Err(RenderError::Window(format!(
+                    "scene command {} at frame {}: {error}",
+                    outcome.sequence, outcome.frame
+                )));
+            }
+        }
         self.report.events.clear();
         let camera = self.scene.lock().unwrap().apply(renderer)?;
         target.clear = renderer.background();
