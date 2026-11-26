@@ -399,6 +399,22 @@ costs nothing on the next `focus`. With `crossfade=0.3`, a node that gives way
 to finer ones stays drawn for 0.3 s, fading out while they fade in, so the
 level of detail changes without a pop (see `Fade`).
 
+With the Rust Engine, set `request=True` to receive a `CellRequest` in a Python builder.
+Its fields match the SDK v1 request: absolute `x` and `y` (world X and Z), `size`,
+`lod` and `seed`. Builders can return a `MeshData`, `None`, or a `CellResult` with
+`(mesh, material_key)` pairs and optional `(archetype, row_width, bytes)` rows.
+An async Python callable runs on the worker. A compatible `manifoldx.builder.v1`
+capsule runs on an in-process thread and returns the same owned cell data.
+The streamer resolves `materials` from the declared material keys.
+
+Use `convert(request, rows)` to map application rows to `(batches, tiles)`.
+A batch is `(count, columns)`, where `columns` maps registered component names to
+NumPy arrays of `float32` or `uint32`. Register the application columns before
+starting the Engine. `tiles` contains the E3 terrain tiles covering the cell.
+Call `configure_stream_collision` once with the collision index's tile size before
+publishing tiles. `sample_stream_collision` returns the published surface and version.
+
+
 A coarse node can look like the finer ones it stands for when it carries a
 picture of them. A `build` that returns `MeshData(..., albedo=image)`, an
 `(n, n, 3)` sRGB image of the node seen from above over its square, has it

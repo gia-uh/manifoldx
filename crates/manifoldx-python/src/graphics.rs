@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use manifoldx_core::ecs::{ColumnData, ComponentPayload, EntityId, World};
+use manifoldx_core::ecs::{ColumnData, EntityId, World};
 use manifoldx_render::environment::EnvironmentData;
 use manifoldx_render::fragment::FragmentData;
 use manifoldx_render::frame_compute::{ComputeBinding, ComputeProgram, FrameCompute};
@@ -24,6 +24,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
+use crate::stream_cells::{CellBatch, CellCommit, CellDraw, CellKey, StreamCells};
+use crate::vehicles::{tile_inputs, SampleOutput, TileInput};
 use crate::PyNativeWorld;
 
 type ComputeColumn = (Option<usize>, String, u32, bool);
@@ -84,10 +86,12 @@ type PostInput = (
 enum Upload {
     StreamBegin(u32, [[f32; 3]; 2], u64, u64),
     StreamWrite(u32, bool, Vec<u8>),
-    StreamShow(u32, u32, [f64; 3], Option<f32>, Option<f32>),
-    StreamHide(u32),
-    StreamFade(u32, f32),
+    StreamCommit(CellCommit, bool),
+    StreamHide(CellKey, u64),
+    StreamFade(CellKey, usize, f32),
     StreamRetire(u32),
+    Terrain(f64),
+    RetireScene(Vec<u32>, Vec<u32>),
     Mesh(u32, MeshData, Vec<[f32; 2]>, VertexInput),
     Material(u32, [f32; 3], Shading, StandardEffects),
     Surface(u32, Box<[[f32; 5]; 9]>, bool),
@@ -135,7 +139,8 @@ pub(crate) struct Scene {
     offscreen: Option<NativeRenderer>,
     view_reads: HashMap<u64, ViewRead>,
     next_read: u64,
-    stream_entities: HashMap<u32, EntityId>,
+    stream_cells: StreamCells,
+    stream_results: HashMap<u64, Result<(), String>>,
     fixture_fault: Option<FixtureRenderFault>,
     compute: Option<FrameCompute>,
     compute_pending: VecDeque<ComputeProgram>,
@@ -166,7 +171,8 @@ impl Scene {
             offscreen: None,
             view_reads: HashMap::new(),
             next_read: 0,
-            stream_entities: HashMap::new(),
+            stream_cells: StreamCells::default(),
+            stream_results: HashMap::new(),
             fixture_fault: None,
             compute: None,
             compute_pending: VecDeque::new(),
@@ -198,45 +204,26 @@ impl Scene {
                 Upload::StreamWrite(id, vertex, bytes) => {
                     renderer.write_stream_mesh(id, vertex, &bytes)?
                 }
-                Upload::StreamShow(id, material, pos, fade, baked) => {
-                    let pos = [
-                        (pos[0] - self.origin[0]) as f32,
-                        pos[1] as f32,
-                        (pos[2] - self.origin[1]) as f32,
-                    ];
-                    let row = [pos[0], pos[1], pos[2], 0., 0., 0., 1., 1., 1., 1.];
-                    let mut payload = vec![
-                        stream_payload(world, "Transform", ColumnData::F32(row.to_vec()))?,
-                        stream_payload(world, "Mesh", ColumnData::U32(vec![id]))?,
-                        stream_payload(world, "Material", ColumnData::U32(vec![material]))?,
-                    ];
-                    for (name, value) in [("Fade", fade), ("Baked", baked)] {
-                        if let Some(value) = value {
-                            payload.push(stream_payload(
-                                world,
-                                name,
-                                ColumnData::F32(vec![value]),
-                            )?);
-                        }
-                    }
-                    let entity = world.spawn(1, &payload).map_err(stream_world_error)?[0];
-                    self.stream_entities.insert(id, entity);
-                }
-                Upload::StreamHide(id) | Upload::StreamRetire(id) => {
-                    if let Some(entity) = self.stream_entities.remove(&id) {
-                        world.destroy(&[entity]).map_err(stream_world_error)?;
-                    }
-                    if matches!(upload, Upload::StreamRetire(_)) {
-                        renderer.retire_stream_mesh(id);
+                Upload::StreamCommit(commit, receipt) => {
+                    let version = commit.version;
+                    let result = self
+                        .stream_cells
+                        .commit(world, renderer, commit, self.origin);
+                    if receipt {
+                        self.stream_results
+                            .insert(version, result.map_err(|error| error.to_string()));
+                    } else {
+                        result?;
                     }
                 }
-                Upload::StreamFade(id, value) => {
-                    if let Some(&entity) = self.stream_entities.get(&id) {
-                        let fade = stream_payload(world, "Fade", ColumnData::F32(vec![value]))?;
-                        world
-                            .update_rows(fade.component, &[entity], fade.data)
-                            .map_err(stream_world_error)?;
-                    }
+                Upload::StreamHide(key, version) => self.stream_cells.hide(world, key, version)?,
+                Upload::StreamFade(key, part, value) => {
+                    self.stream_cells.fade(world, key, part, value)?
+                }
+                Upload::StreamRetire(id) => renderer.retire_stream_mesh(id),
+                Upload::Terrain(size) => self.stream_cells.configure(size)?,
+                Upload::RetireScene(meshes, materials) => {
+                    renderer.retire_scene(&meshes, &materials)
                 }
                 Upload::Axis(id, points) => renderer.upload_axis(id, points)?,
                 Upload::Volume(id, dims, bytes) => renderer.upload_volume(id, dims, &bytes)?,
@@ -353,21 +340,6 @@ impl Scene {
         self.offscreen = Some(renderer);
         result
     }
-}
-
-fn stream_world_error(error: manifoldx_core::ecs::WorldError) -> RenderError {
-    RenderError::Resource(error.to_string())
-}
-
-fn stream_payload(
-    world: &World,
-    name: &str,
-    data: ColumnData,
-) -> Result<ComponentPayload, RenderError> {
-    let component = world
-        .component_index(name)
-        .ok_or_else(|| RenderError::Resource(format!("missing stream column {name}")))?;
-    Ok(ComponentPayload { component, data })
 }
 
 pub(crate) fn compute_overrides(scene: &Mutex<Scene>) -> Result<HashMap<u32, u32>, RenderError> {
@@ -523,6 +495,7 @@ impl NativeGraphics {
     }
 
     #[pyo3(signature = (texture_id, camera, layers, size, clear, live, fog))]
+    #[allow(clippy::too_many_arguments)]
     fn create_view(
         &self,
         texture_id: u32,
@@ -820,6 +793,14 @@ impl NativeGraphics {
         Ok(())
     }
 
+    fn retire_scene(&self, meshes: Vec<u32>, materials: Vec<u32>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::RetireScene(meshes, materials));
+    }
+
     fn stream_begin(&self, id: u32, bounds: [[f32; 3]; 2], vertices: u64, indices: u64) {
         self.scene
             .lock()
@@ -836,36 +817,76 @@ impl NativeGraphics {
             .push_back(Upload::StreamWrite(id, vertex, data.as_bytes().to_vec()));
     }
 
-    #[pyo3(signature = (id, material, pos, fade, baked))]
-    fn stream_show(
+    #[allow(clippy::too_many_arguments)]
+    fn stream_commit(
         &self,
-        id: u32,
-        material: u32,
+        key: CellKey,
+        version: u64,
+        meshes: Vec<CellDraw>,
         pos: [f64; 3],
-        fade: Option<f32>,
-        baked: Option<f32>,
+        rows: Vec<CellBatch>,
+        tiles: Vec<TileInput>,
+        receipt: bool,
     ) {
+        let commit = CellCommit {
+            key,
+            version,
+            meshes,
+            origin: pos,
+            rows,
+            tiles: tile_inputs(tiles),
+        };
         self.scene
             .lock()
             .unwrap()
             .uploads
-            .push_back(Upload::StreamShow(id, material, pos, fade, baked));
+            .push_back(Upload::StreamCommit(commit, receipt));
     }
 
-    fn stream_hide(&self, id: u32) {
+    fn stream_result(&self, version: u64) -> PyResult<Option<bool>> {
         self.scene
             .lock()
             .unwrap()
-            .uploads
-            .push_back(Upload::StreamHide(id));
+            .stream_results
+            .remove(&version)
+            .map(|result| result.map(|()| true).map_err(PyValueError::new_err))
+            .transpose()
     }
 
-    fn stream_fade(&self, id: u32, value: f32) {
+    fn stream_hide(&self, key: CellKey, version: u64) {
         self.scene
             .lock()
             .unwrap()
             .uploads
-            .push_back(Upload::StreamFade(id, value));
+            .push_back(Upload::StreamHide(key, version));
+    }
+
+    fn stream_fade(&self, key: CellKey, part: usize, value: f32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamFade(key, part, value));
+    }
+
+    fn stream_terrain(&self, size: f64) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Terrain(size));
+    }
+
+    fn stream_sample(&self, x: f64, z: f64, near: f64) -> Option<SampleOutput> {
+        let sample = self.scene.lock().unwrap().stream_cells.sample(x, z, near)?;
+        Some((
+            sample.height,
+            sample.normal,
+            sample.grip,
+            sample.level,
+            sample.tile,
+            sample.version,
+        ))
     }
 
     fn stream_retire(&self, id: u32) {
@@ -1285,6 +1306,8 @@ impl NativeGraphics {
         result.set_item("adapter", renderer.adapter().to_json())?;
         result.set_item("target", "rgba8unorm-srgb")?;
         result.set_item("view_resources", renderer.view_counts())?;
+        result.set_item("stream_resources", renderer.stream_counts())?;
+        result.set_item("streamed_cells", scene.stream_cells.count())?;
         Ok(result)
     }
 }

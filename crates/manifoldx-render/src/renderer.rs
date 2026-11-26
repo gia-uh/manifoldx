@@ -684,6 +684,7 @@ pub struct NativeRenderer {
     palette_buffer: Option<InstanceBuffer>,
     meshes: HashMap<u32, GpuMesh>,
     stream_uploads: HashMap<u32, StreamUpload>,
+    streamed_meshes: BTreeSet<u32>,
     materials: HashMap<u32, Material>,
     fragments: HashMap<u32, FragmentPipeline>,
     manual: HashMap<u32, ManualPipeline>,
@@ -995,6 +996,7 @@ impl NativeRenderer {
             palette_buffer: None,
             meshes: HashMap::new(),
             stream_uploads: HashMap::new(),
+            streamed_meshes: BTreeSet::new(),
             materials: HashMap::new(),
             fragments: HashMap::new(),
             manual: HashMap::new(),
@@ -1396,14 +1398,38 @@ impl NativeRenderer {
         self.gpu.queue.write_buffer(buffers[index], *offset, bytes);
         *offset = end;
         if upload.offsets == buffers.map(wgpu::Buffer::size) {
+            self.streamed_meshes.insert(id);
             self.meshes
                 .insert(id, self.stream_uploads.remove(&id).unwrap().mesh);
         }
         Ok(())
     }
 
+    pub fn retire_scene(&mut self, meshes: &[u32], materials: &[u32]) {
+        for &mesh in meshes {
+            self.retire_stream_mesh(mesh);
+        }
+        for material in materials {
+            self.surface_materials.remove(material);
+            self.materials.remove(material);
+            self.manual.remove(material);
+            self.fragments.remove(material);
+            self.invalid_materials.remove(material);
+        }
+        self.manual_frames = [None, None];
+    }
+
+    pub fn stream_counts(&self) -> [usize; 2] {
+        [self.stream_uploads.len(), self.streamed_meshes.len()]
+    }
+
+    pub fn has_stream_mesh(&self, mesh: u32, material: u32) -> bool {
+        self.meshes.contains_key(&mesh) && self.materials.contains_key(&material)
+    }
+
     pub fn retire_stream_mesh(&mut self, id: u32) {
         self.stream_uploads.remove(&id);
+        self.streamed_meshes.remove(&id);
         // wgpu keeps the submitted buffers alive until their last use has finished.
         self.meshes.remove(&id);
     }
@@ -1754,7 +1780,7 @@ impl NativeRenderer {
                     let mut rgb =
                         Vec::with_capacity(size.width as usize * size.height as usize * 3);
                     for line in bytes.chunks_exact(padded as usize) {
-                        for pixel in line[..row as usize].chunks_exact(4) {
+                        for pixel in line[..row as usize].as_chunks::<4>().0 {
                             let [r, g, b] = if bgra {
                                 [pixel[2], pixel[1], pixel[0]]
                             } else {

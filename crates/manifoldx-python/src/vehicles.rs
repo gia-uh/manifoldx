@@ -635,7 +635,7 @@ impl Drop for PyVehicleRuntime {
 type GridInput = ([f64; 2], [f64; 2], [usize; 2], Vec<f64>, f64, u64);
 type TriangleInput = ([[f64; 3]; 3], f64, u64);
 type ObstacleInput = ([[f64; 2]; 2], [f64; 2], f64);
-type TileInput = (
+pub(crate) type TileInput = (
     TileKey,
     u64,
     Vec<GridInput>,
@@ -644,9 +644,9 @@ type TileInput = (
 );
 type ProfileInput = (Vec<(f64, f64)>, Vec<f64>, f64, Option<(f64, f64, f64)>, f64);
 type AssistInput = (f64, Vec<f64>, Vec<f64>, [bool; 4]);
-type SampleOutput = (f64, [f64; 3], f64, u64, TileKey, u64);
+pub(crate) type SampleOutput = (f64, [f64; 3], f64, u64, TileKey, u64);
 
-fn tile_inputs(inputs: Vec<TileInput>) -> Vec<Tile> {
+pub(crate) fn tile_inputs(inputs: Vec<TileInput>) -> Vec<Tile> {
     inputs
         .into_iter()
         .map(|(key, version, grids, triangles, obstacles)| Tile {

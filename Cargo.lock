@@ -712,6 +712,7 @@ version = "0.0.0"
 dependencies = [
  "manifoldx-core",
  "manifoldx-render",
+ "manifoldx-sdk",
  "pyo3",
 ]
 

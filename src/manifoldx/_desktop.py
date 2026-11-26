@@ -187,6 +187,8 @@ class _NativeEngine:
             self._world.register(name, kind=kind, width=size)
         self._registries = {"Mesh": {}, "Material": {}}
         self._mesh_ids = count(1)
+        self._material_ids = count(1)
+        self._cell_versions = count(1)
         self._streamers = WeakSet()
         self._process_executor = None
         self._pending_tasks = []
@@ -411,8 +413,10 @@ class _NativeEngine:
         edits = self._transform_edits
         if "Transform" in arrays:
             rows = arrays["Transform"]
-            for entity, row, original in zip(entities, rows, originals["Transform"]):
-                if entity not in edits and not np.array_equal(row, original):
+            changed = np.flatnonzero(np.any(rows != originals["Transform"], axis=1))
+            for index in changed:
+                entity, row = entities[index], rows[index]
+                if entity not in edits:
                     row[:3] = row[:3].astype("float64") + offset
                     edits[entity] = row
         if np.any(offset):
@@ -505,12 +509,12 @@ class _NativeEngine:
         if component not in self._world._schemas:
             self._world.register(component)
 
-    def _mesh(self, geometry):
+    def _mesh(self, geometry, *, reuse=None):
         registry = self._registries["Mesh"]
         key = id(geometry)
         if key in registry:
             return registry[key][0]
-        index = next(self._mesh_ids)
+        index = next(self._mesh_ids) if reuse is None else reuse
         if "vertices" in geometry and np.size(geometry.get("indices")) == 2:
             indices = np.asarray(geometry["indices"], dtype=np.intp).reshape(2)
             positions = np.asarray(geometry["vertices"], dtype="f4")[indices]
@@ -551,8 +555,38 @@ class _NativeEngine:
     def _replace_geometry(self, entities, geometry):
         if self._commands is None:
             raise RuntimeError("geometry swaps require a native frame command lease")
-        index = self._mesh(geometry)
-        self._commands.replace("Mesh", entities, np.full((len(entities), 1), index, dtype="uint32"))
+        data = self._snapshot.read("Mesh")
+        owners = dict(zip(data.entities, zip(data.membership, data.numpy().ravel())))
+        owned = set(entities)
+        if any(entity not in owners or not owners[entity][0] for entity in owned):
+            raise ValueError("stale geometry handle")
+        old = {int(owners[entity][1]) for entity in owned}
+        others = {int(index) for entity, (has_mesh, index) in owners.items()
+                  if has_mesh and entity not in owned}
+        reuse = next(iter(old)) if len(old) == 1 and old.isdisjoint(others) else None
+        index = self._mesh(geometry, reuse=reuse)
+        if index not in old or len(old) != 1:
+            self._commands.replace("Mesh", entities, np.full((len(entities), 1), index, dtype="uint32"))
+        registry = self._registries["Mesh"]
+        for key, (mesh, obj) in list(registry.items()):
+            if mesh in old and mesh not in others and obj is not geometry:
+                del registry[key]
+                if mesh != index:
+                    self._graphics.stream_retire(mesh)
+
+    def clear_scene(self):
+        """Release scene-owned geometry and materials between native frames."""
+        self._world._owner()
+        for streamer in list(self._streamers):
+            streamer.close()
+        snapshot = self._world._native.snapshot()
+        self._world._native.destroy(snapshot["handles"])
+        meshes = self._registries["Mesh"]
+        materials = self._registries["Material"]
+        self._graphics.retire_scene([entry[0] for entry in meshes.values()],
+                                    [entry[0] for entry in materials.values()])
+        meshes.clear()
+        materials.clear()
 
     def submit_process(self, fn, *args):
         """Submit CPU preparation to a spawned process without sharing GPU objects."""
@@ -569,7 +603,7 @@ class _NativeEngine:
         cached = registry.get(key)
         if cached is not None and cached[2] == version:
             return cached[0]
-        index = len(registry) + 1 if cached is None else cached[0]
+        index = next(self._material_ids) if cached is None else cached[0]
         if isinstance(material, ShaderMaterial):
             self._graphics.fragment(
                 index, material._fragment.source, material._uniforms, material._textures
@@ -765,6 +799,16 @@ class _NativeEngine:
         texture = TextureHandle(index, None, None, None, (size, size), layers=layers)
         texture._native_owner = self
         return texture
+
+    def configure_stream_collision(self, cell_size):
+        """Create the E3 terrain index that receives streamed collision tiles."""
+        if not np.isfinite(cell_size) or cell_size <= 0:
+            raise ValueError("streamed collision tile size must be finite and positive")
+        self._graphics.stream_terrain(cell_size)
+
+    def sample_stream_collision(self, x, z, near):
+        """Read the current E3 surface from the published streaming terrain."""
+        return self._graphics.stream_sample(x, z, near)
 
     def _write_native_baked_layer(self, handle, layer, levels):
         if getattr(handle, "_native_owner", None) is not self:

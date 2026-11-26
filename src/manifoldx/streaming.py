@@ -43,6 +43,7 @@ import itertools
 import threading
 import weakref
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Callable, NamedTuple
 
@@ -66,6 +67,41 @@ class MeshData(NamedTuple):
     # u8[n, n, 3|4], sRGB: what the node holds seen from above over its square, x along the image's width and
     # z down its height. QuadStreamer with a baked material draws it on the vertices of surface SURFACE_BAKED.
     albedo: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class CellRequest:
+    """World origin, step size, LOD and seed passed to either builder backend."""
+
+    x: float
+    y: float
+    size: float
+    lod: int
+    seed: int
+
+
+@dataclass(frozen=True)
+class CellResult:
+    """Mesh/material pairs and application-owned rows from a cell builder."""
+
+    meshes: tuple
+    rows: tuple = ()
+
+
+@dataclass(frozen=True)
+class _NativeCell:
+    parts: tuple
+    rows: tuple
+    tiles: tuple
+    prepare_ms: float
+
+
+@dataclass(frozen=True)
+class _NativeDraw:
+    key: tuple
+    version: int
+    layers: tuple
+    parts: int
 
 
 class _Cell:
@@ -114,10 +150,51 @@ async def _await_cell(data):
     return await data
 
 
+def _resolve_build(data):
+    return asyncio.run(_await_cell(data)) if inspect.isawaitable(data) else data
+
+
+def _pack_native_cell(build, key, request, use_request, capsule, convert, side):
+    started = perf_counter()
+    if capsule:
+        meshes, raw = build.build(request.x, request.y, request.size, request.lod, request.seed)
+        data = CellResult(tuple((
+            MeshData(np.frombuffer(p, np.float32).reshape(-1, 3),
+                     np.frombuffer(n, np.float32).reshape(-1, 3),
+                     np.ones(len(p) // 4, np.float32).reshape(-1, 3), np.frombuffer(i, np.uint32)),
+            material,
+        ) for material, p, n, i in meshes), tuple(raw))
+    else:
+        data = _resolve_build(build(request) if use_request else build(*key))
+    if data is None:
+        return None
+    if not isinstance(data, CellResult):
+        data = CellResult(((data, 0),))
+    if data.rows and convert is None:
+        raise ValueError("streamed archetype rows need an application converter")
+    spawn, tiles = ((), ()) if convert is None else convert(request, data.rows)
+    from manifoldx.vehicles.native import _tile
+
+    batches = []
+    for count, columns in spawn:
+        payload = []
+        for name, array in columns.items():
+            values = np.asarray(array)
+            if values.dtype not in (np.dtype("f4"), np.dtype("u4")):
+                raise ValueError("streamed ECS columns require float32 or uint32")
+            packed = values.reshape(-1).tolist()
+            payload.append((name, packed, None) if values.dtype.kind == "f" else (name, None, packed))
+        batches.append((count, payload))
+    parts = tuple((_pack_mesh(mesh, side, native=True), material) for mesh, material in data.meshes)
+    return _NativeCell(parts, tuple(batches), tuple(_tile(tile) for tile in tiles),
+                       (perf_counter() - started) * 1000)
+
+
 def _pack_now(build, key, side=None, *, native=False):
-    data = build(*key)
-    if inspect.isawaitable(data):
-        data = asyncio.run(_await_cell(data))
+    return _pack_mesh(_resolve_build(build(*key)), side, native=native)
+
+
+def _pack_mesh(data, side, *, native):
     if data is None:
         return None
     geo = {
@@ -222,16 +299,32 @@ class _Uploads:
     """
 
     def _start(self, engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material, builders=1,
-               warm=None):
+               warm=None, *, request=False, seed=0, materials=None, convert=None):
+        self._native = getattr(engine, "_graphics", None)
+        self._capsule = not callable(build)
+        if self._capsule:
+            if self._native is None:
+                raise TypeError("native builder capsules require the Rust Engine")
+            if workers != "thread":
+                raise ValueError("capsule builders run in-process on worker threads")
+            from manifoldx._core_native import _StreamBuilder
+
+            build = _StreamBuilder(build)
+        if self._native is None and (request or materials is not None or convert is not None or seed):
+            raise ValueError("the cell request and row converter require the Rust Engine")
         if not isinstance(workers, Builders):
             workers = Builders(builders, workers, warm)
         self._pool, self.builders = workers.pool, workers.count
+        self._use_request, self._seed = bool(request), seed
+        self._convert = convert
+        self._results = {}
+        self._invalid = set()
         if material is None:
             from manifoldx.resources import StandardMaterial
 
             material = StandardMaterial("#ffffff", roughness=0.9, vertex_colors=True)
         self.engine, self.build = engine, build
-        self._native = getattr(engine, "_graphics", None)
+        self._materials = {0: material, **(materials or {})}
         if self._native is not None:
             from manifoldx.components import Baked, Fade
 
@@ -258,7 +351,7 @@ class _Uploads:
         self._stats = {"built": 0, "uploaded": 0, "dropped": 0, "max_frame_ms": 0.0, "baked": 0, "unbaked": 0}
         if self._native is not None:
             self._stats.update(cancelled=0, stale=0, upload_bytes=0, upload_ms=0.0,
-                               prepare_ms=0.0, wait_ms=0.0)
+                               prepare_ms=0.0, wait_ms=0.0, rejected=0)
         self._last = None
         self._landed = 0  # uploads finished so far
         self._serial = next(_SERIAL)
@@ -282,6 +375,13 @@ class _Uploads:
         self._last = now
         got = 0
         if self._native is not None:
+            for key, draw in list(self._results.items()):
+                try:
+                    if self._native.stream_result(draw.version) is None:
+                        continue
+                except ValueError as exc:
+                    self._invalidate_result(key, exc)
+                del self._results[key]
             finished = {future for future in self._abandoned if future.done()}
             self._stats["stale"] += len(finished)
             self._abandoned.difference_update(finished)
@@ -291,15 +391,36 @@ class _Uploads:
             for c, _fut in done:
                 del self._pending[c]
         for c, fut in done:
-            cell = self._ready[c] = fut.result()
-            if self._native is not None:
+            if self._native is None:
+                cell = fut.result()
+            else:
+                queued = self._submitted.pop(c)
+                try:
+                    cell = fut.result()
+                except Exception as exc:
+                    self._invalidate_result(c, exc)
+                    got += 1
+                    continue
                 cpu = 0.0 if cell is None else cell.prepare_ms
                 self._stats["prepare_ms"] += cpu
-                self._stats["wait_ms"] += max(0.0, (now - self._submitted.pop(c)) * 1000 - cpu)
+                self._stats["wait_ms"] += max(0.0, (now - queued) * 1000 - cpu)
+            self._ready[c] = cell
             self._stats["built"] += 1
             self._note("built", c)
             got += 1
         return got
+
+    def _invalidate_result(self, key, error):
+        self._stats["rejected"] += 1
+        self._stats["last_error"] = str(error)
+        self._invalid.add(key)
+        self._ready.pop(key, None)
+        if key in self._drawn:
+            self._undraw(key)
+        self._unload(key)
+
+    def _native_key(self, key):
+        return (self._serial, *(key if len(key) == 3 else (0, *key)))
 
     def _on_gpu(self, c) -> bool:
         """Whether cell c can be drawn without building a buffer on the frame."""
@@ -367,24 +488,33 @@ class _Uploads:
         cell = self._ready[key]
         up = self._gpu.get(key)
         if up is None:
-            mesh = next(self.engine._mesh_ids)
-            bounds = [cell.geo["positions"].min(axis=0), cell.geo["positions"].max(axis=0)]
-            self._native.stream_begin(mesh, [row.tolist() for row in bounds], len(cell.vbytes), len(cell.ibytes))
-            up = self._gpu[key] = {"id": mesh, "at": [0, 0], "done": False}
+            up = self._gpu[key] = {"ids": [], "part": 0, "at": [0, 0], "done": False}
         spent = 0
-        lengths = [len(cell.vbytes), len(cell.ibytes)]
-        for k, data in enumerate((cell.vbytes, cell.ibytes)):
-            at = up["at"][k]
-            count = min(len(data) - at, room - spent)
-            if count:
-                self._native.stream_write(up["id"], k == 0, data[at:at + count])
-                up["at"][k] += count
-                spent += count
-        if up["at"] == lengths:
+        while up["part"] < len(cell.parts) and spent < room:
+            part = up["part"]
+            mesh, _ = cell.parts[part]
+            if part == len(up["ids"]):
+                identity = next(self.engine._mesh_ids)
+                pos = mesh.geo["positions"]
+                bounds = [pos.min(axis=0).tolist(), pos.max(axis=0).tolist()]
+                self._native.stream_begin(identity, bounds, len(mesh.vbytes), len(mesh.ibytes))
+                up["ids"].append(identity)
+            lengths = [len(mesh.vbytes), len(mesh.ibytes)]
+            for k, data in enumerate((mesh.vbytes, mesh.ibytes)):
+                at = up["at"][k]
+                size = min(len(data) - at, room - spent)
+                if size:
+                    self._native.stream_write(up["ids"][part], k == 0, data[at:at + size])
+                    up["at"][k] += size
+                    spent += size
+            if up["at"] == lengths:
+                up["part"] += 1
+                up["at"] = [0, 0]
+                mesh.vbytes = mesh.ibytes = None
+        if up["part"] == len(cell.parts):
             up["done"] = True
             self._landed += 1
             self._note("landed", key)
-            cell.vbytes = cell.ibytes = None
         self._stats["upload_bytes"] += spent
         self._stats["upload_ms"] += (perf_counter() - started) * 1000
         return spent
@@ -401,10 +531,19 @@ class _Uploads:
             self._note("cancelled", key)
 
     def _submit_build(self, key, side=None):
-        future = self._pool.submit(_pack, self.build, *key, side=side, native=self._native is not None)
-        self._pending[key] = future
-        if self._native is not None:
+        if self._native is None:
+            future = self._pool.submit(_pack, self.build, *key, side=side)
+        else:
+            if len(key) == 3:
+                x, z, size = self._box(key)
+                lod = key[0]
+            else:
+                x, z, size, lod = key[0] * self.cell, key[1] * self.cell, self.cell, 0
+            request = CellRequest(x, z, size, lod, self._seed)
+            future = self._pool.submit(_pack_native_cell, self.build, key, request, self._use_request,
+                                       self._capsule, self._convert, side)
             self._submitted[key] = perf_counter()
+        self._pending[key] = future
         self._note("submitted", key)
         return future
 
@@ -415,7 +554,8 @@ class _Uploads:
         if up is None:
             return
         if self._native is not None:
-            self._native.stream_retire(up["id"])
+            for identity in up["ids"]:
+                self._native.stream_retire(identity)
             return
         for buf in up.get("bufs", ()):
             buf.destroy()
@@ -429,20 +569,29 @@ class _Uploads:
             return
         from manifoldx.components import Baked, Fade, Material, Mesh, Transform
 
-        layer = self._take_layer(cell)
         if self._native is not None:
-            mesh = self._gpu[c]["id"]
-            self._native.stream_show(
-                mesh, self.engine._material(self.material), pos,
-                0.0 if getattr(self, "crossfade", None) else None,
-                float(layer) if self._baked is not None else None,
-            )
-            self._drawn[c] = mesh
-            if layer >= 0:
-                self._layers[mesh] = layer
+            version = next(self.engine._cell_versions)
+            identity = self._native_key(c)
+            updates, layers = [], []
+            mesh_ids = self._gpu[c]["ids"]
+            try:
+                materials = [self.engine._material(self._materials[material]) for _, material in cell.parts]
+            except (KeyError, ValueError) as exc:
+                self._invalidate_result(c, exc)
+                return
+            for mesh, material, (part, _) in zip(mesh_ids, materials, cell.parts):
+                layer = self._take_layer(part)
+                if layer >= 0:
+                    layers.append(layer)
+                updates.append((mesh, material, 0.0 if getattr(self, "crossfade", None) else None,
+                                float(layer) if self._baked is not None else None))
+            draw = _NativeDraw(identity, version, tuple(layers), len(updates))
+            self._native.stream_commit(identity, version, updates, pos, cell.rows, cell.tiles, True)
+            self._results[c] = self._drawn[c] = draw
             self._stats["uploaded"] += 1
             self._note("drawn", c)
             return
+        layer = self._take_layer(cell)
         self._drawn[c] = self.engine.spawn(
             Mesh(cell.geo),
             Material(self.material),
@@ -485,14 +634,15 @@ class _Uploads:
         return self._baked is not None and (self._native is not None or self.engine._device is not None)
 
     def _destroy(self, handle):
-        """Destroy a drawn node's entity, keeping its geometry, and give its layer back."""
-        layer = self._layers.pop(handle if self._native is not None else handle.index, None)
+        """Destroy the drawn node and return the baked layers it used."""
+        if self._native is not None:
+            self._native.stream_hide(handle.key, handle.version)
+            self._free_layers.extend(handle.layers)
+            return
+        layer = self._layers.pop(handle.index, None)
         if layer is not None:
             self._free_layers.append(layer)
-        if self._native is not None:
-            self._native.stream_hide(handle)
-        else:
-            handle.destroy(free_geometry=False)
+        handle.destroy(free_geometry=False)
 
     def close(self) -> None:
         """Stop the worker and destroy every drawn cell."""
@@ -533,10 +683,12 @@ class Streamer(_Uploads):
         material=None,
         turn: tuple[int, int] = (0, 1),
         warm: Callable[[], None] | None = None,
+        *, request=False, seed=0, materials=None, convert=None,
     ):
         if ready_radius < radius:
             raise ValueError(f"ready_radius ({ready_radius}) must be at least radius ({radius})")
-        self._start(engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material, warm=warm)
+        self._start(engine, build, uploads_per_frame, upload_bytes_per_frame, workers, material, warm=warm,
+                    request=request, seed=seed, materials=materials, convert=convert)
         self.cell = float(cell)
         self.radius, self.ready_radius = radius, ready_radius
         self.turn = turn
@@ -566,8 +718,9 @@ class Streamer(_Uploads):
             key=lambda c: (c[0] - fi) ** 2 + (c[1] - fj) ** 2,
         )
         self._want = {c for c in wanted if ring(c) <= self.radius}
+        self._invalid.intersection_update(wanted)
         for c in wanted:
-            if c not in self._ready and c not in self._pending:
+            if c not in self._ready and c not in self._pending and c not in self._invalid:
                 if self._native is not None and len(self._pending) + len(self._abandoned) >= 2 * self.builders:
                     break
                 self._submit_build(c)
@@ -676,6 +829,7 @@ class QuadStreamer(_Uploads):
         cache: int = 256,
         crossfade: float | None = None,
         focus_radius: float | None = None,
+        *, request=False, seed=0, materials=None, convert=None,
     ):
         if crossfade and material is None:
             from manifoldx.resources import StandardMaterial
@@ -683,7 +837,8 @@ class QuadStreamer(_Uploads):
             material = StandardMaterial("#ffffff", roughness=0.9, vertex_colors=True, faded=True)
         if crossfade and not getattr(material, "faded", False):
             raise ValueError("crossfade needs a StandardMaterial made with faded=True")
-        self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders, warm)
+        self._start(engine, build, None, upload_bytes_per_frame, workers, material, builders, warm,
+                    request=request, seed=seed, materials=materials, convert=convert)
         self.in_flight, self.cache = 2 * self.builders, int(cache)
         self._todo: list = []  # the nodes to build next, most error on screen last
         self.crossfade = float(crossfade) if crossfade else None
@@ -871,7 +1026,8 @@ class QuadStreamer(_Uploads):
                 elif self._pending[n].cancel():  # one already building lands in the cache instead
                     del self._pending[n]
                     self._note("cancelled", n)
-            todo = [n for n in wanted if n not in self._ready and n not in self._pending]
+            self._invalid.intersection_update(keep)
+            todo = [n for n in wanted if n not in self._ready and n not in self._pending and n not in self._invalid]
             self._todo = todo[::-1]  # most error last, for pop()
             while self._todo and len(self._pending) + len(self._abandoned) < self.in_flight:
                 self._submit(self._todo.pop())
@@ -1073,7 +1229,8 @@ class QuadStreamer(_Uploads):
     @_deferred.deferred_in_pipeline(find=_streamer_engine)
     def _set_fade(self, handle, value):
         if self._native is not None:
-            self._native.stream_fade(handle, value)
+            for part in range(handle.parts):
+                self._native.stream_fade(handle.key, part, value)
         else:
             self.engine.store._components["Fade"][handle.index] = value
 
@@ -1108,4 +1265,4 @@ class QuadStreamer(_Uploads):
         return {**self._stats, "held": len(self._ready) + len(self._pending), "by_level": by_level}
 
 
-__all__ = ["Builders", "MeshData", "QuadStreamer", "Streamer"]
+__all__ = ["Builders", "CellRequest", "CellResult", "MeshData", "QuadStreamer", "Streamer"]
