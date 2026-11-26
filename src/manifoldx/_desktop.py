@@ -436,7 +436,10 @@ class _NativeEngine:
             np.asarray(geometry["normals"]).tolist(),
             np.asarray(geometry["indices"]).reshape(-1).tolist(),
             np.asarray(geometry.get("uvs", [])).tolist(),
-            (np.asarray(geometry.get("colors", [])).tolist(), joints),
+            (
+                np.asarray(geometry.get("colors", [])).tolist(), joints,
+                np.asarray(geometry.get("surfaces", []), dtype="f4").reshape(-1).tolist(),
+            ),
         )
         registry[key] = (index, geometry)
         return index
@@ -491,7 +494,7 @@ class _NativeEngine:
         params = None
         effects = None
         if kind == "standard":
-            unsupported = material.detail or material.paletted or material.baked is not None
+            unsupported = material.paletted or material.baked is not None
             if unsupported:
                 raise NotImplementedError(
                     "the requested Standard material effect needs a later native renderer"
@@ -518,6 +521,10 @@ class _NativeEngine:
             )
         shininess = material.shininess if kind == "phong" else None
         self._graphics.material(index, _color(material.color), kind, params, shininess, effects)
+        if kind == "standard" and material.vertex_colors and material.albedo_map is None:
+            self._graphics.surface_patterns(
+                index, [material.surface_patterns[i] for i in range(1, 10)], material.detail
+            )
         registry[key] = (index, material, version)
         return index
 

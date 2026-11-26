@@ -40,7 +40,7 @@ type CameraInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32);
 type LightInput = ([f32; 3], [f32; 3], f32);
 type SpotInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32, f32);
 type MaterialInput = (f32, f32, f32, Option<u32>);
-type VertexInput = (Vec<[f32; 3]>, Vec<u32>);
+type VertexInput = (Vec<[f32; 3]>, Vec<u32>, Vec<f32>);
 type PoseIdentity = (u32, Option<u64>);
 type PoseInput = (PoseIdentity, JointMatrices);
 type FrameInput = (PoseIdentity, u32, f64);
@@ -82,6 +82,7 @@ type PostInput = (
 enum Upload {
     Mesh(u32, MeshData, Vec<[f32; 2]>, VertexInput),
     Material(u32, [f32; 3], Shading, StandardEffects),
+    Surface(u32, Box<[[f32; 5]; 9]>, bool),
     Albedo(u32, u32, u32, Vec<Vec<u8>>),
     Poses(Vec<PoseInput>),
     Bake(u32, Vec<JointMatrices>),
@@ -179,8 +180,17 @@ impl Scene {
                 Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
                 Upload::Environment(data) => renderer.upload_environment(&data)?,
                 Upload::View(options) => renderer.set_fixture_view(options)?,
-                Upload::Mesh(id, mesh, uv, (colors, joints)) => {
-                    renderer.upload_mesh_attributes(id, &mesh, [1.0; 3], &uv, &colors, &joints)?
+                Upload::Mesh(id, mesh, uv, (colors, joints, surfaces)) => renderer
+                    .upload_mesh_surfaces(
+                        id,
+                        &mesh,
+                        [1.0; 3],
+                        &uv,
+                        (&colors, &surfaces),
+                        &joints,
+                    )?,
+                Upload::Surface(id, patterns, detail) => {
+                    renderer.set_surface_patterns(id, *patterns, detail)?
                 }
                 Upload::Poses(poses) => {
                     let entities = poses
@@ -746,6 +756,14 @@ impl NativeGraphics {
             .unwrap()
             .uploads
             .push_back(Upload::Axis(id, points));
+    }
+
+    fn surface_patterns(&self, id: u32, patterns: [[f32; 5]; 9], detail: bool) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Surface(id, Box::new(patterns), detail));
     }
 
     fn volume(&self, id: u32, dims: [u32; 3], bytes: &Bound<'_, PyBytes>) {

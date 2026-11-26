@@ -29,10 +29,11 @@ pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 /// Reversed-depth float buffer; the pass clears 0 and compares `Greater`.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16 + 4 + 8 * 4 + 16 + 4 + 8) * 4;
+const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16 + 4 + 8 * 4 + 16 + 4 + 8 + 4) * 4;
 const INSTANCE_FLOATS: usize = 40;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
-const VERTEX_BYTES: usize = 12 * 4;
+const VERTEX_BYTES: usize = 13 * 4;
+const SURFACE_FLOATS: usize = 52;
 const FLAT_STYLE: [f32; 4] = [0.0, 0.0, 0.0, 2.0];
 /// Largest offscreen side accepted by this slice.
 pub const MAX_SIDE: u32 = 4096;
@@ -318,6 +319,13 @@ impl Default for InstanceStyle {
     }
 }
 
+struct SurfaceBinding {
+    albedo: u32,
+    values: [f32; SURFACE_FLOATS],
+    uniform: wgpu::Buffer,
+    group: wgpu::BindGroup,
+}
+
 struct GpuMesh {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -582,6 +590,7 @@ pub struct NativeRenderer {
     spot_light: Option<SpotLight>,
     animation: [f32; 4],
     benders: [[f32; 4]; 8],
+    origin_tile: [f32; 2],
     format: wgpu::TextureFormat,
     offscreen: Option<OffscreenTarget>,
     post_options: Option<std::sync::Arc<PostOptions>>,
@@ -597,6 +606,8 @@ pub struct NativeRenderer {
     translucent_pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
     textures: HashMap<u32, MeshTexture>,
+    surface_default: wgpu::Buffer,
+    surface_materials: HashMap<u32, SurfaceBinding>,
     point_lights: [[f32; 8]; 4],
     sun: [f32; 8],
     spot: [f32; 16],
@@ -667,8 +678,26 @@ impl NativeRenderer {
                             },
                             count: None,
                         },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 64,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: wgpu::BufferSize::new(
+                                    (SURFACE_FLOATS * 4) as u64,
+                                ),
+                            },
+                            count: None,
+                        },
                     ],
                 });
+        let surface_default = gpu_buffer(
+            &gpu.device,
+            "native default surface settings",
+            (SURFACE_FLOATS * 4) as u64,
+            wgpu::BufferUsages::UNIFORM,
+        );
         let skin = Skin::new(&gpu);
         let shadow = ShadowMap::new(&gpu.device);
         let shadow_layout = gpu
@@ -823,6 +852,7 @@ impl NativeRenderer {
             spot_light: None,
             animation: [0.0; 4],
             benders: [[0.0; 4]; 8],
+            origin_tile: [0.0; 2],
             format,
             offscreen: None,
             post_options: None,
@@ -838,6 +868,8 @@ impl NativeRenderer {
             translucent_pipeline: translucent,
             texture_layout,
             textures: HashMap::new(),
+            surface_default,
+            surface_materials: HashMap::new(),
             point_lights: [[0.0; 8]; 4],
             sun: [0.0; 8],
             spot: [0.0; 16],
@@ -1071,6 +1103,18 @@ impl NativeRenderer {
         colors: &[[f32; 3]],
         joints: &[u32],
     ) -> Result<(), RenderError> {
+        self.upload_mesh_surfaces(geometry_id, mesh, color_srgb, uvs, (colors, &[]), joints)
+    }
+
+    pub fn upload_mesh_surfaces(
+        &mut self,
+        geometry_id: u32,
+        mesh: &MeshData,
+        color_srgb: [f32; 3],
+        uvs: &[[f32; 2]],
+        (colors, surfaces): (&[[f32; 3]], &[f32]),
+        joints: &[u32],
+    ) -> Result<(), RenderError> {
         if geometry_id == 0 {
             return Err(RenderError::ReservedGeometryId);
         }
@@ -1095,6 +1139,11 @@ impl NativeRenderer {
                 "mesh UV count differs from vertex count".into(),
             ));
         }
+        if !surfaces.is_empty()
+            && (surfaces.len() != vertex_count || surfaces.iter().any(|id| !id.is_finite()))
+        {
+            return Err(RenderError::Resource("invalid vertex surface ids".into()));
+        }
         let mut interleaved = Vec::with_capacity(vertex_count * (VERTEX_BYTES / 4));
         let mut bounds = [mesh.positions[0]; 2];
         for (index, (position, normal)) in mesh.positions.iter().zip(&mesh.normals).enumerate() {
@@ -1110,6 +1159,7 @@ impl NativeRenderer {
                 .map(|rgb| srgb_to_linear(*rgb))
                 .unwrap_or([1.0; 4]);
             interleaved.extend_from_slice(&color[..3]);
+            interleaved.push(surfaces.get(index).copied().unwrap_or_default());
             interleaved.push(f32::from_bits(
                 joints.get(index).copied().unwrap_or_default(),
             ));
@@ -1330,6 +1380,7 @@ impl NativeRenderer {
         self.set_frame_time(time);
         self.animation[1] = origin[0].rem_euclid(256.0) as f32;
         self.animation[2] = origin[1].rem_euclid(256.0) as f32;
+        self.origin_tile = origin.map(|value| (value / 256.0).floor() as f32);
         self.benders = [[0.0; 4]; 8];
         for (target, &[x, z, radius, strength]) in self.benders.iter_mut().zip(benders) {
             *target = [
@@ -1497,26 +1548,101 @@ impl NativeRenderer {
         self.bind_albedo(view, sampler)
     }
 
+    pub fn set_surface_patterns(
+        &mut self,
+        id: u32,
+        patterns: [[f32; 5]; 9],
+        detail: bool,
+    ) -> Result<(), RenderError> {
+        let albedo = self
+            .materials
+            .get(&id)
+            .ok_or_else(|| {
+                RenderError::Resource("surface patterns need a registered Standard material".into())
+            })?
+            .albedo;
+        if patterns
+            .iter()
+            .any(|row| row[0] <= 0.0 || row.iter().any(|x| !x.is_finite()))
+        {
+            return Err(RenderError::Resource(
+                "invalid Standard surface pattern parameters".into(),
+            ));
+        }
+        let mut data = [0.0; SURFACE_FLOATS];
+        for (index, row) in patterns.iter().enumerate() {
+            data[index * 4..index * 4 + 4].copy_from_slice(&row[..4]);
+            data[36 + index] = row[4];
+        }
+        data[48] = 1.0;
+        data[49] = u8::from(detail) as f32;
+        let device = &self.gpu.device;
+        let queue = &self.gpu.queue;
+        if let Some(cached) = self
+            .surface_materials
+            .get_mut(&id)
+            .filter(|entry| entry.albedo == albedo)
+        {
+            if cached.values != data {
+                queue.write_buffer(&cached.uniform, 0, bytemuck::cast_slice(&data));
+                cached.values = data;
+            }
+            return Ok(());
+        }
+        let uniform = gpu_buffer(
+            device,
+            "native surface material settings",
+            (SURFACE_FLOATS * 4) as u64,
+            wgpu::BufferUsages::UNIFORM,
+        );
+        queue.write_buffer(&uniform, 0, bytemuck::cast_slice(&data));
+        let texture = &self.textures[&albedo];
+        let group = self.albedo_group(&texture.view, &texture.sampler, &uniform);
+        self.surface_materials.insert(
+            id,
+            SurfaceBinding {
+                albedo,
+                uniform,
+                group,
+                values: data,
+            },
+        );
+        Ok(())
+    }
+
     fn bind_albedo(&self, view: wgpu::TextureView, sampler: wgpu::Sampler) -> MeshTexture {
-        let group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("manifoldx-albedo"),
-            layout: &self.texture_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-            ],
-        });
+        let group = self.albedo_group(&view, &sampler, &self.surface_default);
         MeshTexture {
             group,
             view,
             sampler,
         }
+    }
+
+    fn albedo_group(
+        &self,
+        view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        surface: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("manifoldx-albedo"),
+            layout: &self.texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 64,
+                    resource: surface.as_entire_binding(),
+                },
+            ],
+        })
     }
 
     /// Render the World's instances offscreen and return an owned RGBA image.
@@ -2072,6 +2198,7 @@ impl NativeRenderer {
             globals[132..136].copy_from_slice(&[color[0], color[1], color[2], 1.0]);
             globals[136..138].copy_from_slice(&range);
         }
+        globals[140..142].copy_from_slice(&self.origin_tile);
         self.gpu
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&globals));
@@ -2208,7 +2335,12 @@ impl NativeRenderer {
                             &self.pipeline
                         };
                         pass.set_pipeline(pipeline);
-                        pass.set_bind_group(1, &self.textures[&group.albedo].group, &[]);
+                        let material = group
+                            .surface
+                            .and_then(|id| self.surface_materials.get(&id))
+                            .map(|surface| &surface.group)
+                            .unwrap_or(&self.textures[&group.albedo].group);
+                        pass.set_bind_group(1, material, &[]);
                         pass.set_bind_group(3, scene, &[]);
                     }
                     let mesh = self
@@ -2539,6 +2671,12 @@ impl NativeRenderer {
                 .material_id
                 .filter(|id| !shadow && ids.is_none() && self.fragments.contains_key(id));
             let manual = manual.filter(|_| !shadow);
+            let surface = instance.material_id.filter(|id| {
+                !shadow
+                    && ids.is_none()
+                    && effects.vertex_colors
+                    && self.surface_materials.contains_key(id)
+            });
             let group = groups
                 .entry((
                     rank,
@@ -2548,6 +2686,7 @@ impl NativeRenderer {
                     alpha_material,
                     fragment,
                     manual,
+                    surface,
                 ))
                 .or_insert_with(|| DrawGroup {
                     geometry_id,
@@ -2556,6 +2695,7 @@ impl NativeRenderer {
                     fragment,
                     manual,
                     axis: mesh.axis,
+                    surface,
                     rank,
                     first_slot: slot,
                     instances: 0,
@@ -2759,6 +2899,7 @@ struct DrawGroup {
     fragment: Option<u32>,
     manual: Option<u32>,
     axis: bool,
+    surface: Option<u32>,
     rank: (bool, bool),
     first_slot: u32,
     instances: u32,
@@ -2783,13 +2924,13 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
         shader_location: 7,
     },
     wgpu::VertexAttribute {
-        format: wgpu::VertexFormat::Float32x3,
+        format: wgpu::VertexFormat::Float32x4,
         offset: 32,
         shader_location: 9,
     },
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Uint32,
-        offset: 44,
+        offset: 48,
         shader_location: 12,
     },
 ];
@@ -2861,7 +3002,8 @@ const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLay
     attributes: &INSTANCE_ATTRIBUTES,
 };
 
-const SHADER: &str = r#"
+const SHADER: &str = concat!(
+    r#"
 struct PointLight {
     position: vec4<f32>,
     rgb_intensity: vec4<f32>,
@@ -2888,10 +3030,17 @@ struct Camera {
     environment: vec4<f32>,
     fog_color: vec4<f32>,
     fog_range: vec4<f32>,
+    origin_tile: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var albedo_sampler: sampler;
 @group(1) @binding(1) var albedo_texture: texture_2d<f32>;
+struct SurfaceSettings {
+    patterns: array<vec4<f32>, 9>,
+    darks: array<vec4<f32>, 3>,
+    options: vec4<f32>,
+};
+@group(1) @binding(64) var<uniform> surface_settings: SurfaceSettings;
 @group(2) @binding(0) var<storage, read> joint_mats: array<mat4x4<f32>>;
 struct ShadowData {
     matrices: array<mat4x4<f32>, 4>,
@@ -2934,7 +3083,7 @@ struct VertexIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(7) uv: vec2<f32>,
-    @location(9) color: vec3<f32>,
+    @location(9) color: vec4<f32>,
     @location(12) joints: u32,
 };
 struct InstanceIn {
@@ -2961,6 +3110,7 @@ struct VertexOut {
     @location(6) @interpolate(flat) cut: vec4<f32>,
     @location(7) @interpolate(flat) ripple: f32,
     @location(8) @interpolate(flat) fade: f32,
+    @location(9) surface: f32,
 };
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
@@ -3070,7 +3220,7 @@ fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     }
     out.clip_position = select(vec4<f32>(0.0, 0.0, -1.0, 1.0), camera.view_proj * displayed, instance.m3.w != 0.0);
     out.normal = transform_normal(model, normal);
-    out.color = instance.color.rgb * select(vec3<f32>(1.0), in.color * instance.tint, instance.effects.w > 0.0);
+    out.color = instance.color.rgb * select(vec3<f32>(1.0), in.color.xyz * instance.tint, instance.effects.w > 0.0);
     out.effects = instance.effects;
     out.cut = instance.cut;
     out.ripple = instance.motion.z;
@@ -3078,6 +3228,7 @@ fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     out.world_position = world.xyz;
     out.uv = in.uv;
     out.style = instance.style;
+    out.surface = in.color.w;
     return out;
 }
 
@@ -3191,7 +3342,7 @@ fn phong_color(in: VertexOut, n: vec3<f32>) -> vec3<f32> {
             let distance_sq = max(dot(offset, offset), 0.0001);
             let radiance = light.rgb_intensity.rgb * light.rgb_intensity.a / distance_sq;
             let highlight = pow(max(dot(reflect(-direction, n), view), 0.0), in.style.x);
-            color += (in.color * incidence + vec3<f32>(highlight)) * radiance;
+            color += (in.color.xyz * incidence + vec3<f32>(highlight)) * radiance;
         }
     }
     return color;
@@ -3218,6 +3369,14 @@ fn fs_shadow(in: VertexOut) {
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let uv_dx = dpdx(in.uv);
     let uv_dy = dpdy(in.uv);
+    let pattern_normal = abs(safe_normalize(in.normal));
+    let pattern_pos = in.world_position + vec3<f32>(camera.animation.y, 0.0, camera.animation.z);
+    let pattern_uv = select(select(pattern_pos.xy, pattern_pos.zy, pattern_normal.x >= pattern_normal.z),
+        pattern_pos.xz, pattern_normal.y >= pattern_normal.x && pattern_normal.y >= pattern_normal.z);
+    let pattern_width = length(fwidth(pattern_uv));
+    let detail_x = length(dpdx(pattern_pos.xz));
+    let detail_y = length(dpdy(pattern_pos.xz));
+    let detail_width = vec2<f32>(sqrt(detail_x * detail_y), max(detail_x, detail_y));
     if in.fade < 1.0 && fade_dropped(in.clip_position.xy, in.fade) {
         discard;
     }
@@ -3249,10 +3408,20 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         if texel.a < 0.5 { discard; }
         albedo = texel.rgb;
     }
+    var roughness = in.style.x;
+    if mode != 4u && surface_settings.options.x > 0.0 {
+        let surface_id = i32(in.surface + 0.5);
+        albedo = surface_albedo(albedo, surface_id, pattern_uv, pattern_width);
+        if surface_settings.options.y > 0.0 {
+            let details = detail_surface(albedo, surface_id, pattern_pos.xz, detail_width,
+                distance(camera.position.xyz, in.world_position));
+            albedo = details.xyz;
+            roughness = clamp(roughness + details.w, 0.04, 1.0);
+        }
+    }
     let v = safe_normalize(camera.position.xyz - in.world_position);
     var color = 0.03 * albedo * in.style.z;
     if camera.environment.y > 0.0 {
-        let roughness = in.style.x;
         let metallic = in.style.y;
         let nv = max(dot(n, v), 0.0001);
         let f0 = mix(vec3<f32>(0.04), albedo, metallic);
@@ -3269,14 +3438,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let offset = light.position.xyz - in.world_position;
             let dist_sq = max(dot(offset, offset), 0.0001);
             let radiance = light.rgb_intensity.rgb * light.rgb_intensity.a / dist_sq;
-            color += standard_light(n, v, safe_normalize(offset), albedo, in.style.x, in.style.y, radiance);
+            color += standard_light(n, v, safe_normalize(offset), albedo, roughness, in.style.y, radiance);
         }
     }
     let sun = camera.sun;
     if sun.rgb_intensity.a > 0.0 {
         let l = safe_normalize(-sun.direction.xyz);
         let radiance = sun.rgb_intensity.rgb * sun.rgb_intensity.a * shadow_factor(1.0, in.world_position, n, l);
-        color += standard_light(n, v, l, albedo, in.style.x, in.style.y, radiance);
+        color += standard_light(n, v, l, albedo, roughness, in.style.y, radiance);
     }
     let spot = camera.spot;
     if spot.rgb_intensity.a > 0.0 {
@@ -3290,7 +3459,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let attenuation = cone * cone * range_fade * range_fade / (dist * dist + 0.0001);
         let radiance = spot.rgb_intensity.rgb * spot.rgb_intensity.a * attenuation
                      * shadow_factor(2.0, in.world_position, n, l);
-        color += standard_light(n, v, l, albedo, in.style.x, in.style.y, radiance);
+        color += standard_light(n, v, l, albedo, roughness, in.style.y, radiance);
     }
     if in.ripple > 0.0 {
         let tau = 6.28318530718;
@@ -3311,7 +3480,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(color, in.effects.x);
 }
-"#;
+"#,
+    include_str!("surface.wgsl")
+);
 
 /// sRGB to linear for a colour a person chose, matching the engine's material rule.
 pub fn srgb_to_linear(color: [f32; 3]) -> [f32; 4] {
