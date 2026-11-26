@@ -414,9 +414,11 @@ impl<A: DesktopApplication> Desktop<'_, A> {
         context.renderer.queue().submit([encoder.finish()]);
         let submit = submitted_at.elapsed();
         drop(color);
-        if self.options.suppress_present {
+        if self.options.suppress_present && self.options.sample_limit == Some(self.presents + 1) {
+            // The diagnostic submits the final frame but never presents it.
+            // Exit without another acquisition on the discarded swapchain image.
             drop(texture);
-            return Ok(true);
+            return Ok(false);
         }
         context.window.pre_present_notify();
         let presenting_at = Instant::now();
