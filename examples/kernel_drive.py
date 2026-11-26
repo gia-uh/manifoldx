@@ -59,5 +59,39 @@ def main():
     print(f"Other car speed {cars[1, 0]:.3f}, position {cars[1, 2]:.3f}")
 
 
+def desktop_scene():
+    """Show both cars. Hold W to accelerate the red car and release to brake."""
+    import manifoldx as mx
+    from manifoldx.components import Material, Mesh, Transform
+
+    engine = mx.Engine("Resident Drive", width=800, height=600, max_entities=32)
+    world = engine.world
+    world.register(Car)
+    world.register(Player)
+    engine.camera.set_pose(position=(1.5, 5, 10), target=(1.5, 0, 0))
+    mesh = mx.geometry.cube(0.65, 0.65, 0.65)
+    engine.spawn(
+        Mesh(mesh),
+        Material(mx.material.flat("#ff3010")),
+        Transform(pos=(-200, 0, 0)),
+        Car(pos=(-2, 0, 0), forward=(1, 0, 0)),
+        Player(),
+    )
+    engine.spawn(
+        Mesh(mesh),
+        Material(mx.material.flat("#10e040")),
+        Transform(pos=(200, 0, 0)),
+        Car(pos=(-2, 0, -1.6), forward=(1, 0, 0)),
+    )
+    install_steering(world, lambda _: engine.input.pressed_keys)
+    engine.bind_position(drive, field="pos", target="wgsl")
+    return engine
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if sys.argv[1:] == ["--desktop"]:
+        desktop_scene().run()
+    else:
+        main()
