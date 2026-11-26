@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import time
+from threading import Event
 from pathlib import Path
 
 import manifoldx as mx
@@ -11,9 +12,10 @@ import numpy as np
 from PIL import Image
 
 from manifoldx.camera import Camera
-from manifoldx.components import Layer, Material, Mesh, Transform
-from manifoldx.resources import DirectionalLight, FlatMaterial, StandardMaterial, plane
+from manifoldx.components import Baked, Layer, Material, Mesh, Transform
+from manifoldx.resources import SURFACE_BAKED, DirectionalLight, FlatMaterial, StandardMaterial, plane
 from manifoldx.streaming import MeshData, Streamer, _pack_native_vertices
+from manifoldx.textures import layer_mips, texture_array, write_layer, write_texture
 
 
 def rejected(call, message):
@@ -39,7 +41,9 @@ def engine_for(name):
 
 
 def solid(pixels, channel):
-    rgb = np.median(pixels, axis=(0, 1))
+    height, width = pixels.shape[:2]
+    center = pixels[height // 3:height * 2 // 3, width // 3:width * 2 // 3]
+    rgb = np.median(center, axis=(0, 1))
     assert rgb[channel] > max(np.delete(rgb, channel)) + 40, rgb
 
 
@@ -207,6 +211,75 @@ def async_stream(output):
     return stream.stats()
 
 
+def cancellation(output):
+    engine = engine_for("Cancel and reuse a streamed key")
+    started, finish = Event(), Event()
+    first = True
+
+    def build(request):
+        nonlocal first
+        geometry = plane(2.5, 2.5)
+        block = first
+        first = False
+        if block:
+            started.set()
+            assert finish.wait(3)
+        color = (0.8, 0.05, 0.05) if block else (0.06, 0.84, 0.1)
+        return MeshData(geometry["positions"], geometry["normals"],
+                        np.tile(np.array(color, np.float32), (4, 1)), geometry["indices"])
+
+    stream = Streamer(engine, 4, build, radius=0, ready_radius=0, request=True)
+    stream.focus(0, 0)
+    assert started.wait(1)
+    stream.focus(4, 0)
+    stream.focus(0, 0)
+    finish.set()
+    for _ in range(90):
+        stream.focus(0, 0)
+        image = engine.render_frame()
+        if stream.settled and stream.stats()["stale"]:
+            break
+        time.sleep(0.002)
+    stats = stream.stats()
+    assert stats["stale"] >= 1 and stats["uploaded"] == 1 and stats["rejected"] == 0, stats
+    rgb = save(output, "reused-key", image)
+    assert rgb[1] > rgb[0] + 40, rgb
+    stream.close()
+    engine.render_frame()
+    assert engine.last_frame["stream_resources"] == [0, 0]
+    engine.close()
+    return stats
+
+
+def patch(output, fault):
+    engine = engine_for("Isolated array patch")
+    texture = texture_array(engine, 2, 16)
+    geometry = plane(1.1, 1.6)
+    geometry["baked_uv"] = geometry.pop("uvs")
+    geometry["colors"] = np.ones((4, 3), np.float32)
+    geometry["surfaces"] = np.full(4, SURFACE_BAKED, np.float32)
+    red = np.broadcast_to(np.asarray((220, 30, 40), np.uint8), (16, 16, 3))
+    blue = np.broadcast_to(np.asarray((30, 40, 220), np.uint8), (16, 16, 3))
+    write_layer(engine, texture, 0, layer_mips(red))
+    write_layer(engine, texture, 1, layer_mips(blue))
+    mat = StandardMaterial("#ffffff", roughness=0.8, vertex_colors=True, baked=texture)
+    engine.spawn(Mesh(geometry), Material(mat), Transform(pos=((-0.7, 0, 0), (0.7, 0, 0))),
+                 Baked(layer=[0, 1]), n=2)
+    first = engine.render_frame()
+    patch_rgba = np.broadcast_to(np.asarray((30, 220, 40, 255), np.uint8), (8, 8, 4))
+    write_texture(engine, texture, patch_rgba, (4, 4), layer=1 if fault == "layer" else 0)
+    assert rejected(lambda: write_texture(engine, texture, patch_rgba, (4, 4), layer=2), "outside")
+    after = engine.render_frame()
+    save(output, "array-before", first)
+    save(output, "array-after", after)
+    changed = np.any(first != after, axis=2)
+    counts = [int(changed[:, :80].sum()), int(changed[:, 80:].sum())]
+    assert counts[0] > 20 and counts[1] == 0, counts
+    assert counts[0] < int(np.sum(first[:, :80, 0] > 100)), counts
+    engine.close()
+    return {"changed_pixels_by_layer": counts}
+
+
 def capsule():
     import native
     from manifoldx._core_native import _StreamBuilder
@@ -237,8 +310,8 @@ def portable_rows(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule"))
-    parser.add_argument("--fault", choices=("refresh", "albedo", "atomic", "late"))
+    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel"))
+    parser.add_argument("--fault", choices=("refresh", "albedo", "atomic", "late", "layer"))
     args = parser.parse_args()
     assert sys.flags.isolated
     assert Path(mx.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
@@ -247,8 +320,10 @@ def main():
         result = async_stream(args.output)
     elif args.case == "capsule":
         result = capsule()
+    elif args.case == "cancel":
+        result = cancellation(args.output)
     else:
-        case = {"views": views, "albedo": albedo, "transaction": transaction}[args.case]
+        case = {"views": views, "albedo": albedo, "transaction": transaction, "patch": patch}[args.case]
         result = case(args.output, args.fault)
     (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))
