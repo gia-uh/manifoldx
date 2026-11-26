@@ -67,9 +67,15 @@ def main():
         if args.disable != ("raw" if cls is Raw else "generated"):
             assert engine.compute(cls) is cls
     results = []
+    image_centers = []
     for frame in range(2):
         image = engine.render_frame(supersample=1)
         Image.fromarray(image).save(args.output / f"frame-{frame}.png")
+        hits = np.all(image[..., :3] == (0xCD, 0x40, 0x34), axis=-1)
+        image_centers.append([
+            float(xs.mean()) if xs.size else None
+            for xs in (np.nonzero(half)[1] for half in np.split(hits, 2))
+        ])
         if native:
             positions = engine.world.query("Transform").read().numpy()[:, :3].tolist()
         else:
@@ -87,7 +93,10 @@ def main():
             "compute_passes_ns": timings,
             "frame_sample_unchanged": before == engine.last_frame,
         }, indent=2) + "\n")
+    (args.output / "image-centers.json").write_text(json.dumps(image_centers) + "\n")
     assert results == [[-1.5, 0.75], [-2.5, 2.0]], "compute dispatch or dependency produced wrong coordinates"
+    assert all(x is not None for centers in image_centers for x in centers), "missing compute-driven mesh ROI"
+    np.testing.assert_allclose(image_centers, [[40, 63], [29.5, 76]], atol=1.0, rtol=0)
 
 
 if __name__ == "__main__":
