@@ -197,7 +197,7 @@ class _NativeEngine:
 
         def invoke(snapshot, commands):
             clock = snapshot.clock
-            self.elapsed = self._time_base + clock.time + clock.dt
+            self.elapsed = self._time_base + clock.time
             data = {key: snapshot.read(key) for key in columns}
             selected = None
             for value in data.values():
@@ -449,6 +449,7 @@ class _NativeEngine:
             self.desktop_report = self._world._loop.run_desktop(
                 self._graphics, options, self._world._systems, startup
             )
+            self.elapsed = self.desktop_report["scheduler_frames"] / hz
             if location := os.environ.get("MANIFOLDX_DESKTOP_REPORT"):
                 Path(location).write_text(json.dumps(self.desktop_report, indent=2) + "\n")
         finally:
