@@ -94,6 +94,41 @@ render pipeline in `manifoldx.renderer`, not from `spawn`: the mesh is
 accepted, and the first frame that tries to build its pipeline fails with the
 geometry's id. Chapter 5 adds UVs and textures.
 
+## Custom fragment materials on the Rust renderer
+
+Use `MANIFOLDX_CORE=rust` to attach a Python fragment to a mesh. The decorator
+validates and lowers the function when the module imports. It reports an
+unsupported statement or expression through `ShaderCompileError`, with the
+file, line, and column. The lowered code runs as WGSL on the GPU.
+
+```python
+import numpy as np
+import manifoldx as mx
+from manifoldx.shader import Texture1D, Vec2, Vec4, clamp, f32, sample
+
+@mx.shader.fragment
+def heat(uv: Vec2, value: f32, cmap: Texture1D) -> Vec4:
+    return sample(cmap, clamp(value, 0.0, 1.0))
+
+texels = np.array([[221, 39, 51, 255], [33, 161, 227, 255]], dtype=np.uint8)
+heat_material = mx.ShaderMaterial(heat, value=0.25, cmap=texels)
+# Use Material(heat_material) on a mesh with UVs.
+```
+
+The mesh supplies the interpolated `Vec2` UV. Supply each other argument by
+name to `ShaderMaterial`. A scalar must fit a finite `f32`. A `Texture1D` takes
+a `(width, 4)` array of unsigned 8-bit RGBA texels. Sampling takes normalized
+coordinates and uses linear filtering with clamp-to-edge. The GPU decodes
+sRGB texels to linear RGB, keeps alpha linear, and encodes the fragment's
+linear RGB once on output. Argument order in the signature determines
+the layout. Keyword order has no effect.
+
+For hand-written mesh WGSL, extend `manifoldx.resources.Material` and keep
+`_compile()`, `uniform_type()`, `get_data()`, and `get_texture_bindings()`.
+Group 0 keeps mesh globals, model matrices, material uniforms, and lights
+at slots 0 through 3. Each sampler index returned by
+`get_texture_bindings()` keeps its texture view at the following slot.
+
 ## A basin in the evening sun
 
 The plaza starts with the fountain and one plane for the ground. The plane is
