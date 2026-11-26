@@ -1,4 +1,4 @@
-//! Billboard sprites and the colormap/starfield WGSL material path.
+//! Native billboards for sprites, stars, and world or screen labels.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
@@ -10,6 +10,8 @@ use crate::manual::{gpu_buffer, GLOBAL_FLOATS};
 use crate::math::model_from_transform_row;
 use crate::renderer::{Gpu, RenderError};
 use crate::scene::InstanceSource;
+
+const LABEL_SIZE: [u32; 3] = [256, 64, 256];
 
 const QUAD: [[f32; 3]; 6] = [
     [-1.0, -1.0, 0.0],
@@ -29,7 +31,7 @@ pub struct SpriteData {
 struct SpriteMaterial {
     pipeline: wgpu::RenderPipeline,
     params: wgpu::Buffer,
-    view: wgpu::TextureView,
+    view: Option<wgpu::TextureView>,
     data: SpriteData,
 }
 
@@ -50,6 +52,11 @@ struct SpriteFrame {
     draws: Vec<(u32, Range<u32>)>,
 }
 
+struct LabelAtlas {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
 pub(crate) struct SpritePass {
     format: wgpu::TextureFormat,
     quad: wgpu::Buffer,
@@ -58,6 +65,8 @@ pub(crate) struct SpritePass {
     materials: HashMap<u32, SpriteMaterial>,
     frames: [Option<SpriteFrame>; 2],
     capacity: usize,
+    labels: bool,
+    atlas: Option<LabelAtlas>,
 }
 
 impl SpritePass {
@@ -65,6 +74,7 @@ impl SpritePass {
         gpu: &Gpu,
         format: wgpu::TextureFormat,
         capacity: usize,
+        labels: bool,
     ) -> Result<Self, RenderError> {
         let device = gpu.device();
         if capacity as u64 * 64 > device.limits().max_storage_buffer_binding_size {
@@ -81,51 +91,44 @@ impl SpritePass {
             mag_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let uniform = wgpu::BufferBindingType::Uniform;
+        let storage = wgpu::BufferBindingType::Storage { read_only: true };
+        let both = wgpu::ShaderStages::VERTEX_FRAGMENT;
+        let vertex = wgpu::ShaderStages::VERTEX;
+        let fragment = wgpu::ShaderStages::FRAGMENT;
+        let mut entries = vec![
+            buffer_binding(0, uniform, both),
+            buffer_binding(1, storage, vertex),
+            buffer_binding(2, uniform, both),
+            buffer_binding(3, storage, vertex),
+        ];
+        let (texture_slot, view_dimension) = if labels {
+            (4, wgpu::TextureViewDimension::D2Array)
+        } else {
+            entries.push(buffer_binding(4, storage, vertex));
+            (5, wgpu::TextureViewDimension::D1)
+        };
+        entries.extend([
+            wgpu::BindGroupLayoutEntry {
+                binding: texture_slot,
+                visibility: fragment,
+                count: None,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension,
+                    multisampled: false,
+                },
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: texture_slot + 1,
+                visibility: fragment,
+                count: None,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            },
+        ]);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("native sprite resources"),
-            entries: &[
-                buffer_binding(
-                    0,
-                    wgpu::BufferBindingType::Uniform,
-                    wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ),
-                buffer_binding(
-                    1,
-                    wgpu::BufferBindingType::Storage { read_only: true },
-                    wgpu::ShaderStages::VERTEX,
-                ),
-                buffer_binding(
-                    2,
-                    wgpu::BufferBindingType::Uniform,
-                    wgpu::ShaderStages::FRAGMENT,
-                ),
-                buffer_binding(
-                    3,
-                    wgpu::BufferBindingType::Storage { read_only: true },
-                    wgpu::ShaderStages::VERTEX,
-                ),
-                buffer_binding(
-                    4,
-                    wgpu::BufferBindingType::Storage { read_only: true },
-                    wgpu::ShaderStages::VERTEX,
-                ),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    count: None,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D1,
-                        multisampled: false,
-                    },
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    count: None,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                },
-            ],
+            label: Some("native billboard resources"),
+            entries: &entries,
         });
         Ok(Self {
             format,
@@ -135,6 +138,8 @@ impl SpritePass {
             materials: HashMap::new(),
             frames: [None, None],
             capacity,
+            labels,
+            atlas: None,
         })
     }
 
@@ -144,7 +149,9 @@ impl SpritePass {
         id: u32,
         data: SpriteData,
     ) -> Result<(), RenderError> {
-        if data.rgba.len() != 256 * 4 || data.values.iter().any(|value| !value.is_finite()) {
+        if (!self.labels && data.rgba.len() != 256 * 4)
+            || data.values.iter().any(|value| !value.is_finite())
+        {
             return Err(RenderError::Resource(
                 "invalid sprite uniform or colormap".into(),
             ));
@@ -184,7 +191,7 @@ impl SpritePass {
             "fs_main",
             (
                 wgpu::FrontFace::Ccw,
-                None,
+                self.labels.then_some(wgpu::BlendState::ALPHA_BLENDING),
                 wgpu::PrimitiveTopology::TriangleList,
             ),
         );
@@ -201,7 +208,7 @@ impl SpritePass {
         );
         gpu.queue()
             .write_buffer(&params, 0, bytemuck::cast_slice(&data.values));
-        let view = upload_1d(gpu, &data.rgba);
+        let view = (!self.labels).then(|| upload_1d(gpu, &data.rgba));
         self.materials.insert(
             id,
             SpriteMaterial {
@@ -217,6 +224,70 @@ impl SpritePass {
         Ok(())
     }
 
+    pub(crate) fn upload_tile(
+        &mut self,
+        gpu: &Gpu,
+        layer: u32,
+        rgba: &[u8],
+    ) -> Result<(), RenderError> {
+        let [width, height, depth_or_array_layers] = LABEL_SIZE;
+        let device = gpu.device();
+        if !self.labels
+            || layer >= depth_or_array_layers
+            || rgba.len() != (width * height * 4) as usize
+            || device.limits().max_texture_array_layers < depth_or_array_layers
+        {
+            return Err(RenderError::Resource(
+                "invalid native label atlas layer".into(),
+            ));
+        }
+        let atlas = self.atlas.get_or_insert_with(|| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("native label atlas"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            LabelAtlas { texture, view }
+        });
+        gpu.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &atlas.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
+    }
+
     pub(crate) fn prepare(
         &mut self,
         gpu: &Gpu,
@@ -229,7 +300,15 @@ impl SpritePass {
         if let Some(frame) = &mut self.frames[view] {
             frame.draws.clear();
         }
-        let Some(marker) = world.component_index("PointCloud") else {
+        if self.labels && self.atlas.is_none() {
+            return Ok(());
+        }
+        let marker_name = if self.labels {
+            "TextLabel"
+        } else {
+            "PointCloud"
+        };
+        let Some(marker) = world.component_index(marker_name) else {
             return Ok(());
         };
         let Some(material) = source.material else {
@@ -256,7 +335,12 @@ impl SpritePass {
         let ColumnData::U32(material_ids) = materials.data else {
             unreachable!("validated material schema")
         };
-        let scalars = scalar(world, "ScalarValue", &entities, 0.0)?;
+        let scalar_name = if self.labels {
+            "TextLabel"
+        } else {
+            "ScalarValue"
+        };
+        let scalars = scalar(world, scalar_name, &entities, 0.0)?;
         let radii = scalar(world, "Radius", &entities, 1.0)?;
         let layer_ids = layers
             .map(|_| scalar(world, "Layer", &entities, 0.0))
@@ -274,7 +358,7 @@ impl SpritePass {
             let id = material_ids[i];
             if !self.materials.contains_key(&id) {
                 return Err(RenderError::Resource(format!(
-                    "point cloud needs a ColormapMaterial, found id {id}"
+                    "{marker_name} used an incompatible native billboard material id {id}"
                 )));
             }
             let group = groups.entry(id).or_default();
@@ -328,18 +412,29 @@ impl SpritePass {
             frame.draws.push((id, start..rows.models.len() as u32));
             frame.groups.entry(id).or_insert_with(|| {
                 let material = &self.materials[&id];
+                let mut entries = vec![
+                    resource(0, frame.globals.as_entire_binding()),
+                    resource(1, frame.transforms.as_entire_binding()),
+                    resource(2, material.params.as_entire_binding()),
+                    resource(3, frame.scalars.as_entire_binding()),
+                ];
+                let (texture_slot, view) = if let Some(atlas) = &self.atlas {
+                    (4, &atlas.view)
+                } else {
+                    entries.push(resource(4, frame.radii.as_entire_binding()));
+                    (5, material.view.as_ref().expect("sprite colormap"))
+                };
+                entries.extend([
+                    resource(texture_slot, wgpu::BindingResource::TextureView(view)),
+                    resource(
+                        texture_slot + 1,
+                        wgpu::BindingResource::Sampler(&self.sampler),
+                    ),
+                ]);
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("native sprite material"),
+                    label: Some("native billboard material"),
                     layout: &self.layout,
-                    entries: &[
-                        resource(0, frame.globals.as_entire_binding()),
-                        resource(1, frame.transforms.as_entire_binding()),
-                        resource(2, material.params.as_entire_binding()),
-                        resource(3, frame.scalars.as_entire_binding()),
-                        resource(4, frame.radii.as_entire_binding()),
-                        resource(5, wgpu::BindingResource::TextureView(&material.view)),
-                        resource(6, wgpu::BindingResource::Sampler(&self.sampler)),
-                    ],
+                    entries: &entries,
                 })
             });
         }

@@ -146,6 +146,7 @@ class _NativeEngine:
             self._world.register(name, kind=kind, width=size)
         self._registries = {"Mesh": {}, "Material": {}}
         self._manual_registry = MaterialRegistry()
+        self._label_atlas = None
         self._textures = 0
         self._graphics = _NativeGraphics()
         self._handlers = {"startup": [], "shutdown": []}
@@ -394,12 +395,16 @@ class _NativeEngine:
         }
         kind = types.get(type(material))
         if kind is None:
-            from manifoldx.viz import ColormapMaterial
+            from manifoldx.viz import ColormapMaterial, LabelMaterial
 
             if isinstance(material, ColormapMaterial):
                 self._graphics.sprite(
                     index, material._compile(),
                     material.get_data(1, None)[0].tolist(), material.get_lut().tobytes(),
+                )
+            elif isinstance(material, LabelMaterial):
+                self._graphics.label_material(
+                    index, material._compile(), material.get_data(1, None)[0].tolist(),
                 )
             else:
                 self._manual_material(index, material)
@@ -662,7 +667,20 @@ class _NativeEngine:
             self._native_environment = env
         self._graphics.environment(None if env is None else (env.intensity, env.show_skybox))
 
+    def get_label_atlas(self):
+        """Return the atlas of world and screen labels."""
+        from manifoldx.viz.text import LabelTextureAtlas
+
+        if self._label_atlas is None:
+            self._label_atlas = LabelTextureAtlas()
+        return self._label_atlas
+
     def _sync_scene(self):
+        atlas = self._label_atlas
+        if atlas is not None:
+            for layer in sorted(atlas.dirty_slices):
+                self._graphics.label_tile(layer, atlas._slices[layer].tobytes())
+            atlas.clear_dirty()
         self._sync_environment()
         self._graphics.fog(
             ((self.fog_start, self.fog_end), self.fog_color) if self.fog_enabled else None

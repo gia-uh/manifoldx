@@ -608,6 +608,7 @@ pub struct NativeRenderer {
     manual: HashMap<u32, ManualPipeline>,
     manual_frames: [Option<ManualFrame>; 2],
     sprites: Option<SpritePass>,
+    labels: Option<SpritePass>,
     invalid_materials: HashMap<u32, String>,
     instance_buffer: Option<InstanceBuffer>,
     max_instances: usize,
@@ -847,6 +848,7 @@ impl NativeRenderer {
             manual: HashMap::new(),
             manual_frames: [None, None],
             sprites: None,
+            labels: None,
             invalid_materials: HashMap::new(),
             instance_buffer: None,
             max_instances,
@@ -910,12 +912,45 @@ impl NativeRenderer {
 
     pub fn upload_sprite(&mut self, id: u32, data: SpriteData) -> Result<(), RenderError> {
         if self.sprites.is_none() {
-            self.sprites = Some(SpritePass::new(&self.gpu, self.format, self.max_instances)?);
+            self.sprites = Some(SpritePass::new(
+                &self.gpu,
+                self.format,
+                self.max_instances,
+                false,
+            )?);
         }
         self.sprites
             .as_mut()
             .expect("created above")
             .upload(&self.gpu, id, data)
+    }
+
+    pub fn upload_label(&mut self, id: u32, data: SpriteData) -> Result<(), RenderError> {
+        self.prepare_labels()?;
+        self.labels
+            .as_mut()
+            .expect("prepared above")
+            .upload(&self.gpu, id, data)
+    }
+
+    pub fn upload_label_tile(&mut self, layer: u32, rgba: &[u8]) -> Result<(), RenderError> {
+        self.prepare_labels()?;
+        self.labels
+            .as_mut()
+            .expect("prepared above")
+            .upload_tile(&self.gpu, layer, rgba)
+    }
+
+    fn prepare_labels(&mut self) -> Result<(), RenderError> {
+        if self.labels.is_none() {
+            self.labels = Some(SpritePass::new(
+                &self.gpu,
+                self.format,
+                self.max_instances,
+                true,
+            )?);
+        }
+        Ok(())
     }
 
     pub fn upload_manual(&mut self, id: u32, data: &ManualData) -> Result<(), RenderError> {
@@ -1834,22 +1869,24 @@ impl NativeRenderer {
 
         let read_started = Instant::now();
         let mut batch = read_instances(world, source, draw.ignore_transform)?;
-        if let Some(point_cloud) = world
-            .component_index("PointCloud")
-            .filter(|_| !batch.instances.is_empty())
-        {
-            let entities: Vec<_> = batch
-                .instances
-                .iter()
-                .map(|instance| instance.entity)
-                .collect();
-            let mut point_clouds = world
-                .memberships(point_cloud, &entities)
-                .map_err(|error| RenderError::Resource(error.to_string()))?
-                .into_iter();
-            batch
-                .instances
-                .retain(|_| !point_clouds.next().expect("one marker per instance"));
+        for marker in ["PointCloud", "TextLabel"] {
+            if let Some(column) = world
+                .component_index(marker)
+                .filter(|_| !batch.instances.is_empty())
+            {
+                let entities: Vec<_> = batch
+                    .instances
+                    .iter()
+                    .map(|instance| instance.entity)
+                    .collect();
+                let mut marked = world
+                    .memberships(column, &entities)
+                    .map_err(|error| RenderError::Resource(error.to_string()))?
+                    .into_iter();
+                batch
+                    .instances
+                    .retain(|_| !marked.next().expect("one marker per instance"));
+            }
         }
         let fades = draw.ids.is_none() && self.materials.values().any(|m| m.effects.faded);
         let tints = draw.ids.is_none() && self.materials.values().any(|m| m.effects.tinted);
@@ -1860,13 +1897,13 @@ impl NativeRenderer {
             .or(self.layer_filter.as_deref());
         // A layer can hide a caster from the camera without hiding its shadow.
         let sprite_view = usize::from(draw.secondary.is_some());
-        if draw.ids.is_none() && !draw.omit_draw {
-            if let Some(mut sprites) = self.sprites.take() {
-                let globals = self.material_globals(camera, &target, None);
-                let result =
-                    sprites.prepare(&self.gpu, world, source, layers, &globals, sprite_view);
-                self.sprites = Some(sprites);
-                result?;
+        if draw.ids.is_none()
+            && !draw.omit_draw
+            && (self.sprites.is_some() || self.labels.is_some())
+        {
+            let globals = self.material_globals(camera, &target, None);
+            for pass in self.sprites.iter_mut().chain(self.labels.iter_mut()) {
+                pass.prepare(&self.gpu, world, source, layers, &globals, sprite_view)?;
             }
         }
         let shadow_batch = (layers.is_some()
@@ -2149,8 +2186,8 @@ impl NativeRenderer {
                 }
             }
             if draw.ids.is_none() && !draw.omit_draw {
-                if let Some(sprites) = &self.sprites {
-                    let (draws, triangles) = sprites.draw(&mut pass, sprite_view);
+                for billboards in self.sprites.iter().chain(self.labels.iter()) {
+                    let (draws, triangles) = billboards.draw(&mut pass, sprite_view);
                     stats.draw_calls += draws;
                     stats.triangles += triangles;
                 }

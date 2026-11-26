@@ -79,6 +79,8 @@ enum Upload {
     Fragment(u32, FragmentData),
     Manual(u32, ManualData),
     Sprite(u32, SpriteData),
+    Label(u32, SpriteData),
+    LabelTile(u32, Vec<u8>),
     Axis(u32, [[f32; 3]; 2]),
 }
 
@@ -148,6 +150,8 @@ impl Scene {
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
                 Upload::Axis(id, points) => renderer.upload_axis(id, points)?,
+                Upload::Label(id, data) => renderer.upload_label(id, data)?,
+                Upload::LabelTile(layer, rgba) => renderer.upload_label_tile(layer, &rgba)?,
                 Upload::Sprite(id, data) => renderer.upload_sprite(id, data)?,
                 Upload::Manual(id, data) => renderer.upload_manual(id, &data)?,
                 Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
@@ -672,6 +676,27 @@ impl NativeGraphics {
             .unwrap()
             .uploads
             .push_back(Upload::Axis(id, points));
+    }
+
+    fn label_material(&self, id: u32, source: String, values: [f32; 4]) {
+        let data = SpriteData {
+            source,
+            values,
+            rgba: Vec::new(),
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Label(id, data));
+    }
+
+    fn label_tile(&self, layer: u32, rgba: &Bound<'_, PyBytes>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::LabelTile(layer, rgba.as_bytes().to_vec()));
     }
 
     fn sprite(&self, id: u32, source: String, values: [f32; 4], rgba: &Bound<'_, PyBytes>) {
