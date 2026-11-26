@@ -6,7 +6,7 @@ use manifoldx_core::ecs::{ColumnData, EntityId, World};
 
 use crate::manual::{gpu_buffer, GLOBAL_FLOATS};
 use crate::math::{model_from_transform_row, Mat4};
-use crate::renderer::{Gpu, RenderError, DEPTH_FORMAT};
+use crate::renderer::{FrameTarget, Gpu, RenderError};
 use crate::scene::InstanceSource;
 use crate::sprite::{read, scalar, world_error};
 
@@ -43,7 +43,7 @@ struct VolumeDraw {
 
 struct View {
     globals: wgpu::Buffer,
-    group: wgpu::BindGroup,
+    depth_group: Option<(wgpu::TextureView, wgpu::BindGroup)>,
     draws: HashMap<EntityId, VolumeDraw>,
     order: Vec<EntityId>,
 }
@@ -81,7 +81,17 @@ impl VolumePass {
         let sampler_type = wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering);
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("native DVR camera layout"),
-            entries: &[layout_entry(0, uniform)],
+            entries: &[
+                layout_entry(0, uniform),
+                layout_entry(
+                    1,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+            ],
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("native DVR textures and transform"),
@@ -113,13 +123,7 @@ impl VolumePass {
                 compilation_options: Default::default(),
             },
             primitive: Default::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
+            depth_stencil: None,
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -294,14 +298,9 @@ impl VolumePass {
                 (GLOBAL_FLOATS * 4) as u64,
                 wgpu::BufferUsages::UNIFORM,
             );
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("native DVR globals"),
-                layout: &self.globals_layout,
-                entries: &[binding(0, globals.as_entire_binding())],
-            });
             View {
                 globals,
-                group,
+                depth_group: None,
                 draws: HashMap::new(),
                 order: Vec::new(),
             }
@@ -381,17 +380,63 @@ impl VolumePass {
         Ok(())
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, index: usize) -> usize {
-        let Some(view) = &self.views[index] else {
-            return 0;
-        };
-        if !view.order.is_empty() {
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &view.group, &[]);
-            for id in &view.order {
-                pass.set_bind_group(1, &view.draws[id].group, &[]);
-                pass.draw(0..3, 0..1);
-            }
+    pub(crate) fn has_draws(&self, index: usize) -> bool {
+        self.views[index]
+            .as_ref()
+            .is_some_and(|view| !view.order.is_empty())
+    }
+
+    pub(crate) fn encode(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &FrameTarget<'_>,
+        index: usize,
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) -> usize {
+        let view = self.views[index]
+            .as_mut()
+            .expect("DVR view already prepared");
+        if view
+            .depth_group
+            .as_ref()
+            .is_none_or(|(depth, _)| depth != target.depth)
+        {
+            let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("native DVR camera and opaque depth"),
+                layout: &self.globals_layout,
+                entries: &[
+                    binding(0, view.globals.as_entire_binding()),
+                    binding(1, wgpu::BindingResource::TextureView(target.depth)),
+                ],
+            });
+            view.depth_group = Some((target.depth.clone(), group));
+        }
+        // The prior pass stores opaque depth. Sample it without attaching it
+        // to the volume pass, which only blends into the existing scene color.
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("manifoldx-native-dvr"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target.color,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            timestamp_writes: timestamps,
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(
+            0,
+            &view.depth_group.as_ref().expect("DVR depth bound").1,
+            &[],
+        );
+        for id in &view.order {
+            pass.set_bind_group(1, &view.draws[id].group, &[]);
+            pass.draw(0..3, 0..1);
         }
         view.order.len()
     }

@@ -2552,6 +2552,38 @@ impl NativeRenderer {
         }
         stats.upload_ns = elapsed_ns(upload_started.elapsed());
 
+        let draw_overlays = draw.ids.is_none() && !draw.omit_draw;
+        let has_axes = draw_overlays && draw_groups.iter().any(|group| group.axis);
+        let has_volume = draw_overlays
+            && self
+                .volumes
+                .as_ref()
+                .is_some_and(|volumes| volumes.has_draws(view_index));
+        let finish_with_overlay = has_volume && (has_axes || self.labels.is_some());
+        // Preserve the original timing interval across the split passes.
+        let start_timestamps = if has_volume {
+            target.timestamps.as_ref().and_then(|times| {
+                times
+                    .beginning_of_pass_write_index
+                    .map(|index| wgpu::RenderPassTimestampWrites {
+                        query_set: times.query_set,
+                        beginning_of_pass_write_index: Some(index),
+                        end_of_pass_write_index: None,
+                    })
+            })
+        } else {
+            target.timestamps.clone()
+        };
+        let end_timestamps = target.timestamps.as_ref().and_then(|times| {
+            times
+                .end_of_pass_write_index
+                .map(|index| wgpu::RenderPassTimestampWrites {
+                    query_set: times.query_set,
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: Some(index),
+                })
+        });
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("manifoldx-native-opaque-pass"),
@@ -2572,7 +2604,7 @@ impl NativeRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: target.timestamps,
+                timestamp_writes: start_timestamps,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2664,46 +2696,64 @@ impl NativeRenderer {
                     stats.draw_calls += draws;
                     stats.triangles += triangles;
                 }
-                if let Some(volumes) = &self.volumes {
-                    let draws = volumes.draw(&mut pass, view_index);
-                    if draws > 0 {
-                        stats.frame_order.push("volume");
-                    }
-                    stats.draw_calls += draws;
-                    stats.triangles += draws;
+                if !has_volume {
+                    self.encode_labels_and_axes(
+                        &mut pass,
+                        &draw_groups,
+                        view_index,
+                        has_axes,
+                        &mut stats,
+                    );
                 }
-                if let Some(labels) = &self.labels {
-                    let (draws, triangles) = labels.draw(&mut pass, view_index);
-                    if draws > 0 {
-                        stats.frame_order.push("label");
-                    }
-                    stats.draw_calls += draws;
-                    stats.triangles += triangles;
-                }
-                if draw_groups.iter().any(|group| group.axis) {
-                    stats.frame_order.push("axis");
-                }
-                let mut first = 0;
-                for group in &draw_groups {
-                    let end = first + group.instances;
-                    if group.axis {
-                        let id = group.manual.expect("axes carry a manual line material");
-                        let view = self.manual_frames[manual_index]
-                            .as_ref()
-                            .expect("axis frame prepared");
-                        let mesh = &self.meshes[&group.geometry_id];
-                        pass.set_pipeline(&self.manual[&id].pipelines[0]);
-                        pass.set_bind_group(0, &view.groups[&id], &[]);
-                        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                        pass.set_index_buffer(
-                            mesh.index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        pass.draw_indexed(0..mesh.index_count, 0, first..end);
-                        stats.draw_calls += 1;
-                    }
-                    first = end;
-                }
+            }
+        }
+
+        if has_volume {
+            let volume_timestamps = if finish_with_overlay {
+                None
+            } else {
+                end_timestamps.clone()
+            };
+            let draws = self.volumes.as_mut().expect("DVR pass prepared").encode(
+                &self.gpu,
+                encoder,
+                &target,
+                view_index,
+                volume_timestamps,
+            );
+            stats.frame_order.push("volume");
+            stats.draw_calls += draws;
+            stats.triangles += draws;
+            if finish_with_overlay {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("manifoldx-native-labels-and-axes"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target.color,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: target.depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: end_timestamps,
+                    ..Default::default()
+                });
+                self.encode_labels_and_axes(
+                    &mut pass,
+                    &draw_groups,
+                    view_index,
+                    has_axes,
+                    &mut stats,
+                );
             }
         }
 
@@ -2733,6 +2783,48 @@ impl NativeRenderer {
             stats.shadow_layers = frame.layers;
         }
         Ok(stats)
+    }
+
+    fn encode_labels_and_axes(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        groups: &[DrawGroup],
+        view_index: usize,
+        has_axes: bool,
+        stats: &mut RenderStats,
+    ) {
+        if let Some(labels) = &self.labels {
+            let (draws, triangles) = labels.draw(pass, view_index);
+            if draws > 0 {
+                stats.frame_order.push("label");
+            }
+            stats.draw_calls += draws;
+            stats.triangles += triangles;
+        }
+        if !has_axes {
+            return;
+        }
+        stats.frame_order.push("axis");
+        let instances = self.instance_buffer.as_ref().expect("axis instance buffer");
+        pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        let mut first = 0;
+        for group in groups {
+            let end = first + group.instances;
+            if group.axis {
+                let id = group.manual.expect("axes carry a manual line material");
+                let view = self.manual_frames[view_index]
+                    .as_ref()
+                    .expect("axis frame prepared");
+                let mesh = &self.meshes[&group.geometry_id];
+                pass.set_pipeline(&self.manual[&id].pipelines[0]);
+                pass.set_bind_group(0, &view.groups[&id], &[]);
+                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, first..end);
+                stats.draw_calls += 1;
+            }
+            first = end;
+        }
     }
 
     fn scene_bounds(&self, batch: &InstanceBatch) -> Option<([f32; 3], f32)> {

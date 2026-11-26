@@ -22,6 +22,7 @@ struct VolumeUniforms {
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
+@group(0) @binding(1) var scene_depth: texture_depth_2d;
 @group(1) @binding(0) var volume_tex:  texture_3d<f32>;
 @group(1) @binding(1) var vol_sampler: sampler;
 @group(1) @binding(2) var color_lut:   texture_2d<f32>;
@@ -42,7 +43,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOut {
         vec2<f32>(-1.0,  3.0),
     );
     var out: VertexOut;
-    out.clip_pos = vec4<f32>(pos[vid], 1.0, 1.0);  // the near plane under reversed depth: always passes
+    out.clip_pos = vec4<f32>(pos[vid], 1.0, 1.0);
     return out;
 }
 
@@ -102,8 +103,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     );
     // Unproject NDC near/far into world space.
     // Reversed depth: the near plane is z = 1, the far plane z = 0.
-    let inv_vp_near = inverse_mat4(globals.vp) * vec4<f32>(ndc, 1.0, 1.0);
-    let inv_vp_far  = inverse_mat4(globals.vp) * vec4<f32>(ndc, 0.0, 1.0);
+    let inv_vp = inverse_mat4(globals.vp);
+    let inv_vp_near = inv_vp * vec4<f32>(ndc, 1.0, 1.0);
+    let inv_vp_far  = inv_vp * vec4<f32>(ndc, 0.0, 1.0);
     let world_near = inv_vp_near.xyz / inv_vp_near.w;
     let world_far  = inv_vp_far.xyz  / inv_vp_far.w;
     let ro_world = world_near;
@@ -120,6 +122,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
 
     var t = max(t_near, 0.0);
+    // A cleared reverse-Z pixel has depth zero. For opaque geometry,
+    // unproject its actual depth and measure along the same world-space ray.
+    let depth = textureLoad(scene_depth, vec2<i32>(pixel), 0);
+    var clipped = false;
+    if depth > 0.0 {
+        let hit = inv_vp * vec4<f32>(ndc, depth, 1.0);
+        let t_opaque = dot(hit.xyz / hit.w - ro_world, rd_world);
+        if t_opaque <= t {
+            discard;
+        }
+        clipped = t_opaque < t_far;
+        t_far = min(t_far, t_opaque);
+    }
     var accum: vec4<f32> = vec4<f32>(0.0);
     var step_count: u32 = 0u;
     let inv_range = 1.0 / max(vu.vmax - vu.vmin, 1e-12);
@@ -136,8 +151,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
         // 1D LUTs encoded as 256x1 2D textures (wgpu portability).
         let rgb = textureSampleLevel(color_lut,   lut_sampler, vec2<f32>(s_n, 0.5), 0.0).rgb;
-        let a   = textureSampleLevel(opacity_lut, lut_sampler, vec2<f32>(s_n, 0.5), 0.0).r
-                  * vu.density_scale * vu.step_size;
+        // Integrate only the visible part of the last step at an opaque hit.
+        let step = select(vu.step_size, min(vu.step_size, t_far - t), clipped);
+        let a = textureSampleLevel(opacity_lut, lut_sampler, vec2<f32>(s_n, 0.5), 0.0).r
+                * vu.density_scale * step;
 
         accum = accum + (1.0 - accum.a) * vec4<f32>(rgb * a, a);
         t = t + vu.step_size;
