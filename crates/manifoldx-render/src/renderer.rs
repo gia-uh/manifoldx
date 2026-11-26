@@ -2835,8 +2835,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let v = safe_normalize(camera.position.xyz - in.world_position);
     var color = 0.03 * albedo * in.style.z;
     if camera.environment.y > 0.0 {
-        let metallic = in.style.x;
-        let roughness = in.style.y;
+        let roughness = in.style.x;
+        let metallic = in.style.y;
         let nv = max(dot(n, v), 0.0001);
         let f0 = mix(vec3<f32>(0.04), albedo, metallic);
         let f = f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * pow(1.0 - nv, 5.0);
