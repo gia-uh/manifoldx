@@ -218,6 +218,96 @@ pub struct FrameTarget<'a> {
     pub height: u32,
     pub clear: wgpu::Color,
     pub timestamps: Option<wgpu::RenderPassTimestampWrites<'a>>,
+    pub positions: Option<ResidentPositions<'a>>,
+}
+
+/// The position version published by the current frame barrier.
+pub struct ResidentPositions<'a> {
+    pub buffer: &'a wgpu::Buffer,
+    pub members: &'a [Option<manifoldx_core::ecs::EntityId>],
+    pub row_width: u32,
+    pub offset: u32,
+}
+
+struct PositionPass {
+    pipeline: wgpu::ComputePipeline,
+    metadata: wgpu::Buffer,
+    args: wgpu::Buffer,
+    capacity: u64,
+}
+
+impl PositionPass {
+    fn new(device: &wgpu::Device, instance_limit: usize) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("resident position culling"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("position.wgsl").into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("resident position culling"),
+            layout: None,
+            module: &module,
+            entry_point: Some("place"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let buffer = |label, size, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: usage | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let capacity = instance_limit as u64 * 32;
+        Self {
+            pipeline,
+            metadata: buffer(
+                "resident position bounds",
+                capacity,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            args: buffer("resident position args", 16, wgpu::BufferUsages::UNIFORM),
+            capacity,
+        }
+    }
+
+    fn encode(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        buffers: [&wgpu::Buffer; 3],
+        args: [u32; 4],
+        metadata: &[[u32; 8]],
+    ) {
+        debug_assert!(metadata.len() as u64 * 32 <= self.capacity);
+        gpu.queue
+            .write_buffer(&self.metadata, 0, bytemuck::cast_slice(metadata));
+        gpu.queue
+            .write_buffer(&self.args, 0, bytemuck::cast_slice(&args));
+        let entries = [
+            buffers[0],
+            &self.metadata,
+            buffers[1],
+            buffers[2],
+            &self.args,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(binding, buffer)| wgpu::BindGroupEntry {
+            binding: binding as u32,
+            resource: buffer.as_entire_binding(),
+        })
+        .collect::<Vec<_>>();
+        let binding = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident position culling"),
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &binding, &[]);
+        pass.dispatch_workgroups(args[2].div_ceil(64), 1, 1);
+    }
 }
 
 pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
@@ -292,6 +382,7 @@ pub struct NativeRenderer {
     materials: HashMap<u32, Material>,
     instance_buffer: Option<InstanceBuffer>,
     max_instances: usize,
+    position_pass: Option<PositionPass>,
 }
 
 impl NativeRenderer {
@@ -425,6 +516,7 @@ impl NativeRenderer {
             materials: HashMap::new(),
             instance_buffer: None,
             max_instances,
+            position_pass: None,
         };
         let white = renderer.make_texture(1, 1, &[&[255, 255, 255, 255]]);
         renderer.textures.insert(0, white);
@@ -755,6 +847,7 @@ impl NativeRenderer {
             height,
             clear: self.clear,
             timestamps: None,
+            positions: None,
         };
         let mut stats = self.encode_world(
             &mut encoder,
@@ -873,7 +966,12 @@ impl NativeRenderer {
         };
         let aspect = target.width as f32 / target.height as f32;
         let view_projection = camera.view_projection(aspect);
-        let draw_groups = self.pack_instances(&batch, &view_projection, &mut stats)?;
+        let draw_groups = self.pack_instances(
+            &batch,
+            &view_projection,
+            target.positions.as_ref(),
+            &mut stats,
+        )?;
         stats.read_ns = elapsed_ns(read_started.elapsed());
 
         let upload_started = Instant::now();
@@ -898,7 +996,9 @@ impl NativeRenderer {
                     buffer: self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("manifoldx-native-instances"),
                         size: capacity,
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        usage: wgpu::BufferUsages::VERTEX
+                            | wgpu::BufferUsages::COPY_DST
+                            | wgpu::BufferUsages::STORAGE,
                         mapped_at_creation: false,
                     }),
                     capacity_bytes: capacity,
@@ -906,6 +1006,28 @@ impl NativeRenderer {
             }
             let buffer = &self.instance_buffer.as_ref().expect("created above").buffer;
             self.gpu.queue.write_buffer(buffer, 0, &instance_data);
+        }
+        if let Some(source) = &target.positions {
+            let metadata: Vec<_> = draw_groups
+                .iter()
+                .flat_map(|group| group.positions.iter().copied())
+                .collect();
+            if metadata.iter().any(|row| row[0] != u32::MAX) {
+                let pass = self
+                    .position_pass
+                    .get_or_insert_with(|| PositionPass::new(&self.gpu.device, self.max_instances));
+                pass.encode(
+                    &self.gpu,
+                    encoder,
+                    [
+                        source.buffer,
+                        &self.instance_buffer.as_ref().expect("instance data").buffer,
+                        &self.camera_buffer,
+                    ],
+                    [source.row_width, source.offset, metadata.len() as u32, 0],
+                    &metadata,
+                );
+            }
         }
         stats.upload_ns = elapsed_ns(upload_started.elapsed());
 
@@ -989,47 +1111,60 @@ impl NativeRenderer {
         &self,
         batch: &InstanceBatch,
         view_projection: &Mat4,
+        positions: Option<&ResidentPositions<'_>>,
         stats: &mut RenderStats,
     ) -> Result<Vec<DrawGroup>, RenderError> {
-        let mut groups: BTreeMap<(u32, bool, u32), Vec<f32>> = BTreeMap::new();
+        let mut groups = BTreeMap::<_, DrawGroup>::new();
         for instance in &batch.instances {
             let mesh = self
                 .meshes
                 .get(&instance.geometry_id)
                 .ok_or(RenderError::UnknownGeometry(instance.geometry_id))?;
             let clip = view_projection.multiply(&instance.model);
-            if outside_frustum(&clip, mesh.bounds) {
+            let slot = instance.entity.slot();
+            let bound = positions.is_some_and(|source| {
+                source.members.get(slot as usize) == Some(&Some(instance.entity))
+            });
+            if !bound && outside_frustum(&clip, mesh.bounds) {
                 continue;
             }
             let material = instance
                 .material_id
                 .and_then(|id| self.materials.get(&id).copied())
                 .unwrap_or(Material::diffuse(mesh.color));
-            let entry = groups
-                .entry((
-                    instance.geometry_id,
-                    flips_winding(&instance.model),
-                    material.albedo,
-                ))
-                .or_default();
-            entry.extend_from_slice(&instance.model.to_columns());
-            entry.extend_from_slice(&material.color);
-            entry.extend_from_slice(&material.style);
-            stats.instances += 1;
-        }
-        Ok(groups
-            .into_iter()
-            .map(|((geometry_id, reversed, albedo), values)| {
-                debug_assert!(values.len().is_multiple_of(INSTANCE_FLOATS));
-                DrawGroup {
+            let geometry_id = instance.geometry_id;
+            let reversed = flips_winding(&instance.model);
+            let albedo = material.albedo;
+            let group = groups
+                .entry((geometry_id, reversed, albedo))
+                .or_insert_with(|| DrawGroup {
                     geometry_id,
                     reversed,
                     albedo,
-                    instances: (values.len() / INSTANCE_FLOATS) as u32,
-                    values,
-                }
-            })
-            .collect())
+                    instances: 0,
+                    values: Vec::new(),
+                    positions: Vec::new(),
+                });
+            group.values.extend_from_slice(&instance.model.to_columns());
+            group.values.extend_from_slice(&material.color);
+            group.values.extend_from_slice(&material.style);
+            if positions.is_some() {
+                let [[lx, ly, lz], [hx, hy, hz]] = mesh.bounds;
+                group.positions.push([
+                    if bound { slot } else { u32::MAX },
+                    lx.to_bits(),
+                    ly.to_bits(),
+                    lz.to_bits(),
+                    hx.to_bits(),
+                    hy.to_bits(),
+                    hz.to_bits(),
+                    0,
+                ]);
+            }
+            group.instances += 1;
+            stats.instances += 1;
+        }
+        Ok(groups.into_values().collect())
     }
 
     fn pack_instance_bytes(&self, groups: &[DrawGroup]) -> Vec<u8> {
@@ -1072,6 +1207,7 @@ struct DrawGroup {
     albedo: u32,
     instances: u32,
     values: Vec<f32>,
+    positions: Vec<[u32; 8]>,
 }
 
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
@@ -1212,7 +1348,7 @@ fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     let model = mat4x4<f32>(instance.m0, instance.m1, instance.m2, instance.m3);
     let world = model * vec4<f32>(in.position, 1.0);
     var out: VertexOut;
-    out.clip_position = camera.view_proj * world;
+    out.clip_position = select(vec4<f32>(0.0, 0.0, -1.0, 1.0), camera.view_proj * world, instance.m3.w != 0.0);
     out.normal = transform_normal(model, in.normal);
     out.color = instance.color.rgb;
     out.world_position = world.xyz;

@@ -381,6 +381,7 @@ impl<A: DesktopApplication> Desktop<'_, A> {
             width: context.size.width,
             height: context.size.height,
             clear: context.renderer.background(),
+            positions: None,
             timestamps: timing.map(|timing| wgpu::RenderPassTimestampWrites {
                 query_set: &timing.queries,
                 beginning_of_pass_write_index: Some(0),
