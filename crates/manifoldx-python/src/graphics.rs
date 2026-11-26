@@ -96,6 +96,8 @@ enum Upload {
     Material(u32, [f32; 3], Shading, StandardEffects),
     Surface(u32, Box<[[f32; 5]; 9]>, bool),
     Albedo(u32, u32, u32, Vec<Vec<u8>>),
+    TexturePatch(u32, [u32; 3], [u32; 2], Vec<u8>),
+    TextureRelease(u32),
     BakedArray(u32, u32, u32),
     BakedLayer(u32, u32, Vec<Vec<u8>>),
     Poses(Vec<PoseInput>),
@@ -281,6 +283,10 @@ impl Scene {
                 Upload::BakedLayer(id, layer, levels) => {
                     renderer.write_baked_layer(id, layer, &levels)?
                 }
+                Upload::TexturePatch(id, origin, size, bytes) => {
+                    renderer.write_texture_patch(id, origin, size, &bytes)?
+                }
+                Upload::TextureRelease(id) => renderer.release_texture(id),
                 Upload::Albedo(id, width, height, levels) => renderer.upload_albedo(
                     id,
                     width,
@@ -438,6 +444,11 @@ impl NativeGraphics {
         Self {
             scene: Arc::new(Mutex::new(Scene::new())),
         }
+    }
+
+    fn close(&self, py: Python<'_>) {
+        let old = std::mem::replace(&mut *self.scene.lock().unwrap(), Scene::new());
+        py.detach(move || drop(old));
     }
 
     fn camera(&self, args: CameraInput) -> PyResult<()> {
@@ -1214,6 +1225,27 @@ impl NativeGraphics {
             .unwrap()
             .uploads
             .push_back(Upload::BakedLayer(id, layer, levels));
+    }
+
+    fn texture_patch(&self, id: u32, origin: [u32; 3], size: [u32; 2], data: &Bound<'_, PyBytes>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::TexturePatch(
+                id,
+                origin,
+                size,
+                data.as_bytes().to_vec(),
+            ));
+    }
+
+    fn texture_release(&self, id: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::TextureRelease(id));
     }
 
     fn albedo(&self, py: Python<'_>, id: u32, width: u32, height: u32, levels: Vec<Py<PyBytes>>) {

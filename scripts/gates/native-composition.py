@@ -68,7 +68,7 @@ def capture(post, omit=None, late=False):
         )
         mesh(plane(2.4, 2.4), FlatMaterial("#e54519"), (8, 0, 0), layer=1)
         handle = TextureHandle(1, None, None, None, (40, 40))
-        handle._native_owner = engine
+        engine._track_texture(handle, view=True)
         mesh(plane(1.08, 0.85), StandardMaterial("#ffffff", albedo_map=handle), (-2.5, 0.5, 0))
     if omit != "sprite":
         engine.spawn(PointCloud(), Material(ColormapMaterial("viridis", 0, 1, lit=False)),

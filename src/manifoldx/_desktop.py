@@ -68,10 +68,14 @@ def _camera_layers(camera):
     return None if camera.layers is None else sorted(camera.layers)
 
 
-def _release_native_view(owner, index):
+def _release_native_texture(owner, index, view):
     engine = owner()
     if engine is not None and not engine._closed:
-        engine._release_view(index)
+        engine._texture_handles.pop(index, None)
+        if view:
+            engine._release_view(index)
+        else:
+            engine._graphics.texture_release(index)
 
 
 @dataclass
@@ -196,6 +200,7 @@ class _NativeEngine:
         self._label_atlas = None
         self._volume_registry = VolumeRegistry()
         self._textures = 0
+        self._texture_handles = {}
         self._views = {}
         self._texture_reads = {}
         self._graphics = _NativeGraphics()
@@ -398,7 +403,8 @@ class _NativeEngine:
                         commands.replace(key, entities, arrays[name])
                 if self._pending_destroy:
                     commands.destroy(tuple(dict.fromkeys(self._pending_destroy)))
-                self._sync_scene()
+                if self._desktop_ran:
+                    self._sync_scene()
             finally:
                 self._commands, self._entities = None, ()
                 self._snapshot = None
@@ -580,7 +586,8 @@ class _NativeEngine:
         for streamer in list(self._streamers):
             streamer.close()
         snapshot = self._world._native.snapshot()
-        self._world._native.destroy(snapshot["handles"])
+        entities = self._world._entities(snapshot["handles"])
+        self._world._native.destroy(self._world._handles(entities))
         meshes = self._registries["Mesh"]
         materials = self._registries["Material"]
         self._graphics.retire_scene([entry[0] for entry in meshes.values()],
@@ -645,10 +652,10 @@ class _NativeEngine:
         effects = None
         if kind == "standard":
             baked = material.baked
-            if baked is not None and getattr(baked, "_native_owner", None) is not self:
+            if baked is not None and not self._owns_texture(baked):
                 raise ValueError("baked texture array belongs to a different graphics owner")
             texture = material.albedo_map
-            if texture is not None and getattr(texture, "_native_owner", None) is not self:
+            if texture is not None and not self._owns_texture(texture):
                 raise ValueError("albedo texture belongs to a different graphics owner")
             params = (
                 material.roughness,
@@ -691,7 +698,7 @@ class _NativeEngine:
                 raise ValueError("manual WGSL sampler indices must follow the fixed mesh bindings")
             if binding in slots or binding + 1 in slots:
                 raise ValueError("manual WGSL sampler and texture binding indices overlap")
-            if getattr(handle, "_native_owner", None) is not self:
+            if not self._owns_texture(handle):
                 raise ValueError("manual WGSL texture belongs to a different graphics owner")
             slots.update((binding, binding + 1))
             textures.append((binding, handle.id))
@@ -727,17 +734,25 @@ class _NativeEngine:
         )
         self._views[index] = _View(camera, bool(live))
         handle = TextureHandle(index, None, None, None, (width, height))
+        return self._track_texture(handle, view=True)
+
+    def _track_texture(self, handle, *, view=False):
         handle._native_owner = self
-        handle._native_view = True
-        finalize(handle, _release_native_view, ref(self), index)
+        handle._native_view = view
+        self._texture_handles[handle.id] = ref(handle)
+        finalize(handle, _release_native_texture, ref(self), handle.id, view)
         return handle
+
+    def _owns_texture(self, handle):
+        known = self._texture_handles.get(handle.id)
+        return not self._closed and known is not None and known() is handle
 
     def _release_view(self, index):
         self._views.pop(index, None)
         self._graphics.release_view(index)
 
     def _view_id(self, handle):
-        if self._closed or getattr(handle, "_native_owner", None) is not self:
+        if not self._owns_texture(handle):
             raise ValueError("texture belongs to a different or closed graphics owner")
         if not getattr(handle, "_native_view", False):
             raise ValueError("expected a render-to-texture handle")
@@ -789,16 +804,14 @@ class _NativeEngine:
             index, width, height, [level.tobytes() for level in _mip_chain(image)]
         )
         texture = TextureHandle(index, None, None, None, (width, height), source)
-        texture._native_owner = self
-        return texture
+        return self._track_texture(texture)
 
     def _upload_native_baked_array(self, layers, size):
         self._textures += 1
         index = self._textures
         self._graphics.baked_array(index, size, layers)
         texture = TextureHandle(index, None, None, None, (size, size), layers=layers)
-        texture._native_owner = self
-        return texture
+        return self._track_texture(texture)
 
     def configure_stream_collision(self, cell_size):
         """Create the E3 terrain index that receives streamed collision tiles."""
@@ -810,8 +823,14 @@ class _NativeEngine:
         """Read the current E3 surface from the published streaming terrain."""
         return self._graphics.stream_sample(x, z, near)
 
+    def _write_native_texture(self, handle, rgba, x, y, layer):
+        if not self._owns_texture(handle) or handle._native_view:
+            raise ValueError("texture is a view or belongs to a different graphics owner")
+        height, width = rgba.shape[:2]
+        self._graphics.texture_patch(handle.id, (x, y, layer), (width, height), rgba.tobytes())
+
     def _write_native_baked_layer(self, handle, layer, levels):
-        if getattr(handle, "_native_owner", None) is not self:
+        if not self._owns_texture(handle):
             raise ValueError("baked texture array belongs to a different graphics owner")
         if not 0 <= layer < handle.layers:
             raise ValueError("baked texture layer index is outside the array")
@@ -1092,7 +1111,8 @@ class _NativeEngine:
             self._started = True
             for callback in self._handlers["startup"]:
                 callback({})
-        self._sync_scene()
+            if self._desktop_ran:
+                self._sync_scene()
         return not self._quit
 
     def quit(self):
@@ -1113,9 +1133,16 @@ class _NativeEngine:
             streamer.close()
         if self._process_executor is not None:
             self._process_executor.shutdown(wait=False, cancel_futures=True)
-        if self._started:
-            for callback in self._handlers["shutdown"]:
-                callback({})
+        try:
+            if self._started:
+                for callback in self._handlers["shutdown"]:
+                    callback({})
+        finally:
+            self._graphics.close()
+            self._views.clear()
+            self._texture_handles.clear()
+            for registry in self._registries.values():
+                registry.clear()
 
     def run(self):
         if current_thread() is not main_thread():

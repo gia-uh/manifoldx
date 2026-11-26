@@ -63,7 +63,7 @@ pub(crate) struct SpritePass {
     sampler: wgpu::Sampler,
     layout: wgpu::BindGroupLayout,
     materials: HashMap<u32, SpriteMaterial>,
-    frames: [Option<SpriteFrame>; 2],
+    frames: HashMap<u32, SpriteFrame>,
     capacity: usize,
     labels: bool,
     atlas: Option<LabelAtlas>,
@@ -136,7 +136,7 @@ impl SpritePass {
             sampler,
             layout,
             materials: HashMap::new(),
-            frames: [None, None],
+            frames: HashMap::new(),
             capacity,
             labels,
             atlas: None,
@@ -218,7 +218,7 @@ impl SpritePass {
                 data,
             },
         );
-        for frame in self.frames.iter_mut().flatten() {
+        for frame in self.frames.values_mut() {
             frame.groups.remove(&id);
         }
         Ok(())
@@ -288,6 +288,10 @@ impl SpritePass {
         Ok(())
     }
 
+    pub(crate) fn drop_view(&mut self, id: u32) {
+        self.frames.remove(&id);
+    }
+
     pub(crate) fn prepare(
         &mut self,
         gpu: &Gpu,
@@ -295,9 +299,9 @@ impl SpritePass {
         source: InstanceSource,
         layers: Option<&BTreeSet<i32>>,
         globals: &[f32; GLOBAL_FLOATS],
-        view: usize,
+        view: u32,
     ) -> Result<(), RenderError> {
-        if let Some(frame) = &mut self.frames[view] {
+        if let Some(frame) = self.frames.get_mut(&view) {
             frame.draws.clear();
         }
         if self.labels && self.atlas.is_none() {
@@ -369,7 +373,7 @@ impl SpritePass {
             group.radii.push(radii[i]);
         }
         let device = gpu.device();
-        let frame = self.frames[view].get_or_insert_with(|| {
+        let frame = self.frames.entry(view).or_insert_with(|| {
             let capacity = self.capacity as u64;
             SpriteFrame {
                 globals: gpu_buffer(
@@ -450,8 +454,8 @@ impl SpritePass {
         Ok(())
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, view: usize) -> (usize, usize) {
-        let Some(frame) = &self.frames[view] else {
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, view: u32) -> (usize, usize) {
+        let Some(frame) = self.frames.get(&view) else {
             return (0, 0);
         };
         let mut triangles = 0;

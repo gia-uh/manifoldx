@@ -693,7 +693,7 @@ pub struct NativeRenderer {
     materials: HashMap<u32, Material>,
     fragments: HashMap<u32, FragmentPipeline>,
     manual: HashMap<u32, ManualPipeline>,
-    manual_frames: [Option<ManualFrame>; 2],
+    manual_frames: HashMap<u32, ManualFrame>,
     sprites: Option<SpritePass>,
     labels: Option<SpritePass>,
     volumes: Option<VolumePass>,
@@ -1006,7 +1006,7 @@ impl NativeRenderer {
             materials: HashMap::new(),
             fragments: HashMap::new(),
             manual: HashMap::new(),
-            manual_frames: [None, None],
+            manual_frames: HashMap::new(),
             sprites: None,
             labels: None,
             volumes: None,
@@ -1187,7 +1187,7 @@ impl NativeRenderer {
             },
         };
         let pipeline = ManualPipeline::new(&self.gpu, data, vertex, self.format)?;
-        for frame in self.manual_frames.iter_mut().flatten() {
+        for frame in self.manual_frames.values_mut() {
             frame.groups.remove(&id);
         }
         self.manual.insert(id, pipeline);
@@ -1425,7 +1425,7 @@ impl NativeRenderer {
             self.fragments.remove(material);
             self.invalid_materials.remove(material);
         }
-        self.manual_frames = [None, None];
+        self.manual_frames.clear();
     }
 
     pub fn stream_counts(&self) -> [usize; 2] {
@@ -1735,6 +1735,13 @@ impl NativeRenderer {
 
     pub fn drop_view(&mut self, id: u32) {
         self.secondary.remove(&id);
+        self.manual_frames.remove(&id);
+        for pass in self.sprites.iter_mut().chain(self.labels.iter_mut()) {
+            pass.drop_view(id);
+        }
+        if let Some(pass) = &mut self.volumes {
+            pass.drop_view(id);
+        }
     }
 
     pub fn release_view(&mut self, id: u32) {
@@ -1872,9 +1879,78 @@ impl NativeRenderer {
             })
             .collect();
         self.textures.insert(id, texture);
+        self.invalidate_manual_texture(id);
         for (material, group) in refreshed {
             self.surface_materials.get_mut(&material).unwrap().group = group;
         }
+    }
+
+    pub fn release_texture(&mut self, id: u32) {
+        self.textures.remove(&id);
+        self.baked_arrays.remove(&id);
+        self.surface_materials
+            .retain(|_, binding| binding.albedo != id && binding.baked != Some(id));
+        self.invalidate_manual_texture(id);
+    }
+
+    fn invalidate_manual_texture(&mut self, id: u32) {
+        for frame in self.manual_frames.values_mut() {
+            frame.groups.retain(|material, _| {
+                self.manual
+                    .get(material)
+                    .is_some_and(|pipeline| !pipeline.samples(id))
+            });
+        }
+    }
+
+    pub fn write_texture_patch(
+        &self,
+        id: u32,
+        origin: [u32; 3],
+        size: [u32; 2],
+        pixels: &[u8],
+    ) -> Result<(), RenderError> {
+        let texture = self
+            .baked_arrays
+            .get(&id)
+            .map(|array| &array.texture)
+            .or_else(|| self.textures.get(&id).map(|image| image.view.texture()))
+            .ok_or_else(|| RenderError::Resource(format!("unknown texture {id}")))?;
+        let [x, y, z] = origin;
+        let [width, height] = size;
+        if width == 0
+            || height == 0
+            || z >= texture.depth_or_array_layers()
+            || x.checked_add(width).is_none_or(|end| end > texture.width())
+            || y.checked_add(height)
+                .is_none_or(|end| end > texture.height())
+            || pixels.len() != width as usize * height as usize * 4
+            || !texture.usage().contains(wgpu::TextureUsages::COPY_DST)
+        {
+            return Err(RenderError::Resource(
+                "invalid texture patch bounds or format".into(),
+            ));
+        }
+        self.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z },
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
     }
 
     /// Reserve an sRGB array texture with its complete mip chain.
@@ -2582,7 +2658,7 @@ impl NativeRenderer {
             None => self.layer_filter.as_deref(),
         };
         // A layer can hide a caster from the camera without hiding its shadow.
-        let view_index = usize::from(draw.secondary.is_some());
+        let view_index = draw.secondary.map_or(0, |view| view.texture_id);
         if draw.ids.is_none()
             && !draw.omit_draw
             && (self.sprites.is_some() || self.labels.is_some() || self.volumes.is_some())
@@ -2670,7 +2746,7 @@ impl NativeRenderer {
                 stats.shadow_layers = frame.layers;
             }
         }
-        let manual_index = usize::from(draw.secondary.is_some());
+        let manual_index = view_index;
         if draw_groups.iter().any(|group| group.manual.is_some()) {
             let manual_globals = self.material_globals(camera, &target, frame.as_ref());
             let transforms: Vec<[f32; 16]> = draw_groups
@@ -2689,13 +2765,12 @@ impl NativeRenderer {
                 })
                 .collect();
             let device = &self.gpu.device;
-            if self.manual_frames[manual_index].is_none() {
-                self.manual_frames[manual_index] =
-                    Some(ManualFrame::new(device, self.max_instances)?);
-            }
-            let view = self.manual_frames[manual_index]
-                .as_mut()
-                .expect("created above");
+            let view = match self.manual_frames.entry(manual_index) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(ManualFrame::new(device, self.max_instances)?)
+                }
+            };
             view.write(
                 &self.gpu.queue,
                 &manual_globals,
@@ -2926,9 +3001,7 @@ impl NativeRenderer {
                     }
                     if let Some(id) = group.manual {
                         let manual = &self.manual[&id];
-                        let view = self.manual_frames[manual_index]
-                            .as_ref()
-                            .expect("manual frame prepared");
+                        let view = &self.manual_frames[&manual_index];
                         pass.set_pipeline(&manual.pipelines[usize::from(group.reversed)]);
                         pass.set_bind_group(0, &view.groups[&id], &[]);
                     } else if let Some(id) = group.fragment {
@@ -3074,7 +3147,7 @@ impl NativeRenderer {
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         groups: &[DrawGroup],
-        view_index: usize,
+        view_index: u32,
         has_axes: bool,
         stats: &mut RenderStats,
     ) {
@@ -3097,9 +3170,7 @@ impl NativeRenderer {
             let end = first + group.instances;
             if group.axis {
                 let id = group.manual.expect("axes carry a manual line material");
-                let view = self.manual_frames[view_index]
-                    .as_ref()
-                    .expect("axis frame prepared");
+                let view = &self.manual_frames[&view_index];
                 let mesh = &self.meshes[&group.geometry_id];
                 pass.set_pipeline(&self.manual[&id].pipelines[0]);
                 pass.set_bind_group(0, &view.groups[&id], &[]);
