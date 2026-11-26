@@ -2,7 +2,7 @@ struct Args {
     width: u32,
     offset: u32,
     count: u32,
-    unused: u32,
+    stride: u32,
 };
 
 @group(0) @binding(0) var<storage, read> positions: array<f32>;
@@ -35,7 +35,7 @@ fn place(@builtin(global_invocation_id) id: vec3<u32>) {
     if slot == 0xffffffffu { return; }
     let p = slot * args.width + args.offset;
     let pos = vec3<f32>(positions[p], positions[p + 1u], positions[p + 2u]);
-    let m = id.x * 24u;
+    let m = id.x * args.stride;
     let model = mat4x4<f32>(
         vec4<f32>(instances[m], instances[m + 1u], instances[m + 2u], 0.0),
         vec4<f32>(instances[m + 4u], instances[m + 5u], instances[m + 6u], 0.0),
@@ -47,5 +47,14 @@ fn place(@builtin(global_invocation_id) id: vec3<u32>) {
     instances[m + 12u] = pos.x;
     instances[m + 13u] = pos.y;
     instances[m + 14u] = pos.z;
-    instances[m + 15u] = select(1.0, 0.0, outside(view_projection * model, lo, hi));
+    var displayed = model;
+    if instances[m + 26u] > 0.0 {
+        let height = instances[m + 25u];
+        let mirror = mat4x4<f32>(
+            vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, -1.0, 0.0, 0.0),
+            vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 2.0 * height, 0.0, 1.0),
+        );
+        displayed = mirror * model;
+    }
+    instances[m + 15u] = select(1.0, 0.0, outside(view_projection * displayed, lo, hi));
 }

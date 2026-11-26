@@ -10,6 +10,7 @@ from threading import current_thread, main_thread
 
 import numpy as np
 
+from manifoldx._versions import _Counter
 from manifoldx.camera import Camera
 from manifoldx.components import Component, Material, Mesh, Transform
 from manifoldx.ecs import ComponentView, _make_component_class
@@ -325,6 +326,7 @@ class _NativeEngine:
             np.asarray(geometry["normals"]).tolist(),
             np.asarray(geometry["indices"]).reshape(-1).tolist(),
             np.asarray(geometry.get("uvs", [])).tolist(),
+            np.asarray(geometry.get("colors", [])).tolist(),
         )
         registry[key] = (index, geometry)
         return index
@@ -332,9 +334,13 @@ class _NativeEngine:
     def _material(self, material):
         registry = self._registries["Material"]
         key = id(material)
-        if key in registry:
-            return registry[key][0]
-        index = len(registry) + 1
+        if getattr(material, "_version", None) is None:
+            material._version = _Counter()
+        version = material._version.value
+        cached = registry.get(key)
+        if cached is not None and cached[2] == version:
+            return cached[0]
+        index = len(registry) + 1 if cached is None else cached[0]
         types = {
             BasicMaterial: "basic",
             FlatMaterial: "flat",
@@ -345,14 +351,11 @@ class _NativeEngine:
         if kind is None:
             raise NotImplementedError(f"native base renderer has no {type(material).__name__}")
         params = None
+        effects = None
         if kind == "standard":
             unsupported = (
-                material.vertex_colors
-                or material.sway
+                material.sway
                 or material.ripple
-                or material.mirror is not None
-                or material.opacity != 1
-                or material.cut is not None
                 or material.tinted
                 or material.faded
                 or material.detail
@@ -372,9 +375,10 @@ class _NativeEngine:
                 material.ao,
                 None if texture is None else texture.id,
             )
+            effects = (material.vertex_colors, material.opacity, material.mirror, material.cut)
         shininess = material.shininess if kind == "phong" else None
-        self._graphics.material(index, _color(material.color), kind, params, shininess)
-        registry[key] = (index, material)
+        self._graphics.material(index, _color(material.color), kind, params, shininess, effects)
+        registry[key] = (index, material, version)
         return index
 
     def _upload_native_albedo(self, image, source):
@@ -461,6 +465,9 @@ class _NativeEngine:
         return post
 
     def _sync_scene(self):
+        for _, material, version in self._registries["Material"].values():
+            if material._version.value != version:
+                self._material(material)
         camera = self.camera
         if camera.layers is not None or camera.vertical_scale != 1:
             raise NotImplementedError(

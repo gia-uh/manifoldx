@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use manifoldx_core::ecs::World;
 use manifoldx_render::{
     resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, PostOptions,
-    RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight, DEFAULT_MAX_INSTANCES,
+    RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight, StandardEffects,
+    DEFAULT_MAX_INSTANCES,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -18,6 +19,7 @@ type CameraInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32);
 type LightInput = ([f32; 3], [f32; 3], f32);
 type SpotInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32, f32);
 type MaterialInput = (f32, f32, f32, Option<u32>);
+type EffectsInput = (bool, f32, Option<f32>, Option<[f32; 4]>);
 type SkyInput = ([f32; 3], Option<[f32; 3]>, f32, f32, f32);
 type PostInput = (
     Option<[f32; 5]>,
@@ -30,8 +32,8 @@ type PostInput = (
 );
 
 enum Upload {
-    Mesh(u32, MeshData, Vec<[f32; 2]>),
-    Material(u32, [f32; 3], Shading),
+    Mesh(u32, MeshData, Vec<[f32; 2]>, Vec<[f32; 3]>),
+    Material(u32, [f32; 3], Shading, StandardEffects),
     Albedo(u32, u32, u32, Vec<Vec<u8>>),
 }
 
@@ -67,11 +69,11 @@ impl Scene {
         renderer.set_post(self.post.clone());
         for upload in self.uploads.drain(..) {
             match upload {
-                Upload::Mesh(id, mesh, uv) => {
-                    renderer.upload_mesh_with_uv(id, &mesh, [1.0; 3], &uv)?
+                Upload::Mesh(id, mesh, uv, colors) => {
+                    renderer.upload_mesh_attributes(id, &mesh, [1.0; 3], &uv, &colors)?
                 }
-                Upload::Material(id, color, shading) => {
-                    renderer.set_material(id, color, shading)?
+                Upload::Material(id, color, shading, effects) => {
+                    renderer.set_material_effects(id, color, shading, effects)?
                 }
                 Upload::Albedo(id, width, height, levels) => renderer.upload_albedo(
                     id,
@@ -229,6 +231,7 @@ impl NativeGraphics {
         Ok(())
     }
 
+    #[pyo3(signature = (id, positions, normals, indices, uvs, colors=None))]
     fn mesh(
         &self,
         id: u32,
@@ -236,6 +239,7 @@ impl NativeGraphics {
         normals: Vec<[f32; 3]>,
         indices: Vec<u32>,
         uvs: Vec<[f32; 2]>,
+        colors: Option<Vec<[f32; 3]>>,
     ) -> PyResult<()> {
         let mesh = MeshData {
             positions,
@@ -244,15 +248,16 @@ impl NativeGraphics {
         };
         mesh.validate()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        self.scene
-            .lock()
-            .unwrap()
-            .uploads
-            .push(Upload::Mesh(id, mesh, uvs));
+        self.scene.lock().unwrap().uploads.push(Upload::Mesh(
+            id,
+            mesh,
+            uvs,
+            colors.unwrap_or_default(),
+        ));
         Ok(())
     }
 
-    #[pyo3(signature = (id, color, kind, standard=None, shininess=None))]
+    #[pyo3(signature = (id, color, kind, standard=None, shininess=None, effects=None))]
     fn material(
         &self,
         id: u32,
@@ -260,6 +265,7 @@ impl NativeGraphics {
         kind: &str,
         standard: Option<MaterialInput>,
         shininess: Option<f32>,
+        effects: Option<EffectsInput>,
     ) -> PyResult<()> {
         let shading = match (kind, standard, shininess) {
             ("basic", None, None) => Shading::Basic,
@@ -284,11 +290,23 @@ impl NativeGraphics {
                 )))
             }
         };
+        let effects = effects.map_or_else(
+            StandardEffects::default,
+            |(vertex_colors, opacity, mirror, cut)| StandardEffects {
+                vertex_colors,
+                opacity,
+                mirror,
+                cut,
+            },
+        );
+        effects
+            .validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         self.scene
             .lock()
             .unwrap()
             .uploads
-            .push(Upload::Material(id, color, shading));
+            .push(Upload::Material(id, color, shading, effects));
         Ok(())
     }
 

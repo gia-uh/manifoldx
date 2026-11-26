@@ -13,7 +13,7 @@ pub use post::{PostOptions, Sky};
 pub use renderer::{
     json_string, srgb_to_linear, write_ppm, AdapterSummary, DirectionalLight, FrameTarget, Gpu,
     NativeRenderer, PointLight, RenderError, RenderOutput, RenderStats, RendererOptions, Shading,
-    SpotLight, COLOR_FORMAT, DEPTH_FORMAT, MAX_SIDE,
+    SpotLight, StandardEffects, COLOR_FORMAT, DEPTH_FORMAT, MAX_SIDE,
 };
 pub use scene::{
     read_instances, resolve_source, spawn_instances, used_geometry_ids, Instance, InstanceBatch,

@@ -20,9 +20,9 @@ pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16) * 4;
-const INSTANCE_FLOATS: usize = 24;
+const INSTANCE_FLOATS: usize = 32;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
-const VERTEX_BYTES: usize = 8 * 4;
+const VERTEX_BYTES: usize = 11 * 4;
 const FLAT_STYLE: [f32; 4] = [0.0, 0.0, 0.0, 2.0];
 /// Largest offscreen side accepted by this slice.
 pub const MAX_SIDE: u32 = 4096;
@@ -202,11 +202,55 @@ pub struct SpotLight {
     pub cos_outer: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct StandardEffects {
+    pub vertex_colors: bool,
+    pub opacity: f32,
+    pub mirror: Option<f32>,
+    pub cut: Option<[f32; 4]>,
+}
+
+impl Default for StandardEffects {
+    fn default() -> Self {
+        Self {
+            vertex_colors: false,
+            opacity: 1.0,
+            mirror: None,
+            cut: None,
+        }
+    }
+}
+
+impl StandardEffects {
+    pub fn validate(self) -> Result<(), RenderError> {
+        if !self.opacity.is_finite()
+            || self.opacity < 0.0
+            || self.mirror.is_some_and(|height| !height.is_finite())
+            || self
+                .cut
+                .is_some_and(|cut| cut.iter().any(|x| !x.is_finite()))
+        {
+            return Err(RenderError::Resource(
+                "invalid Standard material effects".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn reflection(height: f32) -> Mat4 {
+    let mut transform = Mat4::IDENTITY;
+    transform.0[5] = -1.0;
+    transform.0[7] = 2.0 * height;
+    transform
+}
+
 #[derive(Clone, Copy)]
 struct Material {
     color: [f32; 4],
     style: [f32; 4],
     albedo: u32,
+    effects: StandardEffects,
 }
 
 impl Material {
@@ -215,6 +259,7 @@ impl Material {
             color,
             style: [0.0; 4],
             albedo: 0,
+            effects: StandardEffects::default(),
         }
     }
 }
@@ -448,6 +493,7 @@ pub struct NativeRenderer {
     post_sun: Option<DirectionalLight>,
     pipeline: wgpu::RenderPipeline,
     reversed_pipeline: wgpu::RenderPipeline,
+    translucent_pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
     textures: HashMap<u32, wgpu::BindGroup>,
     point_lights: [[f32; 8]; 4],
@@ -522,7 +568,7 @@ impl NativeRenderer {
                 bind_group_layouts: &[Some(&bind_group_layout), Some(&texture_layout)],
                 immediate_size: 0,
             });
-        let pipeline = |front_face| {
+        let pipeline = |front_face, translucent: bool| {
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("manifoldx-native-opaque-pipeline"),
@@ -537,14 +583,14 @@ impl NativeRenderer {
                         topology: wgpu::PrimitiveTopology::TriangleList,
                         strip_index_format: None,
                         front_face,
-                        cull_mode: Some(wgpu::Face::Back),
+                        cull_mode: (!translucent).then_some(wgpu::Face::Back),
                         unclipped_depth: false,
                         polygon_mode: wgpu::PolygonMode::Fill,
                         conservative: false,
                     },
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: DEPTH_FORMAT,
-                        depth_write_enabled: Some(true),
+                        depth_write_enabled: Some(!translucent),
                         depth_compare: Some(wgpu::CompareFunction::Greater),
                         stencil: Default::default(),
                         bias: Default::default(),
@@ -556,7 +602,11 @@ impl NativeRenderer {
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format,
-                            blend: Some(wgpu::BlendState::REPLACE),
+                            blend: Some(if translucent {
+                                wgpu::BlendState::ALPHA_BLENDING
+                            } else {
+                                wgpu::BlendState::REPLACE
+                            }),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
@@ -578,8 +628,9 @@ impl NativeRenderer {
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
-        let regular = pipeline(wgpu::FrontFace::Ccw);
-        let reversed = pipeline(wgpu::FrontFace::Cw);
+        let regular = pipeline(wgpu::FrontFace::Ccw, false);
+        let reversed = pipeline(wgpu::FrontFace::Cw, false);
+        let translucent = pipeline(wgpu::FrontFace::Ccw, true);
         let mut renderer = Self {
             gpu,
             format,
@@ -589,6 +640,7 @@ impl NativeRenderer {
             post_sun: None,
             pipeline: regular,
             reversed_pipeline: reversed,
+            translucent_pipeline: translucent,
             texture_layout,
             textures: HashMap::new(),
             point_lights: [[0.0; 8]; 4],
@@ -652,16 +704,33 @@ impl NativeRenderer {
         color_srgb: [f32; 3],
         uvs: &[[f32; 2]],
     ) -> Result<(), RenderError> {
+        self.upload_mesh_attributes(geometry_id, mesh, color_srgb, uvs, &[])
+    }
+
+    pub fn upload_mesh_attributes(
+        &mut self,
+        geometry_id: u32,
+        mesh: &MeshData,
+        color_srgb: [f32; 3],
+        uvs: &[[f32; 2]],
+        colors: &[[f32; 3]],
+    ) -> Result<(), RenderError> {
         if geometry_id == 0 {
             return Err(RenderError::ReservedGeometryId);
         }
         let vertex_count = mesh.validate()?;
+        if !colors.is_empty()
+            && (colors.len() != vertex_count
+                || colors.as_flattened().iter().any(|x| !x.is_finite()))
+        {
+            return Err(RenderError::Resource("invalid vertex colors".into()));
+        }
         if !uvs.is_empty() && uvs.len() != vertex_count {
             return Err(RenderError::Resource(
                 "mesh UV count differs from vertex count".into(),
             ));
         }
-        let mut interleaved = Vec::with_capacity(vertex_count * 8);
+        let mut interleaved = Vec::with_capacity(vertex_count * (VERTEX_BYTES / 4));
         let mut bounds = [mesh.positions[0]; 2];
         for (index, (position, normal)) in mesh.positions.iter().zip(&mesh.normals).enumerate() {
             for axis in 0..3 {
@@ -671,6 +740,11 @@ impl NativeRenderer {
             interleaved.extend_from_slice(position);
             interleaved.extend_from_slice(normal);
             interleaved.extend_from_slice(uvs.get(index).unwrap_or(&[0.0; 2]));
+            let color = colors
+                .get(index)
+                .map(|rgb| srgb_to_linear(*rgb))
+                .unwrap_or([1.0; 4]);
+            interleaved.extend_from_slice(&color[..3]);
         }
         let vertex_bytes = bytemuck::cast_slice(&interleaved);
         let vertex_buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -688,7 +762,7 @@ impl NativeRenderer {
             mapped_at_creation: false,
         });
         self.gpu.queue.write_buffer(&index_buffer, 0, index_bytes);
-        debug_assert_eq!(interleaved.len(), vertex_count * 8);
+        debug_assert_eq!(interleaved.len() * 4, vertex_count * VERTEX_BYTES);
         self.meshes.insert(
             geometry_id,
             GpuMesh {
@@ -714,6 +788,17 @@ impl NativeRenderer {
         color_srgb: [f32; 3],
         shading: Shading,
     ) -> Result<(), RenderError> {
+        self.set_material_effects(id, color_srgb, shading, StandardEffects::default())
+    }
+
+    pub fn set_material_effects(
+        &mut self,
+        id: u32,
+        color_srgb: [f32; 3],
+        shading: Shading,
+        effects: StandardEffects,
+    ) -> Result<(), RenderError> {
+        effects.validate()?;
         if id == 0 || color_srgb.iter().any(|value| !value.is_finite()) {
             return Err(RenderError::Resource("invalid material id or color".into()));
         }
@@ -757,6 +842,7 @@ impl NativeRenderer {
                 color: srgb_to_linear(color_srgb),
                 style,
                 albedo,
+                effects,
             },
         );
         Ok(())
@@ -1235,7 +1321,12 @@ impl NativeRenderer {
                         &self.instance_buffer.as_ref().expect("instance data").buffer,
                         &self.camera_buffer,
                     ],
-                    [source.row_width, source.offset, metadata.len() as u32, 0],
+                    [
+                        source.row_width,
+                        source.offset,
+                        metadata.len() as u32,
+                        INSTANCE_FLOATS as u32,
+                    ],
                     &metadata,
                 );
             }
@@ -1276,7 +1367,9 @@ impl NativeRenderer {
                 pass.set_vertex_buffer(1, instance_buffer.slice(..));
                 let mut first_instance = 0u32;
                 for group in &draw_groups {
-                    let pipeline = if group.reversed {
+                    let pipeline = if group.rank.0 {
+                        &self.translucent_pipeline
+                    } else if group.reversed {
                         &self.reversed_pipeline
                     } else {
                         &self.pipeline
@@ -1343,20 +1436,17 @@ impl NativeRenderer {
                 .meshes
                 .get(&instance.geometry_id)
                 .ok_or(RenderError::UnknownGeometry(instance.geometry_id))?;
-            let clip = view_projection.multiply(&instance.model);
             let slot = instance.entity.slot();
             let bound = positions.is_some_and(|source| {
                 source.members.get(slot as usize) == Some(&Some(instance.entity))
             });
-            if !bound && outside_frustum(&clip, mesh.bounds) {
-                continue;
-            }
             let material = if let Some(labels) = ids {
                 let [r, g, b, _] = labels.get(&slot).copied().unwrap_or_default().to_le_bytes();
                 Material {
                     color: srgb_to_linear([r, g, b].map(|value| f32::from(value) / 255.0)),
                     style: FLAT_STYLE,
                     albedo: 0,
+                    effects: StandardEffects::default(),
                 }
             } else {
                 instance
@@ -1364,15 +1454,28 @@ impl NativeRenderer {
                     .and_then(|id| self.materials.get(&id).copied())
                     .unwrap_or(Material::diffuse(mesh.color))
             };
+            let effects = material.effects;
+            let mirrored = effects.mirror.is_some();
+            let translucent = effects.opacity < 1.0;
+            let rank = (translucent, mirrored);
+            let displayed = effects.mirror.map_or(instance.model, |height| {
+                reflection(height).multiply(&instance.model)
+            });
+            if !bound && outside_frustum(&view_projection.multiply(&displayed), mesh.bounds) {
+                continue;
+            }
             let geometry_id = instance.geometry_id;
-            let reversed = flips_winding(&instance.model);
+            let reversed = flips_winding(&displayed);
             let albedo = material.albedo;
+            let alpha_material = translucent.then_some(instance.material_id).flatten();
             let group = groups
-                .entry((geometry_id, reversed, albedo))
+                .entry((rank, geometry_id, reversed, albedo, alpha_material))
                 .or_insert_with(|| DrawGroup {
                     geometry_id,
                     reversed,
                     albedo,
+                    rank,
+                    first_slot: slot,
                     instances: 0,
                     values: Vec::new(),
                     positions: Vec::new(),
@@ -1380,6 +1483,15 @@ impl NativeRenderer {
             group.values.extend_from_slice(&instance.model.to_columns());
             group.values.extend_from_slice(&material.color);
             group.values.extend_from_slice(&material.style);
+            group.values.extend_from_slice(&[
+                effects.opacity,
+                effects.mirror.unwrap_or_default(),
+                u8::from(mirrored) as f32,
+                u8::from(effects.vertex_colors) as f32,
+            ]);
+            group
+                .values
+                .extend_from_slice(&effects.cut.unwrap_or_default());
             if positions.is_some() {
                 let [[lx, ly, lz], [hx, hy, hz]] = mesh.bounds;
                 group.positions.push([
@@ -1396,7 +1508,9 @@ impl NativeRenderer {
             group.instances += 1;
             stats.instances += 1;
         }
-        Ok(groups.into_values().collect())
+        let mut groups: Vec<_> = groups.into_values().collect();
+        groups.sort_by_key(|group| (group.rank, if group.rank.0 { group.first_slot } else { 0 }));
+        Ok(groups)
     }
 
     fn pack_instance_bytes(&self, groups: &[DrawGroup]) -> Vec<u8> {
@@ -1437,12 +1551,14 @@ struct DrawGroup {
     geometry_id: u32,
     reversed: bool,
     albedo: u32,
+    rank: (bool, bool),
+    first_slot: u32,
     instances: u32,
     values: Vec<f32>,
     positions: Vec<[u32; 8]>,
 }
 
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -1458,13 +1574,18 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
         offset: 24,
         shader_location: 7,
     },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 32,
+        shader_location: 9,
+    },
 ];
 const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: VERTEX_BYTES as u64,
     step_mode: wgpu::VertexStepMode::Vertex,
     attributes: &VERTEX_ATTRIBUTES,
 };
-const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
         offset: 0,
@@ -1494,6 +1615,16 @@ const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
         format: wgpu::VertexFormat::Float32x4,
         offset: 80,
         shader_location: 8,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 96,
+        shader_location: 10,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 112,
+        shader_location: 11,
     },
 ];
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -1532,6 +1663,7 @@ struct VertexIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(7) uv: vec2<f32>,
+    @location(9) color: vec3<f32>,
 };
 struct InstanceIn {
     @location(2) m0: vec4<f32>,
@@ -1540,6 +1672,8 @@ struct InstanceIn {
     @location(5) m3: vec4<f32>,
     @location(6) color: vec4<f32>,
     @location(8) style: vec4<f32>,
+    @location(10) effects: vec4<f32>,
+    @location(11) cut: vec4<f32>,
 };
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -1548,6 +1682,8 @@ struct VertexOut {
     @location(2) world_position: vec3<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) @interpolate(flat) style: vec4<f32>,
+    @location(5) @interpolate(flat) effects: vec4<f32>,
+    @location(6) @interpolate(flat) cut: vec4<f32>,
 };
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
@@ -1592,9 +1728,15 @@ fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     let model = mat4x4<f32>(instance.m0, instance.m1, instance.m2, instance.m3);
     let world = model * vec4<f32>(in.position, 1.0);
     var out: VertexOut;
-    out.clip_position = select(vec4<f32>(0.0, 0.0, -1.0, 1.0), camera.view_proj * world, instance.m3.w != 0.0);
+    var displayed = world;
+    if instance.effects.z > 0.0 {
+        displayed.y = 2.0 * instance.effects.y - world.y;
+    }
+    out.clip_position = select(vec4<f32>(0.0, 0.0, -1.0, 1.0), camera.view_proj * displayed, instance.m3.w != 0.0);
     out.normal = transform_normal(model, in.normal);
-    out.color = instance.color.rgb;
+    out.color = instance.color.rgb * select(vec3<f32>(1.0), in.color, instance.effects.w > 0.0);
+    out.effects = instance.effects;
+    out.cut = instance.cut;
     out.world_position = world.xyz;
     out.uv = in.uv;
     out.style = instance.style;
@@ -1667,6 +1809,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if mode == 5u {
         return vec4<f32>(phong_color(in, n), 1.0);
     }
+    if (in.effects.z > 0.0 && in.world_position.y < in.effects.y)
+        || (all(in.world_position.xz > in.cut.xy) && all(in.world_position.xz < in.cut.zw)) {
+        discard;
+    }
     var albedo = in.color;
     if mode == 4u {
         let texel = textureSampleGrad(albedo_texture, albedo_sampler, in.uv, uv_dx, uv_dy);
@@ -1702,7 +1848,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let radiance = spot.rgb_intensity.rgb * spot.rgb_intensity.a * attenuation;
         color += standard_light(n, v, l, albedo, in.style.x, in.style.y, radiance);
     }
-    return vec4<f32>(color / (color + vec3<f32>(1.0)), 1.0);
+    return vec4<f32>(color / (color + vec3<f32>(1.0)), in.effects.x);
 }
 "#;
 
