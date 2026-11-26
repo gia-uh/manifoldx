@@ -16,9 +16,11 @@ from manifoldx.ecs import ComponentView, _make_component_class
 from manifoldx.input import InputState
 from manifoldx.resources import (
     BasicMaterial,
+    DirectionalLight,
     FlatMaterial,
     PhongMaterial,
     PointLight,
+    SpotLight,
     StandardMaterial,
 )
 from manifoldx.systems import Query
@@ -108,6 +110,8 @@ class _NativeEngine:
         self.background_color = (0.1, 0.1, 0.2)
         self._origin = (0.0, 0.0)
         self._lights = []
+        self._sun = None
+        self._spot = None
         self._capacity = max_entities
         self.input = InputState()
         self._world = World(max_entities)
@@ -204,6 +208,8 @@ class _NativeEngine:
             self._world.replace("Transform", data.entities, rows)
         self.camera.position = (self.camera.position.astype("float64") + offset).astype("float32")
         self.camera.target = (self.camera.target.astype("float64") + offset).astype("float32")
+        if self._spot is not None:
+            self._spot.position = tuple(np.asarray(self._spot.position, dtype="float64") + offset)
         self._origin = (float(x), float(z))
 
     def on(self, event):
@@ -420,6 +426,16 @@ class _NativeEngine:
     def add_light(self, light):
         self.set_lights([*self._lights, light])
 
+    def set_sun(self, light):
+        if light is not None and not isinstance(light, DirectionalLight):
+            raise TypeError("sun must be a DirectionalLight or None")
+        self._sun = light
+
+    def set_spot(self, light):
+        if light is not None and not isinstance(light, SpotLight):
+            raise TypeError("spot must be a SpotLight or None")
+        self._spot = light
+
     def _sync_scene(self):
         camera = self.camera
         if camera.layers is not None or camera.vertical_scale != 1:
@@ -440,7 +456,23 @@ class _NativeEngine:
             (list(light.position), _color(light.color), light.intensity)
             for light in self._lights[:4]
         ]
-        self._graphics.settings(self.background_color, lights)
+        sun = self._sun
+        sun_values = (
+            None if sun is None else (list(sun.direction), _color(sun.color), sun.intensity)
+        )
+        spot = self._spot
+        spot_values = None
+        if spot is not None:
+            spot_values = (
+                list(spot.position),
+                list(spot.direction),
+                _color(spot.color),
+                spot.intensity,
+                spot.distance or 30.0,
+                np.cos(spot.inner_angle),
+                np.cos(spot.outer_angle),
+            )
+        self._graphics.settings(self.background_color, lights, sun_values, spot_values)
 
     def set_fixed_timestep(self, dt):
         if not 0.001 <= dt <= 1:

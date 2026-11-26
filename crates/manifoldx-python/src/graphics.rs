@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::World;
 use manifoldx_render::{
-    resolve_source, Camera, MeshData, NativeRenderer, PointLight, RenderError, RenderStats,
-    RendererOptions, Shading, DEFAULT_MAX_INSTANCES,
+    resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, RenderError,
+    RenderStats, RendererOptions, Shading, SpotLight, DEFAULT_MAX_INSTANCES,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -16,6 +16,7 @@ use crate::PyNativeWorld;
 
 type CameraInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32);
 type LightInput = ([f32; 3], [f32; 3], f32);
+type SpotInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32, f32);
 type MaterialInput = (f32, f32, f32, Option<u32>);
 
 enum Upload {
@@ -28,6 +29,8 @@ pub(crate) struct Scene {
     camera: Camera,
     background: [f32; 3],
     lights: Vec<PointLight>,
+    sun: Option<DirectionalLight>,
+    spot: Option<SpotLight>,
     uploads: Vec<Upload>,
     offscreen: Option<NativeRenderer>,
 }
@@ -38,6 +41,8 @@ impl Scene {
             camera: Camera::new([0.0, 1.0, 2.0], [0.0; 3]),
             background: [0.1, 0.1, 0.2],
             lights: Vec::new(),
+            sun: None,
+            spot: None,
             uploads: Vec::new(),
             offscreen: None,
         }
@@ -46,6 +51,7 @@ impl Scene {
     pub(crate) fn apply(&mut self, renderer: &mut NativeRenderer) -> Result<Camera, RenderError> {
         renderer.set_background(self.background);
         renderer.set_point_lights(&self.lights);
+        renderer.set_direct_lights(self.sun, self.spot);
         for upload in self.uploads.drain(..) {
             match upload {
                 Upload::Mesh(id, mesh, uv) => {
@@ -142,8 +148,31 @@ impl NativeGraphics {
         Ok(())
     }
 
-    fn settings(&self, background: [f32; 3], lights: Vec<LightInput>) {
+    #[pyo3(signature = (background, lights, sun=None, spot=None))]
+    fn settings(
+        &self,
+        background: [f32; 3],
+        lights: Vec<LightInput>,
+        sun: Option<LightInput>,
+        spot: Option<SpotInput>,
+    ) {
         let mut scene = self.scene.lock().unwrap();
+        scene.sun = sun.map(|(direction, color, intensity)| DirectionalLight {
+            direction,
+            color,
+            intensity,
+        });
+        scene.spot = spot.map(
+            |(position, direction, color, intensity, range, cos_inner, cos_outer)| SpotLight {
+                position,
+                direction,
+                color,
+                intensity,
+                range,
+                cos_inner,
+                cos_outer,
+            },
+        );
         scene.background = background;
         scene.lights = lights
             .into_iter()

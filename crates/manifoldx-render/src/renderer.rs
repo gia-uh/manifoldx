@@ -18,7 +18,7 @@ pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 /// Reversed-depth float buffer; the pass clears 0 and compares `Greater`.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8) * 4;
+const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16) * 4;
 const INSTANCE_FLOATS: usize = 24;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
 const VERTEX_BYTES: usize = 8 * 4;
@@ -181,6 +181,24 @@ pub struct PointLight {
     /// The established point-light buffer stores the input RGB directly.
     pub color: [f32; 3],
     pub intensity: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DirectionalLight {
+    pub direction: [f32; 3],
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SpotLight {
+    pub position: [f32; 3],
+    pub direction: [f32; 3],
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub range: f32,
+    pub cos_inner: f32,
+    pub cos_outer: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -391,6 +409,8 @@ pub struct NativeRenderer {
     texture_layout: wgpu::BindGroupLayout,
     textures: HashMap<u32, wgpu::BindGroup>,
     point_lights: [[f32; 8]; 4],
+    sun: [f32; 8],
+    spot: [f32; 16],
     clear: wgpu::Color,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -525,6 +545,8 @@ impl NativeRenderer {
             texture_layout,
             textures: HashMap::new(),
             point_lights: [[0.0; 8]; 4],
+            sun: [0.0; 8],
+            spot: [0.0; 16],
             clear: wgpu::Color::BLACK,
             camera_buffer,
             camera_bind_group,
@@ -710,6 +732,37 @@ impl NativeRenderer {
             let [r, g, b] = light.color;
             *row = [x, y, z, 0.0, r, g, b, light.intensity];
         }
+    }
+
+    pub fn set_direct_lights(&mut self, sun: Option<DirectionalLight>, spot: Option<SpotLight>) {
+        self.sun = sun.map_or([0.0; 8], |light| {
+            let [x, y, z] = light.direction;
+            let [r, g, b] = light.color;
+            [x, y, z, 0.0, r, g, b, light.intensity]
+        });
+        self.spot = spot.map_or([0.0; 16], |light| {
+            let [x, y, z] = light.position;
+            let [dx, dy, dz] = light.direction;
+            let [r, g, b] = light.color;
+            [
+                x,
+                y,
+                z,
+                light.range,
+                dx,
+                dy,
+                dz,
+                light.cos_inner,
+                r,
+                g,
+                b,
+                light.intensity,
+                light.cos_outer,
+                0.0,
+                0.0,
+                0.0,
+            ]
+        });
     }
 
     /// Upload a complete sRGB RGBA8 chain, largest mip first.
@@ -1034,7 +1087,9 @@ impl NativeRenderer {
         let mut globals = [0.0; GLOBAL_BYTES / 4];
         globals[..16].copy_from_slice(&view_projection.to_columns());
         globals[16..19].copy_from_slice(&camera.position);
-        globals[20..].copy_from_slice(self.point_lights.as_flattened());
+        globals[20..52].copy_from_slice(self.point_lights.as_flattened());
+        globals[52..60].copy_from_slice(&self.sun);
+        globals[60..].copy_from_slice(&self.spot);
         self.gpu
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&globals));
@@ -1352,10 +1407,22 @@ struct PointLight {
     position: vec4<f32>,
     rgb_intensity: vec4<f32>,
 };
+struct DirectionalLight {
+    direction: vec4<f32>,
+    rgb_intensity: vec4<f32>,
+};
+struct SpotLight {
+    position_range: vec4<f32>,
+    direction_cos_inner: vec4<f32>,
+    rgb_intensity: vec4<f32>,
+    cos_outer: vec4<f32>,
+};
 struct Camera {
     view_proj: mat4x4<f32>,
     position: vec4<f32>,
     lights: array<PointLight, 4>,
+    sun: DirectionalLight,
+    spot: SpotLight,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var albedo_sampler: sampler;
@@ -1440,14 +1507,10 @@ fn geometry_schlick(ndot: f32, roughness: f32) -> f32 {
 }
 
 fn standard_light(
-    n: vec3<f32>, v: vec3<f32>, world: vec3<f32>, albedo: vec3<f32>,
-    roughness: f32, metallic: f32, light: PointLight,
+    n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, albedo: vec3<f32>,
+    roughness: f32, metallic: f32, radiance: vec3<f32>,
 ) -> vec3<f32> {
-    let offset = light.position.xyz - world;
-    let l = safe_normalize(offset);
     let h = safe_normalize(v + l);
-    let dist_sq = max(dot(offset, offset), 0.0001);
-    let radiance = light.rgb_intensity.rgb * light.rgb_intensity.a / dist_sq;
     let ndotv = max(dot(n, v), 0.0);
     let ndotl = max(dot(n, l), 0.0);
     let ndoth = max(dot(n, h), 0.0);
@@ -1515,8 +1578,29 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     for (var i = 0u; i < 4u; i++) {
         let light = camera.lights[i];
         if light.rgb_intensity.a > 0.0 {
-            color += standard_light(n, v, in.world_position, albedo, in.style.x, in.style.y, light);
+            let offset = light.position.xyz - in.world_position;
+            let dist_sq = max(dot(offset, offset), 0.0001);
+            let radiance = light.rgb_intensity.rgb * light.rgb_intensity.a / dist_sq;
+            color += standard_light(n, v, safe_normalize(offset), albedo, in.style.x, in.style.y, radiance);
         }
+    }
+    let sun = camera.sun;
+    if sun.rgb_intensity.a > 0.0 {
+        let radiance = sun.rgb_intensity.rgb * sun.rgb_intensity.a;
+        color += standard_light(n, v, safe_normalize(-sun.direction.xyz), albedo, in.style.x, in.style.y, radiance);
+    }
+    let spot = camera.spot;
+    if spot.rgb_intensity.a > 0.0 {
+        let offset = spot.position_range.xyz - in.world_position;
+        let dist = length(offset);
+        let l = safe_normalize(offset);
+        let cos_angle = dot(-l, safe_normalize(spot.direction_cos_inner.xyz));
+        let cone = clamp((cos_angle - spot.cos_outer.x)
+                         / max(spot.direction_cos_inner.w - spot.cos_outer.x, 0.0001), 0.0, 1.0);
+        let range_fade = clamp(1.0 - pow(dist / spot.position_range.w, 4.0), 0.0, 1.0);
+        let attenuation = cone * cone * range_fade * range_fade / (dist * dist + 0.0001);
+        let radiance = spot.rgb_intensity.rgb * spot.rgb_intensity.a * attenuation;
+        color += standard_light(n, v, l, albedo, in.style.x, in.style.y, radiance);
     }
     return vec4<f32>(color / (color + vec3<f32>(1.0)), 1.0);
 }
