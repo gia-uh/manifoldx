@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
+use manifoldx_render::shadow::ShadowOptions;
 use manifoldx_render::skin::{validate_matrices, JointMatrices};
 use manifoldx_render::{
     resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, PostOptions,
@@ -25,6 +26,18 @@ type PoseIdentity = (u32, Option<u64>);
 type PoseInput = (PoseIdentity, JointMatrices);
 type FrameInput = (PoseIdentity, u32, f64);
 type EffectsInput = (bool, f32, Option<f32>, Option<[f32; 4]>);
+type ShadowInput = (
+    [f32; 3],
+    f32,
+    u32,
+    f32,
+    f32,
+    f32,
+    u32,
+    bool,
+    u32,
+    Option<f32>,
+);
 type SkyInput = ([f32; 3], Option<[f32; 3]>, f32, f32, f32);
 type PostInput = (
     Option<[f32; 5]>,
@@ -52,6 +65,7 @@ pub(crate) struct Scene {
     sun: Option<DirectionalLight>,
     spot: Option<SpotLight>,
     post: Option<Arc<PostOptions>>,
+    shadows: Option<ShadowOptions>,
     clips: HashMap<u32, usize>,
     uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
@@ -66,6 +80,7 @@ impl Scene {
             sun: None,
             spot: None,
             post: None,
+            shadows: None,
             clips: HashMap::new(),
             uploads: VecDeque::new(),
             offscreen: None,
@@ -81,6 +96,7 @@ impl Scene {
         renderer.set_point_lights(&self.lights);
         renderer.set_direct_lights(self.sun, self.spot);
         renderer.set_post(self.post.clone());
+        renderer.set_shadows(self.shadows);
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
                 Upload::Mesh(id, mesh, uv, (colors, joints)) => {
@@ -254,6 +270,42 @@ impl NativeGraphics {
                 intensity,
             })
             .collect();
+    }
+
+    #[pyo3(signature = (options))]
+    fn shadows(&self, options: Option<ShadowInput>) -> PyResult<()> {
+        let options = options.map(
+            |(
+                target,
+                extent,
+                resolution,
+                near,
+                far,
+                bias,
+                pcf_radius,
+                auto_fit,
+                cascades,
+                distance,
+            )| ShadowOptions {
+                target,
+                extent,
+                resolution,
+                near,
+                far,
+                bias,
+                pcf_radius,
+                auto_fit,
+                cascades,
+                distance,
+            },
+        );
+        if let Some(options) = options {
+            options
+                .validate()
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        }
+        self.scene.lock().unwrap().shadows = options;
+        Ok(())
     }
 
     #[pyo3(signature = (settings))]
@@ -476,6 +528,7 @@ pub(crate) fn stats_dict<'py>(
     result.set_item("draw_calls", stats.draw_calls)?;
     result.set_item("triangles", stats.triangles)?;
     result.set_item("post_order", &stats.post_order)?;
+    result.set_item("shadow_layers", stats.shadow_layers)?;
     result.set_item("post_target_generation", stats.post_target_generation)?;
     result.set_item("read_ns", stats.read_ns)?;
     result.set_item("upload_ns", stats.upload_ns)?;

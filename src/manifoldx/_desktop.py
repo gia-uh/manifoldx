@@ -121,6 +121,7 @@ class _NativeEngine:
         self._sun = None
         self._spot = None
         self._post = None
+        self._shadow_options = None
         self._capacity = max_entities
         self.input = InputState()
         self._world = World(max_entities)
@@ -219,6 +220,10 @@ class _NativeEngine:
         self.camera.target = (self.camera.target.astype("float64") + offset).astype("float32")
         if self._spot is not None:
             self._spot.position = tuple(np.asarray(self._spot.position, dtype="float64") + offset)
+        if self._shadow_options is not None:
+            target, *options = self._shadow_options
+            self._shadow_options = (tuple(np.asarray(target, dtype="float64") + offset), *options)
+            self._graphics.shadows(self._shadow_options)
         self._origin = (float(x), float(z))
 
     def on(self, event):
@@ -486,6 +491,34 @@ class _NativeEngine:
         if light is not None and not isinstance(light, SpotLight):
             raise TypeError("spot must be a SpotLight or None")
         self._spot = light
+
+    def enable_shadows(
+        self,
+        target=(0, 0, 0),
+        extent=10.0,
+        resolution=2048,
+        near=0.1,
+        far=50.0,
+        bias=0.005,
+        pcf_radius=1,
+        auto_fit=True,
+        cascades=1,
+        shadow_distance=None,
+    ):
+        options = (
+            tuple(target),
+            extent,
+            int(resolution),
+            near,
+            far,
+            bias,
+            int(pcf_radius),
+            bool(auto_fit),
+            int(cascades),
+            shadow_distance,
+        )
+        self._graphics.shadows(options)
+        self._shadow_options = options
 
     def set_post(self, **effects):
         from manifoldx.post import Post, ssao_kernel

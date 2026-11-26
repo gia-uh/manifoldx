@@ -13,6 +13,7 @@ use crate::scene::{
     read_instances, InstanceBatch, InstanceSource, MeshData, SceneError, DEFAULT_MAX_INSTANCES,
 };
 
+use crate::shadow::{self, ShadowFrame, ShadowMap, ShadowOptions};
 use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
 
 /// The offscreen colour format. It is sRGB, so the target encodes the
@@ -450,6 +451,8 @@ pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wg
 /// mapping. The desktop diagnostic measures GPU execution separately.
 #[derive(Clone, Debug, Default)]
 pub struct RenderStats {
+    /// Number of actual shadow depth layers encoded before scene colour.
+    pub shadow_layers: usize,
     /// Actual encoded screen-space effects after the main pass.
     pub post_order: Vec<&'static str>,
     pub post_target_generation: u64,
@@ -487,9 +490,21 @@ pub struct RenderOutput {
 }
 
 /// Native GPU resources and drawing for one target format.
+struct ShadowLayer {
+    camera: wgpu::Buffer,
+    camera_group: wgpu::BindGroup,
+    instances: Option<InstanceBuffer>,
+}
+
 pub struct NativeRenderer {
     gpu: Gpu,
     skin: Skin,
+    camera_layout: wgpu::BindGroupLayout,
+    shadow: ShadowMap,
+    shadow_options: Option<ShadowOptions>,
+    shadow_pipelines: [wgpu::RenderPipeline; 2],
+    shadow_layers: Vec<ShadowLayer>,
+    spot_light: Option<SpotLight>,
     format: wgpu::TextureFormat,
     offscreen: Option<OffscreenTarget>,
     post_options: Option<std::sync::Arc<PostOptions>>,
@@ -566,6 +581,18 @@ impl NativeRenderer {
                     ],
                 });
         let skin = Skin::new(&gpu);
+        let shadow = ShadowMap::new(&gpu.device);
+        let shadow_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("native shadow pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&bind_group_layout),
+                    Some(&texture_layout),
+                    Some(&skin.layout),
+                ],
+                immediate_size: 0,
+            });
         let pipeline_layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -574,14 +601,19 @@ impl NativeRenderer {
                     Some(&bind_group_layout),
                     Some(&texture_layout),
                     Some(&skin.layout),
+                    Some(&shadow.layout),
                 ],
                 immediate_size: 0,
             });
-        let pipeline = |front_face, translucent: bool| {
+        let pipeline = |front_face, translucent: bool, depth_only: bool| {
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("manifoldx-native-opaque-pipeline"),
-                    layout: Some(&pipeline_layout),
+                    layout: Some(if depth_only {
+                        &shadow_layout
+                    } else {
+                        &pipeline_layout
+                    }),
                     vertex: wgpu::VertexState {
                         module: &shader,
                         entry_point: Some("vs_main"),
@@ -598,14 +630,22 @@ impl NativeRenderer {
                         conservative: false,
                     },
                     depth_stencil: Some(wgpu::DepthStencilState {
-                        format: DEPTH_FORMAT,
+                        format: if depth_only {
+                            shadow::FORMAT
+                        } else {
+                            DEPTH_FORMAT
+                        },
                         depth_write_enabled: Some(!translucent),
-                        depth_compare: Some(wgpu::CompareFunction::Greater),
+                        depth_compare: Some(if depth_only {
+                            wgpu::CompareFunction::Less
+                        } else {
+                            wgpu::CompareFunction::Greater
+                        }),
                         stencil: Default::default(),
                         bias: Default::default(),
                     }),
                     multisample: wgpu::MultisampleState::default(),
-                    fragment: Some(wgpu::FragmentState {
+                    fragment: (!depth_only).then_some(wgpu::FragmentState {
                         module: &shader,
                         entry_point: Some("fs_main"),
                         compilation_options: Default::default(),
@@ -637,12 +677,22 @@ impl NativeRenderer {
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
-        let regular = pipeline(wgpu::FrontFace::Ccw, false);
-        let reversed = pipeline(wgpu::FrontFace::Cw, false);
-        let translucent = pipeline(wgpu::FrontFace::Ccw, true);
+        let regular = pipeline(wgpu::FrontFace::Ccw, false, false);
+        let reversed = pipeline(wgpu::FrontFace::Cw, false, false);
+        let translucent = pipeline(wgpu::FrontFace::Ccw, true, false);
+        let shadow_pipelines = [
+            pipeline(wgpu::FrontFace::Ccw, false, true),
+            pipeline(wgpu::FrontFace::Cw, false, true),
+        ];
         let mut renderer = Self {
             gpu,
             skin,
+            camera_layout: bind_group_layout,
+            shadow,
+            shadow_options: None,
+            shadow_pipelines,
+            shadow_layers: Vec::new(),
+            spot_light: None,
             format,
             offscreen: None,
             post_options: None,
@@ -918,6 +968,7 @@ impl NativeRenderer {
 
     pub fn set_direct_lights(&mut self, sun: Option<DirectionalLight>, spot: Option<SpotLight>) {
         self.post_sun = sun;
+        self.spot_light = spot;
         self.sun = sun.map_or([0.0; 8], |light| {
             let [x, y, z] = light.direction;
             let [r, g, b] = light.color;
@@ -946,6 +997,10 @@ impl NativeRenderer {
                 0.0,
             ]
         });
+    }
+
+    pub fn set_shadows(&mut self, options: Option<ShadowOptions>) {
+        self.shadow_options = options;
     }
 
     pub fn set_post(&mut self, options: Option<std::sync::Arc<PostOptions>>) {
@@ -1314,12 +1369,38 @@ impl NativeRenderer {
             &view_projection,
             target.positions.as_ref(),
             draw.ids,
+            false,
             &mut stats,
         )?;
         stats.read_ns = elapsed_ns(read_started.elapsed());
 
         let upload_started = Instant::now();
         self.skin.upload(&self.gpu);
+        let frame = self
+            .shadow_options
+            .filter(|_| draw.ids.is_none() && !draw.omit_draw)
+            .and_then(|options| {
+                let bounds =
+                    if options.auto_fit && options.cascades == 1 && self.spot_light.is_none() {
+                        self.scene_bounds(&batch)
+                    } else {
+                        None
+                    };
+                ShadowFrame::new(
+                    options,
+                    camera,
+                    aspect,
+                    self.post_sun,
+                    self.spot_light,
+                    bounds,
+                )
+            });
+        self.shadow
+            .prepare(&self.gpu.device, &self.gpu.queue, frame.as_ref())?;
+        if let Some(frame) = frame {
+            self.encode_shadows(encoder, &batch, &frame)?;
+            stats.shadow_layers = frame.layers;
+        }
         let mut globals = [0.0; GLOBAL_BYTES / 4];
         globals[..16].copy_from_slice(&view_projection.to_columns());
         globals[16..19].copy_from_slice(&camera.position);
@@ -1428,6 +1509,7 @@ impl NativeRenderer {
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_bind_group(1, &self.textures[&group.albedo], &[]);
                     pass.set_bind_group(2, &self.skin.group, &[]);
+                    pass.set_bind_group(3, &self.shadow.group, &[]);
                     let mesh = self
                         .meshes
                         .get(&group.geometry_id)
@@ -1447,6 +1529,135 @@ impl NativeRenderer {
         }
 
         Ok(stats)
+    }
+
+    fn scene_bounds(&self, batch: &InstanceBatch) -> Option<([f32; 3], f32)> {
+        let mut lower = [f32::INFINITY; 3];
+        let mut upper = [f32::NEG_INFINITY; 3];
+        for instance in &batch.instances {
+            let Some(mesh) = self.meshes.get(&instance.geometry_id) else {
+                continue;
+            };
+            let [lo, hi] = mesh.bounds;
+            for x in [lo[0], hi[0]] {
+                for y in [lo[1], hi[1]] {
+                    for z in [lo[2], hi[2]] {
+                        let point = instance.model.transform_point([x, y, z]);
+                        for axis in 0..3 {
+                            lower[axis] = lower[axis].min(point[axis]);
+                            upper[axis] = upper[axis].max(point[axis]);
+                        }
+                    }
+                }
+            }
+        }
+        if !lower[0].is_finite() {
+            return None;
+        }
+        let center = std::array::from_fn(|axis| 0.5 * (lower[axis] + upper[axis]));
+        let diameter = (0..3)
+            .map(|axis| (upper[axis] - lower[axis]).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        Some((center, (diameter * 0.5).max(0.001)))
+    }
+
+    fn encode_shadows(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        batch: &InstanceBatch,
+        frame: &ShadowFrame,
+    ) -> Result<(), RenderError> {
+        let device = &self.gpu.device;
+        let queue = &self.gpu.queue;
+        for index in 0..frame.layers {
+            let matrix = &frame.matrices[index];
+            let groups =
+                self.pack_instances(batch, matrix, None, None, true, &mut RenderStats::default())?;
+            let data = self.pack_instance_bytes(&groups);
+            if self.shadow_layers.len() <= index {
+                let camera = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("native shadow camera"),
+                    size: GLOBAL_BYTES as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let camera_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("native shadow camera binding"),
+                    layout: &self.camera_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: camera.as_entire_binding(),
+                    }],
+                });
+                self.shadow_layers.push(ShadowLayer {
+                    camera,
+                    camera_group,
+                    instances: None,
+                });
+            }
+            let layer = &mut self.shadow_layers[index];
+            queue.write_buffer(&layer.camera, 0, bytemuck::cast_slice(&matrix.to_columns()));
+            if !data.is_empty() {
+                let size = data.len() as u64;
+                if layer
+                    .instances
+                    .as_ref()
+                    .is_none_or(|buffer| buffer.capacity_bytes < size)
+                {
+                    let capacity_bytes = size.next_power_of_two();
+                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("native shadow instances"),
+                        size: capacity_bytes,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    layer.instances = Some(InstanceBuffer {
+                        buffer,
+                        capacity_bytes,
+                    });
+                }
+                let buffer = &layer
+                    .instances
+                    .as_ref()
+                    .expect("shadow group implies instance buffer")
+                    .buffer;
+                queue.write_buffer(buffer, 0, &data);
+            }
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("native shadow layer"),
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow.depth[index],
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            if !groups.is_empty() {
+                let buffer = &layer
+                    .instances
+                    .as_ref()
+                    .expect("shadow group implies instance buffer")
+                    .buffer;
+                pass.set_vertex_buffer(1, buffer.slice(..));
+                let mut first = 0;
+                for group in groups {
+                    let mesh = &self.meshes[&group.geometry_id];
+                    pass.set_pipeline(&self.shadow_pipelines[usize::from(group.reversed)]);
+                    pass.set_bind_group(0, &layer.camera_group, &[]);
+                    pass.set_bind_group(1, &self.textures[&0], &[]);
+                    pass.set_bind_group(2, &self.skin.group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, first..first + group.instances);
+                    first += group.instances;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Render without issuing any draw, for the negative control.
@@ -1479,6 +1690,7 @@ impl NativeRenderer {
         view_projection: &Mat4,
         positions: Option<&ResidentPositions<'_>>,
         ids: Option<&HashMap<u32, u32>>,
+        shadow: bool,
         stats: &mut RenderStats,
     ) -> Result<Vec<DrawGroup>, RenderError> {
         let mut groups = BTreeMap::<_, DrawGroup>::new();
@@ -1508,6 +1720,9 @@ impl NativeRenderer {
             let effects = material.effects;
             let mirrored = effects.mirror.is_some();
             let translucent = effects.opacity < 1.0;
+            if shadow && (translucent || mirrored) {
+                continue;
+            }
             let rank = (translucent, mirrored);
             let displayed = effects.mirror.map_or(instance.model, |height| {
                 reflection(height).multiply(&instance.model)
@@ -1729,6 +1944,18 @@ struct Camera {
 @group(1) @binding(0) var albedo_sampler: sampler;
 @group(1) @binding(1) var albedo_texture: texture_2d<f32>;
 @group(2) @binding(0) var<storage, read> joint_mats: array<mat4x4<f32>>;
+struct ShadowData {
+    matrices: array<mat4x4<f32>, 4>,
+    settings: vec4<f32>, // caster, resolution, PCF radius, single-map bias
+    splits: vec4<f32>,
+    texels: vec4<f32>,
+    ranges: vec4<f32>,
+    camera_depth: vec4<f32>,
+    layers: vec4<f32>,
+};
+@group(3) @binding(0) var shadow_map: texture_depth_2d_array;
+@group(3) @binding(1) var shadow_sampler: sampler_comparison;
+@group(3) @binding(2) var<uniform> shadows: ShadowData;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -1875,6 +2102,78 @@ fn standard_light(
     return (diffuse + specular) * radiance * ndotl;
 }
 
+fn shadow_taps(layer: i32, uv: vec2<f32>, depth: f32) -> f32 {
+    let radius = i32(shadows.settings.z);
+    let texel = 1.0 / shadows.settings.y;
+    var sum = 0.0;
+    for (var y = -radius; y <= radius; y++) {
+        for (var x = -radius; x <= radius; x++) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texel;
+            sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + offset, layer, depth);
+        }
+    }
+    let diameter = f32(2 * radius + 1);
+    return sum / (diameter * diameter);
+}
+
+fn shadow_sample(layer: i32, world: vec3<f32>, bias: f32, fade_edge: bool) -> f32 {
+    let clip = shadows.matrices[layer] * vec4<f32>(world, 1.0);
+    let ndc = clip.xyz / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if clip.w <= 0.0 || any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
+        return 1.0;
+    }
+    let shade = shadow_taps(layer, uv, ndc.z - bias);
+    if !fade_edge {
+        return shade;
+    }
+    let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    return mix(1.0, shade, smoothstep(0.0, 0.15, edge));
+}
+
+fn cascade_shadow(layer: i32, world: vec3<f32>, n: vec3<f32>, ndl: f32) -> f32 {
+    let texel = shadows.texels[layer];
+    let point = world + n * texel * (2.0 - ndl);
+    let bias = texel / shadows.ranges[layer] * (1.0 + 2.0 * (1.0 - ndl));
+    return shadow_sample(layer, point, bias, false);
+}
+
+fn shadow_factor(caster: f32, world: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
+    if shadows.settings.x != caster {
+        return 1.0;
+    }
+    let ndl = max(dot(n, l), 0.0);
+    let count = i32(shadows.layers.x);
+    if count <= 1 {
+        let bias = shadows.settings.w * (1.0 + 4.0 * (1.0 - ndl));
+        return shadow_sample(0, world, bias, true);
+    }
+    let depth = -dot(shadows.camera_depth, vec4<f32>(world, 1.0));
+    if depth > shadows.splits[count - 1] {
+        return 1.0;
+    }
+    var layer = 0;
+    while layer < count - 1 && depth > shadows.splits[layer] {
+        layer += 1;
+    }
+    let shade = cascade_shadow(layer, world, n, ndl);
+    var near_depth = 0.0;
+    if layer > 0 {
+        near_depth = shadows.splits[layer - 1];
+    }
+    let far_depth = shadows.splits[layer];
+    let blend = 0.1 * (far_depth - near_depth);
+    let t = clamp((depth - (far_depth - blend)) / blend, 0.0, 1.0);
+    if t <= 0.0 {
+        return shade;
+    }
+    var next = 1.0;
+    if layer < count - 1 {
+        next = cascade_shadow(layer + 1, world, n, ndl);
+    }
+    return mix(shade, next, t);
+}
+
 fn phong_color(in: VertexOut, n: vec3<f32>) -> vec3<f32> {
     let view = safe_normalize(camera.position.xyz - in.world_position);
     var color = 0.03 * in.color;
@@ -1938,8 +2237,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     let sun = camera.sun;
     if sun.rgb_intensity.a > 0.0 {
-        let radiance = sun.rgb_intensity.rgb * sun.rgb_intensity.a;
-        color += standard_light(n, v, safe_normalize(-sun.direction.xyz), albedo, in.style.x, in.style.y, radiance);
+        let l = safe_normalize(-sun.direction.xyz);
+        let radiance = sun.rgb_intensity.rgb * sun.rgb_intensity.a * shadow_factor(1.0, in.world_position, n, l);
+        color += standard_light(n, v, l, albedo, in.style.x, in.style.y, radiance);
     }
     let spot = camera.spot;
     if spot.rgb_intensity.a > 0.0 {
@@ -1951,7 +2251,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                          / max(spot.direction_cos_inner.w - spot.cos_outer.x, 0.0001), 0.0, 1.0);
         let range_fade = clamp(1.0 - pow(dist / spot.position_range.w, 4.0), 0.0, 1.0);
         let attenuation = cone * cone * range_fade * range_fade / (dist * dist + 0.0001);
-        let radiance = spot.rgb_intensity.rgb * spot.rgb_intensity.a * attenuation;
+        let radiance = spot.rgb_intensity.rgb * spot.rgb_intensity.a * attenuation
+                     * shadow_factor(2.0, in.world_position, n, l);
         color += standard_light(n, v, l, albedo, in.style.x, in.style.y, radiance);
     }
     return vec4<f32>(color / (color + vec3<f32>(1.0)), in.effects.x);
