@@ -140,6 +140,8 @@ class _NativeEngine:
         self._line_rows = {}
         self._world = World(max_entities)
         self._position_binding = None
+        self._compute_classes = {}
+        self._compute_columns = set()
         self._desktop_probe = (False, False, False, None)
         self._frame_loop = FrameLoop
         columns = (("Transform", "f32", 10), ("Mesh", "u32", 1), ("Material", "u32", 1))
@@ -187,6 +189,8 @@ class _NativeEngine:
         if source.width != 3 or field not in program.writes:
             raise ValueError("bind a registered vec3<f32> field written by the kernel")
         writes = sorted(layout[name] for name in program.writes)
+        if column in self._compute_columns:
+            raise ValueError("resident position cannot alias a mirrored Compute column")
         self._position_binding = (
             column,
             width,
@@ -334,6 +338,70 @@ class _NativeEngine:
             if isinstance(component, type) and issubclass(component, Component)
             else _NativeEngine._column_name(component)
         )
+
+    def compute(self, cls):
+        """Register a Compute class to dispatch on the native GPU."""
+        import weakref
+
+        from manifoldx.compute import Compute
+
+        if not isinstance(cls, type) or not issubclass(cls, Compute):
+            raise TypeError(f"engine.compute(...) expects a Compute subclass; got {cls!r}")
+        if cls in self._compute_classes:
+            return cls
+
+        columns = []
+        for bindings, write in ((cls._reads, False), (cls._writes, True)):
+            for component in bindings.values():
+                name = component.__name__
+                if component._gpu_only:
+                    index, width = None, component._shape[0]
+                else:
+                    key = name if name in self._world._schemas else component
+                    if key not in self._world._schemas:
+                        self._register_component(component)
+                    index = self._world._column(key)
+                    width = self._world._metadata[index][2]
+                    if self._position_binding is not None and index == self._position_binding[0]:
+                        raise ValueError("Compute cannot alias the resident position column")
+                columns.append((index, name, width, write))
+
+        sentinels = {"frame_dt": 1, "entity_count": 2, "frame_index": 3}
+        uniforms = []
+        for name in cls._uniforms:
+            default = cls._uniform_defaults.get(name)
+            if isinstance(default, str):
+                if default not in sentinels:
+                    raise ValueError(f"unknown Compute uniform source {default!r} for {name}")
+                uniforms.append((sentinels[default], 0.0))
+            else:
+                uniforms.append((0, float(0.0 if default is None else default)))
+
+        callback = None
+        dispatch = cls.dispatch
+        if isinstance(dispatch, str):
+            symbols = {"entity_count": 1, "max_entities": 2}
+            if dispatch not in symbols:
+                raise ValueError(f"unknown Compute dispatch size {dispatch!r}")
+            threads = (symbols[dispatch], 0)
+        elif callable(dispatch):
+            engine = weakref.ref(self)
+
+            def callback():
+                return int(dispatch(engine()))
+
+            threads = (3, 0)
+        else:
+            threads = (0, max(0, int(dispatch)))
+
+        key = len(self._compute_classes)
+        self._graphics.compute(
+            (key, cls().compile(), cls.workgroup_size, uniforms, threads, columns),
+            callback,
+        )
+        self._compute_classes[cls] = key
+        self._compute_columns.update(index for index, _, _, _ in columns if index is not None)
+        return cls
 
     def _register_component(self, component):
         if component not in self._world._schemas:
@@ -847,6 +915,7 @@ class _NativeEngine:
             raise RuntimeError("native Engine quit during startup")
 
         labels = None
+        compute_dt = None
         if pass_ == "ids":
             labels = {}
             if groups is not None:
@@ -859,6 +928,7 @@ class _NativeEngine:
                             labels[slot] = label
         else:
             step = self._fixed_dt if self._fixed_dt is not None else dt
+            compute_dt = step
             self._world._loop = self._frame_loop(self._world._native, 64, 8, 4096)
             self._world._running = True
             self._time_base = self.elapsed
@@ -870,7 +940,7 @@ class _NativeEngine:
 
         self._sync_scene()
         width, height = self.w * supersample, self.h * supersample
-        captured = self._graphics.capture(self._world._native, width, height, labels)
+        captured = self._graphics.capture(self._world._native, width, height, labels, compute_dt)
         rgba = captured.pop("rgba")
         self.last_frame = captured
         rgb = np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4)[:, :, :3]

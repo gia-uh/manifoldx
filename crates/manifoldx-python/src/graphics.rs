@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
 use manifoldx_render::environment::EnvironmentData;
 use manifoldx_render::fragment::FragmentData;
+use manifoldx_render::frame_compute::{ComputeBinding, ComputeProgram, FrameCompute};
 use manifoldx_render::lines::{LineLayer, LineOptions, LineRow};
 use manifoldx_render::manual::ManualData;
 use manifoldx_render::rect::RectRow;
@@ -24,6 +25,16 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
 use crate::PyNativeWorld;
+
+type ComputeColumn = (Option<usize>, String, u32, bool);
+type ComputeInput = (
+    u32,
+    String,
+    u32,
+    Vec<(u8, f32)>,
+    (u8, u32),
+    Vec<ComputeColumn>,
+);
 
 type CameraInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32);
 type LightInput = ([f32; 3], [f32; 3], f32);
@@ -107,6 +118,9 @@ pub(crate) struct Scene {
     clips: HashMap<u32, usize>,
     uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
+    compute: Option<FrameCompute>,
+    compute_pending: VecDeque<ComputeProgram>,
+    compute_callbacks: Vec<(u32, Py<PyAny>)>,
 }
 
 impl Scene {
@@ -131,6 +145,9 @@ impl Scene {
             clips: HashMap::new(),
             uploads: VecDeque::new(),
             offscreen: None,
+            compute: None,
+            compute_pending: VecDeque::new(),
+            compute_callbacks: Vec::new(),
         }
     }
 
@@ -198,12 +215,31 @@ impl Scene {
         Ok(self.camera)
     }
 
+    pub(crate) fn run_compute(
+        &mut self,
+        renderer: &NativeRenderer,
+        world: &mut World,
+        dt: f32,
+        dispatch: &HashMap<u32, u32>,
+    ) -> Result<(), RenderError> {
+        if self.compute.is_none() && self.compute_pending.is_empty() {
+            return Ok(());
+        }
+        let passes = self.compute.get_or_insert_with(FrameCompute::default);
+        while let Some(program) = self.compute_pending.pop_front() {
+            passes.register(renderer, world, program)?;
+        }
+        passes.run(renderer, world, dt, dispatch)
+    }
+
     fn capture(
         &mut self,
-        world: &World,
+        world: &mut World,
         width: u32,
         height: u32,
         labels: Option<&HashMap<u32, u32>>,
+        dt: Option<f32>,
+        dispatch: &HashMap<u32, u32>,
     ) -> Result<manifoldx_render::RenderOutput, RenderError> {
         let mut renderer = match self.offscreen.take() {
             Some(renderer) => renderer,
@@ -213,6 +249,9 @@ impl Scene {
             })?,
         };
         let result = (|| {
+            if let Some(dt) = dt.filter(|_| labels.is_none()) {
+                self.run_compute(&renderer, world, dt, dispatch)?;
+            }
             let camera = self.apply(&mut renderer, world)?;
             let source = source(world)?;
             match labels {
@@ -223,6 +262,32 @@ impl Scene {
         self.offscreen = Some(renderer);
         result
     }
+}
+
+pub(crate) fn compute_overrides(scene: &Mutex<Scene>) -> Result<HashMap<u32, u32>, RenderError> {
+    if scene.lock().unwrap().compute_callbacks.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Python::attach(|py| {
+        let callbacks: Vec<_> = scene
+            .lock()
+            .unwrap()
+            .compute_callbacks
+            .iter()
+            .map(|(key, callback)| (*key, callback.clone_ref(py)))
+            .collect();
+        callbacks
+            .into_iter()
+            .map(|(key, callback)| {
+                let threads: i64 = callback.call0(py)?.extract(py)?;
+                let threads = u32::try_from(threads.max(0)).map_err(|_| {
+                    PyValueError::new_err("Compute callable dispatch exceeds u32 threads")
+                })?;
+                Ok((key, threads))
+            })
+            .collect::<PyResult<_>>()
+    })
+    .map_err(|error| RenderError::Resource(error.to_string()))
 }
 
 fn skin_entity(
@@ -831,7 +896,43 @@ impl NativeGraphics {
             .push_back(Upload::Albedo(id, width, height, levels));
     }
 
-    #[pyo3(signature = (world, width, height, labels=None))]
+    #[pyo3(signature = (declaration, callback=None))]
+    fn compute(&self, declaration: ComputeInput, callback: Option<Py<PyAny>>) {
+        let (key, source, workgroup_size, uniforms, threads, columns) = declaration;
+        let bindings = columns
+            .into_iter()
+            .map(|(column, name, width, write)| ComputeBinding {
+                column,
+                name,
+                width,
+                write,
+            })
+            .collect();
+        let mut scene = self.scene.lock().unwrap();
+        scene.compute_pending.push_back(ComputeProgram {
+            key,
+            source,
+            workgroup_size,
+            uniforms,
+            threads,
+            bindings,
+        });
+        if let Some(callback) = callback {
+            scene.compute_callbacks.push((key, callback));
+        }
+    }
+
+    fn compute_timings(&self, py: Python<'_>) -> PyResult<Vec<Option<u64>>> {
+        py.detach(|| {
+            let scene = self.scene.lock().unwrap();
+            match (&scene.compute, &scene.offscreen) {
+                (Some(compute), Some(renderer)) => compute.timings(renderer).map_err(render_error),
+                _ => Ok(Vec::new()),
+            }
+        })
+    }
+
+    #[pyo3(signature = (world, width, height, labels=None, dt=None))]
     fn capture<'py>(
         &self,
         py: Python<'py>,
@@ -839,13 +940,19 @@ impl NativeGraphics {
         width: u32,
         height: u32,
         labels: Option<HashMap<u32, u32>>,
+        dt: Option<f32>,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let dispatch = if labels.is_none() && dt.is_some() {
+            compute_overrides(&self.scene).map_err(render_error)?
+        } else {
+            HashMap::new()
+        };
         let output = py.detach(|| {
-            let world = world.lock()?;
+            let mut world = world.lock()?;
             self.scene
                 .lock()
                 .unwrap()
-                .capture(&world, width, height, labels.as_ref())
+                .capture(&mut world, width, height, labels.as_ref(), dt, &dispatch)
                 .map_err(render_error)
         })?;
         let result = stats_dict(py, &output.stats)?;

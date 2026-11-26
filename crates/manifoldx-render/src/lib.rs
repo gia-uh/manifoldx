@@ -4,6 +4,7 @@ pub mod camera;
 pub mod desktop;
 pub mod environment;
 pub mod fragment;
+pub mod frame_compute;
 pub mod lines;
 pub mod manual;
 pub mod math;
