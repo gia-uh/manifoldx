@@ -3,11 +3,17 @@ use super::*;
 use manifoldx_core::clock::{conflicts, Cadence, FrameClock};
 use manifoldx_core::ecs::{Compare, ComponentReadout, ComponentSchema, Scalar, Selection};
 use manifoldx_core::kernel::Program;
-use manifoldx_core::runtime::{Admission, Command, Control, Staged, MAX_COMMAND_BYTES};
+use manifoldx_core::runtime::{apply, Admission, Command, Control, Staged, MAX_COMMAND_BYTES};
 use manifoldx_render::{
     desktop::{self, DesktopApplication, DesktopInfo, DesktopOptions, PresentedFrame},
+    resident::{PositionSpec, ResidentKernel},
     wgpu,
-    winit::{dpi::PhysicalSize, window::Window},
+    winit::{
+        dpi::PhysicalSize,
+        event::WindowEvent,
+        keyboard::{Key, NamedKey},
+        window::Window,
+    },
     FrameTarget, NativeRenderer, RenderError, RenderStats, RendererOptions,
 };
 use pyo3::types::PyTuple;
@@ -542,6 +548,7 @@ impl System {
         report: &mut Report,
         tick: u64,
         current: bool,
+        apply: &mut impl FnMut(&mut World, Command) -> Result<Option<ComponentReadout>, String>,
     ) -> Result<(), String> {
         self.ns = self.ns.max(completed.ns);
         self.last_ns = completed.ns;
@@ -558,7 +565,8 @@ impl System {
             return Ok(());
         }
         for command in batch.commands {
-            report.system_commands += u64::from(command.commit(world, tick));
+            report.system_commands +=
+                u64::from(command.commit_with(tick, |command| apply(world, command)));
         }
         for (event, value) in batch.events {
             if report.events.len() == MAX_QUEUE {
@@ -763,8 +771,14 @@ impl Loop {
                     .frame_intervals_ns
                     .push(nanos(start.duration_since(previous)));
             }
-            let (kernels, slowest) =
-                self.systems_at_barrier(world, &clock, &mut cache, &mut due, &mut report)?;
+            let (kernels, slowest) = self.systems_at_barrier(
+                world,
+                &clock,
+                &mut cache,
+                &mut due,
+                &mut report,
+                &mut apply,
+            )?;
             control.record_frame();
             let deadline = clock.advance();
             let active = if profile { nanos(start.elapsed()) } else { 0 };
@@ -803,6 +817,7 @@ impl Loop {
         cache: &mut Cache,
         due: &mut Vec<(Option<u64>, usize)>,
         report: &mut Report,
+        apply: &mut impl FnMut(&mut World, Command) -> Result<Option<ComponentReadout>, String>,
     ) -> Result<(u64, Option<(usize, u64)>), String> {
         let profile = self.profile;
         let mut kernels = 0;
@@ -840,7 +855,7 @@ impl Loop {
                     (call(callback, snap, &system.access, &self.state), true)
                 }
             };
-            system.finish(world, ready, report, clock.tick(), current)?;
+            system.finish(world, ready, report, clock.tick(), current, apply)?;
         }
         // Prefer the least recently dispatched registration when starts
         // conflict. Ties use registration order. No missed start is queued.
@@ -1069,6 +1084,8 @@ impl FrameLoop {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (graphics, options, registrations, startup, keyboard, position, diagnostics))]
     fn run_desktop<'py>(
         &self,
         py: Python<'py>,
@@ -1076,6 +1093,9 @@ impl FrameLoop {
         options: DesktopInput,
         registrations: Vec<Registration>,
         startup: Py<PyAny>,
+        keyboard: Py<PyAny>,
+        position: Option<PositionInput>,
+        diagnostics: DesktopDiagnostics,
     ) -> PyResult<Bound<'py, PyDict>> {
         if thread::current().id() != self.owner_thread {
             return Err(PyRuntimeError::new_err("run on the World owner thread"));
@@ -1090,6 +1110,34 @@ impl FrameLoop {
         {
             return Err(PyValueError::new_err(
                 "invalid desktop dimensions, frame limits or systems",
+            ));
+        }
+        let (skip_dispatch, suppress_present, diagnostic_readback, resize_after_three) =
+            diagnostics;
+        if (skip_dispatch
+            || suppress_present
+            || diagnostic_readback
+            || resize_after_three.is_some())
+            && frame_limit.is_none()
+        {
+            return Err(PyValueError::new_err(
+                "desktop diagnostics require a frame limit",
+            ));
+        }
+        let position =
+            position.map(
+                |(column, width, offset, kernel_version, writes, wgsl)| PositionSpec {
+                    column,
+                    width,
+                    offset,
+                    kernel_version,
+                    writes,
+                    wgsl,
+                },
+            );
+        if (skip_dispatch || diagnostic_readback) && position.is_none() {
+            return Err(PyValueError::new_err(
+                "resident diagnostics require a position binding",
             ));
         }
         let present_mode = match mode.as_str() {
@@ -1110,6 +1158,10 @@ impl FrameLoop {
             owner: self,
             registrations: Some(registrations),
             startup,
+            keyboard,
+            position,
+            resident: None,
+            skip_dispatch,
             world: None,
             runner: None,
             scene: Arc::clone(&graphics.scene),
@@ -1129,15 +1181,29 @@ impl FrameLoop {
             present_mode,
             renderer: RendererOptions::default(),
             sample_limit: frame_limit,
+            suppress_present,
+            resize_after_three: resize_after_three
+                .map(|(width, height)| PhysicalSize::new(width, height)),
         };
-        let (presented, gpu_ns) = py.detach(|| {
+        let (presented, gpu_ns, diagnostic) = py.detach(|| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 desktop::run_desktop(options, &mut frames)
             }));
             frames.finish();
-            result
+            let (presented, gpu_ns) = result
                 .map_err(|_| PyRuntimeError::new_err("native desktop frame loop panicked"))?
-                .map_err(graphics::render_error)
+                .map_err(graphics::render_error)?;
+            let diagnostic = if diagnostic_readback {
+                frames
+                    .resident
+                    .as_ref()
+                    .map(ResidentKernel::diagnostic_readback)
+                    .transpose()
+                    .map_err(graphics::render_error)?
+            } else {
+                None
+            };
+            Ok::<_, PyErr>((presented, gpu_ns, diagnostic))
         })?;
         let result = PyDict::new(py);
         result.set_item("presented", presented)?;
@@ -1191,6 +1257,32 @@ impl FrameLoop {
             })
             .collect::<PyResult<_>>()?;
         result.set_item("samples", samples)?;
+        if let Some(resident) = &frames.resident {
+            let stats = &resident.stats;
+            let gpu = PyDict::new(py);
+            gpu.set_item("dispatches", stats.dispatches)?;
+            gpu.set_item("version", stats.version)?;
+            gpu.set_item("cpu_version", stats.cpu_version)?;
+            gpu.set_item("row_uploads", stats.row_uploads)?;
+            gpu.set_item("row_upload_bytes", stats.row_upload_bytes)?;
+            gpu.set_item("field_uploads", stats.field_uploads)?;
+            gpu.set_item("field_upload_bytes", stats.field_upload_bytes)?;
+            gpu.set_item("mask_uploads", stats.mask_uploads)?;
+            gpu.set_item("mask_upload_bytes", stats.mask_upload_bytes)?;
+            gpu.set_item("uniform_uploads", stats.uniform_uploads)?;
+            gpu.set_item("uniform_upload_bytes", stats.uniform_uploads * 16)?;
+            gpu.set_item("generations_seeded", stats.generations_seeded)?;
+            gpu.set_item("generations_retired", stats.generations_retired)?;
+            if let Some((bytes, rows)) = diagnostic {
+                gpu.set_item("diagnostic_readbacks", u64::from(bytes != 0))?;
+                gpu.set_item("diagnostic_bytes", bytes)?;
+                gpu.set_item("diagnostic_rows", rows)?;
+            } else {
+                gpu.set_item("diagnostic_readbacks", 0)?;
+                gpu.set_item("diagnostic_bytes", 0)?;
+            }
+            result.set_item("resident", gpu)?;
+        }
         Ok(result)
     }
 
@@ -1347,10 +1439,17 @@ type DesktopInput = (
     Option<u64>,
 );
 
+type PositionInput = (usize, u32, u32, u32, Vec<(u32, u32)>, String);
+type DesktopDiagnostics = (bool, bool, bool, Option<(u32, u32)>);
+
 struct WindowFrames<'a> {
     owner: &'a FrameLoop,
     registrations: Option<Vec<Prepared>>,
     startup: Py<PyAny>,
+    keyboard: Py<PyAny>,
+    position: Option<PositionSpec>,
+    resident: Option<ResidentKernel>,
+    skip_dispatch: bool,
     world: Option<World>,
     runner: Option<Loop>,
     scene: Arc<Mutex<graphics::Scene>>,
@@ -1397,6 +1496,20 @@ impl DesktopApplication for WindowFrames<'_> {
             .begin(&registrations, None)
             .map_err(RenderError::Window)?;
         self.world = Some(world);
+        if let Some(position) = self.position.take() {
+            if registrations.iter().any(|(_, hz, reads, writes, participant)| {
+                reads.contains(&position.column)
+                    || hz.is_some() && writes.contains(&position.column)
+                    || matches!(participant, Participant::Kernel(column, _) if *column == position.column)
+            }) {
+                return Err(RenderError::Window("resident column cannot use CPU reads, async writes or a CPU kernel".into()));
+            }
+            self.resident = Some(ResidentKernel::new(
+                renderer,
+                self.world.as_ref().unwrap(),
+                position,
+            )?);
+        }
         self.runner = Some(
             Loop::new(registrations, None, state, self.frame_limit.is_some())
                 .map_err(|error| RenderError::Window(error.to_string()))?,
@@ -1409,17 +1522,26 @@ impl DesktopApplication for WindowFrames<'_> {
         _window: &Window,
         renderer: &mut NativeRenderer,
         encoder: &mut wgpu::CommandEncoder,
-        mut target: FrameTarget<'_>,
+        target: FrameTarget<'_>,
     ) -> Result<Option<RenderStats>, RenderError> {
         if self
             .frame_limit
-            .is_some_and(|limit| self.frames.len() as u64 >= limit)
+            .is_some_and(|limit| self.clock.tick() >= limit)
         {
             return Ok(None);
         }
         let world = self.world.as_mut().expect("desktop start owns the World");
         let control = &self.owner.control;
-        if !control.frame_boundary(world, self.clock.tick(), self.owner.batches_per_frame) {
+        let resident = &mut self.resident;
+        let mut commit = |world: &mut World, command| match resident {
+            Some(resident) => resident.apply(world, command),
+            None => apply(world, command),
+        };
+        if !control.frame_boundary_with(
+            self.clock.tick(),
+            self.owner.batches_per_frame,
+            |command| commit(world, command),
+        ) {
             return Ok(None);
         }
         self.runner
@@ -1431,6 +1553,7 @@ impl DesktopApplication for WindowFrames<'_> {
                 &mut self.cache,
                 &mut self.due,
                 &mut self.report,
+                &mut commit,
             )
             .map_err(RenderError::Window)?;
         // The desktop Engine owns this queue and has no external receipt consumer.
@@ -1445,7 +1568,14 @@ impl DesktopApplication for WindowFrames<'_> {
         }
         self.report.events.clear();
         let camera = self.scene.lock().unwrap().apply(renderer)?;
-        target.clear = renderer.background();
+        if let Some(resident) = &mut self.resident {
+            resident.dispatch(world, encoder, self.clock.dt() as f32, self.skip_dispatch)?;
+        }
+        let target = FrameTarget {
+            positions: self.resident.as_ref().map(ResidentKernel::positions),
+            clear: renderer.background(),
+            ..target
+        };
         let draw = renderer.encode_world_to_target(
             encoder,
             target,
@@ -1456,6 +1586,24 @@ impl DesktopApplication for WindowFrames<'_> {
         control.record_frame();
         self.clock.advance();
         Ok(Some(draw))
+    }
+
+    fn event(&mut self, _: &Window, event: &WindowEvent) -> Result<(), RenderError> {
+        let (name, pressed) = match event {
+            WindowEvent::Focused(false) => (None, false),
+            WindowEvent::KeyboardInput { event, .. } => {
+                let name = match &event.logical_key {
+                    Key::Character(name) => name.as_str(),
+                    Key::Named(NamedKey::Space) => "Space",
+                    _ => return Ok(()),
+                };
+                (Some(name), event.state.is_pressed())
+            }
+            _ => return Ok(()),
+        };
+        Python::attach(|py| self.keyboard.call1(py, (name, pressed)))
+            .map_err(|error| RenderError::Window(error.to_string()))?;
+        Ok(())
     }
 
     fn presented(&mut self, frame: PresentedFrame) -> Result<(), RenderError> {

@@ -4,6 +4,7 @@ pub mod camera;
 pub mod desktop;
 pub mod math;
 pub mod renderer;
+pub mod resident;
 pub mod scene;
 
 pub use camera::Camera;

@@ -32,6 +32,8 @@ pub struct DesktopOptions {
     pub present_mode: wgpu::PresentMode,
     pub renderer: RendererOptions,
     pub sample_limit: Option<u64>,
+    pub suppress_present: bool,
+    pub resize_after_three: Option<PhysicalSize<u32>>,
 }
 
 #[derive(Clone)]
@@ -412,6 +414,10 @@ impl<A: DesktopApplication> Desktop<'_, A> {
         context.renderer.queue().submit([encoder.finish()]);
         let submit = submitted_at.elapsed();
         drop(color);
+        if self.options.suppress_present {
+            drop(texture);
+            return Ok(true);
+        }
         context.window.pre_present_notify();
         let presenting_at = Instant::now();
         texture.present();
@@ -429,6 +435,13 @@ impl<A: DesktopApplication> Desktop<'_, A> {
             present,
             render,
         })?;
+        if self.presents == 3 {
+            if let Some(size) = self.options.resize_after_three {
+                if let Some(applied_size) = context.window.request_inner_size(size) {
+                    context.configure(applied_size)?;
+                }
+            }
+        }
         if suboptimal {
             context.configure(context.window.inner_size())?;
         }

@@ -106,6 +106,9 @@ class _Selection:
 
     def read(self, column=None):
         component = self.component if column is None else self.world._column(column)
+        resident = self.world._resident_closed
+        if component == resident or any(predicate[0] == resident for predicate in self.predicates):
+            raise RuntimeError("resident column is unavailable after the desktop device closes")
         return self.world._readback(
             self.world._loop.read(self.component, self.predicates, component)
         )
@@ -149,7 +152,9 @@ class _Commands:
 
     def replace(self, component, entities, rows):
         return self._lease.replace(
-            self._world._column(component), lambda: self._world._handles(entities, command=True), rows
+            self._world._column(component),
+            lambda: self._world._handles(entities, command=True),
+            rows,
         )
 
     def spawn(self, *components, count=1, payload=None):
@@ -218,6 +223,7 @@ class World:
         self._systems = []
         self._running = False
         self._started = False
+        self._resident_closed = None
 
     def _owner(self):
         if current_thread() is not self._thread:

@@ -260,7 +260,7 @@ impl Control {
         self.frame_boundary_with(frame, limit, |command| apply(world, command))
     }
 
-    fn frame_boundary_with(
+    pub fn frame_boundary_with(
         &self,
         frame: u64,
         limit: usize,
@@ -496,7 +496,7 @@ impl Staged {
         self.commit_with(frame, |command| apply(world, command))
     }
 
-    fn commit_with(
+    pub fn commit_with(
         mut self,
         frame: u64,
         apply_command: impl FnOnce(Command) -> Result<Option<ComponentReadout>, String>,

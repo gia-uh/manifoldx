@@ -13,6 +13,7 @@ import numpy as np
 from manifoldx.camera import Camera
 from manifoldx.components import Component, Material, Mesh, Transform
 from manifoldx.ecs import ComponentView, _make_component_class
+from manifoldx.input import InputState
 from manifoldx.resources import (
     BasicMaterial,
     FlatMaterial,
@@ -108,7 +109,10 @@ class _NativeEngine:
         self._origin = (0.0, 0.0)
         self._lights = []
         self._capacity = max_entities
+        self.input = InputState()
         self._world = World(max_entities)
+        self._position_binding = None
+        self._desktop_probe = (False, False, False, None)
         self._frame_loop = FrameLoop
         columns = (("Transform", "f32", 10), ("Mesh", "u32", 1), ("Material", "u32", 1))
         for name, kind, size in columns:
@@ -129,6 +133,48 @@ class _NativeEngine:
         self.desktop_report = None
 
     @property
+    def world(self):
+        """Native World used by the desktop frame scheduler."""
+        return self._world
+
+    def bind_position(self, program, *, field, target):
+        """Draw a registered kernel component's vec3 position from the GPU."""
+        from manifoldx.compute.kernel import _Kernel, _VERSION
+
+        self._world._owner()
+        if self._started or self._closed or self._position_binding is not None:
+            raise RuntimeError("bind one resident position field before starting the Engine")
+        if target != "wgsl":
+            raise ValueError("resident position binding requires target='wgsl'")
+        if not isinstance(program, _Kernel) or program.version != _VERSION:
+            raise TypeError("resident position binding requires a v1 @kernel declaration")
+        column = self._world._column(program.component)
+        _, kind, width, layout = self._world._metadata[column]
+        if kind != "f32" or width != program.width or tuple(layout.items()) != program.layout:
+            raise ValueError("resident position kernel does not match the registered schema")
+        source = self._world.field(program.component, field)
+        if source.width != 3 or field not in program.writes:
+            raise ValueError("bind a registered vec3<f32> field written by the kernel")
+        writes = sorted(layout[name] for name in program.writes)
+        self._position_binding = (
+            column,
+            width,
+            source.offset,
+            program.version,
+            writes,
+            program.wgsl(),
+        )
+
+    def _desktop_key(self, name, pressed):
+        if name is None:
+            for key in self.input.pressed_keys:
+                self.input._record_key_up(key, ())
+        elif pressed:
+            self.input._record_key_down(name, ())
+        else:
+            self.input._record_key_up(name, ())
+
+    @property
     def origin(self):
         return self._origin
 
@@ -146,6 +192,10 @@ class _NativeEngine:
 
     def set_origin(self, x, z):
         self._world._owner()
+        if self._position_binding is not None:
+            raise NotImplementedError(
+                "changing origin with a resident position binding is unavailable"
+            )
         offset = self._origin_vector() - (x, 0, z)
         data = self._world.query("Transform").read()
         rows = data.numpy().copy()
@@ -447,18 +497,28 @@ class _NativeEngine:
 
         try:
             self.desktop_report = self._world._loop.run_desktop(
-                self._graphics, options, self._world._systems, startup
+                self._graphics,
+                options,
+                self._world._systems,
+                startup,
+                self._desktop_key,
+                self._position_binding,
+                self._desktop_probe,
             )
             self.elapsed = self.desktop_report["scheduler_frames"] / hz
             if location := os.environ.get("MANIFOLDX_DESKTOP_REPORT"):
                 Path(location).write_text(json.dumps(self.desktop_report, indent=2) + "\n")
         finally:
             self._world._running = False
+            if self._position_binding is not None:
+                self._world._resident_closed = self._position_binding[0]
             self.close()
 
     def render_frame(self, *, supersample=1, pass_="beauty", groups=None, dt=1 / 30):
         if self._desktop_ran:
             raise RuntimeError("presented and offscreen targets require separate Engine sessions")
+        if self._position_binding is not None:
+            raise NotImplementedError("resident position binding requires the native desktop mode")
         if supersample != 1 or pass_ != "beauty" or groups is not None:
             raise NotImplementedError("native base capture supports one beauty sample per pixel")
         if not self._start():
