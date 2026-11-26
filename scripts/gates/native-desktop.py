@@ -1,4 +1,4 @@
-"""Verify the installed native desktop wheel from an X11 or Xwayland desktop."""
+"""Verify the installed native wheel. Use an isolated X server for repeatable key input."""
 
 import argparse
 import ctypes as c
@@ -112,6 +112,8 @@ class _Keyboard:
         self.xlib = c.CDLL("libX11.so.6")
         self.xlib.XOpenDisplay.argtypes = [c.c_char_p]
         self.xlib.XOpenDisplay.restype = c.c_void_p
+        self.xlib.XRaiseWindow.argtypes = [c.c_void_p, c.c_ulong]
+        self.xlib.XGetInputFocus.argtypes = [c.c_void_p, c.POINTER(c.c_ulong), c.POINTER(c.c_int)]
         self.xlib.XSetInputFocus.argtypes = [c.c_void_p, c.c_ulong, c.c_int, c.c_ulong]
         self.xlib.XKeysymToKeycode.argtypes = [c.c_void_p, c.c_ulong]
         self.xlib.XKeysymToKeycode.restype = c.c_ubyte
@@ -129,8 +131,14 @@ class _Keyboard:
         self.display = self.xlib.XOpenDisplay(None)
         assert self.display, "cannot open the X11 display"
         self.window = int(window, 16)
+        self.xlib.XRaiseWindow(self.display, self.window)
         self.xlib.XSetInputFocus(self.display, self.window, 2, 0)
         self.xlib.XSync(self.display, 0)
+        time.sleep(0.20)
+        focus = c.c_ulong()
+        revert = c.c_int()
+        self.xlib.XGetInputFocus(self.display, c.byref(focus), c.byref(revert))
+        assert focus.value == self.window, f"X11 did not focus {self.window:#x}: {focus.value:#x}"
 
     def key_w(self, pressed):
         key = self.xlib.XKeysymToKeycode(self.display, ord("w"))
@@ -201,6 +209,10 @@ def interact(process, directory):
 
 
 def validate_motion(centers, report):
+    stats = report["resident"]
+    assert stats["field_uploads"] == 2 and stats["field_upload_bytes"] == 8, (
+        f"input oracle: expected separate writes for press and release: {stats}"
+    )
     before, held, released, settled = centers
     assert all(all(x is not None for x in pair) for pair in centers), centers
     assert held[0] - before[0] >= 18, f"motion oracle: W did not move the red car: {centers}"
@@ -208,9 +220,7 @@ def validate_motion(centers, report):
     assert max(pair[1] for pair in centers) - min(pair[1] for pair in centers) < 2, (
         f"entity oracle: W moved the other car: {centers}"
     )
-    stats = report["resident"]
     assert stats["dispatches"] == stats["version"] == report["presented"], stats
-    assert stats["field_uploads"] == 2 and stats["field_upload_bytes"] == 8, stats
     assert stats["row_uploads"] == 1 and stats["row_upload_bytes"] == 64, stats
     assert stats["diagnostic_readbacks"] == stats["diagnostic_bytes"] == 0, stats
 
