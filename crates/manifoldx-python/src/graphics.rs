@@ -83,6 +83,7 @@ pub(crate) struct Scene {
     spot: Option<SpotLight>,
     post: Option<Arc<PostOptions>>,
     environment: Option<(f32, bool)>,
+    fog: Option<([f32; 2], [f32; 3])>,
     shadows: Option<ShadowOptions>,
     rects: Arc<[RectRow]>,
     lines: Option<Arc<LineOptions>>,
@@ -106,6 +107,7 @@ impl Scene {
             spot: None,
             post: None,
             environment: None,
+            fog: None,
             shadows: None,
             rects: Arc::default(),
             lines: None,
@@ -131,6 +133,7 @@ impl Scene {
         renderer.set_post(self.post.clone());
         renderer.set_shadows(self.shadows);
         renderer.set_environment(self.environment);
+        renderer.set_fog(self.fog);
         renderer.set_rects(self.rects.clone(), self.rect_before_post);
         renderer.set_layers(self.layers.clone());
         renderer.set_animation(self.time, self.origin, &self.benders);
@@ -636,6 +639,10 @@ impl NativeGraphics {
             .uploads
             .push_back(Upload::Material(id, color, shading, effects));
         Ok(())
+    }
+
+    fn fog(&self, fog: Option<([f32; 2], [f32; 3])>) {
+        self.scene.lock().unwrap().fog = fog;
     }
 
     fn environment(&self, environment: Option<(f32, bool)>) -> PyResult<()> {

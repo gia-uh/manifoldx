@@ -25,7 +25,7 @@ pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 /// Reversed-depth float buffer; the pass clears 0 and compares `Greater`.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16 + 4 + 8 * 4 + 16 + 4) * 4;
+const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16 + 4 + 8 * 4 + 16 + 4 + 8) * 4;
 const INSTANCE_FLOATS: usize = 40;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
 const VERTEX_BYTES: usize = 12 * 4;
@@ -567,6 +567,7 @@ pub struct NativeRenderer {
     camera_layout: wgpu::BindGroupLayout,
     shadow: ShadowMap,
     environment: Option<(f32, bool)>,
+    fog: Option<([f32; 2], [f32; 3])>,
     skybox_pipeline: wgpu::RenderPipeline,
     shadow_options: Option<ShadowOptions>,
     shadow_pipelines: [wgpu::RenderPipeline; 2],
@@ -800,6 +801,7 @@ impl NativeRenderer {
             camera_layout: bind_group_layout,
             shadow,
             environment: None,
+            fog: None,
             skybox_pipeline,
             shadow_options: None,
             shadow_pipelines,
@@ -859,6 +861,10 @@ impl NativeRenderer {
 
     pub fn set_environment(&mut self, environment: Option<(f32, bool)>) {
         self.environment = environment;
+    }
+
+    pub fn set_fog(&mut self, fog: Option<([f32; 2], [f32; 3])>) {
+        self.fog = fog;
     }
 
     pub fn upload_environment(&mut self, data: &EnvironmentData) -> Result<(), RenderError> {
@@ -1761,6 +1767,10 @@ impl NativeRenderer {
             globals[112..128].copy_from_slice(&camera.view().to_columns());
             globals[128..132].copy_from_slice(&[intensity, 1.0, projection.0[0], projection.0[5]]);
         }
+        if let Some((range, color)) = self.fog.filter(|_| draw.ids.is_none()) {
+            globals[132..136].copy_from_slice(&[color[0], color[1], color[2], 1.0]);
+            globals[136..138].copy_from_slice(&range);
+        }
         self.gpu
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&globals));
@@ -2459,6 +2469,8 @@ struct Camera {
     benders: array<vec4<f32>, 8>,
     view: mat4x4<f32>,
     environment: vec4<f32>,
+    fog_color: vec4<f32>,
+    fog_range: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var albedo_sampler: sampler;
@@ -2873,7 +2885,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let band = smoothstep(0.86, 0.93, wave) * smoothstep(-0.35, 0.05, gap);
         color += in.ripple * band * (0.25 * color + vec3<f32>(0.12, 0.16, 0.18));
     }
-    return vec4<f32>(color / (color + vec3<f32>(1.0)), in.effects.x);
+    color = color / (color + vec3<f32>(1.0));
+    if camera.fog_color.a > 0.0 {
+        let distance_from_camera = distance(camera.position.xyz, in.world_position);
+        let amount = clamp((distance_from_camera - camera.fog_range.x) /
+            (camera.fog_range.y - camera.fog_range.x), 0.0, 1.0);
+        color = mix(color, camera.fog_color.rgb, amount);
+    }
+    return vec4<f32>(color, in.effects.x);
 }
 "#;
 

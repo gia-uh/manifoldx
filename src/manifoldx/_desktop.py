@@ -123,6 +123,10 @@ class _NativeEngine:
         self._spot = None
         self._post = None
         self._environment = None
+        self.fog_enabled = False
+        self.fog_start = 0.0
+        self.fog_end = 1.0
+        self.fog_color = self.background_color
         self._native_environment = None
         self._shadow_options = None
         self._capacity = max_entities
@@ -551,6 +555,12 @@ class _NativeEngine:
         self._post = post
         return post
 
+    def enable_fog(self, start, end, color=None):
+        """Apply linear distance fog to Standard materials."""
+        self.fog_enabled = True
+        self.fog_start, self.fog_end = float(start), float(end)
+        self.fog_color = tuple(self.background_color if color is None else color)
+
     def set_environment(self, env):
         """Set the image-based lighting environment, preset, or None."""
         from manifoldx.ibl import EnvironmentMap, PRESETS
@@ -585,6 +595,9 @@ class _NativeEngine:
 
     def _sync_scene(self):
         self._sync_environment()
+        self._graphics.fog(
+            ((self.fog_start, self.fog_end), self.fog_color) if self.fog_enabled else None
+        )
         self._graphics.animation(self.elapsed, self._origin, list(self.benders)[:8])
         lines = self.lines
         if lines.layers or self._line_rows:
