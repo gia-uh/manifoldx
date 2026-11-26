@@ -15,7 +15,7 @@ from manifoldx.gui.painter import RectOp
 from manifoldx.gui.layout import LayoutBox
 from manifoldx.gui.style import parse_color
 from manifoldx.post import Grade
-from manifoldx.resources import FlatMaterial, plane
+from manifoldx.resources import FlatMaterial, plane, srgb_to_linear
 from PIL import Image
 
 WIDTH, HEIGHT = 160, 104
@@ -33,7 +33,12 @@ def frame(post, early):
     engine.spawn(Mesh(plane(2, 1.6)), Material(FlatMaterial("#1289de")), Transform())
     if os.environ["MANIFOLDX_CORE"] == "rust":
         assert type(engine).__name__ == "_NativeEngine", type(engine)
-        op = RectOp(LayoutBox(*BOX), parse_color(FILL), parse_color(BORDER), BORDER_WIDTH, RADIUS)
+
+        def linear(color):
+            r, g, b, a = parse_color(color)
+            return (*srgb_to_linear((r, g, b)), a)
+
+        op = RectOp(LayoutBox(*BOX), linear(FILL), linear(BORDER), BORDER_WIDTH, RADIUS)
         engine._graphics.fixture_rects(
             RectMaterial.pack_instances([op], exact=True).tolist(), early
         )
