@@ -96,9 +96,11 @@ def main():
 
     engine = mx.Engine("Stream walk", width=960, height=540)
     streamer = make(engine, args.workers)
-    ms_text, km_text = mx.gui.Text(""), mx.gui.Text("")  # the atlas keeps each string: round them
     if not args.headless:
-        engine.gui.append(mx.gui.Panel(children=[ms_text, km_text], anchor="top-left", offset=(12, 12),
+        from manifoldx.gui import Panel, Text
+
+        ms_text, km_text = Text(""), Text("")  # the atlas keeps each string: round them
+        engine.gui.append(Panel(children=[ms_text, km_text], anchor="top-left", offset=(12, 12),
                                        style_overrides={"width": 150, "height": 44, "padding": 6, "gap": 2}))
     st = {"frame": 0, "last": None, "wall": [], "cpu": []}
 
@@ -110,8 +112,9 @@ def main():
             if st["frame"] > WARMUP:
                 st["wall"].append(ms)
                 st["cpu"].append((now[1] - st["last"][1]) * 1000)
-            ms_text.text = f"frame {ms:.0f} ms"
-            km_text.text = f"{max(0, st['frame'] - WARMUP) * STEP / 1000:.1f} km"
+            if not args.headless:
+                ms_text.text = f"frame {ms:.0f} ms"
+                km_text.text = f"{max(0, st['frame'] - WARMUP) * STEP / 1000:.1f} km"
         st["last"] = now
         z = -max(0, st["frame"] - WARMUP) * STEP         # walk north once the ring is warm
         st["frame"] += 1
