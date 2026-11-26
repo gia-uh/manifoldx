@@ -568,6 +568,10 @@ pub struct RenderStats {
     pub read_ns: u64,
     /// Camera uniform and instance buffer copy.
     pub upload_ns: u64,
+    pub stream_upload_bytes: u64,
+    pub stream_upload_ns: u64,
+    pub stream_meshes: [usize; 2],
+    pub view_resources: [usize; 2],
     /// Command encoding and queue submission.
     pub encode_submit_ns: u64,
     /// Poll, map, copy and unmap of the readback buffer.
@@ -685,6 +689,7 @@ pub struct NativeRenderer {
     meshes: HashMap<u32, GpuMesh>,
     stream_uploads: HashMap<u32, StreamUpload>,
     streamed_meshes: BTreeSet<u32>,
+    stream_transfer: [u64; 2],
     materials: HashMap<u32, Material>,
     fragments: HashMap<u32, FragmentPipeline>,
     manual: HashMap<u32, ManualPipeline>,
@@ -997,6 +1002,7 @@ impl NativeRenderer {
             meshes: HashMap::new(),
             stream_uploads: HashMap::new(),
             streamed_meshes: BTreeSet::new(),
+            stream_transfer: [0; 2],
             materials: HashMap::new(),
             fragments: HashMap::new(),
             manual: HashMap::new(),
@@ -1395,7 +1401,10 @@ impl NativeRenderer {
         if bytes.is_empty() || !bytes.len().is_multiple_of(4) || end > buffers[index].size() {
             return Err(RenderError::Resource("invalid streamed mesh write".into()));
         }
+        let started = Instant::now();
         self.gpu.queue.write_buffer(buffers[index], *offset, bytes);
+        self.stream_transfer[0] += bytes.len() as u64;
+        self.stream_transfer[1] += elapsed_ns(started.elapsed());
         *offset = end;
         if upload.offsets == buffers.map(wgpu::Buffer::size) {
             self.streamed_meshes.insert(id);
@@ -2352,6 +2361,10 @@ impl NativeRenderer {
             self.encode_view_reads(encoder);
         }
         stats.frame_order = order;
+        [stats.stream_upload_bytes, stats.stream_upload_ns] =
+            std::mem::take(&mut self.stream_transfer);
+        stats.stream_meshes = self.stream_counts();
+        stats.view_resources = self.view_counts();
         Ok(stats)
     }
 

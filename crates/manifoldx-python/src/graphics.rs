@@ -1327,6 +1327,10 @@ pub(crate) fn stats_dict<'py>(
     result.set_item("post_target_generation", stats.post_target_generation)?;
     result.set_item("read_ns", stats.read_ns)?;
     result.set_item("upload_ns", stats.upload_ns)?;
+    result.set_item("stream_upload_bytes", stats.stream_upload_bytes)?;
+    result.set_item("stream_upload_ns", stats.stream_upload_ns)?;
+    result.set_item("stream_resources", stats.stream_meshes)?;
+    result.set_item("view_resources", stats.view_resources)?;
     result.set_item("encode_submit_ns", stats.encode_submit_ns)?;
     result.set_item("readback_wait_ns", stats.wait_readback_ns)?;
     result.set_item("total_ns", stats.total_ns)?;
