@@ -342,6 +342,14 @@ class _NativeEngine:
         if key in registry:
             return registry[key][0]
         index = len(registry) + 1
+        if "vertices" in geometry and np.size(geometry.get("indices")) == 2:
+            indices = np.asarray(geometry["indices"], dtype=np.intp).reshape(2)
+            positions = np.asarray(geometry["vertices"], dtype="f4")[indices]
+            if positions.shape != (2, 3):
+                raise ValueError("axis geometry requires two three-dimensional endpoints")
+            self._graphics.axis(index, positions.tolist())
+            registry[key] = (index, geometry)
+            return index
         joints = []
         if "joints" in geometry:
             from manifoldx.skinning import pack_joints, validate_joints, validate_weights
@@ -431,6 +439,8 @@ class _NativeEngine:
         return index
 
     def _manual_material(self, index, material):
+        from manifoldx.viz import AxisMaterial
+
         if not isinstance(material, MaterialBase):
             raise TypeError("a manual WGSL material must extend Material")
         subtype = getattr(material, "pipeline_subtype", None)
@@ -457,7 +467,9 @@ class _NativeEngine:
         )
         textured = subtype == "textured" and getattr(material, "albedo_map", None) is not None
         source = material._compile(textured=True) if textured else material._compile()
-        self._graphics.manual(index, source, rows.reshape(-1).tolist(), textures, blend)
+        self._graphics.manual(
+            index, source, rows.reshape(-1).tolist(), textures, blend, isinstance(material, AxisMaterial)
+        )
 
     def _upload_native_albedo(self, image, source):
         self._textures += 1

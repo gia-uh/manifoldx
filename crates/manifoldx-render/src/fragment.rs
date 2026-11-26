@@ -88,7 +88,7 @@ impl FragmentPipeline {
                 vertex,
                 format,
                 "fs_custom",
-                (front_face, None),
+                (front_face, None, wgpu::PrimitiveTopology::TriangleList),
             )
         });
         if let Some(error) = pollster::block_on(scope.pop()) {
@@ -196,7 +196,11 @@ pub(crate) fn make_pipeline(
     vertex: &[wgpu::VertexBufferLayout<'_>],
     format: wgpu::TextureFormat,
     fragment: &str,
-    (front_face, blend): (wgpu::FrontFace, Option<wgpu::BlendState>),
+    (front_face, blend, topology): (
+        wgpu::FrontFace,
+        Option<wgpu::BlendState>,
+        wgpu::PrimitiveTopology,
+    ),
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("native fragment pipeline"),
@@ -209,7 +213,9 @@ pub(crate) fn make_pipeline(
         },
         primitive: wgpu::PrimitiveState {
             front_face,
-            cull_mode: blend.is_none().then_some(wgpu::Face::Back),
+            topology,
+            cull_mode: (blend.is_none() && topology == wgpu::PrimitiveTopology::TriangleList)
+                .then_some(wgpu::Face::Back),
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {

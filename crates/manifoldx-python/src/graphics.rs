@@ -79,6 +79,7 @@ enum Upload {
     Fragment(u32, FragmentData),
     Manual(u32, ManualData),
     Sprite(u32, SpriteData),
+    Axis(u32, [[f32; 3]; 2]),
 }
 
 pub(crate) struct Scene {
@@ -146,6 +147,7 @@ impl Scene {
         renderer.set_lines(self.lines.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
+                Upload::Axis(id, points) => renderer.upload_axis(id, points)?,
                 Upload::Sprite(id, data) => renderer.upload_sprite(id, data)?,
                 Upload::Manual(id, data) => renderer.upload_manual(id, &data)?,
                 Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
@@ -664,6 +666,14 @@ impl NativeGraphics {
         Ok(())
     }
 
+    fn axis(&self, id: u32, points: [[f32; 3]; 2]) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Axis(id, points));
+    }
+
     fn sprite(&self, id: u32, source: String, values: [f32; 4], rgba: &Bound<'_, PyBytes>) {
         let data = SpriteData {
             source,
@@ -684,12 +694,14 @@ impl NativeGraphics {
         uniforms: Vec<f32>,
         textures: Vec<(u32, u32)>,
         blend: u8,
+        axis: bool,
     ) {
         let data = ManualData {
             source,
             uniforms,
             textures,
             blend,
+            axis,
         };
         self.scene
             .lock()

@@ -12,6 +12,7 @@ pub struct ManualData {
     pub uniforms: Vec<f32>,
     pub textures: Vec<(u32, u32)>,
     pub blend: u8,
+    pub axis: bool,
 }
 
 pub(crate) struct MeshTexture {
@@ -23,6 +24,7 @@ pub(crate) struct MeshTexture {
 pub(crate) struct ManualPipeline {
     pub(crate) pipelines: [wgpu::RenderPipeline; 2],
     pub(crate) translucent: bool,
+    pub(crate) axis: bool,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
     source: String,
@@ -39,6 +41,11 @@ impl ManualPipeline {
         format: wgpu::TextureFormat,
     ) -> Result<Self, RenderError> {
         let device = gpu.device();
+        let topology = if data.axis {
+            wgpu::PrimitiveTopology::LineList
+        } else {
+            wgpu::PrimitiveTopology::TriangleList
+        };
         let blend = match data.blend {
             0 => None,
             1 => Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -115,7 +122,7 @@ impl ManualPipeline {
                 std::slice::from_ref(&vertex),
                 format,
                 "fs_main",
-                (face, blend),
+                (face, blend, topology),
             )
         });
         if let Some(error) = pollster::block_on(scope.pop()) {
@@ -136,6 +143,7 @@ impl ManualPipeline {
         Ok(Self {
             pipelines,
             translucent: blend.is_some(),
+            axis: data.axis,
             layout,
             uniform,
             source: data.source.clone(),
@@ -149,6 +157,7 @@ impl ManualPipeline {
         if self.source != data.source
             || self.textures != data.textures
             || self.blend != data.blend
+            || self.axis != data.axis
             || uniform_size(data)? != self.uniform.size()
         {
             return Ok(false);

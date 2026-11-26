@@ -17,7 +17,7 @@ use crate::scene::{
 
 use crate::environment::EnvironmentData;
 use crate::fragment::{FragmentData, FragmentPipeline};
-use crate::manual::{ManualData, ManualFrame, ManualPipeline, MeshTexture};
+use crate::manual::{gpu_buffer, ManualData, ManualFrame, ManualPipeline, MeshTexture};
 use crate::shadow::{self, ShadowFrame, ShadowMap, ShadowOptions};
 use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
 use crate::sprite::{SpriteData, SpritePass};
@@ -324,6 +324,7 @@ struct GpuMesh {
     color: [f32; 4],
     bounds: [[f32; 3]; 2],
     skinned: bool,
+    axis: bool,
 }
 
 struct InstanceBuffer {
@@ -944,9 +945,13 @@ impl NativeRenderer {
             },
         ];
         let vertex = wgpu::VertexBufferLayout {
-            array_stride: VERTEX_BYTES as u64,
+            array_stride: if data.axis { 12 } else { VERTEX_BYTES as u64 },
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &attributes,
+            attributes: if data.axis {
+                &attributes[..1]
+            } else {
+                &attributes
+            },
         };
         let pipeline = ManualPipeline::new(&self.gpu, data, vertex, self.format)?;
         for frame in self.manual_frames.iter_mut().flatten() {
@@ -1065,6 +1070,38 @@ impl NativeRenderer {
                 color: srgb_to_linear(color_srgb),
                 bounds,
                 skinned: !joints.is_empty(),
+                axis: false,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn upload_axis(&mut self, id: u32, points: [[f32; 3]; 2]) -> Result<(), RenderError> {
+        if id == 0 || points.as_flattened().iter().any(|value| !value.is_finite()) {
+            return Err(RenderError::Resource("invalid native axis geometry".into()));
+        }
+        let device = self.device();
+        let vertex_buffer = gpu_buffer(
+            device,
+            "native axis endpoints",
+            24,
+            wgpu::BufferUsages::VERTEX,
+        );
+        let index_buffer = gpu_buffer(device, "native axis indices", 8, wgpu::BufferUsages::INDEX);
+        self.queue()
+            .write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&points));
+        self.queue()
+            .write_buffer(&index_buffer, 0, bytemuck::cast_slice(&[0u32, 1]));
+        self.meshes.insert(
+            id,
+            GpuMesh {
+                vertex_buffer,
+                index_buffer,
+                index_count: 2,
+                bounds: points,
+                color: [1.0; 4],
+                skinned: false,
+                axis: true,
             },
         );
         Ok(())
@@ -1826,7 +1863,8 @@ impl NativeRenderer {
         if draw.ids.is_none() && !draw.omit_draw {
             if let Some(mut sprites) = self.sprites.take() {
                 let globals = self.material_globals(camera, &target, None);
-                let result = sprites.prepare(&self.gpu, world, source, layers, &globals, sprite_view);
+                let result =
+                    sprites.prepare(&self.gpu, world, source, layers, &globals, sprite_view);
                 self.sprites = Some(sprites);
                 result?;
             }
@@ -2063,6 +2101,10 @@ impl NativeRenderer {
                 pass.set_vertex_buffer(1, instance_buffer.slice(..));
                 let mut first_instance = 0u32;
                 for group in &draw_groups {
+                    if group.axis {
+                        first_instance += group.instances;
+                        continue;
+                    }
                     if let Some(id) = group.manual {
                         let manual = &self.manual[&id];
                         let view = self.manual_frames[manual_index]
@@ -2112,6 +2154,27 @@ impl NativeRenderer {
                     stats.draw_calls += draws;
                     stats.triangles += triangles;
                 }
+                let mut first = 0;
+                for group in &draw_groups {
+                    let end = first + group.instances;
+                    if group.axis {
+                        let id = group.manual.expect("axes carry a manual line material");
+                        let view = self.manual_frames[manual_index]
+                            .as_ref()
+                            .expect("axis frame prepared");
+                        let mesh = &self.meshes[&group.geometry_id];
+                        pass.set_pipeline(&self.manual[&id].pipelines[0]);
+                        pass.set_bind_group(0, &view.groups[&id], &[]);
+                        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        pass.set_index_buffer(
+                            mesh.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        pass.draw_indexed(0..mesh.index_count, 0, first..end);
+                        stats.draw_calls += 1;
+                    }
+                    first = end;
+                }
             }
         }
 
@@ -2143,7 +2206,11 @@ impl NativeRenderer {
         let mut lower = [f32::INFINITY; 3];
         let mut upper = [f32::NEG_INFINITY; 3];
         for instance in &batch.instances {
-            let Some(mesh) = self.meshes.get(&instance.geometry_id) else {
+            let Some(mesh) = self
+                .meshes
+                .get(&instance.geometry_id)
+                .filter(|mesh| !mesh.axis)
+            else {
                 continue;
             };
             let [lo, hi] = mesh.bounds;
@@ -2307,6 +2374,9 @@ impl NativeRenderer {
                 .meshes
                 .get(&instance.geometry_id)
                 .ok_or(RenderError::UnknownGeometry(instance.geometry_id))?;
+            if mesh.axis && (shadow || ids.is_some()) {
+                continue;
+            }
             if ids.is_none() {
                 let invalid = instance
                     .material_id
@@ -2338,6 +2408,11 @@ impl NativeRenderer {
             let manual = instance
                 .material_id
                 .filter(|id| ids.is_none() && self.manual.contains_key(id));
+            if mesh.axis != manual.is_some_and(|id| self.manual[&id].axis) {
+                return Err(RenderError::Resource(
+                    "axis geometry requires AxisMaterial and vice versa".into(),
+                ));
+            }
             let translucent =
                 effects.opacity < 1.0 || manual.is_some_and(|id| self.manual[&id].translucent);
             if shadow && (translucent || mirrored) {
@@ -2350,6 +2425,7 @@ impl NativeRenderer {
             let deformed = mesh.skinned || (!shadow && effects.sway > 0.0);
             if !bound
                 && !deformed
+                && !mesh.axis
                 && outside_frustum(&view_projection.multiply(&displayed), mesh.bounds)
             {
                 continue;
@@ -2378,6 +2454,7 @@ impl NativeRenderer {
                     albedo,
                     fragment,
                     manual,
+                    axis: mesh.axis,
                     rank,
                     first_slot: slot,
                     instances: 0,
@@ -2580,6 +2657,7 @@ struct DrawGroup {
     albedo: u32,
     fragment: Option<u32>,
     manual: Option<u32>,
+    axis: bool,
     rank: (bool, bool),
     first_slot: u32,
     instances: u32,

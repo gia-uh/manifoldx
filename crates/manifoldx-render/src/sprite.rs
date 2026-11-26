@@ -182,7 +182,11 @@ impl SpritePass {
             &vertex,
             self.format,
             "fs_main",
-            (wgpu::FrontFace::Ccw, None),
+            (
+                wgpu::FrontFace::Ccw,
+                None,
+                wgpu::PrimitiveTopology::TriangleList,
+            ),
         );
         if let Some(error) = pollster::block_on(scope.pop()) {
             return Err(RenderError::Resource(format!(
