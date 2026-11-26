@@ -3,11 +3,13 @@
 pub mod camera;
 pub mod desktop;
 pub mod math;
+pub mod post;
 pub mod renderer;
 pub mod resident;
 pub mod scene;
 
 pub use camera::Camera;
+pub use post::{PostOptions, Sky};
 pub use renderer::{
     json_string, srgb_to_linear, write_ppm, AdapterSummary, DirectionalLight, FrameTarget, Gpu,
     NativeRenderer, PointLight, RenderError, RenderOutput, RenderStats, RendererOptions, Shading,

@@ -112,6 +112,7 @@ class _NativeEngine:
         self._lights = []
         self._sun = None
         self._spot = None
+        self._post = None
         self._capacity = max_entities
         self.input = InputState()
         self._world = World(max_entities)
@@ -435,6 +436,29 @@ class _NativeEngine:
         if light is not None and not isinstance(light, SpotLight):
             raise TypeError("spot must be a SpotLight or None")
         self._spot = light
+
+    def set_post(self, **effects):
+        from manifoldx.post import Post, ssao_kernel
+
+        post = (self._post or Post()).changed(**effects)
+        options = None
+        if post.active():
+            s, b, sh, g, sky = post.ssao, post.bloom, post.shafts, post.grade, post.sky
+            samples = min(32, max(0, int(s.samples))) if s else 0
+            options = (
+                None if s is None else (s.radius, s.intensity, samples, s.bias, s.power),
+                None if b is None else (b.threshold, b.knee, b.intensity),
+                None if sh is None else (sh.intensity, sh.decay, sh.density, sh.samples),
+                None if g is None else (g.saturation, g.contrast, g.vignette),
+                None
+                if sky is None
+                else (sky.zenith, sky.horizon, sky.sun_size, sky.sun_intensity, sky.glow),
+                post.fxaa,
+                ssao_kernel(samples).tolist(),
+            )
+        self._graphics.post(options)
+        self._post = post
+        return post
 
     def _sync_scene(self):
         camera = self.camera

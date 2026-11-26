@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::World;
 use manifoldx_render::{
-    resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, RenderError,
-    RenderStats, RendererOptions, Shading, SpotLight, DEFAULT_MAX_INSTANCES,
+    resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, PostOptions,
+    RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight, DEFAULT_MAX_INSTANCES,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -18,6 +18,16 @@ type CameraInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32);
 type LightInput = ([f32; 3], [f32; 3], f32);
 type SpotInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32, f32);
 type MaterialInput = (f32, f32, f32, Option<u32>);
+type SkyInput = ([f32; 3], Option<[f32; 3]>, f32, f32, f32);
+type PostInput = (
+    Option<[f32; 5]>,
+    Option<[f32; 3]>,
+    Option<[f32; 4]>,
+    Option<[f32; 3]>,
+    Option<SkyInput>,
+    bool,
+    Vec<[f32; 4]>,
+);
 
 enum Upload {
     Mesh(u32, MeshData, Vec<[f32; 2]>),
@@ -31,6 +41,7 @@ pub(crate) struct Scene {
     lights: Vec<PointLight>,
     sun: Option<DirectionalLight>,
     spot: Option<SpotLight>,
+    post: Option<Arc<PostOptions>>,
     uploads: Vec<Upload>,
     offscreen: Option<NativeRenderer>,
 }
@@ -43,6 +54,7 @@ impl Scene {
             lights: Vec::new(),
             sun: None,
             spot: None,
+            post: None,
             uploads: Vec::new(),
             offscreen: None,
         }
@@ -52,6 +64,7 @@ impl Scene {
         renderer.set_background(self.background);
         renderer.set_point_lights(&self.lights);
         renderer.set_direct_lights(self.sun, self.spot);
+        renderer.set_post(self.post.clone());
         for upload in self.uploads.drain(..) {
             match upload {
                 Upload::Mesh(id, mesh, uv) => {
@@ -185,6 +198,37 @@ impl NativeGraphics {
             .collect();
     }
 
+    #[pyo3(signature = (settings))]
+    fn post(&self, settings: Option<PostInput>) -> PyResult<()> {
+        let post = if let Some((ssao, bloom, shafts, grade, sky, fxaa, kernel)) = settings {
+            let kernel = kernel
+                .try_into()
+                .map_err(|_| PyValueError::new_err("post kernel must have 32 rows"))?;
+            let sky = sky.map(
+                |(zenith, horizon, sun_size_degrees, sun_intensity, glow)| Sky {
+                    zenith,
+                    horizon,
+                    sun_size_degrees,
+                    sun_intensity,
+                    glow,
+                },
+            );
+            Some(Arc::new(PostOptions {
+                ssao,
+                bloom,
+                shafts,
+                grade,
+                sky,
+                fxaa,
+                kernel,
+            }))
+        } else {
+            None
+        };
+        self.scene.lock().unwrap().post = post;
+        Ok(())
+    }
+
     fn mesh(
         &self,
         id: u32,
@@ -298,6 +342,8 @@ pub(crate) fn stats_dict<'py>(
     result.set_item("instances", stats.instances)?;
     result.set_item("draw_calls", stats.draw_calls)?;
     result.set_item("triangles", stats.triangles)?;
+    result.set_item("post_order", &stats.post_order)?;
+    result.set_item("post_target_generation", stats.post_target_generation)?;
     result.set_item("read_ns", stats.read_ns)?;
     result.set_item("upload_ns", stats.upload_ns)?;
     result.set_item("encode_submit_ns", stats.encode_submit_ns)?;

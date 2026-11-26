@@ -8,6 +8,7 @@ use manifoldx_core::ecs::World;
 
 use crate::camera::Camera;
 use crate::math::Mat4;
+use crate::post::{PostOptions, PostPasses};
 use crate::scene::{
     read_instances, InstanceBatch, InstanceSource, MeshData, SceneError, DEFAULT_MAX_INSTANCES,
 };
@@ -344,6 +345,39 @@ impl PositionPass {
     }
 }
 
+struct OffscreenTarget {
+    size: [u32; 2],
+    color: wgpu::Texture,
+    view: wgpu::TextureView,
+    depth: wgpu::TextureView,
+}
+
+impl OffscreenTarget {
+    fn new(device: &wgpu::Device, [width, height]: [u32; 2]) -> Self {
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("manifoldx-native-color"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            size: [width, height],
+            color,
+            view,
+            depth: depth_target(device, width, height),
+        }
+    }
+}
+
 pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
     let depth = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("manifoldx-native-depth"),
@@ -356,7 +390,7 @@ pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wg
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     depth.create_view(&wgpu::TextureViewDescriptor::default())
@@ -368,6 +402,9 @@ pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wg
 /// mapping. The desktop diagnostic measures GPU execution separately.
 #[derive(Clone, Debug, Default)]
 pub struct RenderStats {
+    /// Actual encoded screen-space effects after the main pass.
+    pub post_order: Vec<&'static str>,
+    pub post_target_generation: u64,
     /// Live entities the World read examined.
     pub entities_examined: usize,
     /// Instances after membership and geometry filtering.
@@ -404,6 +441,11 @@ pub struct RenderOutput {
 /// Native GPU resources and drawing for one target format.
 pub struct NativeRenderer {
     gpu: Gpu,
+    format: wgpu::TextureFormat,
+    offscreen: Option<OffscreenTarget>,
+    post_options: Option<std::sync::Arc<PostOptions>>,
+    post_passes: Option<PostPasses>,
+    post_sun: Option<DirectionalLight>,
     pipeline: wgpu::RenderPipeline,
     reversed_pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
@@ -540,6 +582,11 @@ impl NativeRenderer {
         let reversed = pipeline(wgpu::FrontFace::Cw);
         let mut renderer = Self {
             gpu,
+            format,
+            offscreen: None,
+            post_options: None,
+            post_passes: None,
+            post_sun: None,
             pipeline: regular,
             reversed_pipeline: reversed,
             texture_layout,
@@ -735,6 +782,7 @@ impl NativeRenderer {
     }
 
     pub fn set_direct_lights(&mut self, sun: Option<DirectionalLight>, spot: Option<SpotLight>) {
+        self.post_sun = sun;
         self.sun = sun.map_or([0.0; 8], |light| {
             let [x, y, z] = light.direction;
             let [r, g, b] = light.color;
@@ -763,6 +811,10 @@ impl NativeRenderer {
                 0.0,
             ]
         });
+    }
+
+    pub fn set_post(&mut self, options: Option<std::sync::Arc<PostOptions>>) {
+        self.post_options = options;
     }
 
     /// Upload a complete sRGB RGBA8 chain, largest mip first.
@@ -923,23 +975,28 @@ impl NativeRenderer {
         if !(1..=MAX_SIDE).contains(&width) || !(1..=MAX_SIDE).contains(&height) {
             return Err(RenderError::BadSize { width, height });
         }
-        let color = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("manifoldx-native-color"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: COLOR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_view = depth_target(self.device(), width, height);
+        let offscreen = self
+            .offscreen
+            .take()
+            .filter(|target| target.size == [width, height])
+            .unwrap_or_else(|| OffscreenTarget::new(self.device(), [width, height]));
+        let result = self.read_offscreen(world, source, camera, draw, &offscreen);
+        self.offscreen = Some(offscreen);
+        result.map(|mut output| {
+            output.stats.total_ns = elapsed_ns(started.elapsed());
+            output
+        })
+    }
 
+    fn read_offscreen(
+        &mut self,
+        world: &World,
+        source: InstanceSource,
+        camera: &Camera,
+        draw: DrawOptions<'_>,
+        offscreen: &OffscreenTarget,
+    ) -> Result<RenderOutput, RenderError> {
+        let [width, height] = offscreen.size;
         let encode_started = Instant::now();
         let mut encoder = self
             .gpu
@@ -948,8 +1005,8 @@ impl NativeRenderer {
                 label: Some("manifoldx-native-encoder"),
             });
         let target = FrameTarget {
-            color: &color_view,
-            depth: &depth_view,
+            color: &offscreen.view,
+            depth: &offscreen.depth,
             width,
             height,
             clear: if draw.ids.is_some() {
@@ -960,7 +1017,7 @@ impl NativeRenderer {
             timestamps: None,
             positions: None,
         };
-        let mut stats = self.encode_world(&mut encoder, target, world, source, camera, draw)?;
+        let mut stats = self.encode_frame(&mut encoder, target, world, source, camera, draw)?;
 
         let padded_bytes_per_row = align_to(width * 4, 256);
         let readback_size = padded_bytes_per_row as u64 * height as u64;
@@ -972,7 +1029,7 @@ impl NativeRenderer {
         });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &color,
+                texture: &offscreen.color,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -1021,7 +1078,6 @@ impl NativeRenderer {
         drop(mapped);
         readback.unmap();
         stats.wait_readback_ns = elapsed_ns(readback_started.elapsed());
-        stats.total_ns = elapsed_ns(started.elapsed());
 
         Ok(RenderOutput {
             width,
@@ -1040,7 +1096,7 @@ impl NativeRenderer {
         source: InstanceSource,
         camera: &Camera,
     ) -> Result<RenderStats, RenderError> {
-        self.encode_world(
+        self.encode_frame(
             encoder,
             target,
             world,
@@ -1048,6 +1104,50 @@ impl NativeRenderer {
             camera,
             DrawOptions::default(),
         )
+    }
+
+    fn encode_frame(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: FrameTarget<'_>,
+        world: &World,
+        source: InstanceSource,
+        camera: &Camera,
+        draw: DrawOptions<'_>,
+    ) -> Result<RenderStats, RenderError> {
+        let Some(options) = self.post_options.clone().filter(|_| draw.ids.is_none()) else {
+            return self.encode_world(encoder, target, world, source, camera, draw);
+        };
+        let mut post = self
+            .post_passes
+            .take()
+            .unwrap_or_else(|| PostPasses::new(self.device(), self.format));
+        post.prepare(self.device(), [target.width, target.height], target.depth);
+        let output = target.color;
+        let clear = [
+            target.clear.r as f32,
+            target.clear.g as f32,
+            target.clear.b as f32,
+        ];
+        let scene = FrameTarget {
+            color: post.scene(),
+            ..target
+        };
+        let mut result = self.encode_world(encoder, scene, world, source, camera, draw);
+        if let Ok(stats) = &mut result {
+            stats.post_target_generation = post.generation();
+            stats.post_order = post.encode(
+                self.queue(),
+                encoder,
+                output,
+                &options,
+                camera,
+                self.post_sun,
+                clear,
+            );
+        }
+        self.post_passes = Some(post);
+        result
     }
 
     fn encode_world(
