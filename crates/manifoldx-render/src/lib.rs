@@ -14,6 +14,7 @@ pub mod resident;
 pub mod scene;
 pub mod shadow;
 pub mod skin;
+pub mod sprite;
 
 pub use camera::Camera;
 pub use post::{PostOptions, Sky};

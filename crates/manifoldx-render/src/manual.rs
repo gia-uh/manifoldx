@@ -278,7 +278,7 @@ impl ManualFrame {
     }
 }
 
-fn gpu_buffer(
+pub(crate) fn gpu_buffer(
     device: &wgpu::Device,
     label: &str,
     size: u64,

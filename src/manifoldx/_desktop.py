@@ -386,7 +386,15 @@ class _NativeEngine:
         }
         kind = types.get(type(material))
         if kind is None:
-            self._manual_material(index, material)
+            from manifoldx.viz import ColormapMaterial
+
+            if isinstance(material, ColormapMaterial):
+                self._graphics.sprite(
+                    index, material._compile(),
+                    material.get_data(1, None)[0].tolist(), material.get_lut().tobytes(),
+                )
+            else:
+                self._manual_material(index, material)
             registry[key] = (index, material, version)
             return index
         params = None

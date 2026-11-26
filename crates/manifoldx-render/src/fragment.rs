@@ -155,7 +155,7 @@ fn binding(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn upload_1d(gpu: &Gpu, bytes: &[u8]) -> wgpu::TextureView {
+pub(crate) fn upload_1d(gpu: &Gpu, bytes: &[u8]) -> wgpu::TextureView {
     let size = wgpu::Extent3d {
         width: (bytes.len() / 4) as u32,
         height: 1,

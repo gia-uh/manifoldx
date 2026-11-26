@@ -12,6 +12,7 @@ use manifoldx_render::rect::RectRow;
 use manifoldx_render::renderer::{ViewOptions, ViewOrder};
 use manifoldx_render::shadow::ShadowOptions;
 use manifoldx_render::skin::{validate_matrices, JointMatrices};
+use manifoldx_render::sprite::SpriteData;
 use manifoldx_render::{
     resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, PostOptions,
     RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight, StandardEffects,
@@ -77,6 +78,7 @@ enum Upload {
     Environment(EnvironmentData),
     Fragment(u32, FragmentData),
     Manual(u32, ManualData),
+    Sprite(u32, SpriteData),
 }
 
 pub(crate) struct Scene {
@@ -144,6 +146,7 @@ impl Scene {
         renderer.set_lines(self.lines.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
+                Upload::Sprite(id, data) => renderer.upload_sprite(id, data)?,
                 Upload::Manual(id, data) => renderer.upload_manual(id, &data)?,
                 Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
                 Upload::Environment(data) => renderer.upload_environment(&data)?,
@@ -659,6 +662,19 @@ impl NativeGraphics {
         }
         self.scene.lock().unwrap().environment = environment;
         Ok(())
+    }
+
+    fn sprite(&self, id: u32, source: String, values: [f32; 4], rgba: &Bound<'_, PyBytes>) {
+        let data = SpriteData {
+            source,
+            values,
+            rgba: rgba.as_bytes().to_vec(),
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Sprite(id, data));
     }
 
     fn manual(

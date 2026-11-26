@@ -20,6 +20,7 @@ use crate::fragment::{FragmentData, FragmentPipeline};
 use crate::manual::{ManualData, ManualFrame, ManualPipeline, MeshTexture};
 use crate::shadow::{self, ShadowFrame, ShadowMap, ShadowOptions};
 use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
+use crate::sprite::{SpriteData, SpritePass};
 
 /// The offscreen colour format. It is sRGB, so the target encodes the
 /// linear shader output once.
@@ -605,6 +606,7 @@ pub struct NativeRenderer {
     fragments: HashMap<u32, FragmentPipeline>,
     manual: HashMap<u32, ManualPipeline>,
     manual_frames: [Option<ManualFrame>; 2],
+    sprites: Option<SpritePass>,
     invalid_materials: HashMap<u32, String>,
     instance_buffer: Option<InstanceBuffer>,
     max_instances: usize,
@@ -843,6 +845,7 @@ impl NativeRenderer {
             fragments: HashMap::new(),
             manual: HashMap::new(),
             manual_frames: [None, None],
+            sprites: None,
             invalid_materials: HashMap::new(),
             instance_buffer: None,
             max_instances,
@@ -902,6 +905,16 @@ impl NativeRenderer {
             }
         }
         Ok(())
+    }
+
+    pub fn upload_sprite(&mut self, id: u32, data: SpriteData) -> Result<(), RenderError> {
+        if self.sprites.is_none() {
+            self.sprites = Some(SpritePass::new(&self.gpu, self.format, self.max_instances)?);
+        }
+        self.sprites
+            .as_mut()
+            .expect("created above")
+            .upload(&self.gpu, id, data)
     }
 
     pub fn upload_manual(&mut self, id: u32, data: &ManualData) -> Result<(), RenderError> {
@@ -1733,6 +1746,39 @@ impl NativeRenderer {
         true
     }
 
+    fn material_globals(
+        &self,
+        camera: &Camera,
+        target: &FrameTarget<'_>,
+        shadow: Option<&ShadowFrame>,
+    ) -> [f32; crate::manual::GLOBAL_FLOATS] {
+        let aspect = target.width as f32 / target.height as f32;
+        let mut globals = [0.0; crate::manual::GLOBAL_FLOATS];
+        globals[..16].copy_from_slice(&camera.view_projection(aspect).to_columns());
+        globals[16..32].copy_from_slice(&camera.view().to_columns());
+        globals[32..48].copy_from_slice(&camera.projection(aspect).to_columns());
+        globals[48..51].copy_from_slice(&camera.position);
+        globals[51] = self.animation[0];
+        globals[52..54].copy_from_slice(&[target.width as f32, target.height as f32]);
+        globals[54..56].copy_from_slice(&self.animation[1..3]);
+        if let Some((intensity, _)) = self.environment {
+            globals[56] = intensity;
+            globals[57] = f32::from_bits(1);
+        }
+        if let Some(shadow) = shadow {
+            globals[60..76].copy_from_slice(&shadow.matrices[0].to_columns());
+        }
+        globals[76..84].copy_from_slice(&self.sun);
+        globals[88..101].copy_from_slice(&self.spot[..13]);
+        if let Some((range, color)) = self.fog {
+            globals[102..104].copy_from_slice(&range);
+            globals[104..107].copy_from_slice(&color);
+            globals[107] = f32::from_bits(1);
+        }
+        globals[108..].copy_from_slice(self.benders.as_flattened());
+        globals
+    }
+
     fn encode_world(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1751,6 +1797,23 @@ impl NativeRenderer {
 
         let read_started = Instant::now();
         let mut batch = read_instances(world, source, draw.ignore_transform)?;
+        if let Some(point_cloud) = world
+            .component_index("PointCloud")
+            .filter(|_| !batch.instances.is_empty())
+        {
+            let entities: Vec<_> = batch
+                .instances
+                .iter()
+                .map(|instance| instance.entity)
+                .collect();
+            let mut point_clouds = world
+                .memberships(point_cloud, &entities)
+                .map_err(|error| RenderError::Resource(error.to_string()))?
+                .into_iter();
+            batch
+                .instances
+                .retain(|_| !point_clouds.next().expect("one marker per instance"));
+        }
         let fades = draw.ids.is_none() && self.materials.values().any(|m| m.effects.faded);
         let tints = draw.ids.is_none() && self.materials.values().any(|m| m.effects.tinted);
         let styles = instance_styles(world, &batch, fades, tints)?;
@@ -1759,6 +1822,14 @@ impl NativeRenderer {
             .map(|view| &view.layers)
             .or(self.layer_filter.as_deref());
         // A layer can hide a caster from the camera without hiding its shadow.
+        let sprite_view = usize::from(draw.secondary.is_some());
+        if draw.ids.is_none() && !draw.omit_draw && self.sprites.is_some() {
+            let globals = self.material_globals(camera, &target, None);
+            self.sprites
+                .as_mut()
+                .expect("sprite materials uploaded")
+                .prepare(&self.gpu, world, source, layers, &globals, sprite_view)?;
+        }
         let shadow_batch = (layers.is_some()
             && self.shadow_options.is_some()
             && draw.ids.is_none()
@@ -1835,29 +1906,7 @@ impl NativeRenderer {
         }
         let manual_index = usize::from(draw.secondary.is_some());
         if draw_groups.iter().any(|group| group.manual.is_some()) {
-            let mut manual_globals = [0.0; crate::manual::GLOBAL_FLOATS];
-            manual_globals[..16].copy_from_slice(&view_projection.to_columns());
-            manual_globals[16..32].copy_from_slice(&camera.view().to_columns());
-            manual_globals[32..48].copy_from_slice(&camera.projection(aspect).to_columns());
-            manual_globals[48..51].copy_from_slice(&camera.position);
-            manual_globals[51] = self.animation[0];
-            manual_globals[52..54].copy_from_slice(&[target.width as f32, target.height as f32]);
-            manual_globals[54..56].copy_from_slice(&self.animation[1..3]);
-            if let Some((intensity, _)) = self.environment {
-                manual_globals[56] = intensity;
-                manual_globals[57] = f32::from_bits(1);
-            }
-            if let Some(shadow) = &frame {
-                manual_globals[60..76].copy_from_slice(&shadow.matrices[0].to_columns());
-            }
-            manual_globals[76..84].copy_from_slice(&self.sun);
-            manual_globals[88..101].copy_from_slice(&self.spot[..13]);
-            if let Some((range, color)) = self.fog {
-                manual_globals[102..104].copy_from_slice(&range);
-                manual_globals[104..107].copy_from_slice(&color);
-                manual_globals[107] = f32::from_bits(1);
-            }
-            manual_globals[108..].copy_from_slice(self.benders.as_flattened());
+            let manual_globals = self.material_globals(camera, &target, frame.as_ref());
             let transforms: Vec<[f32; 16]> = draw_groups
                 .iter()
                 .flat_map(|group| {
@@ -2054,6 +2103,13 @@ impl NativeRenderer {
                     first_instance += group.instances;
                     stats.draw_calls += 1;
                     stats.triangles += (mesh.index_count / 3) as usize * group.instances as usize;
+                }
+            }
+            if draw.ids.is_none() && !draw.omit_draw {
+                if let Some(sprites) = &self.sprites {
+                    let (draws, triangles) = sprites.draw(&mut pass, sprite_view);
+                    stats.draw_calls += draws;
+                    stats.triangles += triangles;
                 }
             }
         }
