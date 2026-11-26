@@ -237,7 +237,8 @@ struct PositionPass {
 }
 
 impl PositionPass {
-    fn new(device: &wgpu::Device, instance_limit: usize) -> Self {
+    fn new(device: &wgpu::Device, instance_limit: usize) -> Result<Self, RenderError> {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("resident position culling"),
             source: wgpu::ShaderSource::Wgsl(include_str!("position.wgsl").into()),
@@ -250,6 +251,11 @@ impl PositionPass {
             compilation_options: Default::default(),
             cache: None,
         });
+        if let Some(error) = pollster::block_on(scope.pop()) {
+            return Err(RenderError::Device(format!(
+                "resident culling pipeline: {error}"
+            )));
+        }
         let buffer = |label, size, usage| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -259,7 +265,7 @@ impl PositionPass {
             })
         };
         let capacity = instance_limit as u64 * 32;
-        Self {
+        Ok(Self {
             pipeline,
             metadata: buffer(
                 "resident position bounds",
@@ -268,7 +274,7 @@ impl PositionPass {
             ),
             args: buffer("resident position args", 16, wgpu::BufferUsages::UNIFORM),
             capacity,
-        }
+        })
     }
 
     fn encode(
@@ -537,6 +543,13 @@ impl NativeRenderer {
     /// Borrow the queue paired with this renderer's device.
     pub fn queue(&self) -> &wgpu::Queue {
         self.gpu.queue()
+    }
+
+    pub fn prepare_resident_positions(&mut self) -> Result<(), RenderError> {
+        if self.position_pass.is_none() {
+            self.position_pass = Some(PositionPass::new(&self.gpu.device, self.max_instances)?);
+        }
+        Ok(())
     }
 
     /// Upload one indexed geometry under the World's `Mesh` id.
@@ -1013,9 +1026,9 @@ impl NativeRenderer {
                 .flat_map(|group| group.positions.iter().copied())
                 .collect();
             if metadata.iter().any(|row| row[0] != u32::MAX) {
-                let pass = self
-                    .position_pass
-                    .get_or_insert_with(|| PositionPass::new(&self.gpu.device, self.max_instances));
+                let pass = self.position_pass.as_ref().ok_or_else(|| {
+                    RenderError::Device("resident culling pipeline is not prepared".into())
+                })?;
                 pass.encode(
                     &self.gpu,
                     encoder,

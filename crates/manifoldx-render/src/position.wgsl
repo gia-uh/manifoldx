@@ -16,7 +16,7 @@ fn outside(clip: mat4x4<f32>, lo: vec3<f32>, hi: vec3<f32>) -> bool {
     for (var i = 0u; i < 8u; i++) {
         let p = select(lo, hi, (vec3<u32>(i) & vec3<u32>(1u, 2u, 4u)) != vec3<u32>(0u));
         let v = clip * vec4<f32>(p, 1.0);
-        let tests = array<bool, 6>(v.x < -v.w, v.x > v.w, v.y < -v.w, v.y > v.w, v.z < 0.0, v.z > v.w);
+        let tests = array<bool, 6>((v.x < -v.w), (v.x > v.w), (v.y < -v.w), (v.y > v.w), (v.z < 0.0), (v.z > v.w));
         for (var plane = 0u; plane < 6u; plane++) {
             outside_plane[plane] = outside_plane[plane] && tests[plane];
         }

@@ -1497,6 +1497,7 @@ impl DesktopApplication for WindowFrames<'_> {
             .map_err(RenderError::Window)?;
         self.world = Some(world);
         if let Some(position) = self.position.take() {
+            renderer.prepare_resident_positions()?;
             if registrations.iter().any(|(_, hz, reads, writes, participant)| {
                 reads.contains(&position.column)
                     || hz.is_some() && writes.contains(&position.column)
