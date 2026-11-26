@@ -173,19 +173,27 @@ impl NativeGraphics {
         Ok(())
     }
 
-    #[pyo3(signature = (id, color, kind, standard=None))]
+    #[pyo3(signature = (id, color, kind, standard=None, shininess=None))]
     fn material(
         &self,
         id: u32,
         color: [f32; 3],
         kind: &str,
         standard: Option<MaterialInput>,
+        shininess: Option<f32>,
     ) -> PyResult<()> {
-        let shading = match (kind, standard) {
-            ("basic", None) => Shading::Basic,
-            ("flat", None) => Shading::Flat,
-            ("phong", None) => Shading::Phong,
-            ("standard", Some((roughness, metallic, ao, albedo))) => Shading::Standard {
+        let shading = match (kind, standard, shininess) {
+            ("basic", None, None) => Shading::Basic,
+            ("flat", None, None) => Shading::Flat,
+            ("phong", None, Some(shininess)) if shininess.is_finite() && shininess > 0.0 => {
+                Shading::Phong { shininess }
+            }
+            ("phong", None, _) => {
+                return Err(PyValueError::new_err(
+                    "Phong shininess must be finite and positive",
+                ));
+            }
+            ("standard", Some((roughness, metallic, ao, albedo)), None) => Shading::Standard {
                 roughness,
                 metallic,
                 ao,

@@ -365,7 +365,8 @@ class _NativeEngine:
                 material.ao,
                 None if texture is None else texture.id,
             )
-        self._graphics.material(index, _color(material.color), kind, params)
+        shininess = material.shininess if kind == "phong" else None
+        self._graphics.material(index, _color(material.color), kind, params, shininess)
         registry[key] = (index, material)
         return index
 

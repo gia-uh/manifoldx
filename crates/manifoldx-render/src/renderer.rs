@@ -163,7 +163,9 @@ impl Gpu {
 pub enum Shading {
     Basic,
     Flat,
-    Phong,
+    Phong {
+        shininess: f32,
+    },
     Standard {
         roughness: f32,
         metallic: f32,
@@ -639,7 +641,15 @@ impl NativeRenderer {
             return Err(RenderError::Resource("invalid material id or color".into()));
         }
         let (style, albedo) = match shading {
-            Shading::Basic | Shading::Phong => ([0.0, 0.0, 0.0, 1.0], 0),
+            Shading::Basic => ([0.0, 0.0, 0.0, 1.0], 0),
+            Shading::Phong { shininess } => {
+                if !shininess.is_finite() || shininess <= 0.0 {
+                    return Err(RenderError::Resource(
+                        "Phong shininess must be finite and positive".into(),
+                    ));
+                }
+                ([shininess, 0.0, 0.0, 5.0], 0)
+            }
             Shading::Flat => ([0.0, 0.0, 0.0, 2.0], 0),
             Shading::Standard {
                 roughness,
@@ -1400,6 +1410,24 @@ fn standard_light(
     return (diffuse + specular) * radiance * ndotl;
 }
 
+fn phong_color(in: VertexOut, n: vec3<f32>) -> vec3<f32> {
+    let view = safe_normalize(camera.position.xyz - in.world_position);
+    var color = 0.03 * in.color;
+    for (var i = 0u; i < 4u; i++) {
+        let light = camera.lights[i];
+        let offset = light.position.xyz - in.world_position;
+        let direction = safe_normalize(offset);
+        let incidence = dot(n, direction);
+        if light.rgb_intensity.a > 0.0 && incidence > 0.0 {
+            let distance_sq = max(dot(offset, offset), 0.0001);
+            let radiance = light.rgb_intensity.rgb * light.rgb_intensity.a / distance_sq;
+            let highlight = pow(max(dot(reflect(-direction, n), view), 0.0), in.style.x);
+            color += (in.color * incidence + vec3<f32>(highlight)) * radiance;
+        }
+    }
+    return color;
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let uv_dx = dpdx(in.uv);
@@ -1418,6 +1446,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     if mode == 2u {
         return vec4<f32>(in.color, 1.0);
+    }
+    if mode == 5u {
+        return vec4<f32>(phong_color(in, n), 1.0);
     }
     var albedo = in.color;
     if mode == 4u {
