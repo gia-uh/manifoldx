@@ -1,9 +1,10 @@
 //! Python scene declarations for the native graphics owner.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use manifoldx_core::ecs::World;
+use manifoldx_core::ecs::{ColumnData, EntityId, World};
+use manifoldx_render::skin::{validate_matrices, JointMatrices};
 use manifoldx_render::{
     resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, PostOptions,
     RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight, StandardEffects,
@@ -19,6 +20,10 @@ type CameraInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32);
 type LightInput = ([f32; 3], [f32; 3], f32);
 type SpotInput = ([f32; 3], [f32; 3], [f32; 3], f32, f32, f32, f32);
 type MaterialInput = (f32, f32, f32, Option<u32>);
+type VertexInput = (Vec<[f32; 3]>, Vec<u32>);
+type PoseIdentity = (u32, Option<u64>);
+type PoseInput = (PoseIdentity, JointMatrices);
+type FrameInput = (PoseIdentity, u32, f64);
 type EffectsInput = (bool, f32, Option<f32>, Option<[f32; 4]>);
 type SkyInput = ([f32; 3], Option<[f32; 3]>, f32, f32, f32);
 type PostInput = (
@@ -32,9 +37,12 @@ type PostInput = (
 );
 
 enum Upload {
-    Mesh(u32, MeshData, Vec<[f32; 2]>, Vec<[f32; 3]>),
+    Mesh(u32, MeshData, Vec<[f32; 2]>, VertexInput),
     Material(u32, [f32; 3], Shading, StandardEffects),
     Albedo(u32, u32, u32, Vec<Vec<u8>>),
+    Poses(Vec<PoseInput>),
+    Bake(u32, Vec<JointMatrices>),
+    Play(Vec<FrameInput>),
 }
 
 pub(crate) struct Scene {
@@ -44,7 +52,8 @@ pub(crate) struct Scene {
     sun: Option<DirectionalLight>,
     spot: Option<SpotLight>,
     post: Option<Arc<PostOptions>>,
-    uploads: Vec<Upload>,
+    clips: HashMap<u32, usize>,
+    uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
 }
 
@@ -57,20 +66,44 @@ impl Scene {
             sun: None,
             spot: None,
             post: None,
-            uploads: Vec::new(),
+            clips: HashMap::new(),
+            uploads: VecDeque::new(),
             offscreen: None,
         }
     }
 
-    pub(crate) fn apply(&mut self, renderer: &mut NativeRenderer) -> Result<Camera, RenderError> {
+    pub(crate) fn apply(
+        &mut self,
+        renderer: &mut NativeRenderer,
+        world: &World,
+    ) -> Result<Camera, RenderError> {
         renderer.set_background(self.background);
         renderer.set_point_lights(&self.lights);
         renderer.set_direct_lights(self.sun, self.spot);
         renderer.set_post(self.post.clone());
-        for upload in self.uploads.drain(..) {
+        while let Some(upload) = self.uploads.pop_front() {
             match upload {
-                Upload::Mesh(id, mesh, uv, colors) => {
-                    renderer.upload_mesh_attributes(id, &mesh, [1.0; 3], &uv, &colors)?
+                Upload::Mesh(id, mesh, uv, (colors, joints)) => {
+                    renderer.upload_mesh_attributes(id, &mesh, [1.0; 3], &uv, &colors, &joints)?
+                }
+                Upload::Poses(poses) => {
+                    let entities = poses
+                        .iter()
+                        .map(|(identity, _)| skin_entity(world, renderer, *identity))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (entity, (_, matrices)) in entities.into_iter().zip(poses) {
+                        renderer.set_joints(entity, &matrices)?;
+                    }
+                }
+                Upload::Bake(clip, poses) => renderer.bake_poses(clip, &poses)?,
+                Upload::Play(frames) => {
+                    let entities = frames
+                        .iter()
+                        .map(|(identity, _, _)| skin_entity(world, renderer, *identity))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (entity, (_, clip, position)) in entities.into_iter().zip(frames) {
+                        renderer.play_poses(entity, clip, position)?;
+                    }
                 }
                 Upload::Material(id, color, shading, effects) => {
                     renderer.set_material_effects(id, color, shading, effects)?
@@ -101,7 +134,7 @@ impl Scene {
             })?,
         };
         let result = (|| {
-            let camera = self.apply(&mut renderer)?;
+            let camera = self.apply(&mut renderer, world)?;
             let source = source(world)?;
             match labels {
                 Some(labels) => renderer.render_ids(world, source, &camera, width, height, labels),
@@ -110,6 +143,29 @@ impl Scene {
         })();
         self.offscreen = Some(renderer);
         result
+    }
+}
+
+fn skin_entity(
+    world: &World,
+    renderer: &NativeRenderer,
+    (slot, generation): PoseIdentity,
+) -> Result<EntityId, RenderError> {
+    let invalid =
+        || RenderError::Resource(format!("skinning needs a live skinned mesh at slot {slot}"));
+    let entity = world
+        .live_identity(slot)
+        .filter(|id| generation.is_none_or(|version| version == id.generation()))
+        .ok_or_else(invalid)?;
+    let mesh = world.component_index("Mesh").ok_or_else(invalid)?;
+    let rows = world
+        .read_component(mesh, Some(&[entity]))
+        .map_err(|error| RenderError::Resource(error.to_string()))?;
+    match rows.data {
+        ColumnData::U32(ids) if ids.first().is_some_and(|id| renderer.mesh_is_skinned(*id)) => {
+            Ok(entity)
+        }
+        _ => Err(invalid()),
     }
 }
 
@@ -231,7 +287,7 @@ impl NativeGraphics {
         Ok(())
     }
 
-    #[pyo3(signature = (id, positions, normals, indices, uvs, colors=None))]
+    #[pyo3(signature = (id, positions, normals, indices, uvs, attributes=None))]
     fn mesh(
         &self,
         id: u32,
@@ -239,7 +295,7 @@ impl NativeGraphics {
         normals: Vec<[f32; 3]>,
         indices: Vec<u32>,
         uvs: Vec<[f32; 2]>,
-        colors: Option<Vec<[f32; 3]>>,
+        attributes: Option<VertexInput>,
     ) -> PyResult<()> {
         let mesh = MeshData {
             positions,
@@ -248,12 +304,71 @@ impl NativeGraphics {
         };
         mesh.validate()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        self.scene.lock().unwrap().uploads.push(Upload::Mesh(
+        self.scene.lock().unwrap().uploads.push_back(Upload::Mesh(
             id,
             mesh,
             uvs,
-            colors.unwrap_or_default(),
+            attributes.unwrap_or_default(),
         ));
+        Ok(())
+    }
+
+    fn joint_poses(&self, poses: Vec<PoseInput>) -> PyResult<()> {
+        for (_, matrices) in &poses {
+            validate_matrices(matrices)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Poses(poses));
+        Ok(())
+    }
+
+    #[pyo3(signature = (poses, into=None))]
+    fn bake_poses(&self, poses: Vec<JointMatrices>, into: Option<u32>) -> PyResult<u32> {
+        if poses.is_empty() {
+            return Err(PyValueError::new_err(
+                "a skin clip must have at least one frame",
+            ));
+        }
+        for matrices in &poses {
+            validate_matrices(matrices)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        let mut scene = self.scene.lock().unwrap();
+        let id = if let Some(id) = into {
+            if scene.clips.get(&id) != Some(&poses.len()) {
+                return Err(PyValueError::new_err(
+                    "a replacement clip must keep its frame count",
+                ));
+            }
+            id
+        } else {
+            let id = u32::try_from(scene.clips.len() + 1)
+                .map_err(|_| PyValueError::new_err("skin clip identifiers exhausted"))?;
+            scene.clips.insert(id, poses.len());
+            id
+        };
+        scene.uploads.push_back(Upload::Bake(id, poses));
+        Ok(id)
+    }
+
+    fn pose_frames(&self, frames: Vec<FrameInput>) -> PyResult<()> {
+        let mut scene = self.scene.lock().unwrap();
+        for (_, clip, position) in &frames {
+            let count = scene
+                .clips
+                .get(clip)
+                .ok_or_else(|| PyValueError::new_err("unknown skin clip"))?;
+            if !(0.0..=(count - 1) as f64).contains(position) {
+                return Err(PyValueError::new_err(
+                    "position is outside the skin clip's frames",
+                ));
+            }
+        }
+        scene.uploads.push_back(Upload::Play(frames));
         Ok(())
     }
 
@@ -306,7 +421,7 @@ impl NativeGraphics {
             .lock()
             .unwrap()
             .uploads
-            .push(Upload::Material(id, color, shading, effects));
+            .push_back(Upload::Material(id, color, shading, effects));
         Ok(())
     }
 
@@ -319,7 +434,7 @@ impl NativeGraphics {
             .lock()
             .unwrap()
             .uploads
-            .push(Upload::Albedo(id, width, height, levels));
+            .push_back(Upload::Albedo(id, width, height, levels));
     }
 
     #[pyo3(signature = (world, width, height, labels=None))]

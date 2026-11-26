@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::Instant;
 
-use manifoldx_core::ecs::World;
+use manifoldx_core::ecs::{EntityId, World};
 
 use crate::camera::Camera;
 use crate::math::Mat4;
@@ -13,6 +13,8 @@ use crate::scene::{
     read_instances, InstanceBatch, InstanceSource, MeshData, SceneError, DEFAULT_MAX_INSTANCES,
 };
 
+use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
+
 /// The offscreen colour format. It is sRGB, so the target encodes the
 /// linear shader output once.
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -20,9 +22,9 @@ pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 const GLOBAL_BYTES: usize = (16 + 4 + 4 * 8 + 8 + 16) * 4;
-const INSTANCE_FLOATS: usize = 32;
+const INSTANCE_FLOATS: usize = 33;
 const INSTANCE_BYTES: usize = INSTANCE_FLOATS * 4;
-const VERTEX_BYTES: usize = 11 * 4;
+const VERTEX_BYTES: usize = 12 * 4;
 const FLAT_STYLE: [f32; 4] = [0.0, 0.0, 0.0, 2.0];
 /// Largest offscreen side accepted by this slice.
 pub const MAX_SIDE: u32 = 4096;
@@ -277,6 +279,7 @@ struct GpuMesh {
     index_count: u32,
     color: [f32; 4],
     bounds: [[f32; 3]; 2],
+    skinned: bool,
 }
 
 struct InstanceBuffer {
@@ -486,6 +489,7 @@ pub struct RenderOutput {
 /// Native GPU resources and drawing for one target format.
 pub struct NativeRenderer {
     gpu: Gpu,
+    skin: Skin,
     format: wgpu::TextureFormat,
     offscreen: Option<OffscreenTarget>,
     post_options: Option<std::sync::Arc<PostOptions>>,
@@ -561,11 +565,16 @@ impl NativeRenderer {
                         },
                     ],
                 });
+        let skin = Skin::new(&gpu);
         let pipeline_layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("manifoldx-native-pipeline-layout"),
-                bind_group_layouts: &[Some(&bind_group_layout), Some(&texture_layout)],
+                bind_group_layouts: &[
+                    Some(&bind_group_layout),
+                    Some(&texture_layout),
+                    Some(&skin.layout),
+                ],
                 immediate_size: 0,
             });
         let pipeline = |front_face, translucent: bool| {
@@ -633,6 +642,7 @@ impl NativeRenderer {
         let translucent = pipeline(wgpu::FrontFace::Ccw, true);
         let mut renderer = Self {
             gpu,
+            skin,
             format,
             offscreen: None,
             post_options: None,
@@ -704,7 +714,7 @@ impl NativeRenderer {
         color_srgb: [f32; 3],
         uvs: &[[f32; 2]],
     ) -> Result<(), RenderError> {
-        self.upload_mesh_attributes(geometry_id, mesh, color_srgb, uvs, &[])
+        self.upload_mesh_attributes(geometry_id, mesh, color_srgb, uvs, &[], &[])
     }
 
     pub fn upload_mesh_attributes(
@@ -714,11 +724,21 @@ impl NativeRenderer {
         color_srgb: [f32; 3],
         uvs: &[[f32; 2]],
         colors: &[[f32; 3]],
+        joints: &[u32],
     ) -> Result<(), RenderError> {
         if geometry_id == 0 {
             return Err(RenderError::ReservedGeometryId);
         }
         let vertex_count = mesh.validate()?;
+        if !joints.is_empty()
+            && (joints.len() != vertex_count
+                || joints.iter().any(|joint| {
+                    (joint & 255) as usize >= MAX_JOINTS
+                        || ((joint >> 8) & 255) as usize >= MAX_JOINTS
+                }))
+        {
+            return Err(RenderError::Resource("invalid packed mesh joints".into()));
+        }
         if !colors.is_empty()
             && (colors.len() != vertex_count
                 || colors.as_flattened().iter().any(|x| !x.is_finite()))
@@ -745,6 +765,9 @@ impl NativeRenderer {
                 .map(|rgb| srgb_to_linear(*rgb))
                 .unwrap_or([1.0; 4]);
             interleaved.extend_from_slice(&color[..3]);
+            interleaved.push(f32::from_bits(
+                joints.get(index).copied().unwrap_or_default(),
+            ));
         }
         let vertex_bytes = bytemuck::cast_slice(&interleaved);
         let vertex_buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -771,9 +794,35 @@ impl NativeRenderer {
                 index_count: mesh.indices.len() as u32,
                 color: srgb_to_linear(color_srgb),
                 bounds,
+                skinned: !joints.is_empty(),
             },
         );
         Ok(())
+    }
+
+    pub fn mesh_is_skinned(&self, id: u32) -> bool {
+        self.meshes.get(&id).is_some_and(|mesh| mesh.skinned)
+    }
+
+    pub fn set_joints(
+        &mut self,
+        entity: EntityId,
+        matrices: &[[f32; 16]],
+    ) -> Result<(), RenderError> {
+        self.skin.set(entity, matrices)
+    }
+
+    pub fn bake_poses(&mut self, clip: u32, poses: &[JointMatrices]) -> Result<(), RenderError> {
+        self.skin.bake(clip, poses)
+    }
+
+    pub fn play_poses(
+        &mut self,
+        entity: EntityId,
+        clip: u32,
+        position: f64,
+    ) -> Result<(), RenderError> {
+        self.skin.play(entity, clip, position)
     }
 
     /// Register an opaque material colour for a `Material` row id.
@@ -1270,6 +1319,7 @@ impl NativeRenderer {
         stats.read_ns = elapsed_ns(read_started.elapsed());
 
         let upload_started = Instant::now();
+        self.skin.upload(&self.gpu);
         let mut globals = [0.0; GLOBAL_BYTES / 4];
         globals[..16].copy_from_slice(&view_projection.to_columns());
         globals[16..19].copy_from_slice(&camera.position);
@@ -1377,6 +1427,7 @@ impl NativeRenderer {
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_bind_group(1, &self.textures[&group.albedo], &[]);
+                    pass.set_bind_group(2, &self.skin.group, &[]);
                     let mesh = self
                         .meshes
                         .get(&group.geometry_id)
@@ -1461,7 +1512,10 @@ impl NativeRenderer {
             let displayed = effects.mirror.map_or(instance.model, |height| {
                 reflection(height).multiply(&instance.model)
             });
-            if !bound && outside_frustum(&view_projection.multiply(&displayed), mesh.bounds) {
+            if !bound
+                && !mesh.skinned
+                && outside_frustum(&view_projection.multiply(&displayed), mesh.bounds)
+            {
                 continue;
             }
             let geometry_id = instance.geometry_id;
@@ -1492,6 +1546,12 @@ impl NativeRenderer {
             group
                 .values
                 .extend_from_slice(&effects.cut.unwrap_or_default());
+            let skin = if mesh.skinned {
+                self.skin.frame(instance.entity)
+            } else {
+                0
+            };
+            group.values.push(f32::from_bits(skin));
             if positions.is_some() {
                 let [[lx, ly, lz], [hx, hy, hz]] = mesh.bounds;
                 group.positions.push([
@@ -1502,7 +1562,7 @@ impl NativeRenderer {
                     hx.to_bits(),
                     hy.to_bits(),
                     hz.to_bits(),
-                    0,
+                    u32::from(mesh.skinned),
                 ]);
             }
             group.instances += 1;
@@ -1558,7 +1618,7 @@ struct DrawGroup {
     positions: Vec<[u32; 8]>,
 }
 
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -1579,13 +1639,18 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
         offset: 32,
         shader_location: 9,
     },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 44,
+        shader_location: 12,
+    },
 ];
 const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: VERTEX_BYTES as u64,
     step_mode: wgpu::VertexStepMode::Vertex,
     attributes: &VERTEX_ATTRIBUTES,
 };
-const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
         offset: 0,
@@ -1626,6 +1691,11 @@ const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
         offset: 112,
         shader_location: 11,
     },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 128,
+        shader_location: 13,
+    },
 ];
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: INSTANCE_BYTES as u64,
@@ -1658,12 +1728,14 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var albedo_sampler: sampler;
 @group(1) @binding(1) var albedo_texture: texture_2d<f32>;
+@group(2) @binding(0) var<storage, read> joint_mats: array<mat4x4<f32>>;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(7) uv: vec2<f32>,
     @location(9) color: vec3<f32>,
+    @location(12) joints: u32,
 };
 struct InstanceIn {
     @location(2) m0: vec4<f32>,
@@ -1674,6 +1746,7 @@ struct InstanceIn {
     @location(8) style: vec4<f32>,
     @location(10) effects: vec4<f32>,
     @location(11) cut: vec4<f32>,
+    @location(13) joint_pose: u32,
 };
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -1723,17 +1796,50 @@ fn transform_normal(model: mat4x4<f32>, normal: vec3<f32>) -> vec3<f32> {
     return safe_normalize(normal);
 }
 
+fn joint_matrix(pose: u32, joint: u32) -> mat4x4<f32> {
+    let at = (pose & 0xfffffu) * 32u + joint;
+    let a = joint_mats[at];
+    let f = f32(pose >> 20u) / 4095.0;
+    if f == 0.0 {
+        return a;
+    }
+    return a + f * (joint_mats[at + 32u] - a);
+}
+
+fn posed_normal(m: mat4x4<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let a = m[0].xyz;
+    let b = m[1].xyz;
+    let c = m[2].xyz;
+    let det = dot(a, cross(b, c));
+    if abs(det) <= 1e-6 * length(a) * length(b) * length(c) {
+        return normal;
+    }
+    let cofactors = mat3x3<f32>(cross(b, c), cross(c, a), cross(a, b));
+    return safe_normalize(cofactors * normal * sign(det));
+}
+
 @vertex
 fn vs_main(in: VertexIn, instance: InstanceIn) -> VertexOut {
     let model = mat4x4<f32>(instance.m0, instance.m1, instance.m2, instance.m3);
-    let world = model * vec4<f32>(in.position, 1.0);
+    var position = in.position;
+    var normal = in.normal;
+    if instance.joint_pose != 0u {
+        let joints = in.joints;
+        let w = f32(joints >> 16u) / 65535.0;
+        let a = joint_matrix(instance.joint_pose, joints & 255u);
+        let b = joint_matrix(instance.joint_pose, (joints >> 8u) & 255u);
+        let blended = w * a + (1.0 - w) * b;
+        position = (blended * vec4<f32>(position, 1.0)).xyz;
+        normal = posed_normal(blended, normal);
+    }
+    let world = model * vec4<f32>(position, 1.0);
     var out: VertexOut;
     var displayed = world;
     if instance.effects.z > 0.0 {
         displayed.y = 2.0 * instance.effects.y - world.y;
     }
     out.clip_position = select(vec4<f32>(0.0, 0.0, -1.0, 1.0), camera.view_proj * displayed, instance.m3.w != 0.0);
-    out.normal = transform_normal(model, in.normal);
+    out.normal = transform_normal(model, normal);
     out.color = instance.color.rgb * select(vec3<f32>(1.0), in.color, instance.effects.w > 0.0);
     out.effects = instance.effects;
     out.cut = instance.cut;

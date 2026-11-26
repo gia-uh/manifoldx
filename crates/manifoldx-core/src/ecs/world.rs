@@ -40,7 +40,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use super::entity_slots::{EntityError, EntityId, EntitySlots};
+use super::entity_slots::{EntityError, EntityId, EntitySlots, SlotState};
 
 /// The widest row a component can declare, in scalars.
 ///
@@ -587,6 +587,14 @@ impl World {
     /// Fixed entity capacity.
     pub const fn capacity(&self) -> u32 {
         self.slots.capacity()
+    }
+
+    /// Current identity of a live slot, if any.
+    pub fn live_identity(&self, slot: u32) -> Option<EntityId> {
+        if self.slots.state_of(slot) != Some(SlotState::Alive) {
+            return None;
+        }
+        self.slots.current_identity(slot).ok()
     }
 
     /// Number of live entities.

@@ -7,6 +7,7 @@ pub mod post;
 pub mod renderer;
 pub mod resident;
 pub mod scene;
+pub mod skin;
 
 pub use camera::Camera;
 pub use post::{PostOptions, Sky};

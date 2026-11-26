@@ -75,10 +75,17 @@ class _TransformHandle:
 
 class _EntityHandle:
     def __init__(self, engine, entities):
+        self._engine = engine
         self._entities = entities
         self.index = entities[0].slot
         self.indices = np.array([entity.slot for entity in entities])
         self.transform = _TransformHandle(engine, entities[0])
+
+    def set_joints(self, matrices):
+        entity = self._entities[0]
+        self._engine._set_joint_poses(
+            [(entity.slot, entity.generation)], np.asarray(matrices)[None]
+        )
 
 
 class _NativeEngine:
@@ -316,8 +323,13 @@ class _NativeEngine:
         if key in registry:
             return registry[key][0]
         index = len(registry) + 1
-        if "joints" in geometry or "weights" in geometry:
-            raise NotImplementedError("skinned meshes are unavailable in the native base renderer")
+        joints = []
+        if "joints" in geometry:
+            from manifoldx.skinning import pack_joints, validate_joints, validate_weights
+
+            indices = validate_joints(geometry["joints"], len(geometry["positions"]))
+            weights = validate_weights(geometry.get("weights"), indices)
+            joints = pack_joints(indices, weights).tolist()
         if "indices" not in geometry:
             raise ValueError("native meshes require triangle indices")
         self._graphics.mesh(
@@ -326,7 +338,7 @@ class _NativeEngine:
             np.asarray(geometry["normals"]).tolist(),
             np.asarray(geometry["indices"]).reshape(-1).tolist(),
             np.asarray(geometry.get("uvs", [])).tolist(),
-            np.asarray(geometry.get("colors", [])).tolist(),
+            (np.asarray(geometry.get("colors", [])).tolist(), joints),
         )
         registry[key] = (index, geometry)
         return index
@@ -416,6 +428,40 @@ class _NativeEngine:
         if self._commands is not None:
             return self._commands.spawn(count=n, payload=payload)
         return _EntityHandle(self, self._world.spawn(count=n, payload=payload))
+
+    @staticmethod
+    def _joint_matrices(matrices):
+        from manifoldx.skinning import MAX_JOINTS
+
+        matrices = np.asarray(matrices, dtype=np.float32)
+        if (
+            matrices.ndim != 4
+            or matrices.shape[2:] != (4, 4)
+            or not 1 <= matrices.shape[1] <= MAX_JOINTS
+        ):
+            raise ValueError("expected joint matrices of shape (N, J, 4, 4) with 1 <= J <= 32")
+        return matrices.reshape(len(matrices), matrices.shape[1], 16).tolist()
+
+    def _set_joint_poses(self, identities, matrices):
+        poses = self._joint_matrices(matrices)
+        if len(identities) != len(poses):
+            raise ValueError("entity and joint pose counts must match")
+        self._graphics.joint_poses(list(zip(identities, poses)))
+
+    def set_joints(self, indices, matrices):
+        self._set_joint_poses([(int(index), None) for index in indices], matrices)
+
+    def bake_poses(self, frames, into=None):
+        return self._graphics.bake_poses(self._joint_matrices(frames), into)
+
+    def set_pose_frames(self, indices, clip, positions):
+        indices = list(indices)
+        clips = np.broadcast_to(np.asarray(clip, dtype=np.int64), (len(indices),))
+        positions = np.broadcast_to(np.asarray(positions, dtype=np.float64), (len(indices),))
+        frames = []
+        for index, clip_id, position in zip(indices, clips, positions):
+            frames.append(((int(index), None), int(clip_id), float(position)))
+        self._graphics.pose_frames(frames)
 
     def destroy(self, indices):
         if self._commands is None:

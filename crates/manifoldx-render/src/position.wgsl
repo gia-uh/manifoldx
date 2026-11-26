@@ -56,5 +56,6 @@ fn place(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         displayed = mirror * model;
     }
-    instances[m + 15u] = select(1.0, 0.0, outside(view_projection * displayed, lo, hi));
+    let skinned = bounds[row + 7u] != 0u;
+    instances[m + 15u] = select(1.0, 0.0, !skinned && outside(view_projection * displayed, lo, hi));
 }
