@@ -81,10 +81,35 @@ def worker(mode, directory):
             raise AssertionError("closed World returned stale CPU rows")
 
 
+class _KeyEvent(c.Structure):
+    _fields_ = [
+        ("type", c.c_int),
+        ("serial", c.c_ulong),
+        ("send_event", c.c_int),
+        ("display", c.c_void_p),
+        ("window", c.c_ulong),
+        ("root", c.c_ulong),
+        ("subwindow", c.c_ulong),
+        ("time", c.c_ulong),
+        ("x", c.c_int),
+        ("y", c.c_int),
+        ("x_root", c.c_int),
+        ("y_root", c.c_int),
+        ("state", c.c_uint),
+        ("keycode", c.c_uint),
+        ("same_screen", c.c_int),
+    ]
+
+
+class _Event(c.Union):
+    _fields_ = [("key", _KeyEvent), ("padding", c.c_long * 24)]
+
+
 class _Keyboard:
+    # Xwayland may discard XTEST input from the compositor. Direct X11
+    # key events target the probe window and still use its winit input path.
     def __init__(self, window):
         self.xlib = c.CDLL("libX11.so.6")
-        self.xtest = c.CDLL("libXtst.so.6")
         self.xlib.XOpenDisplay.argtypes = [c.c_char_p]
         self.xlib.XOpenDisplay.restype = c.c_void_p
         self.xlib.XSetInputFocus.argtypes = [c.c_void_p, c.c_ulong, c.c_int, c.c_ulong]
@@ -92,14 +117,35 @@ class _Keyboard:
         self.xlib.XKeysymToKeycode.restype = c.c_ubyte
         self.xlib.XSync.argtypes = [c.c_void_p, c.c_int]
         self.xlib.XCloseDisplay.argtypes = [c.c_void_p]
-        self.xtest.XTestFakeKeyEvent.argtypes = [c.c_void_p, c.c_uint, c.c_int, c.c_ulong]
+        self.xlib.XDefaultRootWindow.argtypes = [c.c_void_p]
+        self.xlib.XDefaultRootWindow.restype = c.c_ulong
+        self.xlib.XSendEvent.argtypes = [
+            c.c_void_p,
+            c.c_ulong,
+            c.c_int,
+            c.c_long,
+            c.POINTER(_Event),
+        ]
         self.display = self.xlib.XOpenDisplay(None)
         assert self.display, "cannot open the X11 display"
-        self.xlib.XSetInputFocus(self.display, int(window, 16), 2, 0)
+        self.window = int(window, 16)
+        self.xlib.XSetInputFocus(self.display, self.window, 2, 0)
+        self.xlib.XSync(self.display, 0)
 
     def key_w(self, pressed):
         key = self.xlib.XKeysymToKeycode(self.display, ord("w"))
-        assert key and self.xtest.XTestFakeKeyEvent(self.display, key, pressed, 0)
+        event = _Event()
+        event.key = _KeyEvent(
+            type=2 if pressed else 3,
+            display=self.display,
+            window=self.window,
+            root=self.xlib.XDefaultRootWindow(self.display),
+            keycode=key,
+            same_screen=1,
+        )
+        assert key and self.xlib.XSendEvent(
+            self.display, self.window, 0, 1 if pressed else 2, c.byref(event)
+        )
         self.xlib.XSync(self.display, 0)
 
     def close(self):
