@@ -14,8 +14,9 @@ from PIL import Image
 from manifoldx.camera import Camera
 from manifoldx.components import Baked, Layer, Material, Mesh, Transform
 from manifoldx.resources import SURFACE_BAKED, DirectionalLight, FlatMaterial, StandardMaterial, plane
-from manifoldx.streaming import MeshData, Streamer, _pack_native_vertices
+from manifoldx.streaming import CellResult, MeshData, Streamer, _pack_native_vertices
 from manifoldx.textures import layer_mips, texture_array, write_layer, write_texture
+from manifoldx.vehicles import GroundTile, Heightfield
 
 
 def rejected(call, message):
@@ -280,7 +281,61 @@ def patch(output, fault):
     return {"changed_pixels_by_layer": counts}
 
 
-def capsule():
+def invalidation(output):
+    engine = engine_for("Visible cell invalidation")
+    engine.configure_stream_collision(4)
+    engine.world.register("FixtureRows", kind="u32", width=1)
+    current = 1
+
+    def build(request):
+        geometry = plane(2.5, 2.5)
+        color = (0.9, 0.05, 0.05) if current == 1 else (0.05, 0.9, 0.05)
+        mesh = MeshData(geometry["positions"], geometry["normals"],
+                        np.tile(np.array(color, np.float32), (4, 1)), geometry["indices"])
+        return CellResult(((mesh, 0),), ((0, 1, bytes([current])),))
+
+    def convert(request, rows):
+        height = rows[0][2][0]
+        grid = Heightfield((request.x, request.y), (4, 4), [[height] * 2] * 2)
+        batches = [(1, {"FixtureRows": np.array([height, 99] if height == 2 else [height], np.uint32)})]
+        return batches, [GroundTile((0, 0), 1, heightfields=[grid])]
+
+    stream = Streamer(engine, 4, build, radius=0, ready_radius=0, request=True, convert=convert,
+                      upload_bytes_per_frame=64)
+
+    def draw_until(check, continuity=None):
+        for _ in range(90):
+            stream.focus(0, 0)
+            image = engine.render_frame()
+            if check():
+                return image
+            if continuity is not None:
+                assert np.array_equal(image, continuity)
+            time.sleep(0.002)
+        raise AssertionError(stream.stats())
+
+    before = draw_until(lambda: stream.settled)
+    assert engine.sample_stream_collision(2, 2, 1)[0] == 1
+    assert save(output, "retained", before)[0] > 100
+    current = 2
+    stream.invalidate(0, 0)
+    rejected = draw_until(lambda: stream.stats()["rejected"] == 1, before)
+    assert np.array_equal(rejected, before)
+    assert engine.sample_stream_collision(2, 2, 1)[0] == 1
+    current = 3
+    stream.invalidate(0, 0)
+    after = draw_until(lambda: engine.sample_stream_collision(2, 2, 3)[0] == 3, before)
+    assert save(output, "replacement", after)[1] > 100
+    assert engine.world.query("FixtureRows").read().numpy().tolist() == [[3]]
+    stream.close()
+    engine.render_frame()
+    assert engine.sample_stream_collision(2, 2, 3) is None
+    assert engine.last_frame["stream_resources"] == [0, 0]
+    engine.close()
+    return stream.stats()
+
+
+def capsule(output):
     import native
     from manifoldx._core_native import _StreamBuilder
 
@@ -300,6 +355,34 @@ def capsule():
     assert meshes[0][1] == first
     report["owned_vertex_bytes"] = len(first)
     report["copied_row_bytes"] = sum(len(data) for _, _, data in rows)
+
+    engine = engine_for("Independent capsule wheel on the native streamer")
+    engine.camera.set_pose((50, 180, 120), (50, 0, 50))
+    engine.configure_stream_collision(100)
+    engine.world.register("LampKind", kind="u32", width=1)
+
+    def convert(request, raw):
+        assert portable_rows(raw)
+        kinds = np.frombuffer(raw[0][2], dtype="<u4")[2::3].astype(np.uint32)
+        grid = Heightfield((request.x, request.y), (100, 100), [[0, 0], [0, 0]])
+        return [(len(kinds), {"LampKind": kinds})], [GroundTile((0, 0), 1, heightfields=[grid])]
+
+    stream = Streamer(engine, 100, native.build_cell, radius=0, ready_radius=0, convert=convert,
+                      materials={1: StandardMaterial("#3cd984")})
+    for _ in range(90):
+        stream.focus(0, 0)
+        image = engine.render_frame()
+        if stream.settled:
+            break
+        time.sleep(0.002)
+    assert stream.settled and engine.last_frame["stream_resources"] == [0, 2], stream.stats()
+    report["lamp_rows"] = len(engine.world.query("LampKind").read().numpy())
+    assert report["lamp_rows"] > 0 and engine.sample_stream_collision(50, 50, 0)[0] == 0
+    save(output, "capsule-cell", image)
+    stream.close()
+    engine.render_frame()
+    assert engine.last_frame["stream_resources"] == [0, 0]
+    engine.close()
     return report
 
 
@@ -310,7 +393,7 @@ def portable_rows(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel"))
+    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate"))
     parser.add_argument("--fault", choices=("refresh", "albedo", "atomic", "late", "layer"))
     args = parser.parse_args()
     assert sys.flags.isolated
@@ -319,9 +402,11 @@ def main():
     if args.case == "async":
         result = async_stream(args.output)
     elif args.case == "capsule":
-        result = capsule()
+        result = capsule(args.output)
     elif args.case == "cancel":
         result = cancellation(args.output)
+    elif args.case == "invalidate":
+        result = invalidation(args.output)
     else:
         case = {"views": views, "albedo": albedo, "transaction": transaction, "patch": patch}[args.case]
         result = case(args.output, args.fault)
