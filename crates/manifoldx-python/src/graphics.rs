@@ -13,6 +13,7 @@ use manifoldx_render::renderer::{ViewOptions, ViewOrder};
 use manifoldx_render::shadow::ShadowOptions;
 use manifoldx_render::skin::{validate_matrices, JointMatrices};
 use manifoldx_render::sprite::SpriteData;
+use manifoldx_render::volume::VolumeMaterialData;
 use manifoldx_render::{
     resolve_source, Camera, DirectionalLight, MeshData, NativeRenderer, PointLight, PostOptions,
     RenderError, RenderStats, RendererOptions, Shading, Sky, SpotLight, StandardEffects,
@@ -81,6 +82,8 @@ enum Upload {
     Sprite(u32, SpriteData),
     Label(u32, SpriteData),
     LabelTile(u32, Vec<u8>),
+    Volume(u32, [u32; 3], Vec<u8>),
+    VolumeMaterial(u32, VolumeMaterialData),
     Axis(u32, [[f32; 3]; 2]),
 }
 
@@ -150,6 +153,8 @@ impl Scene {
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
                 Upload::Axis(id, points) => renderer.upload_axis(id, points)?,
+                Upload::Volume(id, dims, bytes) => renderer.upload_volume(id, dims, &bytes)?,
+                Upload::VolumeMaterial(id, data) => renderer.upload_volume_material(id, data)?,
                 Upload::Label(id, data) => renderer.upload_label(id, data)?,
                 Upload::LabelTile(layer, rgba) => renderer.upload_label_tile(layer, &rgba)?,
                 Upload::Sprite(id, data) => renderer.upload_sprite(id, data)?,
@@ -676,6 +681,36 @@ impl NativeGraphics {
             .unwrap()
             .uploads
             .push_back(Upload::Axis(id, points));
+    }
+
+    fn volume(&self, id: u32, dims: [u32; 3], bytes: &Bound<'_, PyBytes>) {
+        self.scene.lock().unwrap().uploads.push_back(Upload::Volume(
+            id,
+            dims,
+            bytes.as_bytes().to_vec(),
+        ));
+    }
+
+    fn volume_material(
+        &self,
+        id: u32,
+        params: ([f32; 3], Option<f32>, u32),
+        color: &Bound<'_, PyBytes>,
+        opacity: Vec<f32>,
+    ) {
+        let (range_density, step, max_steps) = params;
+        let data = VolumeMaterialData {
+            range_density,
+            step,
+            max_steps,
+            color: color.as_bytes().to_vec(),
+            opacity,
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::VolumeMaterial(id, data));
     }
 
     fn label_material(&self, id: u32, source: String, values: [f32; 4]) {

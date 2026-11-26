@@ -21,6 +21,7 @@ use crate::manual::{gpu_buffer, ManualData, ManualFrame, ManualPipeline, MeshTex
 use crate::shadow::{self, ShadowFrame, ShadowMap, ShadowOptions};
 use crate::skin::{JointMatrices, Skin, MAX_JOINTS};
 use crate::sprite::{SpriteData, SpritePass};
+use crate::volume::{VolumeMaterialData, VolumePass};
 
 /// The offscreen colour format. It is sRGB, so the target encodes the
 /// linear shader output once.
@@ -609,6 +610,7 @@ pub struct NativeRenderer {
     manual_frames: [Option<ManualFrame>; 2],
     sprites: Option<SpritePass>,
     labels: Option<SpritePass>,
+    volumes: Option<VolumePass>,
     invalid_materials: HashMap<u32, String>,
     instance_buffer: Option<InstanceBuffer>,
     max_instances: usize,
@@ -849,6 +851,7 @@ impl NativeRenderer {
             manual_frames: [None, None],
             sprites: None,
             labels: None,
+            volumes: None,
             invalid_materials: HashMap::new(),
             instance_buffer: None,
             max_instances,
@@ -949,6 +952,38 @@ impl NativeRenderer {
                 self.max_instances,
                 true,
             )?);
+        }
+        Ok(())
+    }
+
+    pub fn upload_volume(
+        &mut self,
+        id: u32,
+        dims: [u32; 3],
+        bytes: &[u8],
+    ) -> Result<(), RenderError> {
+        self.prepare_volume()?;
+        self.volumes
+            .as_mut()
+            .expect("initialized above")
+            .voxels(&self.gpu, id, dims, bytes)
+    }
+
+    pub fn upload_volume_material(
+        &mut self,
+        id: u32,
+        data: VolumeMaterialData,
+    ) -> Result<(), RenderError> {
+        self.prepare_volume()?;
+        self.volumes
+            .as_mut()
+            .expect("initialized above")
+            .material(&self.gpu, id, data)
+    }
+
+    fn prepare_volume(&mut self) -> Result<(), RenderError> {
+        if self.volumes.is_none() {
+            self.volumes = Some(VolumePass::new(&self.gpu, self.format)?);
         }
         Ok(())
     }
@@ -1700,7 +1735,7 @@ impl NativeRenderer {
         if stats.shadow_layers > 0 {
             order.push("shadow");
         }
-        order.push(if draw.ids.is_some() { "ids" } else { "main" });
+        order.append(&mut stats.frame_order);
         if stats.line_draws > 0 {
             order.push("lines");
         }
@@ -1869,7 +1904,7 @@ impl NativeRenderer {
 
         let read_started = Instant::now();
         let mut batch = read_instances(world, source, draw.ignore_transform)?;
-        for marker in ["PointCloud", "TextLabel"] {
+        for marker in ["PointCloud", "TextLabel", "Volume"] {
             if let Some(column) = world
                 .component_index(marker)
                 .filter(|_| !batch.instances.is_empty())
@@ -1896,14 +1931,17 @@ impl NativeRenderer {
             .map(|view| &view.layers)
             .or(self.layer_filter.as_deref());
         // A layer can hide a caster from the camera without hiding its shadow.
-        let sprite_view = usize::from(draw.secondary.is_some());
+        let view_index = usize::from(draw.secondary.is_some());
         if draw.ids.is_none()
             && !draw.omit_draw
-            && (self.sprites.is_some() || self.labels.is_some())
+            && (self.sprites.is_some() || self.labels.is_some() || self.volumes.is_some())
         {
             let globals = self.material_globals(camera, &target, None);
             for pass in self.sprites.iter_mut().chain(self.labels.iter_mut()) {
-                pass.prepare(&self.gpu, world, source, layers, &globals, sprite_view)?;
+                pass.prepare(&self.gpu, world, source, layers, &globals, view_index)?;
+            }
+            if let Some(volumes) = &mut self.volumes {
+                volumes.prepare(&self.gpu, world, source, layers, &globals, view_index)?;
             }
         }
         let shadow_batch = (layers.is_some()
@@ -2127,7 +2165,11 @@ impl NativeRenderer {
                 pass.set_bind_group(2, &self.skin.group, &[]);
                 pass.set_bind_group(3, scene, &[]);
                 pass.draw(0..3, 0..1);
+                stats.frame_order.push("skybox");
             }
+            stats
+                .frame_order
+                .push(if draw.ids.is_some() { "ids" } else { "main" });
             if !draw.omit_draw && !draw_groups.is_empty() {
                 let instance_buffer = &self
                     .instance_buffer
@@ -2186,10 +2228,32 @@ impl NativeRenderer {
                 }
             }
             if draw.ids.is_none() && !draw.omit_draw {
-                for billboards in self.sprites.iter().chain(self.labels.iter()) {
-                    let (draws, triangles) = billboards.draw(&mut pass, sprite_view);
+                if let Some(sprites) = &self.sprites {
+                    let (draws, triangles) = sprites.draw(&mut pass, view_index);
+                    if draws > 0 {
+                        stats.frame_order.push("sprite");
+                    }
                     stats.draw_calls += draws;
                     stats.triangles += triangles;
+                }
+                if let Some(volumes) = &self.volumes {
+                    let draws = volumes.draw(&mut pass, view_index);
+                    if draws > 0 {
+                        stats.frame_order.push("volume");
+                    }
+                    stats.draw_calls += draws;
+                    stats.triangles += draws;
+                }
+                if let Some(labels) = &self.labels {
+                    let (draws, triangles) = labels.draw(&mut pass, view_index);
+                    if draws > 0 {
+                        stats.frame_order.push("label");
+                    }
+                    stats.draw_calls += draws;
+                    stats.triangles += triangles;
+                }
+                if draw_groups.iter().any(|group| group.axis) {
+                    stats.frame_order.push("axis");
                 }
                 let mut first = 0;
                 for group in &draw_groups {

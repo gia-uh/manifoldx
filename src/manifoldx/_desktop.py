@@ -27,6 +27,7 @@ from manifoldx.resources import (
     PointLight,
     SpotLight,
     StandardMaterial,
+    VolumeRegistry,
 )
 from manifoldx.systems import Query
 from manifoldx.textures import TextureHandle, _mip_chain
@@ -147,6 +148,7 @@ class _NativeEngine:
         self._registries = {"Mesh": {}, "Material": {}}
         self._manual_registry = MaterialRegistry()
         self._label_atlas = None
+        self._volume_registry = VolumeRegistry()
         self._textures = 0
         self._graphics = _NativeGraphics()
         self._handlers = {"startup": [], "shutdown": []}
@@ -395,7 +397,7 @@ class _NativeEngine:
         }
         kind = types.get(type(material))
         if kind is None:
-            from manifoldx.viz import ColormapMaterial, LabelMaterial
+            from manifoldx.viz import ColormapMaterial, LabelMaterial, VolumeMaterial, colormaps
 
             if isinstance(material, ColormapMaterial):
                 self._graphics.sprite(
@@ -405,6 +407,14 @@ class _NativeEngine:
             elif isinstance(material, LabelMaterial):
                 self._graphics.label_material(
                     index, material._compile(), material.get_data(1, None)[0].tolist(),
+                )
+            elif isinstance(material, VolumeMaterial):
+                self._graphics.volume_material(
+                    index,
+                    ((material.vmin, material.vmax, material.density_scale),
+                     material.step_size, material.max_steps),
+                    colormaps.get_colormap(material.cmap).tobytes(),
+                    material.opacity_lut.tolist(),
                 )
             else:
                 self._manual_material(index, material)
@@ -666,6 +676,17 @@ class _NativeEngine:
             )
             self._native_environment = env
         self._graphics.environment(None if env is None else (env.intensity, env.show_skybox))
+
+    def register_volume(self, data, *, name=None):
+        """Register a contiguous float32 (z, y, x) scalar field for DVR."""
+        handle = self._volume_registry.register(data, name=name)
+        self._graphics.volume(handle, data.shape[::-1], data.tobytes())
+        return handle
+
+    def update_volume(self, handle, data):
+        """Replace a volume's voxels without changing its dimensions."""
+        self._volume_registry.update(handle, data)
+        self._graphics.volume(handle, data.shape[::-1], data.tobytes())
 
     def get_label_atlas(self):
         """Return the atlas of world and screen labels."""

@@ -466,11 +466,11 @@ impl SpritePass {
     }
 }
 
-fn world_error(error: manifoldx_core::ecs::WorldError) -> RenderError {
+pub(crate) fn world_error(error: manifoldx_core::ecs::WorldError) -> RenderError {
     RenderError::Resource(error.to_string())
 }
 
-fn read(
+pub(crate) fn read(
     world: &World,
     column: usize,
     entities: &[EntityId],
@@ -480,7 +480,7 @@ fn read(
         .map_err(world_error)
 }
 
-fn scalar(
+pub(crate) fn scalar(
     world: &World,
     name: &str,
     entities: &[EntityId],
