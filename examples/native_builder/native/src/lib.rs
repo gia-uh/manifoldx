@@ -133,6 +133,14 @@ unsafe extern "C" fn build_cell_panics_c(_req: *const CellRequest, out: *mut Bui
     guarded(&mut output, |_| panic!("boom from the native builder"))
 }
 
+unsafe extern "C" fn build_cell_malformed_c(_req: *const CellRequest, out: *mut BuildOutput) -> i32 {
+    let output = unsafe { &mut *out };
+    unsafe {
+        (output.push_mesh)(output.ctx, std::ptr::null(), 3, std::ptr::null(), std::ptr::null(), 3, 0);
+    }
+    0
+}
+
 fn capsule<'py>(
     py: Python<'py>,
     function: unsafe extern "C" fn(*const CellRequest, *mut BuildOutput) -> i32,
@@ -158,6 +166,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "build_cell_irregular",
         capsule(py, build_cell_irregular_c, manifoldx_sdk::BUILDER_NAME)?,
     )?;
+    m.add("build_cell_malformed", capsule(py, build_cell_malformed_c, manifoldx_sdk::BUILDER_NAME)?)?;
     m.add("sdk_version", "1")?;
     Ok(())
 }
