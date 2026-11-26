@@ -86,7 +86,7 @@ impl ResidentKernel {
         if size
             > TRANSFER_LIMIT
                 .min(limits.max_buffer_size)
-                .min(u64::from(limits.max_storage_buffer_binding_size))
+                .min(limits.max_storage_buffer_binding_size)
             || world.capacity().div_ceil(WORKGROUP) > limits.max_compute_workgroups_per_dimension
             || limits.max_compute_workgroup_size_x < WORKGROUP
             || limits.max_compute_invocations_per_workgroup < WORKGROUP
