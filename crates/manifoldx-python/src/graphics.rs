@@ -111,7 +111,7 @@ enum Upload {
     ViewRead(u32, ViewRead),
     Environment(EnvironmentData),
     Fragment(u32, FragmentData),
-    Manual(u32, ManualData),
+    Manual(u32, ManualData, bool),
     Sprite(u32, SpriteData),
     Label(u32, SpriteData),
     LabelTile(u32, Vec<u8>),
@@ -248,7 +248,10 @@ impl Scene {
                 Upload::Label(id, data) => renderer.upload_label(id, data)?,
                 Upload::LabelTile(layer, rgba) => renderer.upload_label_tile(layer, &rgba)?,
                 Upload::Sprite(id, data) => renderer.upload_sprite(id, data)?,
-                Upload::Manual(id, data) => renderer.upload_manual(id, &data)?,
+                Upload::Manual(id, data, samples_view) => {
+                    renderer.upload_manual(id, &data)?;
+                    self.track_view_material(id, samples_view);
+                }
                 Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
                 Upload::Environment(data) => renderer.upload_environment(&data)?,
                 Upload::View(options, live) => renderer.create_view(options, live)?,
@@ -289,15 +292,9 @@ impl Scene {
                         renderer.play_poses(entity, clip, position)?;
                     }
                 }
-                Upload::Material(id, color, shading, effects, view_albedo) => {
+                Upload::Material(id, color, shading, effects, samples_view) => {
                     renderer.set_material_effects(id, color, shading, effects)?;
-                    if view_albedo {
-                        if self.view_materials.insert(id) {
-                            self.view_material_revision = None;
-                        }
-                    } else {
-                        self.view_materials.remove(&id);
-                    }
+                    self.track_view_material(id, samples_view);
                 }
                 Upload::BakedArray(id, size, layers) => {
                     renderer.create_baked_array(id, size, layers)?
@@ -319,6 +316,16 @@ impl Scene {
         }
         self.find_unused_view_materials(world)?;
         Ok(self.camera)
+    }
+
+    fn track_view_material(&mut self, id: u32, samples_view: bool) {
+        if samples_view {
+            if self.view_materials.insert(id) {
+                self.view_material_revision = None;
+            }
+        } else {
+            self.view_materials.remove(&id);
+        }
     }
 
     // Both ordinary ECS edits and streamed commits are visible at this point.
@@ -1211,6 +1218,8 @@ impl NativeGraphics {
             .push_back(Upload::Sprite(id, data));
     }
 
+    #[pyo3(signature = (id, source, uniforms, textures, blend, axis, samples_view=false))]
+    #[allow(clippy::too_many_arguments)]
     fn manual(
         &self,
         id: u32,
@@ -1219,6 +1228,7 @@ impl NativeGraphics {
         textures: Vec<(u32, u32)>,
         blend: u8,
         axis: bool,
+        samples_view: bool,
     ) {
         let data = ManualData {
             source,
@@ -1231,7 +1241,7 @@ impl NativeGraphics {
             .lock()
             .unwrap()
             .uploads
-            .push_back(Upload::Manual(id, data));
+            .push_back(Upload::Manual(id, data, samples_view));
     }
 
     fn fragment(

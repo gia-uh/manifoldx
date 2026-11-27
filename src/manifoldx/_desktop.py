@@ -594,6 +594,8 @@ class _NativeEngine:
         self._graphics.retire_scene([entry[0] for entry in meshes.values()],
                                     [entry[0] for entry in materials.values()])
         meshes.clear()
+        for key in self._view_materials.values():
+            self._manual_registry._unregister(materials[key][1])
         materials.clear()
         self._view_materials.clear()
         self._graphics.take_unused_view_materials()
@@ -612,10 +614,17 @@ class _NativeEngine:
         for index in self._graphics.take_unused_view_materials():
             key = self._view_materials.pop(index, None)
             if key is not None:
+                self._manual_registry._unregister(registry[key][1])
                 del registry[key]
                 retired.append(index)
         if retired:
             self._graphics.retire_scene([], retired)
+
+    def _track_view_material(self, index, key, samples_view):
+        if samples_view:
+            self._view_materials[index] = key
+        else:
+            self._view_materials.pop(index, None)
 
     def _material(self, material):
         # Drain before handing out an id so reuse after an empty frame registers anew.
@@ -663,7 +672,8 @@ class _NativeEngine:
                     material.opacity_lut.tolist(),
                 )
             else:
-                self._manual_material(index, material)
+                samples_view = self._manual_material(index, material)
+                self._track_view_material(index, key, samples_view)
             registry[key] = (index, material, version)
             return index
         params = None
@@ -705,10 +715,7 @@ class _NativeEngine:
                 index, [material.surface_patterns[i] for i in range(1, 10)], material.detail
             )
         registry[key] = (index, material, version)
-        if view_albedo:
-            self._view_materials[index] = key
-        else:
-            self._view_materials.pop(index, None)
+        self._track_view_material(index, key, view_albedo)
         return index
 
     def _manual_material(self, index, material):
@@ -718,6 +725,7 @@ class _NativeEngine:
             raise TypeError("a manual WGSL material must extend Material")
         subtype = getattr(material, "pipeline_subtype", None)
         textures = []
+        samples_view = False
         slots = {0, 1, 2, 3}
         for binding, handle in sorted(material.get_texture_bindings().items()):
             if type(binding) is not int or not 4 <= binding < 999:
@@ -728,6 +736,7 @@ class _NativeEngine:
                 raise ValueError("manual WGSL texture belongs to a different graphics owner")
             slots.update((binding, binding + 1))
             textures.append((binding, handle.id))
+            samples_view |= handle._native_view
         if not isinstance(material.uniform_type(), dict):
             raise TypeError("manual WGSL uniform_type() must return a dict")
         self._manual_registry.register(material)
@@ -741,8 +750,10 @@ class _NativeEngine:
         textured = subtype == "textured" and getattr(material, "albedo_map", None) is not None
         source = material._compile(textured=True) if textured else material._compile()
         self._graphics.manual(
-            index, source, rows.reshape(-1).tolist(), textures, blend, isinstance(material, AxisMaterial)
+            index, source, rows.reshape(-1).tolist(), textures, blend,
+            isinstance(material, AxisMaterial), samples_view,
         )
+        return samples_view
 
     def render_to_texture(self, camera, size, *, live=True, background=None, fog=False):
         """Schedule a secondary camera to render into a sampled texture before main."""

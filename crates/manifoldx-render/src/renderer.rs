@@ -1750,6 +1750,7 @@ impl NativeRenderer {
         self.textures.remove(&id);
         self.surface_materials
             .retain(|_, binding| binding.albedo != id);
+        self.invalidate_manual_texture(id);
     }
 
     pub fn view_counts(&self) -> [usize; 2] {
