@@ -77,7 +77,7 @@ def validate(frame):
     np.testing.assert_allclose([size, intensity, glow],
                                [POST["sky"].sun_size, POST["sky"].sun_intensity, POST["sky"].glow], atol=1e-6)
     assert settings["post"]["fxaa"] is True and settings["environment"][1] is True
-    assert settings["lights"] == [True, 1, True] and settings["fog"] is not None
+    assert settings["lights"] == [True, 1, False] and settings["fog"] is not None
     assert set(settings["post_formats"]) == {"rgba8-srgb", "depth32float", "r8unorm", "rgba16float"}
     counts = frame["counts"]
     assert counts["shadow_layers"] >= 3 and counts["instances"] >= 20
@@ -97,6 +97,9 @@ def main():
     baseline = images[0]
     validate(first)
     assert manifest[-1]["timeline"]["photo"] == 1
+    assert manifest[-1]["timeline"]["shadow_caster"] == "spot"
+    assert manifest[-1]["settings"]["lights"] == [True, 1, True]
+    assert manifest[-1]["counts"]["shadow_layers"] == 1
     assert any(frame["passes"].count("view") == 1 for frame in manifest[1:])
     assert any(frame["passes"].count("view") == 2 for frame in manifest[1:])
     assert any(frame["counts"]["streamed_cells"] > 0 for frame in manifest[1:])
@@ -105,7 +108,7 @@ def main():
 
     changed = {}
     for name in (*POST_EFFECTS, *(() if args.post_only else GROUPS)):
-        can_move = name in {"stream", "compute"}
+        can_move = name in {"stream", "compute", "spot"}
         other, captures = run(output / f"without-{name}", "--omit", name, frames=49 if can_move else 2)
         reference, frame = (images[-1], captures[-1]) if can_move else (baseline, captures[0])
         roi = {"sky": POST_SKY, "environment": ENV_SKY, "gui": HUD}.get(name, np.s_[:, :])

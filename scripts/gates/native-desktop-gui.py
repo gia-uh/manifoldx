@@ -91,6 +91,7 @@ def check_gui(output, fault):
     assert engine._gui_runtime.scale == 1.875 and box != expanded
     sx, sy = (expanded[0] + expanded[2] * 0.5) * 1.875, (expanded[1] + expanded[3] * 0.5) * 1.875
     engine._window_events([("wheel", "", (sx, sy, 0, 100), 0, [])])
+    engine.input._begin_frame()
     engine._pump_events()
     assert engine.gui.pointer_over_gui and engine.input.wheel_delta == (0, 100)
     assert events[-1] == ("wheel", 100)

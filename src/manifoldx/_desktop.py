@@ -427,7 +427,6 @@ class _NativeEngine:
                 self._input_probe(event, payload, consumed, self._gui_runtime.last_target)
             # GUI consumption is cooperative, as on the original input bus.
             self.emit(event, payload)
-        self.input._begin_frame()
 
     def _desktop_begin_frame(self, size, dpi, elapsed, events, world_available):
         self.elapsed = elapsed
@@ -443,6 +442,7 @@ class _NativeEngine:
                 if self.gui:
                     self._gui_runtime.sync()
             self._window_events(events)
+            self.input._begin_frame()
             self._pump_events()
             if self._systems_changed:
                 self._systems_changed = False
@@ -1403,7 +1403,9 @@ class _NativeEngine:
             self._time_base = self.elapsed
             try:
                 systems = [*self._world._systems, *self._application_systems.values()]
-                self._world._loop.run(1, 1 / step, False, systems, None)
+                self._world._loop.run(
+                    1, 1 / step if step else 60, False, systems, None, freeze_clock=step == 0,
+                )
             finally:
                 self._world._running = False
             self.elapsed = self._time_base + step

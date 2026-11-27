@@ -137,14 +137,15 @@ def _setup(args):
     engine.camera.fov = 44
     engine.camera.layers = {0, 3}
     engine.set_sun(DirectionalLight("#fff4df", 2.9, (0.26, -0.26, 0.93)))
-    if omit != "spot":
-        engine.set_spot(SpotLight("#cfe8ff", 16, (0, 4, 4), (0.05, -0.55, -1), 0.18, 0.42, 15))
+    spot = SpotLight("#cfe8ff", 16, (0, 4, 4), (0.05, -0.55, -1), 0.18, 0.42, 15)
+    spot_active = False
     if omit != "point":
         engine.add_light(PointLight(position=(-3, 3, 3), color="#ffcf91", intensity=25))
     if omit != "shadow":
         engine.enable_shadows(extent=8, resolution=512, cascades=3, auto_fit=False, shadow_distance=20)
     if omit != "environment":
         engine.set_environment("sky")
+        engine.environment.show_skybox = True
     if omit != "fog":
         engine.enable_fog(9, 30, (0.18, 0.26, 0.30))
     settings = {} if args.no_post else {key: value for key, value in POST.items() if key != omit}
@@ -159,7 +160,7 @@ def _setup(args):
     id_groups = []
 
     def mesh(group, geometry, material, position, *components, layer=0, **transform):
-        if omit != group:
+        if group is None or omit != group:
             entity = engine.spawn(Mesh(geometry), Material(material), Transform(pos=position, **transform),
                                   Layer(layer=layer), *components)
             if args.ids and group is not None and layer == 0:
@@ -271,11 +272,14 @@ def _setup(args):
     photo_camera.set_pose((0, 0, 5), (0, 0, 0))
     photo = None if omit == "snapshot" else engine.render_to_texture(photo_camera, (160, 120), live=False)
 
-    status = Text("Hold and drag beyond the panel", style_overrides={"fg": "#f5e7c4"})
+    status = Text("Drag past the panel", style_overrides={"fg": "#f5e7c4"})
     slider = Slider(name="tide", min=0, max=1, value=0.25)
     refresh = Button(name="photo", label="Refresh photo")
     scale = Toggle(name="large", value=False, label="Large HUD")
-    timeline = {"state": "start", "value": 0.25, "photo": 0, "events": [], "cells": []}
+    timeline = {
+        "state": "start", "value": 0.25, "photo": 0, "events": [], "cells": [],
+        "shadow_caster": "sun" if omit != "shadow" else "none",
+    }
 
     def record(name, fields):
         if args.output is not None:
@@ -325,7 +329,7 @@ def _setup(args):
         if live is not None:
             views.extend([Text("Live minimap"), Image(live, style_overrides={"width": 112, "radius": 35})])
         if photo is not None:
-            views.extend([Text("On-demand photo"), Image(photo, style_overrides={"width": 112})])
+            views.extend([Text("Snapshot"), Image(photo, style_overrides={"width": 112})])
         engine.gui.append(Panel(views, anchor="bottom-right", offset=(10, 10),
                                 style_overrides={"bg": "#1b354be8", "width": 128, "padding": 8, "radius": 6}))
 
@@ -335,7 +339,15 @@ def _setup(args):
 
     @engine.system
     def animate(query, dt):
+        nonlocal spot_active
         t = engine.elapsed
+        # The desktop renderer uses one shadow caster. Keep the cascades
+        # visible in the initial composition, then show the spot's map.
+        if t >= 2.5 and not spot_active and omit != "spot":
+            engine.set_spot(spot)
+            spot_active = True
+            if omit != "shadow":
+                timeline["shadow_caster"] = "spot"
         if clip_id is not None:
             engine.set_pose_frames([pennant.index], clip_id, [0.5 - 0.5 * math.cos(t * 5)])
         side_x = 1.5 - 1.5 * math.cos(t * 1.5) + 0.28 * timeline["value"]
@@ -376,11 +388,15 @@ def _offscreen(engine, timeline, provenance, id_groups, args):
     args.output.mkdir(parents=True, exist_ok=True)
     frames = []
     previous_photo = 0
+    previous_caster = timeline["shadow_caster"]
     for step in range(args.frames):
         image = engine.render_frame(dt=1 / 12)
         photo_count = timeline["photo"]
-        if step in {0, 1, args.frames // 2, args.frames - 1} or photo_count != previous_photo:
+        caster = timeline["shadow_caster"]
+        transition = photo_count != previous_photo or caster != previous_caster
+        if step in {0, 1, args.frames // 2, args.frames - 1} or transition:
             previous_photo = photo_count
+            previous_caster = caster
             name = f"frame-{step:03d}"
             path = args.output / f"{name}.png"
             PillowImage.fromarray(image).save(path)

@@ -1293,7 +1293,7 @@ impl FrameLoop {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (frames, hz, paced, registrations, bridge, profile=false))]
+    #[pyo3(signature = (frames, hz, paced, registrations, bridge, profile=false, freeze_clock=false))]
     fn run<'py>(
         &self,
         py: Python<'py>,
@@ -1303,6 +1303,7 @@ impl FrameLoop {
         registrations: Vec<Registration>,
         bridge: Option<(Vec<usize>, Py<PyAny>)>,
         profile: bool,
+        freeze_clock: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         if thread::current().id() != self.owner_thread {
             return Err(PyRuntimeError::new_err("run on the World owner thread"));
@@ -1312,6 +1313,11 @@ impl FrameLoop {
         }
         if registrations.len() > MAX_SYSTEMS {
             return Err(PyValueError::new_err("too many systems"));
+        }
+        if freeze_clock && (paced || frames != 1) {
+            return Err(PyValueError::new_err(
+                "a frozen clock requires one unpaced frame",
+            ));
         }
         let registrations = registrations
             .into_iter()
@@ -1323,7 +1329,11 @@ impl FrameLoop {
                 bridge.as_ref().map(|(reads, _)| reads.as_slice()),
             )
             .map_err(PyValueError::new_err)?;
-        let step = Duration::from_secs_f64(1.0 / hz);
+        let step = if freeze_clock {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(1.0 / hz)
+        };
         let bridge = bridge.map(|(reads, callback)| Bridge { reads, callback });
         let execution = py.detach(|| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
