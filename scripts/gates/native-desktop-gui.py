@@ -81,6 +81,9 @@ def check_gui(output, fault):
     assert start[image_y, image_x, 0] > start[image_y, image_x, 2] + 50
     assert updated[image_y, image_x, 2] > updated[image_y, image_x, 0] + 50
     assert np.count_nonzero(np.any(start != updated, axis=2)) > 340
+    label_x, label_y, label_w, label_h = map(round, engine._graphics.gui_boxes()[1][0])
+    label = np.s_[label_y:label_y + label_h, label_x:label_x + label_w]
+    assert np.count_nonzero(np.any(start[label] != updated[label], axis=2)) > 40
 
     engine.gui.scale = 1.25
     engine._desktop_begin_frame((400, 260), 1.5, engine.elapsed, [], True)
@@ -109,21 +112,28 @@ def check_screens(output, examples):
     engine = namespace["engine"]
     images = []
     states = []
-    for label in ("a", "b", "a-return"):
-        if images:
-            engine._window_events([("key_down", "Space", (0, 0, 0, 0), 0, [])])
-        image = engine.render_frame()
-        _assert_pixels(output, image, f"screen-{label}")
-        images.append(image)
-        assert engine.world.query("Transform").read().numpy().shape == (1, 10)
-        systems = [callback.__name__ for callback in engine._application_systems]
-        assert systems == ([] if label == "b" else ["spin"]), systems
-        states.append({"screen": label, "systems": systems, "text": engine.gui[0].children[0].text})
-        engine._window_events([("key_up", "Space", (0, 0, 0, 0), 0, [])])
-        engine.render_frame()
-    assert states[0]["text"] == states[2]["text"] and states[0]["text"] != states[1]["text"]
-    assert np.count_nonzero(np.any(images[0] != images[1], axis=2)) > 900
-    engine.close()
+    entities = []
+    try:
+        for label in ("a", "b", "a-return"):
+            if images:
+                engine._window_events([("key_down", "Space", (0, 0, 0, 0), 0, [])])
+            image = engine.render_frame()
+            _assert_pixels(output, image, f"screen-{label}")
+            images.append(image)
+            rows = engine.world.query("Transform").read()
+            assert rows.numpy().shape == (1, 10)
+            entities.append(rows.entities[0])
+            systems = [callback.__name__ for callback in engine._application_systems]
+            assert systems == ([] if label == "b" else ["spin"]), systems
+            states.append({"screen": label, "systems": systems, "text": engine.gui[0].children[0].text})
+            engine._window_events([("key_up", "Space", (0, 0, 0, 0), 0, [])])
+            engine.render_frame()
+        assert len(set(entities)) == 3, "a previous screen's entity survived the switch"
+        assert states[0]["text"] == states[2]["text"] and states[0]["text"] != states[1]["text"]
+        roi = np.s_[100:500, 130:670]
+        assert np.count_nonzero(np.any(images[0][roi] != images[1][roi], axis=2)) > 900
+    finally:
+        engine.close()
     assert not engine._tasks
     return states
 

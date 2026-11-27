@@ -176,11 +176,16 @@ def _setup(args):
     mesh(None, cube(0.9, 0.18, 0.9), BasicMaterial("#ffffff"), (-3.3, 2.34, -1.1))
     mesh("mirror", plane(1.0, 1.2), StandardMaterial("#bd53df", mirror=-0.08), (-3.2, 1.0, 2.4))
     mesh("alpha", plane(1.1, 0.72), StandardMaterial("#318ee3", opacity=0.47, ripple=0.6), (-3.2, 0.34, 2.55))
-    mesh("glow", sphere(0.71, 24), AtmosphereMaterial("#3aaeff", 1.3), (2.8, 2.15, -1.7))
-    mesh("scattering", sphere(0.64, 24), AtmosphereScatteringMaterial(0.55, 0.64), (3.95, 2.0, -1.8))
-    mesh(None, sphere(0.54, 24), StandardMaterial("#4f715d"), (3.95, 2, -1.8))
-    mesh("cloud", sphere(1.0, 32), CloudMaterial(coverage=0.4, opacity=0.8), (0.3, 3.14, -2.5),
-         scale=(1.6, 0.4, 0.75))
+    mesh("glow", sphere(0.49, 24), AtmosphereMaterial("#3aaeff", 1.8), (2.56, 2.94, 0.55))
+    mesh("scattering", sphere(1.12, 48), AtmosphereScatteringMaterial(0.87, 1.12, intensity=38), (0, 0, 0), layer=2)
+    mesh(None, sphere(0.86, 32), StandardMaterial("#4f715d"), (0, 0, 0), layer=2)
+    mesh("cloud", sphere(0.58, 32), CloudMaterial(coverage=0.55, opacity=0.9), (0.15, 3.0, 0.75),
+         scale=(1.45, 0.52, 0.8))
+
+    # Translucent passes preserve depth underneath. Give the sample chart
+    # an opaque backdrop so the sky composite does not replace their pixels.
+    mesh(None, plane(7.35, 2.7), StandardMaterial("#304553", roughness=1.0),
+         (0.17, 1.64, -0.28))
 
     balloon = cube(0.61, 0.61, 0.61)
     sample = sphere(0.42, 24)
@@ -228,7 +233,7 @@ def _setup(args):
     flag = plane(0.72, 0.46)
     flag["joints"] = np.tile([0, 1], (4, 1))
     flag["weights"] = np.array([0.15, 0.85, 0.85, 0.15], dtype="f4")
-    pennant = mesh("skin", flag, FlatMaterial("#f27c6a"), (-3.3, 2.72, -1.0))
+    pennant = mesh("skin", flag, FlatMaterial("#f27c6a"), (1.86, 3.35, 0.56))
     clip_id = None
     if pennant is not None:
         rest = np.repeat(np.eye(4, dtype="f4")[None], 2, axis=0)
@@ -268,8 +273,8 @@ def _setup(args):
     mesh(None, cube(1, 1, 1), BasicMaterial("#5078de"), (3, 0, 0), layer=1)
     live = None if omit == "view" else engine.render_to_texture(side, (160, 120), fog=False)
     photo_camera = Camera()
-    photo_camera.layers = {1}
-    photo_camera.set_pose((0, 0, 5), (0, 0, 0))
+    photo_camera.layers = {2}
+    photo_camera.set_pose((0, 0.04, -1.43), (0, 0, 0))
     photo = None if omit == "snapshot" else engine.render_to_texture(photo_camera, (160, 120), live=False)
 
     status = Text("Drag past the panel", style_overrides={"fg": "#f5e7c4"})
@@ -352,7 +357,7 @@ def _setup(args):
             engine.set_pose_frames([pennant.index], clip_id, [0.5 - 0.5 * math.cos(t * 5)])
         side_x = 1.5 - 1.5 * math.cos(t * 1.5) + 0.28 * timeline["value"]
         side.set_pose((side_x, 0.25, 5), (side_x, 0, 0))
-        photo_camera.set_pose(side.position, side.target)
+        photo_camera.set_pose((0.14 * side_x, 0.04, -1.43 - 0.23 * side_x), (0, 0, 0))
         if streamer is not None:
             streamer.focus(-2 + ((t * 3) % 7), -1)
             timeline["cells"] = sorted(streamer.drawn())
@@ -377,7 +382,7 @@ def _frame_record(engine, timeline, provenance, label):
         "format": report["target"],
         "passes": report["frame_order"],
         "settings": report["settings"],
-        "counts": {key: report[key] for key in (
+        "counts": {"compute_dispatches": engine._graphics.compute_transfers()[0]} | {key: report[key] for key in (
             "instances", "draw_calls", "triangles", "shadow_layers", "gui_quads",
             "view_resources", "stream_resources", "streamed_cells", "gui_getter_calls",
         )},

@@ -83,6 +83,7 @@ def validate(frame):
     assert counts["shadow_layers"] >= 3 and counts["instances"] >= 20
     assert counts["view_resources"] == [2, 2] and counts["gui_getter_calls"] == 1
     assert counts["gui_quads"][2] == 2 and min(counts["gui_quads"]) > 0
+    assert counts["compute_dispatches"] == 1
 
 
 def main():
@@ -104,6 +105,7 @@ def main():
     assert any(frame["passes"].count("view") == 2 for frame in manifest[1:])
     assert any(frame["counts"]["streamed_cells"] > 0 for frame in manifest[1:])
     assert change(baseline, images[-1], MINIMAP) >= 12, "live secondary view remained static"
+    assert change(baseline, images[1], SNAPSHOT) == 0, "on-demand view redrew without refresh"
     assert change(baseline, images[-1], SNAPSHOT) >= 12, "photo did not reflect its refresh"
 
     changed = {}
@@ -111,12 +113,18 @@ def main():
         can_move = name in {"stream", "compute", "spot"}
         other, captures = run(output / f"without-{name}", "--omit", name, frames=49 if can_move else 2)
         reference, frame = (images[-1], captures[-1]) if can_move else (baseline, captures[0])
-        roi = {"sky": POST_SKY, "environment": ENV_SKY, "gui": HUD}.get(name, np.s_[:, :])
+        roi = {
+            "sky": POST_SKY, "environment": ENV_SKY, "gui": HUD, "view": MINIMAP,
+            "snapshot": SNAPSHOT, "scattering": SNAPSHOT,
+        }.get(name, np.s_[:, :])
         pixels = change(reference, frame, roi)
         assert pixels >= 8, f"no visible change with {name} disabled ({pixels} pixels)"
         if name in POST:
             expected = False if name == "fxaa" else None
             assert other[0]["settings"]["post"][name] == expected
+        count = {"shadow": "shadow_layers", "stream": "streamed_cells", "compute": "compute_dispatches"}.get(name)
+        if count:
+            assert other[-1]["counts"][count] == 0, (name, other[-1]["counts"])
         changed[name] = pixels
 
     reordered, reordered_images = run(output / "gui-before-post", "--fault", "hud-order")
