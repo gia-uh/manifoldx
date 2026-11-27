@@ -152,6 +152,19 @@ def visible_change(name, before, after):
     return pixels
 
 
+def flat_sample_colors(composed, without_flat):
+    # The center of the orange icosphere projects over the blue-gray chart.
+    # Both captures use the normal materials and post stack.
+    patch = np.s_[174:181, 247:254]
+    foreground = np.median(composed[patch], axis=(0, 1))
+    backdrop = np.median(without_flat[patch], axis=(0, 1))
+    red, green, blue = foreground
+    assert red > green + 24 and green > blue + 24, f"flat sample should cover the chart: {foreground}"
+    red, _, blue = backdrop
+    assert blue > red + 16, f"removing the flat sample should reveal the chart: {backdrop}"
+    return {"foreground_rgb": foreground.tolist(), "backdrop_rgb": backdrop.tolist()}
+
+
 def omission_signals(name, active, omitted):
     passes = [pass_ for pass_ in active["passes"] if pass_ not in REMOVED_PASSES.get(name, ())]
     if name in {"view", "snapshot", "gui"}:
@@ -237,6 +250,7 @@ def main():
 
     assert set(REGIONS) == set(POST_EFFECTS) | set(GROUPS)
     changed = {}
+    flat_colors = None
     for name in (*POST_EFFECTS, *(() if args.post_only else GROUPS)):
         can_move = name in {"stream", "compute", "spot"}
         other, captures = run(output / f"without-{name}", "--omit", name, frames=49 if can_move else 2)
@@ -245,6 +259,8 @@ def main():
         omission_signals(name, manifest[index], other[index])
         changed[name] = visible_change(name, images[index], captures[index])
         reject_unrelated_changes(name, images[index], captures[index])
+        if name == "flat":
+            flat_colors = flat_sample_colors(images[index], captures[index])
 
     reordered, reordered_images = run(output / "gui-before-post", "--fault", "hud-order")
     assert reordered[0]["passes"].index("gui") < reordered[0]["passes"].index("composite")
@@ -265,6 +281,8 @@ def main():
         "regions_yx": {name: [[axis.start, axis.stop] for axis in regions[name]] for name in changed},
         "unrelated_change_controls": len(changed) - 1,
     }
+    if flat_colors is not None:
+        report["flat_sample_colors"] = flat_colors
     (output / "fr11.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(changed))
 
