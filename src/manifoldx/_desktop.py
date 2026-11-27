@@ -190,6 +190,7 @@ class _NativeEngine:
         for name, kind, size in columns:
             self._world.register(name, kind=kind, width=size)
         self._registries = {"Mesh": {}, "Material": {}}
+        self._view_materials = {}
         self._mesh_ids = count(1)
         self._material_ids = count(1)
         self._cell_versions = count(1)
@@ -594,6 +595,8 @@ class _NativeEngine:
                                     [entry[0] for entry in materials.values()])
         meshes.clear()
         materials.clear()
+        self._view_materials.clear()
+        self._graphics.take_unused_view_materials()
 
     def submit_process(self, fn, *args):
         """Submit CPU preparation to a spawned process without sharing GPU objects."""
@@ -601,7 +604,22 @@ class _NativeEngine:
 
         return Engine.submit_process(self, fn, *args)
 
+    def _collect_unused_view_materials(self):
+        if not self._view_materials:
+            return
+        registry = self._registries["Material"]
+        retired = []
+        for index in self._graphics.take_unused_view_materials():
+            key = self._view_materials.pop(index, None)
+            if key is not None:
+                del registry[key]
+                retired.append(index)
+        if retired:
+            self._graphics.retire_scene([], retired)
+
     def _material(self, material):
+        # Drain before handing out an id so reuse after an empty frame registers anew.
+        self._collect_unused_view_materials()
         registry = self._registries["Material"]
         key = id(material)
         if getattr(material, "_version", None) is None:
@@ -650,6 +668,7 @@ class _NativeEngine:
             return index
         params = None
         effects = None
+        view_albedo = False
         if kind == "standard":
             baked = material.baked
             if baked is not None and not self._owns_texture(baked):
@@ -657,6 +676,7 @@ class _NativeEngine:
             texture = material.albedo_map
             if texture is not None and not self._owns_texture(texture):
                 raise ValueError("albedo texture belongs to a different graphics owner")
+            view_albedo = texture is not None and texture._native_view
             params = (
                 material.roughness,
                 material.metallic,
@@ -677,12 +697,18 @@ class _NativeEngine:
                 None if baked is None else baked.id,
             )
         shininess = material.shininess if kind == "phong" else None
-        self._graphics.material(index, _color(material.color), kind, params, shininess, effects)
+        self._graphics.material(
+            index, _color(material.color), kind, params, shininess, effects, view_albedo
+        )
         if kind == "standard" and material.vertex_colors and material.albedo_map is None:
             self._graphics.surface_patterns(
                 index, [material.surface_patterns[i] for i in range(1, 10)], material.detail
             )
         registry[key] = (index, material, version)
+        if view_albedo:
+            self._view_materials[index] = key
+        else:
+            self._view_materials.pop(index, None)
         return index
 
     def _manual_material(self, index, material):
@@ -1045,6 +1071,7 @@ class _NativeEngine:
         return self._label_atlas
 
     def _sync_scene(self):
+        self._collect_unused_view_materials()
         atlas = self._label_atlas
         if atlas is not None:
             for layer in sorted(atlas.dirty_slices):

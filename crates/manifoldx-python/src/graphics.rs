@@ -94,7 +94,7 @@ enum Upload {
     Terrain(f64),
     RetireScene(Vec<u32>, Vec<u32>),
     Mesh(u32, MeshData, Vec<[f32; 2]>, VertexInput),
-    Material(u32, [f32; 3], Shading, StandardEffects),
+    Material(u32, [f32; 3], Shading, StandardEffects, bool),
     Surface(u32, Box<[[f32; 5]; 9]>, bool),
     Albedo(u32, u32, u32, Vec<Vec<u8>>),
     TexturePatch(u32, [u32; 3], [u32; 2], Vec<u8>),
@@ -140,6 +140,9 @@ pub(crate) struct Scene {
     clips: HashMap<u32, usize>,
     uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
+    view_materials: BTreeSet<u32>,
+    view_material_revision: Option<(u64, u64)>,
+    unused_view_materials: Vec<u32>,
     view_reads: HashMap<u64, ViewRead>,
     next_read: u64,
     stream_cells: StreamCells,
@@ -172,6 +175,9 @@ impl Scene {
             clips: HashMap::new(),
             uploads: VecDeque::new(),
             offscreen: None,
+            view_materials: BTreeSet::new(),
+            view_material_revision: None,
+            unused_view_materials: Vec::new(),
             view_reads: HashMap::new(),
             next_read: 0,
             stream_cells: StreamCells::default(),
@@ -231,7 +237,10 @@ impl Scene {
                 Upload::StreamRetire(id) => renderer.retire_stream_mesh(id),
                 Upload::Terrain(size) => self.stream_cells.configure(size)?,
                 Upload::RetireScene(meshes, materials) => {
-                    renderer.retire_scene(&meshes, &materials)
+                    renderer.retire_scene(&meshes, &materials);
+                    for id in materials {
+                        self.view_materials.remove(&id);
+                    }
                 }
                 Upload::Axis(id, points) => renderer.upload_axis(id, points)?,
                 Upload::Volume(id, dims, bytes) => renderer.upload_volume(id, dims, &bytes)?,
@@ -280,8 +289,15 @@ impl Scene {
                         renderer.play_poses(entity, clip, position)?;
                     }
                 }
-                Upload::Material(id, color, shading, effects) => {
-                    renderer.set_material_effects(id, color, shading, effects)?
+                Upload::Material(id, color, shading, effects, view_albedo) => {
+                    renderer.set_material_effects(id, color, shading, effects)?;
+                    if view_albedo {
+                        if self.view_materials.insert(id) {
+                            self.view_material_revision = None;
+                        }
+                    } else {
+                        self.view_materials.remove(&id);
+                    }
                 }
                 Upload::BakedArray(id, size, layers) => {
                     renderer.create_baked_array(id, size, layers)?
@@ -301,7 +317,47 @@ impl Scene {
                 )?,
             }
         }
+        self.find_unused_view_materials(world)?;
         Ok(self.camera)
+    }
+
+    // Both ordinary ECS edits and streamed commits are visible at this point.
+    fn find_unused_view_materials(&mut self, world: &World) -> Result<(), RenderError> {
+        if self.view_materials.is_empty() {
+            return Ok(());
+        }
+        let column = world
+            .component_index("Material")
+            .ok_or_else(|| RenderError::Resource("missing Material component".into()))?;
+        let revision = (
+            world.entity_version(),
+            world
+                .column_version(column)
+                .map_err(RenderError::Resource)?,
+        );
+        if self.view_material_revision == Some(revision) {
+            return Ok(());
+        }
+        let rows = world
+            .read_component(column, None)
+            .map_err(|error| RenderError::Resource(error.to_string()))?;
+        let ColumnData::U32(ids) = rows.data else {
+            return Err(RenderError::Resource(
+                "Material must contain u32 ids".into(),
+            ));
+        };
+        let mut unused = self.view_materials.clone();
+        for (id, member) in ids.into_iter().zip(rows.membership) {
+            if member {
+                unused.remove(&id);
+            }
+        }
+        for id in unused {
+            self.view_materials.remove(&id);
+            self.unused_view_materials.push(id);
+        }
+        self.view_material_revision = Some(revision);
+        Ok(())
     }
 
     pub(crate) fn run_compute(
@@ -818,6 +874,10 @@ impl NativeGraphics {
             .push_back(Upload::RetireScene(meshes, materials));
     }
 
+    fn take_unused_view_materials(&self) -> Vec<u32> {
+        std::mem::take(&mut self.scene.lock().unwrap().unused_view_materials)
+    }
+
     fn stream_begin(&self, id: u32, bounds: [[f32; 3]; 2], vertices: u64, indices: u64) {
         self.scene
             .lock()
@@ -981,7 +1041,8 @@ impl NativeGraphics {
         Ok(())
     }
 
-    #[pyo3(signature = (id, color, kind, standard=None, shininess=None, effects=None))]
+    #[pyo3(signature = (id, color, kind, standard=None, shininess=None, effects=None, view_albedo=false))]
+    #[allow(clippy::too_many_arguments)]
     fn material(
         &self,
         id: u32,
@@ -990,6 +1051,7 @@ impl NativeGraphics {
         standard: Option<MaterialInput>,
         shininess: Option<f32>,
         effects: Option<EffectsInput>,
+        view_albedo: bool,
     ) -> PyResult<()> {
         let shading = match (kind, standard, shininess) {
             ("basic", None, None) => Shading::Basic,
@@ -1051,7 +1113,7 @@ impl NativeGraphics {
             .lock()
             .unwrap()
             .uploads
-            .push_back(Upload::Material(id, color, shading, effects));
+            .push_back(Upload::Material(id, color, shading, effects, view_albedo));
         Ok(())
     }
 

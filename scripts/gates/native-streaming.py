@@ -6,6 +6,7 @@ import sys
 import time
 from threading import Event
 from pathlib import Path
+from weakref import ref
 
 import manifoldx as mx
 import numpy as np
@@ -15,6 +16,7 @@ from manifoldx.camera import Camera
 from manifoldx.components import Baked, Layer, Material, Mesh, Transform
 from manifoldx.resources import SURFACE_BAKED, DirectionalLight, FlatMaterial, StandardMaterial, plane
 from manifoldx.streaming import CellResult, MeshData, QuadStreamer, Streamer, _pack_native_vertices, _pack_now
+from manifoldx.systems import Query
 from manifoldx.textures import layer_mips, texture_array, write_layer, write_texture
 from manifoldx.vehicles import GroundTile, Heightfield
 
@@ -107,6 +109,76 @@ def views(output, fault):
     engine.close()
     other.close()
     return result
+
+
+def view_retire(output):
+    engine = engine_for("Retire a view after its last scene consumer")
+    engine.camera.layers = {2}
+    camera = Camera()
+    camera.layers = {1}
+    camera.set_pose((0, 0, 4), (0, 0, 0))
+    geometry = plane(3, 3)
+    source = engine.spawn(
+        Mesh(geometry), Material(FlatMaterial("#e83728")), Transform(), Layer(layer=1)
+    )
+    remove = set()
+
+    @engine.system
+    def destroy_consumers(query: Query[Transform], dt):
+        rows = query.get_component_data("Transform")
+        engine.destroy(np.flatnonzero(np.isin(rows[:, 0], tuple(remove))))
+        remove.clear()
+
+    def spawn_consumer(x):
+        return engine.spawn(
+            Mesh(geometry), Material(material), Transform(pos=(x, 0, 0)), Layer(layer=2)
+        )
+
+    engine.render_frame()
+    baseline = engine.last_frame["view_resources"]
+    assert baseline == [0, 0]
+    texture = engine.render_to_texture(camera, (40, 40), live=False)
+    texture_ref = ref(texture)
+    material = StandardMaterial("#ffffff", roughness=0.8, albedo_map=texture)
+    old = spawn_consumer(0)
+    first = engine.render_frame()
+    solid(first, 0)
+    engine.drop_texture(texture)
+    del texture
+    remove.add(0.0)
+    # Keep the unrelated source out of the destroy query when retiring the center draw.
+    source.transform.pos = (0.25, 0, 0)
+    engine.render_frame()
+    engine.render_frame()
+    assert rejected(lambda: old.transform.pos, "is not alive")
+    assert engine.last_frame["view_resources"] == [0, 1]
+
+    # A material that is still owned by the app can be used again after an empty frame.
+    left = spawn_consumer(-10)
+    center = spawn_consumer(0)
+    assert np.array_equal(engine.render_frame(), first)
+    del material
+    remove.add(-10.0)
+    assert np.array_equal(engine.render_frame(), first)
+    assert rejected(lambda: left.transform.pos, "is not alive")
+    assert engine.last_frame["view_resources"] == [0, 1]
+    pending = engine.read_texture(texture_ref())
+    assert not pending.done() and texture_ref() is not None
+    remove.add(0.0)
+    engine.render_frame()
+    solid(pending.result(timeout=1), 0)
+    for _ in range(3):
+        engine.render_frame()
+    assert rejected(lambda: center.transform.pos, "is not alive")
+    assert np.array_equal(source.transform.pos, [0.25, 0, 0])
+    drained = engine.last_frame["view_resources"]
+    print(json.dumps({"baseline": baseline, "drained": drained, "handle_released": texture_ref() is None}))
+    assert drained == baseline, f"view texture retained after last scene consumer: {drained}"
+    assert texture_ref() is None
+    save(output, "last-image", first)
+    engine.close()
+    return {"baseline": baseline, "drained": drained, "pending_read_completed": True,
+            "material_reused": True, "unrelated_entity_alive": True}
 
 
 def albedo(output, fault):
@@ -603,7 +675,7 @@ def portable_rows(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade", "receipts", "republish", "quad-close", "quad-close-crossfade"))
+    parser.add_argument("--case", required=True, choices=("views", "view-retire", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade", "receipts", "republish", "quad-close", "quad-close-crossfade"))
     parser.add_argument("--fault", choices=("refresh", "albedo", "atomic", "late", "layer"))
     args = parser.parse_args()
     assert sys.flags.isolated
@@ -611,6 +683,8 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     if args.case == "async":
         result = async_stream(args.output)
+    elif args.case == "view-retire":
+        result = view_retire(args.output)
     elif args.case == "capsule":
         result = capsule(args.output)
     elif args.case == "cancel":
