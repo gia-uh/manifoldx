@@ -19,6 +19,20 @@ manifoldx run app.py -- --level 3         # everything after -- goes to the app'
 
 Run it with `uv run` inside a project, like every other Python command here.
 
+## Rust desktop registration reload
+
+With `MANIFOLDX_CORE=rust`, `manifoldx run` executes the usual entry point once
+and opens the window through the native loop. Use `engine.reload_systems(...)`
+with the absolute import names of trusted Python modules. Each module exposes
+`register(system)` and declares synchronous `(query, dt)` callbacks using
+components already registered in the World. A save to a named module replaces
+the full set of registered callbacks between frames. The scene persists. A
+syntax, import or registration error prints a traceback and keeps the previous
+set. Restart after editing setup or an import outside the named modules.
+See [Working with an agent](../docs/chapters/13-working-with-an-agent.md) for an example.
+
+The remaining desktop instructions apply to the default Python core.
+
 ## What a reload does
 
 Every 0.25 s the reloader compares the modification times of the app's source files. When one changed:

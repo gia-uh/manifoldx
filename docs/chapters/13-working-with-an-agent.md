@@ -10,7 +10,7 @@ from a shell, and, at the end, the same plaza in a browser tab.
 
 ## Save, and keep your place
 
-`manifoldx run` is `python` for an app that draws. It runs the program until
+With the default Python core, `manifoldx run` is `python` for an app that draws. It runs the program until
 `engine.run()`, takes the engine, and every quarter of a second compares the
 modification times of the app's own source files. When one has changed it
 forgets the app's modules, runs the program again from the top, and hands the
@@ -168,9 +168,52 @@ engine.watch("plaza/benches.toml", "plaza/shaders/**/*.wgsl")
 engine.run()
 ```
 
+### Reload systems with the Rust desktop core
+
+Run `MANIFOLDX_CORE=rust uv run manifoldx run app.py` (or `run -m game.app`). The
+entry point runs once and `engine.run()` opens the native window. Build the
+scene in the entry point or in its `startup` handler. Declare which modules
+supply replaceable systems before starting the engine.
+
+```python
+engine.reload_systems("game.motion")
+engine.run()
+```
+
+In `game/motion.py`, expose `register(system)`. The registrar takes synchronous
+functions with the same `(query, dt)` arguments as `engine.system`.
+Annotations such as `Query[Transform]` declare the rows a system uses.
+
+```python
+from manifoldx import Query, Transform
+
+
+def register(system):
+    @system
+    def move(query: Query[Transform], dt):
+        query[Transform].pos += (dt, 0, 0)
+```
+
+Keep the registration modules separate from scene setup. They run as trusted
+Python and receive only the registrar during preparation. Put shared component
+classes in a stable module and register them in the scene before reloadable
+systems query them. Access the active rows through `Query` when the scheduler
+calls the system. Avoid importing the entry point or obtaining the application
+Engine or World through globals or imports.
+
+After startup, `run` watches the named modules. A save imports all of them
+fresh and validates the full registration before replacing it between frames.
+The World, entities, meshes and loaded cells stay in place. A syntax, import
+or registration error prints a traceback and the previous systems keep
+running. Save the corrected module to retry. An invalid initial registration
+fails startup. Restart to change the entry point, the module list, undeclared
+imports, component schemas, event handlers or `World.kernel` registrations.
+The Rust desktop command currently supports reload and regular stderr output.
+The dev-channel flags `--port` and `--debug` require the Python desktop core.
+
 ## The dev channel
 
-`manifoldx run` also serves a page and an HTTP API on 127.0.0.1 (port 8770, or
+With the Python core, `manifoldx run` also serves a page and an HTTP API on 127.0.0.1 (port 8770, or
 the next free one) while the app runs, and `manifoldx` has a command for each
 thing an agent needs to ask it.
 

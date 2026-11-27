@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from inspect import iscoroutinefunction
 from pathlib import Path
 from threading import current_thread, main_thread
+from typing import get_type_hints
 from weakref import WeakSet, finalize, ref
 
 import numpy as np
 
+from manifoldx._native_reload import _RegistrationReload, _entry, _preparing
 from manifoldx._versions import _Counter
 from manifoldx.camera import Camera
 from manifoldx.components import Component, Material, Mesh, Transform
@@ -169,6 +171,8 @@ class _NativeEngine:
     ):
         from manifoldx._core_native import FrameLoop, _NativeGraphics
 
+        if _preparing.get():
+            raise RuntimeError("reload registration modules cannot create an Engine")
         if pipelined:
             raise NotImplementedError(
                 "Python graphics pipelining is unavailable with the Rust Engine"
@@ -203,6 +207,7 @@ class _NativeEngine:
         self._frame_waiters = FrameWaiters(self._get_active_loop)
         self._application_systems = {}
         self._systems_changed = False
+        self._registration_reload = None
         self.lines = Lines()
         self.benders = []
         self._line_rows = {}
@@ -444,12 +449,58 @@ class _NativeEngine:
             self._window_events(events)
             self.input._begin_frame()
             self._pump_events()
-            if self._systems_changed:
-                self._systems_changed = False
-                return list(self._application_systems.values())
-            return None
+            return self._frame_system_updates()
         finally:
             self._world._running = True
+
+    def reload_systems(self, *modules):
+        """Declare the source modules that supply reloadable native Engine systems."""
+        if self._started or self._registration_reload is not None:
+            raise RuntimeError("declare reload systems once before starting the Engine")
+        if not modules or any(
+            not isinstance(name, str) or not all(part.isidentifier() for part in name.split("."))
+            for name in modules
+        ):
+            raise ValueError("expected one or more absolute registration module names")
+        if len(set(modules)) != len(modules):
+            raise ValueError("duplicate registration module")
+        self._registration_reload = _RegistrationReload(modules)
+
+    def _current_application_systems(self):
+        reload = self._registration_reload
+        return [*self._application_systems.values(), *(reload.registrations if reload else ())]
+
+    def _frame_system_updates(self):
+        reload = self._registration_reload
+        if reload is not None and _entry.get() is not None:
+            if reload.poll(self._prepare_reload_systems):
+                self._systems_changed = True
+        if self._systems_changed:
+            self._systems_changed = False
+            return self._current_application_systems()
+        return None
+
+    def _prepare_reload_systems(self, callbacks):
+        if len(set(callbacks)) != len(callbacks) or any(
+            callback in self._application_systems for callback in callbacks
+        ):
+            raise ValueError("system is already registered")
+        registrations = tuple(
+            self._bind_application_system(callback, get_type_hints(callback).values(), register=False)
+            for callback in callbacks
+        )
+        # Match frames.rs application_frame and validate_columns before publishing.
+        # Only callbacks go through this lane and every column comes from this World.
+        world = self._world
+        application = [*self._application_systems.values(), *registrations]
+        if len(world._systems) + len(application) > 32:
+            raise ValueError("too many desktop systems (maximum 32)")
+        for name, _, reads, _, _ in application:
+            if self._position_binding is not None and self._position_binding[0] in reads:
+                raise ValueError(f"{name}: resident column cannot use CPU reads")
+            if sum(self._capacity * (17 + world._metadata[col][2] * 4) for col in reads) > 16 * 1024**2:
+                raise ValueError(f"{name}: declared snapshot exceeds byte limit")
+        return registrations
 
     def _desktop_finish_frame(self):
         if self.gui or self._gui_runtime._widgets:
@@ -471,14 +522,23 @@ class _NativeEngine:
             return self.system
         if iscoroutinefunction(callback):
             raise NotImplementedError("the Rust base Engine requires synchronous systems")
+        if callback in self._application_systems:
+            raise ValueError("system is already registered")
+        self._application_systems[callback] = self._bind_application_system(
+            callback, callback.__annotations__.values(), register=True
+        )
+        self._systems_changed = True
+        return callback
+
+    def _bind_application_system(self, callback, hints, *, register):
         columns = []
-        for hint in callback.__annotations__.values():
+        for hint in hints:
             if isinstance(hint, Query):
                 components = (
                     hint.components if isinstance(hint.components, tuple) else (hint.components,)
                 )
                 for component in components:
-                    if isinstance(component, type) and issubclass(component, Component):
+                    if register and isinstance(component, type) and issubclass(component, Component):
                         self._register_component(component)
                     columns.append(self._column_key(component))
         columns = tuple(dict.fromkeys(columns))
@@ -532,14 +592,10 @@ class _NativeEngine:
                 self._transform_edits.clear()
 
         invoke.__qualname__ = callback.__qualname__
-        if callback in self._application_systems:
-            raise ValueError("system is already registered")
         column_ids = self._world._columns(access)
-        self._application_systems[callback] = self._world._system_registration(
+        return self._world._system_registration(
             invoke, None, column_ids, [*column_ids, self._world._structural]
         )
-        self._systems_changed = True
-        return callback
 
     def remove_system(self, callback):
         try:
@@ -1283,6 +1339,9 @@ class _NativeEngine:
         if not self._started:
             self._started = True
             self._event_bus.dispatch_immediate(self, "startup", {})
+            if self._registration_reload is not None:
+                self._registration_reload.prepare(self._prepare_reload_systems)
+                self._systems_changed = True
             if self.gui:
                 self._gui_runtime.sync()
             self._sync_scene()
@@ -1398,11 +1457,15 @@ class _NativeEngine:
             compute_dt = step
             self.input._begin_frame()
             self._pump_events()
+            application = self._current_application_systems()
+            updates = self._frame_system_updates()
+            if updates is not None:
+                application = updates
             self._world._loop = self._frame_loop(self._world._native, 64, 8, 4096)
             self._world._running = True
             self._time_base = self.elapsed
             try:
-                systems = [*self._world._systems, *self._application_systems.values()]
+                systems = [*self._world._systems, *application]
                 self._world._loop.run(
                     1, 1 / step if step else 60, False, systems, None, freeze_clock=step == 0,
                 )

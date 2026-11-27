@@ -97,6 +97,17 @@ def main(argv=None):
 
             WebReloader(script=args.script, module=args.module, argv=app_args, **port).run()
             return 0
+        from manifoldx._core import _selection
+
+        core, _ = _selection()
+        if core == "rust":
+            if args.debug or port:
+                parser.error("--debug and --port require the Python desktop dev channel")
+            from manifoldx._native_reload import _run_app
+
+            _run_app(args.script, args.module, app_args)
+            return 0
+
         from manifoldx.hot import HotReloader
 
         HotReloader(script=args.script, module=args.module, argv=app_args, debug=args.debug, **port).run()
