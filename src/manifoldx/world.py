@@ -415,18 +415,21 @@ class World:
             if self._started:
                 raise RuntimeError("registration closes when the runtime starts")
 
-            @wraps(callback)
-            def invoke(snapshot, commands):
-                self._callback.active = True
-                try:
-                    return callback(_Snapshot(self, snapshot), _Commands(self, commands))
-                finally:
-                    self._callback.active = False
-
-            self._systems.append((callback.__qualname__, hz, read_columns, write_columns, invoke))
+            self._systems.append(self._system_registration(callback, hz, read_columns, write_columns))
             return callback
 
         return register if function is None else register(function)
+
+    def _system_registration(self, callback, hz, reads, writes):
+        @wraps(callback)
+        def invoke(snapshot, commands):
+            self._callback.active = True
+            try:
+                return callback(_Snapshot(self, snapshot), _Commands(self, commands))
+            finally:
+                self._callback.active = False
+
+        return (callback.__qualname__, hz, reads, writes, invoke)
 
     def _compile_kernel(self, program, target):
         from manifoldx.compute.kernel import _Kernel, _native_words

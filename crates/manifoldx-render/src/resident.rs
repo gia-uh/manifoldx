@@ -53,6 +53,10 @@ pub struct ResidentKernel {
 }
 
 impl ResidentKernel {
+    pub fn column(&self) -> usize {
+        self.spec.column
+    }
+
     pub fn new(
         renderer: &NativeRenderer,
         world: &World,

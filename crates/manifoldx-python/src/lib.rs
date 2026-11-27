@@ -19,6 +19,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 mod frames;
 mod graphics;
+mod gui;
 mod kernel;
 mod runtime;
 mod stream_builder;

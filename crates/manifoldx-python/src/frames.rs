@@ -10,8 +10,8 @@ use manifoldx_render::{
     wgpu,
     winit::{
         dpi::PhysicalSize,
-        event::WindowEvent,
-        keyboard::{Key, NamedKey},
+        event::{MouseButton, MouseScrollDelta, WindowEvent},
+        keyboard::{Key, ModifiersState, NamedKey},
         window::Window,
     },
     FrameTarget, NativeRenderer, RenderError, RenderStats, RendererOptions,
@@ -1084,8 +1084,8 @@ impl FrameLoop {
         Ok(result)
     }
 
+    #[pyo3(signature = (graphics, options, registrations, startup, keyboard, position, diagnostics, application=None))]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (graphics, options, registrations, startup, keyboard, position, diagnostics))]
     fn run_desktop<'py>(
         &self,
         py: Python<'py>,
@@ -1096,6 +1096,7 @@ impl FrameLoop {
         keyboard: Py<PyAny>,
         position: Option<PositionInput>,
         diagnostics: DesktopDiagnostics,
+        application: Option<ApplicationInput>,
     ) -> PyResult<Bound<'py, PyDict>> {
         if thread::current().id() != self.owner_thread {
             return Err(PyRuntimeError::new_err("run on the World owner thread"));
@@ -1159,6 +1160,11 @@ impl FrameLoop {
             registrations: Some(registrations),
             startup,
             keyboard,
+            application,
+            events: Vec::new(),
+            cursor: None,
+            modifiers: ModifiersState::empty(),
+            application_systems: 0,
             position,
             resident: None,
             skip_dispatch,
@@ -1441,12 +1447,19 @@ type DesktopInput = (
 
 type PositionInput = (usize, u32, u32, u32, Vec<(u32, u32)>, String);
 type DesktopDiagnostics = (bool, bool, bool, Option<(u32, u32)>);
+type ApplicationInput = (Py<PyAny>, Py<PyAny>);
+type WindowInput = (&'static str, String, [f64; 4], u16, Vec<&'static str>);
 
 struct WindowFrames<'a> {
     owner: &'a FrameLoop,
     registrations: Option<Vec<Prepared>>,
     startup: Py<PyAny>,
     keyboard: Py<PyAny>,
+    application: Option<ApplicationInput>,
+    events: Vec<WindowInput>,
+    cursor: Option<[f64; 2]>,
+    modifiers: ModifiersState,
+    application_systems: usize,
     position: Option<PositionSpec>,
     resident: Option<ResidentKernel>,
     skip_dispatch: bool,
@@ -1463,6 +1476,69 @@ struct WindowFrames<'a> {
 }
 
 impl WindowFrames<'_> {
+    fn application_frame(&mut self, size: [u32; 2], dpi: f64) -> Result<(), RenderError> {
+        let Some((begin, _)) = &self.application else {
+            return Ok(());
+        };
+        // Lifecycle callbacks run between barriers, while the owner has exclusive
+        // access to the World. Systems run after it returns to the Rust scheduler.
+        let owner_slot = self.resident.is_none();
+        if owner_slot {
+            *self.owner.owner.lock().unwrap() = self.world.take();
+        }
+        let events = std::mem::take(&mut self.events);
+        let updates = Python::attach(|py| {
+            let result = begin.call1(py, (size, dpi, self.clock.time(), events, owner_slot))?;
+            result
+                .extract::<Option<Vec<Registration>>>(py)
+                .and_then(|rows| {
+                    rows.map(|rows| rows.into_iter().map(|row| prepare(py, row)).collect())
+                        .transpose()
+                })
+        });
+        if owner_slot {
+            self.world = self.owner.owner.lock().unwrap().take();
+        }
+        let updates: Option<Vec<Prepared>> =
+            updates.map_err(|error| RenderError::Window(error.to_string()))?;
+        if let Some(updates) = updates {
+            let world = self
+                .world
+                .as_ref()
+                .expect("desktop owns the World after callbacks");
+            let runner = self
+                .runner
+                .as_mut()
+                .expect("desktop application has a scheduler");
+            let original = runner.systems.len() - self.application_systems;
+            if original + updates.len() > MAX_SYSTEMS {
+                return Err(RenderError::Window("too many desktop systems".into()));
+            }
+            for (_, hz, reads, writes, participant) in &updates {
+                validate_columns(world, reads, writes)
+                    .map_err(|error| RenderError::Window(error.into()))?;
+                if hz.is_some() || !matches!(participant, Participant::Callback(_)) {
+                    return Err(RenderError::Window(
+                        "application systems must be synchronous callbacks".into(),
+                    ));
+                }
+                if let Some(resident) = &self.resident {
+                    if reads.contains(&resident.column()) {
+                        return Err(RenderError::Window(
+                            "resident column cannot use CPU reads".into(),
+                        ));
+                    }
+                }
+            }
+            self.application_systems = updates.len();
+            let extra = Loop::new(updates, None, runner.state.clone(), runner.profile)
+                .map_err(|error| RenderError::Window(error.to_string()))?;
+            runner.systems.truncate(original);
+            runner.systems.extend(extra.systems);
+        }
+        Ok(())
+    }
+
     fn finish(&mut self) {
         if let Some(world) = self.world.take() {
             self.owner.control.complete();
@@ -1521,7 +1597,7 @@ impl DesktopApplication for WindowFrames<'_> {
 
     fn draw(
         &mut self,
-        _window: &Window,
+        window: &Window,
         renderer: &mut NativeRenderer,
         encoder: &mut wgpu::CommandEncoder,
         target: FrameTarget<'_>,
@@ -1532,6 +1608,7 @@ impl DesktopApplication for WindowFrames<'_> {
         {
             return Ok(None);
         }
+        self.application_frame([target.width, target.height], window.scale_factor())?;
         let world = self.world.as_mut().expect("desktop start owns the World");
         let control = &self.owner.control;
         let resident = &mut self.resident;
@@ -1568,6 +1645,10 @@ impl DesktopApplication for WindowFrames<'_> {
                 )));
             }
         }
+        if let Some((_, after)) = &self.application {
+            Python::attach(|py| after.call0(py))
+                .map_err(|error| RenderError::Window(error.to_string()))?;
+        }
         self.report.events.clear();
         let dispatch = graphics::compute_overrides(&self.scene)?;
         let camera = {
@@ -1597,20 +1678,93 @@ impl DesktopApplication for WindowFrames<'_> {
     }
 
     fn event(&mut self, _: &Window, event: &WindowEvent) -> Result<(), RenderError> {
-        let (name, pressed) = match event {
-            WindowEvent::Focused(false) => (None, false),
+        let mut data = [0.0; 4];
+        let mut key = String::new();
+        let mut button = 0;
+        let name = match event {
+            WindowEvent::Focused(false) | WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                self.cursor = None;
+                self.modifiers = ModifiersState::empty();
+                "focus_lost"
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+                return Ok(());
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                let name = match &event.logical_key {
-                    Key::Character(name) => name.as_str(),
-                    Key::Named(NamedKey::Space) => "Space",
+                key = match &event.logical_key {
+                    Key::Character(name) => name.to_lowercase(),
+                    Key::Named(NamedKey::Space) => "Space".into(),
+                    Key::Named(name) => format!("{name:?}"),
                     _ => return Ok(()),
                 };
-                (Some(name), event.state.is_pressed())
+                if event.state.is_pressed() {
+                    "key_down"
+                } else {
+                    "key_up"
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let current = [position.x, position.y];
+                let previous = self.cursor.replace(current).unwrap_or(current);
+                data = [
+                    current[0],
+                    current[1],
+                    current[0] - previous[0],
+                    current[1] - previous[1],
+                ];
+                "pointer_move"
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: mouse,
+                ..
+            } => {
+                let [x, y] = self.cursor.unwrap_or_default();
+                data = [x, y, 0.0, 0.0];
+                button = match mouse {
+                    MouseButton::Left => 1,
+                    MouseButton::Right => 2,
+                    MouseButton::Middle => 3,
+                    MouseButton::Back => 4,
+                    MouseButton::Forward => 5,
+                    MouseButton::Other(value) => *value,
+                };
+                if state.is_pressed() {
+                    "pointer_down"
+                } else {
+                    "pointer_up"
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let [x, y] = self.cursor.unwrap_or_default();
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(dx, dy) => {
+                        (-f64::from(*dx) * 100.0, -f64::from(*dy) * 100.0)
+                    }
+                    MouseScrollDelta::PixelDelta(point) => (-point.x, -point.y),
+                };
+                data = [x, y, dx, dy];
+                "wheel"
             }
             _ => return Ok(()),
         };
-        Python::attach(|py| self.keyboard.call1(py, (name, pressed)))
-            .map_err(|error| RenderError::Window(error.to_string()))?;
+        if self.application.is_some() {
+            let modifiers = [
+                (ModifiersState::SHIFT, "Shift"),
+                (ModifiersState::CONTROL, "Control"),
+                (ModifiersState::ALT, "Alt"),
+                (ModifiersState::SUPER, "Meta"),
+            ]
+            .into_iter()
+            .filter_map(|(flag, name)| self.modifiers.contains(flag).then_some(name))
+            .collect();
+            self.events.push((name, key, data, button, modifiers));
+        } else if matches!(name, "focus_lost" | "key_down" | "key_up") {
+            let key = (name != "focus_lost").then_some(key);
+            Python::attach(|py| self.keyboard.call1(py, (key, name == "key_down")))
+                .map_err(|error| RenderError::Window(error.to_string()))?;
+        }
         Ok(())
     }
 

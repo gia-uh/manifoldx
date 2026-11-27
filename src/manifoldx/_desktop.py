@@ -18,7 +18,10 @@ from manifoldx._versions import _Counter
 from manifoldx.camera import Camera
 from manifoldx.components import Component, Material, Mesh, Transform
 from manifoldx.ecs import ComponentView, _make_component_class
-from manifoldx.input import InputState
+from manifoldx.events import EventBus, FrameWaiters, _parse_query_components
+from manifoldx.gui._native import _NativeGui
+from manifoldx.gui.widgets import _GuiRoot
+from manifoldx.input import InputState, KeyEvent, PointerEvent, ResizeEvent, WheelEvent
 from manifoldx.lines import Lines
 from manifoldx.shader import ShaderMaterial
 from manifoldx.resources import (
@@ -114,6 +117,20 @@ class _TransformHandle:
         else:
             engine._transform_edits[self._entity] = rows[0]
 
+    @property
+    def scale(self):
+        return self._engine._transform_rows(self._entity)[0, 7:10].copy()
+
+    @scale.setter
+    def scale(self, value):
+        engine = self._engine
+        rows = engine._transform_rows(self._entity)
+        rows[0, 7:10] = value
+        if engine._commands is None:
+            engine._world.replace("Transform", (self._entity,), rows)
+        else:
+            engine._transform_edits[self._entity] = rows[0]
+
     position = pos
 
 
@@ -177,6 +194,15 @@ class _NativeEngine:
         self._shadow_options = None
         self._capacity = max_entities
         self.input = InputState()
+        self.gui = _GuiRoot()
+        self._gui_runtime = _NativeGui(self)
+        self._event_bus = EventBus()
+        self._aio_loop = None
+        self._tasks = set()
+        self._task_errors = []
+        self._frame_waiters = FrameWaiters(self._get_active_loop)
+        self._application_systems = {}
+        self._systems_changed = False
         self.lines = Lines()
         self.benders = []
         self._line_rows = {}
@@ -184,6 +210,7 @@ class _NativeEngine:
         self._position_binding = None
         self._compute_classes = {}
         self._compute_columns = set()
+        self._input_probe = None
         self._desktop_probe = (False, False, False, None)
         self._frame_loop = FrameLoop
         columns = (("Transform", "f32", 10), ("Mesh", "u32", 1), ("Material", "u32", 1))
@@ -205,7 +232,6 @@ class _NativeEngine:
         self._views = {}
         self._texture_reads = {}
         self._graphics = _NativeGraphics()
-        self._handlers = {"startup": [], "shutdown": []}
         self._commands = None
         self._snapshot = None
         self._transform_edits = {}
@@ -323,16 +349,112 @@ class _NativeEngine:
         self._origin = (float(x), float(z))
 
     def on(self, event):
-        if event not in self._handlers:
-            raise NotImplementedError(f"the Rust base Engine does not dispatch {event!r}")
-
         def register(callback):
-            if iscoroutinefunction(callback):
-                raise NotImplementedError("native Engine lifecycle callbacks must be synchronous")
-            self._handlers[event].append(callback)
-            return callback
+            if _parse_query_components(callback):
+                raise NotImplementedError("native event handlers use typed payloads without World queries")
+            return self._event_bus.on(event)(callback)
 
         return register
+
+    def off(self, event, callback):
+        self._event_bus.off(event, callback)
+
+    def emit(self, event, payload=None):
+        self._event_bus.emit(event, payload)
+
+    def tick(self):
+        return self._frame_waiters.add_tick()
+
+    def delay(self, seconds):
+        return self._frame_waiters.add_delay(seconds, self.elapsed)
+
+    def elapsed_at(self, target):
+        return self._frame_waiters.add_elapsed_at(target)
+
+    def _get_active_loop(self):
+        from manifoldx.engine import Engine
+
+        return Engine._get_active_loop(self)
+
+    def _on_task_done(self, task):
+        from manifoldx.engine import Engine
+
+        Engine._on_task_done(self, task)
+
+    def _pump_events(self):
+        from manifoldx.engine import Engine
+
+        self._event_bus.dispatch_pending(self)
+        self._frame_waiters.resolve(self.elapsed)
+        Engine._pump_aio_loop(self)
+
+    def _window_events(self, events):
+        self.gui.pointer_over_gui = False
+        for event, key, data, button, modifiers in events:
+            consumed = False
+            self._gui_runtime.last_target = None
+            modifiers = tuple(modifiers)
+            if event == "focus_lost":
+                self._desktop_key(None, False)
+                for held in self.input.pressed_buttons:
+                    x, y = self.input.mouse_pos
+                    self.input._record_pointer_up(PointerEvent(x, y, 0, 0, held, (), (), "up"))
+                self._gui_runtime.reset()
+                continue
+            if event in ("key_down", "key_up"):
+                down = event == "key_down"
+                record = self.input._record_key_down if down else self.input._record_key_up
+                record(key, modifiers)
+                payload = KeyEvent(key, modifiers, down)
+                if down:
+                    consumed = self._gui_runtime.key(payload)
+            elif event == "wheel":
+                x, y, dx, dy = data
+                payload = WheelEvent(dx, dy, x, y, self.input.pressed_buttons, modifiers)
+                self.input._record_wheel(payload)
+                consumed = self._gui_runtime.pointer(payload, "wheel")
+            else:
+                phase = event.removeprefix("pointer_")
+                buttons = set(self.input.pressed_buttons)
+                if phase == "down":
+                    buttons.add(button)
+                elif phase == "up":
+                    buttons.discard(button)
+                payload = PointerEvent(*data, button, tuple(sorted(buttons)), modifiers, phase)
+                getattr(self.input, f"_record_pointer_{phase}")(payload)
+                consumed = self._gui_runtime.pointer(payload, phase)
+            if self._input_probe is not None:
+                self._input_probe(event, payload, consumed, self._gui_runtime.last_target)
+            # GUI consumption is cooperative, as on the original input bus.
+            self.emit(event, payload)
+        self.input._begin_frame()
+
+    def _desktop_begin_frame(self, size, dpi, elapsed, events, world_available):
+        self.elapsed = elapsed
+        self._world._running = not world_available
+        self._world._started = True
+        try:
+            if (self.w, self.h) != tuple(size) or self._gui_runtime.dpi != dpi or not self.input.viewport_size[0]:
+                self.w, self.h = size
+                self._gui_runtime.dpi = dpi
+                resize = ResizeEvent(round(self.w / dpi), round(self.h / dpi), dpi)
+                self.input._record_resize(resize)
+                self.emit("resize", resize)
+                if self.gui:
+                    self._gui_runtime.sync()
+            self._window_events(events)
+            self._pump_events()
+            if self._systems_changed:
+                self._systems_changed = False
+                return list(self._application_systems.values())
+            return None
+        finally:
+            self._world._running = True
+
+    def _desktop_finish_frame(self):
+        if self.gui or self._gui_runtime._widgets:
+            self._gui_runtime.sync(refresh=True)
+        self._sync_scene()
 
     def component(self, cls):
         cls = _make_component_class(cls, None)
@@ -404,16 +526,27 @@ class _NativeEngine:
                         commands.replace(key, entities, arrays[name])
                 if self._pending_destroy:
                     commands.destroy(tuple(dict.fromkeys(self._pending_destroy)))
-                if self._desktop_ran:
-                    self._sync_scene()
             finally:
                 self._commands, self._entities = None, ()
                 self._snapshot = None
                 self._transform_edits.clear()
 
         invoke.__qualname__ = callback.__qualname__
-        self._world.system(invoke, reads=access, writes=access, structural=True)
+        if callback in self._application_systems:
+            raise ValueError("system is already registered")
+        column_ids = self._world._columns(access)
+        self._application_systems[callback] = self._world._system_registration(
+            invoke, None, column_ids, [*column_ids, self._world._structural]
+        )
+        self._systems_changed = True
         return callback
+
+    def remove_system(self, callback):
+        try:
+            del self._application_systems[callback]
+        except KeyError as error:
+            raise ValueError("system is not registered") from error
+        self._systems_changed = True
 
     def _commit_transforms(self, snapshot, commands, entities, arrays, originals):
         offset = self._callback_origin - self._origin_vector()
@@ -584,6 +717,8 @@ class _NativeEngine:
     def clear_scene(self):
         """Release scene-owned geometry and materials between native frames."""
         self._world._owner()
+        self.gui.clear()
+        self._gui_runtime.reset()
         for streamer in list(self._streamers):
             streamer.close()
         snapshot = self._world._native.snapshot()
@@ -1147,15 +1282,15 @@ class _NativeEngine:
             raise RuntimeError("native Engine is closed")
         if not self._started:
             self._started = True
-            for callback in self._handlers["startup"]:
-                callback({})
-            if self._desktop_ran:
-                self._sync_scene()
+            self._event_bus.dispatch_immediate(self, "startup", {})
+            if self.gui:
+                self._gui_runtime.sync()
+            self._sync_scene()
         return not self._quit
 
     def quit(self):
         self._quit = True
-        if self._world._running:
+        if self._world._running or self._desktop_ran:
             self._world.stop()
 
     def close(self):
@@ -1173,9 +1308,12 @@ class _NativeEngine:
             self._process_executor.shutdown(wait=False, cancel_futures=True)
         try:
             if self._started:
-                for callback in self._handlers["shutdown"]:
-                    callback({})
+                from manifoldx.engine import Engine
+
+                Engine.shutdown_events(self)
         finally:
+            self._gui_runtime.reset()
+            self.gui.clear()
             self._graphics.close()
             self._views.clear()
             self._texture_handles.clear()
@@ -1216,8 +1354,10 @@ class _NativeEngine:
                 self._desktop_key,
                 self._position_binding,
                 self._desktop_probe,
+                (self._desktop_begin_frame, self._desktop_finish_frame),
             )
             self.elapsed = self.desktop_report["scheduler_frames"] / hz
+            self.desktop_report["gui_getter_calls"] = self._gui_runtime.getter_total
             if location := os.environ.get("MANIFOLDX_DESKTOP_REPORT"):
                 Path(location).write_text(json.dumps(self.desktop_report, indent=2) + "\n")
         finally:
@@ -1256,20 +1396,26 @@ class _NativeEngine:
         else:
             step = self._fixed_dt if self._fixed_dt is not None else dt
             compute_dt = step
+            self.input._begin_frame()
+            self._pump_events()
             self._world._loop = self._frame_loop(self._world._native, 64, 8, 4096)
             self._world._running = True
             self._time_base = self.elapsed
             try:
-                self._world._loop.run(1, 1 / step, False, self._world._systems, None)
+                systems = [*self._world._systems, *self._application_systems.values()]
+                self._world._loop.run(1, 1 / step, False, systems, None)
             finally:
                 self._world._running = False
             self.elapsed = self._time_base + step
 
+        if self.gui or self._gui_runtime._widgets:
+            self._gui_runtime.sync(supersample, refresh=labels is None)
         self._sync_scene()
         width, height = self.w * supersample, self.h * supersample
         captured = self._graphics.capture(self._world._native, width, height, labels, compute_dt)
         self._finish_texture_reads()
         rgba = captured.pop("rgba")
+        captured["gui_getter_calls"] = self._gui_runtime.getter_calls if labels is None else 0
         self.last_frame = captured
         rgb = np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4)[:, :, :3]
         if labels is not None:

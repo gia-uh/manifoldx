@@ -7,6 +7,8 @@ use std::time::Instant;
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
 
 use crate::camera::Camera;
+use crate::gui_paint::{Frame as GuiFrame, Source as GuiSource};
+use crate::gui_pass::GuiPass;
 use crate::lines::{LineOptions, LinePass};
 use crate::math::Mat4;
 use crate::post::{PostOptions, PostPasses};
@@ -550,6 +552,13 @@ pub(crate) fn depth_target(device: &wgpu::Device, width: u32, height: u32) -> wg
 #[derive(Clone, Debug, Default)]
 pub struct RenderStats {
     pub line_draws: usize,
+    pub gui_quads: [usize; 3],
+    pub post_settings: Option<std::sync::Arc<PostOptions>>,
+    pub environment_settings: Option<(f32, bool)>,
+    pub fog_settings: Option<([f32; 2], [f32; 3])>,
+    pub point_lights: usize,
+    pub has_sun: bool,
+    pub has_spot: bool,
     pub frame_order: Vec<&'static str>,
     /// Number of actual shadow depth layers encoded before scene colour.
     pub shadow_layers: usize,
@@ -664,6 +673,9 @@ pub struct NativeRenderer {
     post_passes: Option<PostPasses>,
     rects: std::sync::Arc<[RectRow]>,
     rect_pass: Option<RectPass>,
+    gui_frame: std::sync::Arc<GuiFrame>,
+    gui_pass: Option<GuiPass>,
+    gui_before_post: bool,
     lines: Option<std::sync::Arc<LineOptions>>,
     line_pass: Option<LinePass>,
     rect_before_post: bool,
@@ -977,6 +989,9 @@ impl NativeRenderer {
             post_passes: None,
             rects: std::sync::Arc::default(),
             rect_pass: None,
+            gui_frame: std::sync::Arc::default(),
+            gui_pass: None,
+            gui_before_post: false,
             lines: None,
             line_pass: None,
             rect_before_post: false,
@@ -1823,6 +1838,11 @@ impl NativeRenderer {
         self.lines = lines;
     }
 
+    pub fn set_gui(&mut self, frame: std::sync::Arc<GuiFrame>, before_post: bool) {
+        self.gui_frame = frame;
+        self.gui_before_post = before_post;
+    }
+
     /// Submit already laid-out, physical-pixel rectangles. The order override is for fixtures.
     pub fn set_rects(&mut self, rows: std::sync::Arc<[RectRow]>, before_post: bool) {
         self.rects = rows;
@@ -2422,6 +2442,11 @@ impl NativeRenderer {
         if stats.shadow_layers > 0 && !late_shadow {
             order.push("shadow");
         }
+        stats.environment_settings = self.environment;
+        stats.fog_settings = self.fog;
+        stats.point_lights = self.point_lights.iter().filter(|row| row[7] > 0.0).count();
+        stats.has_sun = self.post_sun.is_some_and(|light| light.intensity > 0.0);
+        stats.has_spot = self.spot_light.is_some_and(|light| light.intensity > 0.0);
         order.append(&mut stats.frame_order);
         if stats.line_draws > 0 {
             order.push("lines");
@@ -2504,8 +2529,11 @@ impl NativeRenderer {
         let size = [target.width, target.height];
         let Some(options) = self.post_options.clone().filter(|_| draw.ids.is_none()) else {
             let mut stats = self.encode_world(encoder, target, world, source, camera, draw)?;
-            if draw.ids.is_none() && self.draw_rects(encoder, output, size) {
-                stats.post_order.push("rect");
+            if draw.ids.is_none() {
+                if self.draw_rects(encoder, output, size) {
+                    stats.post_order.push("rect");
+                }
+                self.draw_gui(encoder, output, size, &mut stats)?;
             }
             return Ok(stats);
         };
@@ -2523,11 +2551,15 @@ impl NativeRenderer {
             color: post.scene(),
             ..target
         };
-        let mut result = self.encode_world(encoder, scene, world, source, camera, draw);
-        if let Ok(stats) = &mut result {
+        let result = self.encode_world(encoder, scene, world, source, camera, draw);
+        let result = result.and_then(|mut stats| {
             stats.post_target_generation = post.generation();
+            stats.post_settings = Some(options.clone());
             if self.rect_before_post && self.draw_rects(encoder, post.scene(), size) {
                 stats.post_order.push("rect");
+            }
+            if self.gui_before_post {
+                self.draw_gui(encoder, post.scene(), size, &mut stats)?;
             }
             if self.fixture_fault == Some(FixtureRenderFault::FlatPostDepth) {
                 let depth = depth_target(self.device(), size[0], size[1]);
@@ -2557,9 +2589,46 @@ impl NativeRenderer {
             if !self.rect_before_post && self.draw_rects(encoder, output, size) {
                 stats.post_order.push("rect");
             }
-        }
+            if !self.gui_before_post {
+                self.draw_gui(encoder, output, size, &mut stats)?;
+            }
+            Ok(stats)
+        });
         self.post_passes = Some(post);
         result
+    }
+
+    fn draw_gui(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &wgpu::TextureView,
+        size: [u32; 2],
+        stats: &mut RenderStats,
+    ) -> Result<(), RenderError> {
+        if self.gui_frame.quads.is_empty() {
+            return Ok(());
+        }
+        let pass = self
+            .gui_pass
+            .get_or_insert_with(|| GuiPass::new(&self.gpu, self.format));
+        pass.draw(
+            &self.gpu,
+            encoder,
+            output,
+            size,
+            &self.gui_frame,
+            &self.textures,
+        )?;
+        for quad in &self.gui_frame.quads {
+            let index = match quad.source {
+                GuiSource::Solid => 0,
+                GuiSource::Text => 1,
+                GuiSource::Image(_) => 2,
+            };
+            stats.gui_quads[index] += 1;
+        }
+        stats.post_order.push("gui");
+        Ok(())
     }
 
     fn draw_rects(
