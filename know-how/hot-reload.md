@@ -71,7 +71,7 @@ is one mapping per distinct build, not per reload.
 `close()` stops watching and removes the staged copies; it runs at interpreter
 exit too. The active builder stays callable, so a build already running and a
 call made after close are not invalidated. On Windows a mapped library cannot
-be removed, so its staged file stays until the process exits.
+be removed while mapped. Staged files can survive process exit and can then be deleted.
 `builder.retained()` reports the distinct builds, mappings, rejected capsules
 and staged copies held now.
 

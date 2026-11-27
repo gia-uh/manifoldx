@@ -11,7 +11,7 @@ Retention is per distinct build, not per reload. The same bytes opened again
 return the builder already loaded, and a rejected capsule is not opened twice.
 Every distinct build stays mapped for the rest of the process, because unloading
 native code is not safe while a call may still be inside it. The staged copy is
-removed by ``close()`` and at interpreter exit; the mapping outlives the file.
+removed on close or normal exit where the OS permits unlinking mapped files.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ class NativeBuilder:
     exports ``PyInit_native``), so rebuilds keep that name and the loader
     versions its own staged copy.
 
-    ``close()`` stops watching and removes the staged copies. It does not unload
+    ``close()`` stops watching and attempts to remove the staged copies. It does not unload
     the libraries or clear the active builder: a call already running, or one
     made after close, still reaches the build it started on. The same method
     runs at interpreter exit.
@@ -150,13 +150,10 @@ class NativeBuilder:
         """Stop watching and remove the staged copies; never unload a library.
 
         The active builder stays usable, so calls already running and calls made
-        after close are not invalidated. Calling it again does nothing.
+        after close are not invalidated. Calling it again retries cleanup.
         """
         with self._reload:
-            if self._closed:
-                return
             self._closed = True
-            self._staged.clear()
             # A mapped file can be removed on Linux and macOS; Windows keeps it
             # until the process exits, so the removal there is best effort.
             shutil.rmtree(self._cache, ignore_errors=True)
@@ -164,7 +161,7 @@ class NativeBuilder:
     def retained(self):
         """What the loader holds now: one mapping per distinct build, and its file.
 
-        ``staged`` lists the staged copies that exist; a closed builder has none.
+        ``staged`` lists the staged copies that still exist, including files the OS prevented us from removing.
         """
         with self._reload:
             staged = []

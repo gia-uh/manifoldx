@@ -168,6 +168,18 @@ def test_rejected_capsule_is_opened_once(builds):
     assert material(builder.build(0.0, 0.0, 1000.0, 0, 7)) == 1
 
 
+def test_close_reports_files_left_by_failed_cleanup(builds, monkeypatch):
+    from manifoldx.native_binary import NativeBuilder
+
+    builder = NativeBuilder(builds["1"])
+    with monkeypatch.context() as patch:
+        patch.setattr(shutil, "rmtree", lambda *args, **kwargs: None)
+        builder.close()
+    assert builder.retained()["staged_bytes"] == builds["1"].stat().st_size
+    builder.close()
+    assert builder.retained()["staged_bytes"] == 0
+
+
 def test_close_removes_staged_files_and_keeps_calls_working(builds):
     from manifoldx.native_binary import NativeBuilder
 

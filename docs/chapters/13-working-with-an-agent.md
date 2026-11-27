@@ -241,7 +241,7 @@ error in `builder.last_error`. Builds already running finish on the library they
 started with. Reloading the same bytes reuses the open builder, and a rejected
 capsule is not opened twice. Libraries are never unloaded, so each distinct build
 keeps one mapping, not one per reload. `close()` stops watching and removes the
-staged copies at normal shutdown; the active builder stays callable.
+staged copies where the OS permits it. On Windows a mapped DLL can remain on disk after exit. The active builder stays callable.
 `reload(path)` loads explicitly and raises instead of keeping the old build.
 
 The Rust desktop command currently supports reload and regular stderr output.
