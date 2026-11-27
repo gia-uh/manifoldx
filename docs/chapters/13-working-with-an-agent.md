@@ -208,6 +208,39 @@ or registration error prints a traceback and the previous systems keep
 running. Save the corrected module to retry. An invalid initial registration
 fails startup. Restart to change the entry point, the module list, undeclared
 imports, component schemas, event handlers or `World.kernel` registrations.
+
+### Reload a native builder with the Rust desktop core
+
+A game can build its streamed cells in Rust behind a versioned capsule
+(`crates/manifoldx-sdk`, `manifoldx.builder.v1`). `NativeBuilder` loads that
+cdylib and reloads it without replacing the World or the loaded cells:
+
+```python
+from manifoldx.native_binary import NativeBuilder
+from manifoldx.streaming import Streamer
+
+builder = NativeBuilder("build/libnative.so")
+streamer = Streamer(engine, cell=1000.0, build=builder)
+
+
+@engine.system
+def follow(query, dt):
+    builder.poll()
+    streamer.focus(player.x, player.z)
+```
+
+`poll()` runs once a frame. When the file changes it copies the bytes to a
+content-addressed filename, opens the `manifoldx.builder.v1` capsule and checks
+it before making it active. A rebuild saved over the same path is therefore a
+new mapping, not the one the process already had. `builder.version` identifies
+the active build.
+
+A wrong capsule name, a missing `build_cell` or a file that does not load leaves
+the previous builder and library serving; `poll()` returns `False` and stores the
+error in `builder.last_error`. Builds already running finish on the library they
+started with. Libraries are never unloaded. `reload(path)` loads explicitly and
+raises instead of keeping the old build.
+
 The Rust desktop command currently supports reload and regular stderr output.
 The dev-channel flags `--port` and `--debug` require the Python desktop core.
 

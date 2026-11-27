@@ -67,7 +67,8 @@ jobs:
           uv run --no-sync pytest -o addopts= -q -rs \
             tests/test_compute.py tests/test_compute_integration.py \
             tests/test_compute_slots.py tests/test_compute_transpile.py \
-            tests/test_compute_transpile_integration.py tests/test_volume_render.py tests/test_native_reload.py \
+            tests/test_compute_transpile_integration.py tests/test_volume_render.py \
+            tests/test_native_reload.py tests/test_native_binary_reload.py \
             | tee "$RUNNER_TEMP/compute-regressions.log"
           if grep -q '^SKIPPED ' "$RUNNER_TEMP/compute-regressions.log"; then
             echo "Graphics regression tests skipped" >&2
