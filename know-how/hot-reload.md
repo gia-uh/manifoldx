@@ -63,8 +63,17 @@ Keep the build output's filename stable: its stem names the extension module
 A build with the wrong capsule name, no `build_cell` attribute, or a file that
 does not load is rejected: `poll()` records the error in `builder.last_error`,
 returns `False`, and the previous builder keeps serving. Builds already running
-on the old library finish with it. No library is unloaded, so a rejected or
-retired build stays mapped for the life of the process.
+on the old library finish with it. Reloading the same bytes again reuses the
+builder already open, and a rejected capsule is not opened twice. No library is
+unloaded, so each distinct build stays mapped for the life of the process: that
+is one mapping per distinct build, not per reload.
+
+`close()` stops watching and removes the staged copies; it runs at interpreter
+exit too. The active builder stays callable, so a build already running and a
+call made after close are not invalidated. On Windows a mapped library cannot
+be removed, so its staged file stays until the process exits.
+`builder.retained()` reports the distinct builds, mappings, rejected capsules
+and staged copies held now.
 
 `reload(path)` loads explicitly and raises on failure. Use it when the app knows
 the new build's path instead of watching one.

@@ -1,9 +1,10 @@
 //! A tiny native cell builder for the reload test.
 //!
-//! `MANIFOLDX_NATIVE_VARIANT` picks the bytes at compile time: `1` and `2` are
-//! valid builds with different material and row values; `abi` exports the same
-//! builder under `manifoldx.builder.v2` so the loader must reject it. A request
-//! with a negative x sleeps, so a swap can be raced against work already running.
+//! `MANIFOLDX_NATIVE_VARIANT` picks the bytes at compile time: a positive
+//! number is a valid build whose material and row carry that number (1, 2 and
+//! later reloads use the same fixture); `abi` exports the same builder under
+//! `manifoldx.builder.v2` so the loader must reject it. A request with a
+//! negative x sleeps, so a swap can be raced against work already running.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -15,9 +16,9 @@ use pyo3::types::{PyCapsule, PyModule};
 
 fn variant() -> u32 {
     match option_env!("MANIFOLDX_NATIVE_VARIANT") {
-        Some("2") => 2,
         Some("abi") => 0,
-        _ => 1,
+        Some(value) => value.parse().unwrap_or(1),
+        None => 1,
     }
 }
 

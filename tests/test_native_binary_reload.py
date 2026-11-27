@@ -139,6 +139,103 @@ def test_inflight_build_finishes_on_the_old_library(builds):
         assert material(running.result(timeout=2)) == 1
 
 
+def test_repeated_identical_build_reuses_the_open_builder(builds):
+    from manifoldx.native_binary import NativeBuilder
+
+    builder = NativeBuilder(builds["1"])
+    first = builder.version
+    builder.reload(builds["1"])
+    builder.reload(builds["1"])
+    retained = builder.retained()
+    assert builder.version == first
+    assert retained["distinct_builds"] == 1
+    assert retained["mappings"] == 1
+    assert len(retained["staged"]) == 1
+    assert material(builder.build(0.0, 0.0, 1000.0, 0, 7)) == 1
+
+
+def test_rejected_capsule_is_opened_once(builds):
+    from manifoldx.native_binary import NativeBuilder
+
+    builder = NativeBuilder(builds["1"])
+    for _ in range(3):
+        with pytest.raises(ValueError, match="expected builder capsule manifoldx.builder.v1"):
+            builder.reload(builds["abi"])
+    retained = builder.retained()
+    assert retained["mappings"] == 2
+    assert retained["rejected"] == 1
+    assert len(retained["staged"]) == 2
+    assert material(builder.build(0.0, 0.0, 1000.0, 0, 7)) == 1
+
+
+def test_close_removes_staged_files_and_keeps_calls_working(builds):
+    from manifoldx.native_binary import NativeBuilder
+
+    builder = NativeBuilder(builds["1"])
+    cache = builder._cache
+    assert cache.exists() and any(cache.iterdir())
+    builder.close()
+    assert builder.closed
+    assert not cache.exists()
+    # The mapping outlives its staged file, so the active build still serves.
+    assert material(builder.build(0.0, 0.0, 1000.0, 0, 7)) == 1
+    assert builder.poll() is False
+    with pytest.raises(RuntimeError, match="native builder is closed"):
+        builder.reload(builds["1"])
+    builder.close()
+
+
+def test_close_does_not_invalidate_a_build_in_flight(builds):
+    from manifoldx.native_binary import NativeBuilder
+
+    builder = NativeBuilder(builds["1"])
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(builder.build, -1.0, 0.0, 1000.0, 0, 7)
+        time.sleep(0.03)
+        builder.close()
+        assert material(running.result(timeout=2)) == 1
+        assert material(builder.build(0.0, 0.0, 1000.0, 0, 7)) == 1
+
+
+def test_staged_copies_are_removed_at_process_exit(builds, tmp_path):
+    ok = textwrap.dedent(
+        """\
+        import sys
+        from pathlib import Path
+        from manifoldx.native_binary import NativeBuilder
+
+        builder = NativeBuilder(Path(sys.argv[1]))
+        retained = builder.retained()
+        assert retained["staged_bytes"] > 0 and retained["mappings"] == 1
+        """
+    )
+    rejected = textwrap.dedent(
+        """\
+        import sys
+        from pathlib import Path
+        from manifoldx.native_binary import NativeBuilder
+
+        NativeBuilder(Path(sys.argv[1]))
+        """
+    )
+
+    def run(source, build, expected_exit, name):
+        root = tmp_path / name
+        root.mkdir()
+        result = subprocess.run(
+            [sys.executable, "-c", source, str(build)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "TMPDIR": str(root), "MANIFOLDX_CORE": "rust"},
+        )
+        assert result.returncode == expected_exit, result.stdout + result.stderr
+        # Normal exit, and a rejected build during construction, both clean up.
+        assert list(root.glob("manifoldx-native-*")) == []
+
+    run(ok, builds["1"], 0, "ok")
+    run(rejected, builds["abi"], 1, "rejected")
+
+
 def test_native_cli_reloads_a_build_at_the_frame_boundary(builds, tmp_path, monkeypatch):
     from manifoldx._desktop import _NativeEngine
 
