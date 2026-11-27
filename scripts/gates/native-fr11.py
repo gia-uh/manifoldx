@@ -20,9 +20,12 @@ POST_PASSES = [
 ]
 POST_EFFECTS = (*POST, "saturation", "contrast", "vignette")
 HUD = np.s_[18:185, 18:210]
-ENV_SKY = np.s_[157:186, 516:621]
+# The main post pass replaces empty-depth pixels with its own sky. The
+# minimap has no post stack, so its unobstructed background shows the
+# environment sky. Measure the moving blue cube separately.
+ENV_SKY = np.s_[169:177, 540:596]
 POST_SKY = np.s_[5:45, 233:491]
-MINIMAP = np.s_[161:206, 515:619]
+MINIMAP = np.s_[191:195, 602:611]
 SNAPSHOT = np.s_[267:335, 516:622]
 
 # Coordinates are fixed in the versioned 640×360 composition. Sample the
@@ -259,6 +262,11 @@ def main():
         omission_signals(name, manifest[index], other[index])
         changed[name] = visible_change(name, images[index], captures[index])
         reject_unrelated_changes(name, images[index], captures[index])
+        if name == "environment":
+            assert change(baseline, captures[index], POST_SKY) == 0, "environment changed post sky"
+            assert change(baseline, captures[index], MINIMAP) == 0, "environment changed the blue cube"
+        if name == "sky":
+            assert change(baseline, captures[index], ENV_SKY) == 0, "post sky changed environment sky"
         if name == "flat":
             flat_colors = flat_sample_colors(images[index], captures[index])
 
@@ -273,13 +281,20 @@ def main():
     changed["hud-order"] = change(baseline, reordered_images[0], HUD)
     assert changed["hud-order"] >= 80, "GUI under post did not alter the HUD ROI"
     run(output / "false-provenance", "--fault", "provenance", must_fail="requires the native desktop Engine")
-    plain, _ = run(output / "plain", "--no-post")
+    plain, plain_images = run(output / "plain", "--no-post")
     assert plain[0]["passes"] == BASE_PASSES + ["gui"], plain[0]["passes"]
+    plain_without_env, plain_without_env_images = run(
+        output / "plain-without-environment", "--no-post", "--omit", "environment",
+    )
+    omission_signals("environment", plain[0], plain_without_env[0])
+    main_sky_pixels = change(plain_images[0], plain_without_env_images[0], POST_SKY)
+    assert main_sky_pixels >= 80, "environment sky is missing from the main view with post disabled"
     regions = REGIONS | {"hud-order": HUD}
     report = {
         "changed_pixels": changed,
         "regions_yx": {name: [[axis.start, axis.stop] for axis in regions[name]] for name in changed},
         "unrelated_change_controls": len(changed) - 1,
+        "main_environment_sky_pixels_without_post": main_sky_pixels,
     }
     if flat_colors is not None:
         report["flat_sample_colors"] = flat_colors
