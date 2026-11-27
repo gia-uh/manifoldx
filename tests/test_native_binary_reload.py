@@ -106,6 +106,27 @@ def test_two_valid_builds_and_an_abi_mismatch(builds):
     assert all(path.suffix == SUFFIX for path in builder._cache.iterdir())
 
 
+def test_replacement_during_load_is_seen_on_next_poll(builds, tmp_path, monkeypatch):
+    from manifoldx.native_binary import NativeBuilder
+
+    target = tmp_path / f"native_reload{SUFFIX}"
+    shutil.copy2(builds["1"], target)
+    replacement = tmp_path / "next-build"
+    shutil.copy2(builds["2"], replacement)
+    load = NativeBuilder._load_module
+
+    def replace_then_load(path, staged):
+        replacement.replace(path)
+        return load(path, staged)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(NativeBuilder, "_load_module", staticmethod(replace_then_load))
+        builder = NativeBuilder(target)
+    assert material(builder.build(0.0, 0.0, 1000.0, 0, 7)) == 1
+    assert builder.poll()
+    assert material(builder.build(0.0, 0.0, 1000.0, 0, 7)) == 2
+
+
 def test_inflight_build_finishes_on_the_old_library(builds):
     from manifoldx.native_binary import NativeBuilder
 

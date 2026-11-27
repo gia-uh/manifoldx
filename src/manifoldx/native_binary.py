@@ -119,7 +119,11 @@ class NativeBuilder:
             return False
 
     def _open(self, path: Path):
-        data = path.read_bytes()
+        with path.open("rb") as source:
+            stamp = self._file_identity(os.fstat(source.fileno()))
+            data = source.read()
+            if self._file_identity(os.fstat(source.fileno())) != stamp:
+                raise ValueError(f"{path}: native build changed during read")
         if not data:
             raise ValueError(f"{path}: native build is empty")
         digest = hashlib.sha256(data).hexdigest()
@@ -139,7 +143,7 @@ class NativeBuilder:
             raise ValueError(f"{path}: no {self.attribute!r} capsule") from error
         except Exception as error:
             raise ValueError(f"{path}: capsule ABI rejected: {error}") from error
-        return builder, digest, self._stamp_of(path)
+        return builder, digest, stamp
 
     @staticmethod
     def _load_module(path: Path, staged: Path):
@@ -162,4 +166,8 @@ class NativeBuilder:
             status = path.stat()
         except OSError as error:
             raise FileNotFoundError(f"{path}: native build is not readable") from error
-        return status.st_mtime_ns, status.st_size
+        return self._file_identity(status)
+
+    @staticmethod
+    def _file_identity(status):
+        return status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size
