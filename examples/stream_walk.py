@@ -12,6 +12,8 @@ takes more than twice the median (CPU time by default, --clock wall for wall tim
 """
 
 import argparse
+import json
+from pathlib import Path
 import sys
 from time import perf_counter, process_time
 
@@ -88,6 +90,7 @@ def main():
     ap.add_argument("--clock", choices=["wall", "cpu"], default="cpu",
                     help="what the twice-the-median check reads (default: this process's CPU time)")
     ap.add_argument("--log", help="write one line per frame: frame, wall ms, cpu ms, drawn cells")
+    ap.add_argument("--evidence", type=Path, help="save selected headless frames and resource counters")
     ap.add_argument("--render", action="store_true", help="record a clip with the frame time in a corner")
     ap.add_argument("--output", default="/tmp/stream_walk.mp4")
     ap.add_argument("--duration", type=float, default=30.0)
@@ -96,22 +99,27 @@ def main():
 
     engine = mx.Engine("Stream walk", width=960, height=540)
     streamer = make(engine, args.workers)
-    ms_text, km_text = mx.gui.Text(""), mx.gui.Text("")  # the atlas keeps each string: round them
     if not args.headless:
-        engine.gui.append(mx.gui.Panel(children=[ms_text, km_text], anchor="top-left", offset=(12, 12),
+        from manifoldx.gui import Panel, Text
+
+        ms_text, km_text = Text(""), Text("")  # the atlas keeps each string: round them
+        engine.gui.append(Panel(children=[ms_text, km_text], anchor="top-left", offset=(12, 12),
                                        style_overrides={"width": 150, "height": 44, "padding": 6, "gap": 2}))
     st = {"frame": 0, "last": None, "wall": [], "cpu": []}
 
     @engine.system
     def walk(query, dt):
+        if st.get("draining"):
+            return
         now = (perf_counter(), process_time())
         if st["last"] is not None:
             ms = (now[0] - st["last"][0]) * 1000
             if st["frame"] > WARMUP:
                 st["wall"].append(ms)
                 st["cpu"].append((now[1] - st["last"][1]) * 1000)
-            ms_text.text = f"frame {ms:.0f} ms"
-            km_text.text = f"{max(0, st['frame'] - WARMUP) * STEP / 1000:.1f} km"
+            if not args.headless:
+                ms_text.text = f"frame {ms:.0f} ms"
+                km_text.text = f"{max(0, st['frame'] - WARMUP) * STEP / 1000:.1f} km"
         st["last"] = now
         z = -max(0, st["frame"] - WARMUP) * STEP         # walk north once the ring is warm
         st["frame"] += 1
@@ -135,16 +143,39 @@ def main():
         streamer.close()
         return 0
 
-    log = open(args.log, "w") if args.log else None
-    for f in range(frames + 1):
+    log = open(args.log, "w", buffering=1) if args.log else None
+    captures = {}
+    samples = {}
+    capture_frames = {WARMUP, WARMUP + 8, WARMUP + 16, frames // 2, frames}
+    try:
+        for f in range(frames + 1):
+            image = engine.render_frame(supersample=1)
+            if log and len(st["wall"]) > 0:
+                log.write(f"{f},{st['wall'][-1]:.3f},{st['cpu'][-1]:.3f},{len(streamer.drawn())}\n")
+            if args.evidence and f in capture_frames:
+                captures[f] = image
+                samples[f] = {"drawn": sorted(streamer.drawn()), "origin": engine.origin,
+                              "render": getattr(engine, "last_frame", None)}
+    finally:
+        if log:
+            log.close()
+        streamer.close()
+    if args.evidence:
+        from PIL import Image
+
+        st["draining"] = True
         engine.render_frame(supersample=1)
-        if log and st["wall"]:
-            log.write(f"{f},{st['wall'][-1]:.3f},{st['cpu'][-1]:.3f},{len(streamer.drawn())}\n")
-    streamer.close()
+        args.evidence.mkdir(parents=True, exist_ok=True)
+        for f, image in captures.items():
+            Image.fromarray(image).save(args.evidence / f"frame-{f:05d}.png")
+        report = {"workers": args.workers, "km": args.km, "samples": samples,
+                  "drained": getattr(engine, "last_frame", None), "stream": streamer.stats()}
+        (args.evidence / "result.json").write_text(json.dumps(report, indent=2) + "\n")
+    engine.close()
     for clock in ("wall", "cpu"):
         t = np.array(st[clock])
         print(f"{args.workers} {clock}: {len(t)} frames over {args.km:g} km, median {np.median(t):.2f} ms, "
-              f"p99 {np.percentile(t, 99):.2f} ms, worst {t.max():.2f} ms at frame {int(t.argmax()) + WARMUP + 1}")
+              f"p95 {np.percentile(t, 95):.2f} ms, p99 {np.percentile(t, 99):.2f} ms, worst {t.max():.2f} ms at frame {int(t.argmax()) + WARMUP + 1}")
     print(f"{args.workers}: {streamer.stats()}")
     t = np.array(st[args.clock])
     med, worst = float(np.median(t)), float(t.max())

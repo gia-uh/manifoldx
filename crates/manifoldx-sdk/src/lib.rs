@@ -73,7 +73,10 @@ impl Output {
         indices: &[u32],
         material: u32,
     ) -> u32 {
-        debug_assert_eq!(positions.len(), normals.len());
+        if positions.len() != normals.len() || !positions.len().is_multiple_of(3) {
+            self.error("positions and normals must contain equal numbers of triples");
+            return u32::MAX;
+        }
         unsafe {
             ((*self.ptr).push_mesh)(
                 (*self.ptr).ctx,
@@ -88,7 +91,8 @@ impl Output {
     }
 
     pub fn spawn(&mut self, archetype: u32, rows: &[u8], row_bytes: usize) {
-        if row_bytes == 0 {
+        if row_bytes == 0 || !rows.len().is_multiple_of(row_bytes) {
+            self.error("row bytes must be a whole number of nonzero-width rows");
             return;
         }
         unsafe {

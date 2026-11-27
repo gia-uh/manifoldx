@@ -168,6 +168,10 @@ impl Terrain {
         Ok(next)
     }
 
+    pub fn tile_version(&self, key: TileKey) -> Option<u64> {
+        self.tiles.get(&key).map(|tile| tile.version)
+    }
+
     fn validate(&self, tile: &Tile) -> Result<(), String> {
         let start = [tile.key.0 as f64 * self.size, tile.key.1 as f64 * self.size];
         let in_tile = |x: f64, z: f64| {

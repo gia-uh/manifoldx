@@ -21,6 +21,8 @@ mod frames;
 mod graphics;
 mod kernel;
 mod runtime;
+mod stream_builder;
+mod stream_cells;
 mod vehicles;
 
 use manifoldx_core::ecs::{
@@ -928,6 +930,7 @@ fn _core_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNativeWorld>()?;
     m.add_class::<runtime::PyNativeRuntime>()?;
     graphics::register(m)?;
+    stream_builder::register(m)?;
     frames::register(m)?;
     kernel::register(m)?;
     m.add_class::<vehicles::PyVehicleSim>()?;

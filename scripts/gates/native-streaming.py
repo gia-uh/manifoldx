@@ -1,0 +1,708 @@
+"""Verify the Rust wheel's streamed publications and sampled resource ownership."""
+
+import argparse
+import json
+import sys
+import time
+from threading import Event
+from pathlib import Path
+from weakref import ref
+
+import manifoldx as mx
+import numpy as np
+from PIL import Image
+
+from manifoldx.camera import Camera
+from manifoldx.components import Baked, Layer, Material, Mesh, Transform
+from manifoldx.resources import SURFACE_BAKED, DirectionalLight, FlatMaterial, StandardMaterial, plane
+from manifoldx.streaming import CellResult, MeshData, QuadStreamer, Streamer, _pack_native_vertices, _pack_now
+from manifoldx.systems import Query
+from manifoldx.textures import layer_mips, texture_array, write_layer, write_texture
+from manifoldx.vehicles import GroundTile, Heightfield
+
+
+def rejected(call, message):
+    try:
+        call()
+    except (ValueError, RuntimeError, TypeError) as error:
+        assert message in str(error), str(error)
+        return str(error)
+    raise AssertionError(f"expected rejection containing {message!r}")
+
+
+def save(output, name, pixels):
+    Image.fromarray(pixels).save(output / f"{name}.png")
+    return np.median(pixels[50:70, 70:90], axis=(0, 1)).tolist()
+
+
+def engine_for(name):
+    engine = mx.Engine(name, width=160, height=120, max_entities=32)
+    assert type(engine).__name__ == "_NativeEngine"
+    engine.camera.set_pose((0, 0, 4), (0, 0, 0))
+    engine.set_sun(DirectionalLight("#ffffff", 3.0, (0, 0, -1)))
+    return engine
+
+
+def solid(pixels, channel):
+    height, width = pixels.shape[:2]
+    center = pixels[height // 3:height * 2 // 3, width // 3:width * 2 // 3]
+    rgb = np.median(center, axis=(0, 1))
+    assert rgb[channel] > max(np.delete(rgb, channel)) + 40, rgb
+
+
+def views(output, fault):
+    engine = engine_for("Sampled native secondary camera")
+    other = engine_for("Foreign renderer")
+    camera = Camera()
+    camera.layers = {1}
+    camera.set_pose((0, 0, 4), (0, 0, 0))
+    engine.camera.layers = {2}
+    red = FlatMaterial("#e83728")
+    source = engine.spawn(Mesh(plane(3, 3)), Material(red), Transform(), Layer(layer=1))
+    texture = engine.render_to_texture(camera, (40, 40), live=False, background="#28dc44")
+    assert rejected(lambda: other.read_texture(texture), "different")
+    material = StandardMaterial("#ffffff", roughness=0.8, albedo_map=texture, vertex_colors=True)
+    engine.spawn(Mesh(plane(3, 3)), Material(material), Transform(), Layer(layer=2))
+    read = engine.read_texture(texture)
+    first = engine.render_frame()
+    first_order = engine.last_frame["frame_order"]
+    solid(read.result(timeout=1), 0)
+    first_rgb = save(output, "snapshot", first)
+    assert first_rgb[0] > first_rgb[1] + 40, first_rgb
+    assert first_order[0] == "view", first_order
+
+    camera.set_pose((20, 0, 4), (20, 0, 0))
+    assert np.array_equal(first, engine.render_frame())
+    assert "view" not in engine.last_frame["frame_order"]
+    if fault != "refresh":
+        engine.refresh_texture(texture)
+    read = engine.read_texture(texture)
+    refreshed = engine.render_frame()
+    refreshed_rgb = save(output, "refreshed", refreshed)
+    assert refreshed_rgb[1] > refreshed_rgb[0] + 40, refreshed_rgb
+    solid(read.result(timeout=1), 1)
+
+    engine.set_texture_live(texture, True)
+    camera.set_pose((0, 0, 4), (0, 0, 0))
+    assert np.array_equal(engine.render_frame(), first)
+    engine.drop_texture(texture)
+    assert rejected(lambda: engine.refresh_texture(texture), "dropped")
+    camera.set_pose((20, 0, 4), (20, 0, 0))
+    last = engine.read_texture(texture)
+    assert np.array_equal(engine.render_frame(), first)
+    solid(last.result(timeout=1), 0)
+    assert engine.last_frame["view_resources"] == [0, 1]
+    del texture, material
+    assert np.array_equal(engine.render_frame(), first)
+    assert engine.last_frame["view_resources"] == [0, 1]
+    engine.clear_scene()
+    assert rejected(lambda: source.transform.pos, "is not alive")
+    drained = engine.render_frame()
+    save(output, "drained", drained)
+    assert engine.last_frame["view_resources"] == [0, 0]
+    reopened = engine.render_to_texture(camera, (24, 18), live=False)
+    new_read = engine.read_texture(reopened)
+    engine.render_frame()
+    assert new_read.result(timeout=1).shape == (18, 24, 3)
+    result = {"first_order": first_order, "first_rgb": first_rgb, "refreshed_rgb": refreshed_rgb,
+              "retired_views": [0, 0], "reopened_views": engine.last_frame["view_resources"]}
+    engine.close()
+    other.close()
+    return result
+
+
+def view_retire(output):
+    engine = engine_for("Retire a view after its last scene consumer")
+    engine.camera.layers = {2}
+    camera = Camera()
+    camera.layers = {1}
+    camera.set_pose((0, 0, 4), (0, 0, 0))
+    geometry = plane(3, 3)
+    source = engine.spawn(
+        Mesh(geometry), Material(FlatMaterial("#e83728")), Transform(), Layer(layer=1)
+    )
+    remove = set()
+
+    @engine.system
+    def destroy_consumers(query: Query[Transform], dt):
+        rows = query.get_component_data("Transform")
+        engine.destroy(np.flatnonzero(np.isin(rows[:, 0], tuple(remove))))
+        remove.clear()
+
+    def spawn_consumer(x):
+        return engine.spawn(
+            Mesh(geometry), Material(material), Transform(pos=(x, 0, 0)), Layer(layer=2)
+        )
+
+    engine.render_frame()
+    baseline = engine.last_frame["view_resources"]
+    assert baseline == [0, 0]
+    texture = engine.render_to_texture(camera, (40, 40), live=False)
+    texture_ref = ref(texture)
+    material = StandardMaterial("#ffffff", roughness=0.8, albedo_map=texture)
+    old = spawn_consumer(0)
+    first = engine.render_frame()
+    solid(first, 0)
+    engine.drop_texture(texture)
+    del texture
+    remove.add(0.0)
+    # Keep the unrelated source out of the destroy query when retiring the center draw.
+    source.transform.pos = (0.25, 0, 0)
+    engine.render_frame()
+    engine.render_frame()
+    assert rejected(lambda: old.transform.pos, "is not alive")
+    assert engine.last_frame["view_resources"] == [0, 1]
+
+    # A material that is still owned by the app can be used again after an empty frame.
+    left = spawn_consumer(-10)
+    center = spawn_consumer(0)
+    assert np.array_equal(engine.render_frame(), first)
+    del material
+    remove.add(-10.0)
+    assert np.array_equal(engine.render_frame(), first)
+    assert rejected(lambda: left.transform.pos, "is not alive")
+    assert engine.last_frame["view_resources"] == [0, 1]
+    pending = engine.read_texture(texture_ref())
+    assert not pending.done() and texture_ref() is not None
+    remove.add(0.0)
+    engine.render_frame()
+    solid(pending.result(timeout=1), 0)
+    for _ in range(3):
+        engine.render_frame()
+    assert rejected(lambda: center.transform.pos, "is not alive")
+    assert np.array_equal(source.transform.pos, [0.25, 0, 0])
+    drained = engine.last_frame["view_resources"]
+    print(json.dumps({"baseline": baseline, "drained": drained, "handle_released": texture_ref() is None}))
+    assert drained == baseline, f"view texture retained after last scene consumer: {drained}"
+    assert texture_ref() is None
+    save(output, "last-image", first)
+    engine.close()
+    return {"baseline": baseline, "drained": drained, "pending_read_completed": True,
+            "material_reused": True, "unrelated_entity_alive": True}
+
+
+def albedo(output, fault):
+    engine = engine_for("Same-ID albedo replacement")
+    old = Image.new("RGBA", (8, 8), (225, 20, 30, 255))
+    handle = engine._upload_native_albedo(old, None)
+    material = StandardMaterial("#ffffff", roughness=0.8, albedo_map=handle, vertex_colors=True)
+    engine.spawn(Mesh(plane(3, 3)), Material(material), Transform())
+    index = engine._material(material)
+    engine._graphics.surface_patterns(index, [material.surface_patterns[i] for i in range(1, 10)], True)
+    before = save(output, "original-albedo", engine.render_frame())
+    if fault != "albedo":
+        engine._graphics.albedo(handle.id, 8, 8,
+                               [bytes((20, 225, 30, 255)) * (size * size) for size in (8, 4, 2, 1)])
+    after = save(output, "replaced-albedo", engine.render_frame())
+    assert before[0] > before[1] + 40, before
+    assert after[1] > after[0] + 40, after
+    engine.close()
+    return {"before": before, "after": after}
+
+
+def install_mesh(engine, color):
+    geometry = plane(2.5, 2.5)
+    geometry["colors"] = np.tile(np.asarray(color, np.float32), (4, 1))
+    vb = _pack_native_vertices(geometry)
+    ib = np.asarray(geometry["indices"], np.uint32).tobytes()
+    mesh = next(engine._mesh_ids)
+    engine._graphics.stream_begin(mesh, [[-1.25, -1.25, 0], [1.25, 1.25, 0]], len(vb), len(ib))
+    engine._graphics.stream_write(mesh, True, vb)
+    engine._graphics.stream_write(mesh, False, ib)
+    return mesh
+
+
+def transaction(output, fault):
+    engine = engine_for("Atomic streamed cell")
+    engine.configure_stream_collision(4)
+    engine.world.register("FixtureRows", kind="u32", width=1)
+    graphics = engine._graphics
+    material = engine._material(StandardMaterial("#ffffff", roughness=0.8, vertex_colors=True))
+    red, green = install_mesh(engine, (0.9, 0.05, 0.05)), install_mesh(engine, (0.05, 0.9, 0.05))
+    key = (1, 0, 0, 0)
+
+    def commit(version, mesh, height, invalid=False):
+        grids = [((0, 0), (4, 4), (2, 2), [height] * 4, 0.8, 42)]
+        tiles = [((0, 0), version, grids, [], [])]
+        rows = [(1, [("FixtureRows", None, [int(height), 99] if invalid else [int(height)])])]
+        graphics.stream_commit(key, version, [(mesh, material, None, None)], (0, 0, 0), rows, tiles, True)
+        return engine.render_frame()
+
+    before = commit(1, red, 1.0)
+    assert graphics.stream_result(1)
+    assert engine.sample_stream_collision(2, 2, 1)[0] == 1
+    assert save(output, "version-1", before)[0] > 100
+    bad = commit(2, green, 2.0, invalid=fault != "atomic")
+    assert rejected(lambda: graphics.stream_result(2), "payload")
+    assert np.array_equal(before, bad)
+    assert engine.sample_stream_collision(2, 2, 1)[0] == 1
+    after = commit(3, green, 3.0)
+    assert graphics.stream_result(3)
+    assert engine.sample_stream_collision(2, 2, 3)[-1] == 3
+    assert save(output, "version-3", after)[1] > 100
+    stale_version = 4 if fault == "late" else 2
+    stale = commit(stale_version, red, 2.0)
+    assert rejected(lambda: graphics.stream_result(stale_version), "stale")
+    assert np.array_equal(after, stale)
+    assert engine.sample_stream_collision(2, 2, 3)[0] == 3
+    assert engine.world.query("FixtureRows").read().numpy().tolist() == [[3]]
+    graphics.stream_hide(key, 1)
+    assert np.array_equal(engine.render_frame(), after)
+    graphics.stream_hide(key, 3)
+    graphics.stream_retire(red)
+    graphics.stream_retire(green)
+    save(output, "retired", engine.render_frame())
+    assert engine.sample_stream_collision(2, 2, 3) is None
+    assert engine.last_frame["stream_resources"] == [0, 0]
+    assert engine.last_frame["streamed_cells"] == 0
+    engine.close()
+    return {"versions_observed": [1, 1, 3, 3], "retired_meshes": [0, 0], "remaining_cells": 0}
+
+
+async def async_builder(request):
+    geometry = plane(2.5, 2.5)
+    return MeshData(geometry["positions"], geometry["normals"],
+                    np.tile(np.array((0.85, 0.22, 0.12), np.float32), (4, 1)), geometry["indices"])
+
+
+def async_stream(output):
+    engine = engine_for("Async Python builder")
+    stream = Streamer(engine, 4, async_builder, radius=0, ready_radius=0, request=True,
+                      upload_bytes_per_frame=64)
+    for _ in range(90):
+        stream.focus(0, 0)
+        image = engine.render_frame()
+        if stream.settled:
+            break
+        time.sleep(0.002)
+    assert stream.settled and stream.stats()["uploaded"] == 1, stream.stats()
+    assert save(output, "async-cell", image)[0] > 100
+    stream.close()
+    engine.render_frame()
+    assert engine.last_frame["stream_resources"] == [0, 0]
+    engine.close()
+    return stream.stats()
+
+
+def cancellation(output):
+    engine = engine_for("Cancel and reuse a streamed key")
+    started, finish = Event(), Event()
+    first = True
+
+    def build(request):
+        nonlocal first
+        geometry = plane(2.5, 2.5)
+        block = first
+        first = False
+        if block:
+            started.set()
+            assert finish.wait(3)
+        color = (0.8, 0.05, 0.05) if block else (0.06, 0.84, 0.1)
+        return MeshData(geometry["positions"], geometry["normals"],
+                        np.tile(np.array(color, np.float32), (4, 1)), geometry["indices"])
+
+    stream = Streamer(engine, 4, build, radius=0, ready_radius=0, request=True)
+    stream.focus(0, 0)
+    assert started.wait(1)
+    stream.focus(4, 0)
+    stream.focus(0, 0)
+    finish.set()
+    for _ in range(90):
+        stream.focus(0, 0)
+        image = engine.render_frame()
+        if stream.settled and stream.stats()["stale"]:
+            break
+        time.sleep(0.002)
+    stats = stream.stats()
+    assert stats["stale"] >= 1 and stats["uploaded"] == 1 and stats["rejected"] == 0, stats
+    rgb = save(output, "reused-key", image)
+    assert rgb[1] > rgb[0] + 40, rgb
+    stream.close()
+    engine.render_frame()
+    assert engine.last_frame["stream_resources"] == [0, 0]
+    engine.close()
+    return stats
+
+
+def patch(output, fault):
+    engine = engine_for("Isolated array patch")
+    texture = texture_array(engine, 2, 16)
+    geometry = plane(1.1, 1.6)
+    geometry["baked_uv"] = geometry.pop("uvs")
+    geometry["colors"] = np.ones((4, 3), np.float32)
+    geometry["surfaces"] = np.full(4, SURFACE_BAKED, np.float32)
+    red = np.broadcast_to(np.asarray((220, 30, 40), np.uint8), (16, 16, 3))
+    blue = np.broadcast_to(np.asarray((30, 40, 220), np.uint8), (16, 16, 3))
+    write_layer(engine, texture, 0, layer_mips(red))
+    write_layer(engine, texture, 1, layer_mips(blue))
+    mat = StandardMaterial("#ffffff", roughness=0.8, vertex_colors=True, baked=texture)
+    engine.spawn(Mesh(geometry), Material(mat), Transform(pos=((-0.7, 0, 0), (0.7, 0, 0))),
+                 Baked(layer=[0, 1]), n=2)
+    first = engine.render_frame()
+    patch_rgba = np.broadcast_to(np.asarray((30, 220, 40, 255), np.uint8), (8, 8, 4))
+    write_texture(engine, texture, patch_rgba, (4, 4), layer=1 if fault == "layer" else 0)
+    assert rejected(lambda: write_texture(engine, texture, patch_rgba, (4, 4), layer=2), "outside")
+    after = engine.render_frame()
+    save(output, "array-before", first)
+    save(output, "array-after", after)
+    changed = np.any(first != after, axis=2)
+    counts = [int(changed[:, :80].sum()), int(changed[:, 80:].sum())]
+    assert counts[0] > 20 and counts[1] == 0, counts
+    assert counts[0] < int(np.sum(first[:, :80, 0] > 100)), counts
+    engine.close()
+    return {"changed_pixels_by_layer": counts}
+
+
+def invalidation(output, *, facade=False):
+    engine = engine_for("Visible cell invalidation")
+    engine.configure_stream_collision(4)
+    engine.world.register("FixtureRows", kind="u32", width=1)
+    current = 1
+
+    def build(request):
+        geometry = plane(2.5, 2.5)
+        color = (0.9, 0.05, 0.05) if current == 1 else (0.05, 0.9, 0.05)
+        mesh = MeshData(geometry["positions"], geometry["normals"],
+                        np.tile(np.array(color, np.float32), (4, 1)), geometry["indices"])
+        if facade and current == 2:
+            attributes = np.tile(np.array([8, 4, 2, 13], np.float32), (4, 1))
+            mesh = mesh._replace(facade=attributes)
+            packed = _pack_now(lambda: mesh, ())
+            assert packed.info["has_facade"]
+            assert np.array_equal(np.frombuffer(packed.vbytes, np.float32).reshape(4, 14)[:, -4:], attributes)
+        return CellResult(((mesh, 0),), ((0, 1, bytes([current])),))
+
+    def convert(request, rows):
+        height = rows[0][2][0]
+        grid = Heightfield((request.x, request.y), (4, 4), [[height] * 2] * 2)
+        batches = [(1, {"FixtureRows": np.array([height, 99] if not facade and height == 2 else [height], np.uint32)})]
+        return batches, [GroundTile((0, 0), 1, heightfields=[grid])]
+
+    stream = Streamer(engine, 4, build, radius=0, ready_radius=0, request=True, convert=convert,
+                      upload_bytes_per_frame=64)
+
+    def draw_until(check, continuity=None):
+        for _ in range(90):
+            stream.focus(0, 0)
+            image = engine.render_frame()
+            if check():
+                return image
+            if continuity is not None:
+                assert np.array_equal(image, continuity), ("invalid cell changed the visible image", stream.stats())
+            time.sleep(0.002)
+        raise AssertionError(stream.stats())
+
+    before = draw_until(lambda: stream.settled)
+    ground = engine.sample_stream_collision(2, 2, 1)
+    assert ground[0] == 1
+    assert save(output, "retained", before)[0] > 100
+    initial_upload_bytes = stream.stats()["upload_bytes"]
+    current = 2
+    stream.invalidate(0, 0)
+    rejected = draw_until(lambda: stream.stats()["rejected"] == 1, before)
+    assert np.array_equal(rejected, before)
+    assert engine.sample_stream_collision(2, 2, 1) == ground
+    assert engine.world.query("FixtureRows").read().numpy().tolist() == [[1]]
+    if facade:
+        assert "MeshData.facade" in stream.stats()["last_error"], stream.stats()
+        assert stream.stats()["upload_bytes"] == initial_upload_bytes
+        assert engine.last_frame["stream_resources"] == [0, 1]
+    current = 3
+    stream.invalidate(0, 0)
+    after = draw_until(lambda: engine.sample_stream_collision(2, 2, 3)[0] == 3, before)
+    assert save(output, "replacement", after)[1] > 100
+    assert engine.world.query("FixtureRows").read().numpy().tolist() == [[3]]
+    stream.close()
+    engine.render_frame()
+    assert engine.sample_stream_collision(2, 2, 3) is None
+    assert engine.last_frame["stream_resources"] == [0, 0]
+    engine.close()
+    return stream.stats()
+
+
+def receipts():
+    engine = engine_for("Streaming receipt teardown")
+    engine.world.register("ReceiptRows", kind="u32", width=1)
+    geometry = plane(2, 2)
+    mesh = MeshData(geometry["positions"], geometry["normals"],
+                    np.ones((4, 3), np.float32), geometry["indices"])
+
+    def enqueue(convert=None):
+        stream = Streamer(engine, 4, lambda *_: mesh, radius=0, ready_radius=0, convert=convert)
+        for _ in range(90):
+            stream.focus(0, 0)
+            if stream._results:
+                return stream, stream._results[(0, 0)].version
+            time.sleep(0.002)
+        raise AssertionError(stream.stats())
+
+    try:
+        engine.render_frame()
+        baseline = engine.last_frame["streamed_cells"]
+        active, active_version = enqueue()
+        bad_active, bad_version = enqueue(lambda *_: ([(1, {"ReceiptRows": np.array([1, 2], np.uint32)})], ()))
+        assert engine._graphics.stream_result(active_version) is None
+        assert engine._graphics.stream_result(bad_version) is None
+        closed = {"before_commit": [], "after_commit": []}
+        for _ in range(6):
+            for order, versions in closed.items():
+                stream, version = enqueue()
+                if order == "after_commit":
+                    engine.render_frame()
+                    assert engine.last_frame["streamed_cells"] == baseline + 2
+                else:
+                    assert engine._graphics.stream_result(version) is None
+                stream.close()
+                stream.close()
+                engine.render_frame()
+                assert engine.last_frame["streamed_cells"] == baseline + 1
+                assert engine.last_frame["stream_resources"] == [0, 2]
+                versions.append(version)
+
+        active.focus(0, 0)
+        assert active.settled, active.stats()
+        bad_active.focus(0, 0)
+        assert bad_active.stats()["rejected"] == 1
+        assert "payload" in bad_active.stats()["last_error"], bad_active.stats()
+        active.close()
+        bad_active.close()
+        engine.render_frame()
+        assert engine.last_frame["streamed_cells"] == baseline
+        assert engine.last_frame["stream_resources"] == [0, 0]
+        leaked = {order: sum(engine._graphics.stream_result(version) is not None for version in versions)
+                  for order, versions in closed.items()}
+        assert leaked == {"before_commit": 0, "after_commit": 0}, ("closed receipts accumulated", leaked)
+        return {"cycles": {order: len(versions) for order, versions in closed.items()},
+                "closed_receipts": leaked, "live_success_delivered": True, "live_error_delivered": True,
+                "drained_cells": baseline, "drained_meshes": engine.last_frame["stream_resources"]}
+    finally:
+        engine.close()
+
+
+def republish():
+    engine = engine_for("Republish a cell before the graphics barrier")
+    engine.world.register("ReceiptRows", kind="u32", width=1)
+    geometry = plane(2, 2)
+    mesh = MeshData(geometry["positions"], geometry["normals"],
+                    np.ones((4, 3), np.float32), geometry["indices"])
+
+    def queued(stream):
+        for _ in range(90):
+            stream.focus(0, 0)
+            if (0, 0) in stream.drawn():
+                return stream._results[(0, 0)].version
+            time.sleep(0.002)
+        raise AssertionError(stream.stats())
+
+    def missed_receipt(version):
+        try:
+            return engine._graphics.stream_result(version) is not None
+        except ValueError as error:
+            assert "payload" in str(error), str(error)
+            return True
+
+    old_closed = latest_closed = old_active = 0
+    try:
+        for close in (True, False):
+            for cycle in range(6):
+                value = 1
+
+                def convert(request, raw):
+                    invalid = not close and cycle % 2 == 1 and value == 1
+                    row = [value, 99] if invalid else [value]
+                    return [(1, {"ReceiptRows": np.array(row, np.uint32)})], ()
+
+                stream = Streamer(engine, 4, lambda *_: mesh, radius=0, ready_radius=0, convert=convert)
+                old = queued(stream)
+                stream.focus(4, 0)
+                value = 2
+                latest = queued(stream)
+                assert latest > old
+                assert engine._graphics.stream_result(latest) is None
+                if close:
+                    stream.close()
+                    stream.close()
+                engine.render_frame()
+                if close:
+                    old_closed += missed_receipt(old)
+                    latest_closed += missed_receipt(latest)
+                else:
+                    stream.focus(0, 0)
+                    assert stream.settled and stream.stats()["rejected"] == 0, stream.stats()
+                    assert engine.world.query("ReceiptRows").read().numpy().tolist() == [[2]]
+                    old_active += missed_receipt(old)
+                    stream.close()
+                    engine.render_frame()
+                assert engine.last_frame["streamed_cells"] == 0
+                assert engine.last_frame["stream_resources"] == [0, 0]
+        counts = {"old_closed": old_closed, "latest_closed": latest_closed, "old_active": old_active}
+        assert counts == {"old_closed": 0, "latest_closed": 0, "old_active": 0}, ("superseded receipts accumulated", counts)
+        return {**counts, "close_cycles": 6, "active_cycles": 6, "latest_active_row": 2}
+    finally:
+        engine.close()
+
+
+def quad_close(*, crossfade):
+    engine = engine_for("Close a quadtree with the Engine still live")
+    engine.world.register("QuadRows", kind="u32", width=1)
+    engine.configure_stream_collision(4)
+    geometry = plane(2, 2)
+    mesh = MeshData(geometry["positions"], geometry["normals"],
+                    np.ones((4, 3), np.float32), geometry["indices"])
+    parent = (1, 0, 0)
+    children = {(0, a, b) for a in range(2) for b in range(2)}
+
+    def convert(request, raw):
+        # A separate parent tile lets a parent and its children coexist during the fade.
+        ix, iz = (2, 0) if request.lod else (int(request.x / 4), int(request.y / 4))
+        height = ix * 2 + iz + 1
+        grid = Heightfield((ix * 4, iz * 4), (4, 4), [[height] * 2] * 2)
+        return [(1, {"QuadRows": np.array([height], np.uint32)})], [GroundTile((ix, iz), 1, heightfields=[grid])]
+
+    quad = QuadStreamer(engine, 4, (0, 0), 1, lambda *_: True, lambda _: mesh,
+                        lambda lod: 2**lod, refine_ms=None, crossfade=crossfade,
+                        request=True, convert=convert)
+    neighbor = Streamer(engine, 4, lambda *_: mesh, radius=0, ready_radius=0)
+
+    def follow(height, expected):
+        for _ in range(250):
+            quad.focus(2, 2, height)
+            engine.render_frame()
+            if quad.drawn() == expected:
+                return
+            time.sleep(0.002)
+        raise AssertionError((expected, quad.drawn(), quad.stats()))
+
+    try:
+        follow(100, {parent})
+        if crossfade:
+            time.sleep(crossfade)
+        follow(0.5, children)
+        outgoing = {key for key, (_, _, out) in quad._fading.items() if out}
+        assert outgoing == ({parent} if crossfade else set()), outgoing
+        tiles = [(2, 2), (6, 2), (2, 6), (6, 6), (10, 2)]
+        assert all(engine.sample_stream_collision(x, z, 1) is not None for x, z in tiles[:4])
+        assert (engine.sample_stream_collision(*tiles[-1], 1) is not None) == bool(crossfade)
+        assert engine.last_frame["streamed_cells"] == 4 + len(outgoing)
+        receipts = [draw.version for draw in quad._results.values()]
+        assert receipts
+        for _ in range(90):
+            neighbor.focus(12, 0)
+            if neighbor.drawn():
+                break
+            time.sleep(0.002)
+        assert neighbor.drawn(), neighbor.stats()
+        quad.close()
+        engine.render_frame()
+        assert engine.last_frame["streamed_cells"] == 1
+        assert engine.last_frame["stream_resources"] == [0, 1]
+        assert not engine.world.query("QuadRows").read().membership
+        assert all(engine.sample_stream_collision(x, z, 1) is None for x, z in tiles)
+        assert all(engine._graphics.stream_result(version) is None for version in receipts)
+        assert not quad._fading
+        quad.close()
+        engine.render_frame()
+        assert engine.last_frame["streamed_cells"] == 1
+        assert engine.last_frame["stream_resources"] == [0, 1]
+        neighbor.focus(12, 0)
+        assert neighbor.settled, neighbor.stats()
+        neighbor.close()
+        engine.render_frame()
+        assert engine.last_frame["streamed_cells"] == 0
+        assert engine.last_frame["stream_resources"] == [0, 0]
+        return {"crossfade": bool(crossfade), "visible": len(children), "outgoing": len(outgoing),
+                "drained_receipts": len(receipts), "drained_cells": 0, "drained_meshes": [0, 0],
+                "other_streamer_receipt_delivered": True}
+    finally:
+        engine.close()
+
+
+def capsule(output):
+    import native
+    from manifoldx._core_native import _StreamBuilder
+
+    assert Path(native.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+    good = _StreamBuilder(native.build_cell)
+    report = {"native_module": Path(native.__file__).name}
+    report["wrong_version"] = rejected(lambda: _StreamBuilder(native.build_cell_v2), "v2")
+    report["invalid_request"] = rejected(lambda: good.build(0, 0, float("nan"), 0, 0), "positive size")
+    malformed = _StreamBuilder(native.build_cell_malformed)
+    report["invalid_output"] = rejected(lambda: malformed.build(0, 0, 100, 0, 0), "invalid native mesh")
+    panicking = _StreamBuilder(native.build_cell_panics)
+    report["panic"] = rejected(lambda: panicking.build(0, 0, 100, 0, 0), "boom from the native builder")
+    meshes, rows = good.build(0, 0, 100, 0, 0)
+    assert len(meshes) == 2 and rows and portable_rows(rows)
+    first = bytes(meshes[0][1])
+    good.build(100, 0, 125, 1, 10)
+    assert meshes[0][1] == first
+    report["owned_vertex_bytes"] = len(first)
+    report["copied_row_bytes"] = sum(len(data) for _, _, data in rows)
+
+    engine = engine_for("Independent capsule wheel on the native streamer")
+    engine.camera.set_pose((50, 180, 120), (50, 0, 50))
+    engine.configure_stream_collision(100)
+    engine.world.register("LampKind", kind="u32", width=1)
+
+    def convert(request, raw):
+        assert portable_rows(raw)
+        kinds = np.frombuffer(raw[0][2], dtype="<u4")[2::3].astype(np.uint32)
+        grid = Heightfield((request.x, request.y), (100, 100), [[0, 0], [0, 0]])
+        return [(len(kinds), {"LampKind": kinds})], [GroundTile((0, 0), 1, heightfields=[grid])]
+
+    stream = Streamer(engine, 100, native.build_cell, radius=0, ready_radius=0, convert=convert,
+                      materials={1: StandardMaterial("#3cd984")})
+    for _ in range(90):
+        stream.focus(0, 0)
+        image = engine.render_frame()
+        if stream.settled:
+            break
+        time.sleep(0.002)
+    assert stream.settled and engine.last_frame["stream_resources"] == [0, 2], stream.stats()
+    report["lamp_rows"] = len(engine.world.query("LampKind").read().numpy())
+    assert report["lamp_rows"] > 0 and engine.sample_stream_collision(50, 50, 0)[0] == 0
+    save(output, "capsule-cell", image)
+    stream.close()
+    engine.render_frame()
+    assert engine.last_frame["stream_resources"] == [0, 0]
+    engine.close()
+    return report
+
+
+def portable_rows(rows):
+    return all(width == 12 and len(payload) % width == 0 for _, width, payload in rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--case", required=True, choices=("views", "view-retire", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade", "receipts", "republish", "quad-close", "quad-close-crossfade"))
+    parser.add_argument("--fault", choices=("refresh", "albedo", "atomic", "late", "layer"))
+    args = parser.parse_args()
+    assert sys.flags.isolated
+    assert Path(mx.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+    args.output.mkdir(parents=True, exist_ok=True)
+    if args.case == "async":
+        result = async_stream(args.output)
+    elif args.case == "view-retire":
+        result = view_retire(args.output)
+    elif args.case == "capsule":
+        result = capsule(args.output)
+    elif args.case == "cancel":
+        result = cancellation(args.output)
+    elif args.case == "receipts":
+        result = receipts()
+    elif args.case == "republish":
+        result = republish()
+    elif args.case in ("quad-close", "quad-close-crossfade"):
+        result = quad_close(crossfade=1.0 if args.case == "quad-close-crossfade" else None)
+    elif args.case in ("invalidate", "facade"):
+        result = invalidation(args.output, facade=args.case == "facade")
+    else:
+        case = {"views": views, "albedo": albedo, "transaction": transaction, "patch": patch}[args.case]
+        result = case(args.output, args.fault)
+    (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()

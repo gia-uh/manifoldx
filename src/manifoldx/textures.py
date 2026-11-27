@@ -181,9 +181,10 @@ def texture_from_svg(engine, svg, size_px: int | tuple[int, int]) -> TextureHand
 
 
 @_deferred.deferred_in_pipeline
-def write_texture(engine, handle: TextureHandle, rgba: np.ndarray, origin=(0, 0)) -> None:
+def write_texture(engine, handle: TextureHandle, rgba: np.ndarray, origin=(0, 0), *, layer=0) -> None:
     """Overwrite part of a texture in place: `rgba` is a (h, w, 4) uint8 sRGB patch with
     straight alpha, written with its top-left corner at `origin` = (x, y) pixels.
+    For a texture array, `layer` selects the destination slice.
 
     Only the full-size level changes. The GUI samples that level of any texture, so a
     map in an Image shows the patch at once; a material's minified view of a texture
@@ -195,8 +196,13 @@ def write_texture(engine, handle: TextureHandle, rgba: np.ndarray, origin=(0, 0)
     x, y = int(origin[0]), int(origin[1])
     if x < 0 or y < 0 or x + w > handle.size[0] or y + h > handle.size[1]:
         raise ValueError(f"a {w}x{h} patch at {(x, y)} does not fit a {handle.size} texture")
+    if not 0 <= layer < max(1, handle.layers):
+        raise ValueError("texture patch layer is outside the array")
+    write_native = getattr(engine, "_write_native_texture", None)
+    if write_native is not None:
+        return write_native(handle, rgba, x, y, layer)
     engine._device.queue.write_texture(
-        {"texture": handle.texture, "mip_level": 0, "origin": (x, y, 0)},
+        {"texture": handle.texture, "mip_level": 0, "origin": (x, y, layer)},
         rgba.tobytes(),
         {"offset": 0, "bytes_per_row": w * 4, "rows_per_image": h},
         (w, h, 1),

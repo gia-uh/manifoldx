@@ -10,6 +10,8 @@ The engine's origin follows the camera.
 """
 
 import argparse
+import json
+from pathlib import Path
 import math
 
 import numpy as np
@@ -45,7 +47,7 @@ def build_node(L, a, b):
                     np.array(idx, np.uint32))
 
 
-def build(engine, *, fly: bool = True) -> QuadStreamer:
+def build(engine, *, fly: bool = True, trace=None) -> QuadStreamer:
     """The plain and its streamer on `engine`; with fly, a system that flies the camera up to 6 km and back."""
     engine.background_color = (0.70, 0.80, 0.92)
     engine.camera.near, engine.camera.far = 0.5, 30000.0
@@ -54,7 +56,7 @@ def build(engine, *, fly: bool = True) -> QuadStreamer:
                             error=lambda L: CELL * 2**L / 16)
     if not fly:
         return streamer
-    st = {"t": 0.0}
+    st = {"t": 0.0, "frame": 0}
 
     @engine.system
     def fly_camera(query, dt):
@@ -67,6 +69,9 @@ def build(engine, *, fly: bool = True) -> QuadStreamer:
         ox, oz = engine.origin
         streamer.focus(x, z, y)
         engine.camera.set_pose((x - ox, y, z - oz), (x - ox + 400.0, y * 0.6, z - oz - 200.0))
+        st["frame"] += 1
+        if trace is not None and st["frame"] % 30 == 0:
+            trace.write(json.dumps({"frame": st["frame"], "height": y, **streamer.stats()}) + "\n")
 
     return streamer
 
@@ -76,16 +81,22 @@ def main():
     ap.add_argument("--render", action="store_true")
     ap.add_argument("--output", default="/tmp/quad_streaming.mp4")
     ap.add_argument("--duration", type=float, default=20.0)
+    ap.add_argument("--trace", type=Path, help="write altitude and LOD counts every 30 frames")
     args = ap.parse_args()
 
     engine = mx.Engine("Quad streaming", width=960, height=540)
-    streamer = build(engine)
-    if args.render:
-        engine.render(args.output, fps=24, duration=args.duration)
-    else:
-        engine.run()
-    print(streamer.stats())
-    streamer.close()
+    trace = args.trace.open("w", buffering=1) if args.trace else None
+    streamer = build(engine, trace=trace)
+    try:
+        if args.render:
+            engine.render(output=args.output, fps=24, duration=args.duration)
+        else:
+            engine.run()
+        print(streamer.stats())
+    finally:
+        if trace is not None:
+            trace.close()
+        streamer.close()
 
 
 if __name__ == "__main__":

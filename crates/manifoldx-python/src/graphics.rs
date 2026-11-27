@@ -10,7 +10,7 @@ use manifoldx_render::frame_compute::{ComputeBinding, ComputeProgram, FrameCompu
 use manifoldx_render::lines::{LineLayer, LineOptions, LineRow};
 use manifoldx_render::manual::ManualData;
 use manifoldx_render::rect::RectRow;
-use manifoldx_render::renderer::{FixtureRenderFault, ViewOptions, ViewOrder};
+use manifoldx_render::renderer::{FixtureRenderFault, ViewOptions, ViewOrder, ViewRead};
 use manifoldx_render::shadow::ShadowOptions;
 use manifoldx_render::skin::{validate_matrices, JointMatrices};
 use manifoldx_render::sprite::SpriteData;
@@ -24,6 +24,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
+use crate::stream_cells::{CellBatch, CellCommit, CellDraw, CellKey, StreamCells};
+use crate::vehicles::{tile_inputs, SampleOutput, TileInput};
 use crate::PyNativeWorld;
 
 type ComputeColumn = (Option<usize>, String, u32, bool);
@@ -82,19 +84,34 @@ type PostInput = (
 );
 
 enum Upload {
+    StreamBegin(u32, [[f32; 3]; 2], u64, u64),
+    StreamWrite(u32, bool, Vec<u8>),
+    StreamCommit(CellCommit, bool),
+    StreamDiscardResults(Vec<u64>),
+    StreamHide(CellKey, u64),
+    StreamFade(CellKey, usize, f32),
+    StreamRetire(u32),
+    Terrain(f64),
+    RetireScene(Vec<u32>, Vec<u32>),
     Mesh(u32, MeshData, Vec<[f32; 2]>, VertexInput),
-    Material(u32, [f32; 3], Shading, StandardEffects),
+    Material(u32, [f32; 3], Shading, StandardEffects, bool),
     Surface(u32, Box<[[f32; 5]; 9]>, bool),
     Albedo(u32, u32, u32, Vec<Vec<u8>>),
+    TexturePatch(u32, [u32; 3], [u32; 2], Vec<u8>),
+    TextureRelease(u32),
     BakedArray(u32, u32, u32),
     BakedLayer(u32, u32, Vec<Vec<u8>>),
     Poses(Vec<PoseInput>),
     Bake(u32, Vec<JointMatrices>),
     Play(Vec<FrameInput>),
-    View(ViewOptions),
+    View(ViewOptions, bool),
+    ViewUpdate(u32, Camera, Option<BTreeSet<i32>>, bool, bool),
+    ViewDrop(u32),
+    ViewRelease(u32),
+    ViewRead(u32, ViewRead),
     Environment(EnvironmentData),
     Fragment(u32, FragmentData),
-    Manual(u32, ManualData),
+    Manual(u32, ManualData, bool),
     Sprite(u32, SpriteData),
     Label(u32, SpriteData),
     LabelTile(u32, Vec<u8>),
@@ -123,6 +140,13 @@ pub(crate) struct Scene {
     clips: HashMap<u32, usize>,
     uploads: VecDeque<Upload>,
     offscreen: Option<NativeRenderer>,
+    view_materials: BTreeSet<u32>,
+    view_material_revision: Option<(u64, u64)>,
+    unused_view_materials: Vec<u32>,
+    view_reads: HashMap<u64, ViewRead>,
+    next_read: u64,
+    stream_cells: StreamCells,
+    stream_results: HashMap<u64, Result<(), String>>,
     fixture_fault: Option<FixtureRenderFault>,
     compute: Option<FrameCompute>,
     compute_pending: VecDeque<ComputeProgram>,
@@ -151,6 +175,13 @@ impl Scene {
             clips: HashMap::new(),
             uploads: VecDeque::new(),
             offscreen: None,
+            view_materials: BTreeSet::new(),
+            view_material_revision: None,
+            unused_view_materials: Vec::new(),
+            view_reads: HashMap::new(),
+            next_read: 0,
+            stream_cells: StreamCells::default(),
+            stream_results: HashMap::new(),
             fixture_fault: None,
             compute: None,
             compute_pending: VecDeque::new(),
@@ -161,7 +192,7 @@ impl Scene {
     pub(crate) fn apply(
         &mut self,
         renderer: &mut NativeRenderer,
-        world: &World,
+        world: &mut World,
     ) -> Result<Camera, RenderError> {
         renderer.set_background(self.background);
         renderer.set_point_lights(&self.lights);
@@ -176,16 +207,60 @@ impl Scene {
         renderer.set_lines(self.lines.clone());
         while let Some(upload) = self.uploads.pop_front() {
             match upload {
+                Upload::StreamBegin(id, bounds, vertices, indices) => {
+                    renderer.begin_stream_mesh(id, bounds, vertices, indices)?
+                }
+                Upload::StreamWrite(id, vertex, bytes) => {
+                    renderer.write_stream_mesh(id, vertex, &bytes)?
+                }
+                Upload::StreamCommit(commit, receipt) => {
+                    let version = commit.version;
+                    let result = self
+                        .stream_cells
+                        .commit(world, renderer, commit, self.origin);
+                    if receipt {
+                        self.stream_results
+                            .insert(version, result.map_err(|error| error.to_string()));
+                    } else {
+                        result?;
+                    }
+                }
+                Upload::StreamDiscardResults(versions) => {
+                    for version in versions {
+                        self.stream_results.remove(&version);
+                    }
+                }
+                Upload::StreamHide(key, version) => self.stream_cells.hide(world, key, version)?,
+                Upload::StreamFade(key, part, value) => {
+                    self.stream_cells.fade(world, key, part, value)?
+                }
+                Upload::StreamRetire(id) => renderer.retire_stream_mesh(id),
+                Upload::Terrain(size) => self.stream_cells.configure(size)?,
+                Upload::RetireScene(meshes, materials) => {
+                    renderer.retire_scene(&meshes, &materials);
+                    for id in materials {
+                        self.view_materials.remove(&id);
+                    }
+                }
                 Upload::Axis(id, points) => renderer.upload_axis(id, points)?,
                 Upload::Volume(id, dims, bytes) => renderer.upload_volume(id, dims, &bytes)?,
                 Upload::VolumeMaterial(id, data) => renderer.upload_volume_material(id, data)?,
                 Upload::Label(id, data) => renderer.upload_label(id, data)?,
                 Upload::LabelTile(layer, rgba) => renderer.upload_label_tile(layer, &rgba)?,
                 Upload::Sprite(id, data) => renderer.upload_sprite(id, data)?,
-                Upload::Manual(id, data) => renderer.upload_manual(id, &data)?,
+                Upload::Manual(id, data, samples_view) => {
+                    renderer.upload_manual(id, &data)?;
+                    self.track_view_material(id, samples_view);
+                }
                 Upload::Fragment(id, data) => renderer.upload_fragment(id, &data)?,
                 Upload::Environment(data) => renderer.upload_environment(&data)?,
-                Upload::View(options) => renderer.set_fixture_view(options)?,
+                Upload::View(options, live) => renderer.create_view(options, live)?,
+                Upload::ViewUpdate(id, camera, layers, live, refresh) => {
+                    renderer.update_view(id, camera, layers, live, refresh)?
+                }
+                Upload::ViewDrop(id) => renderer.drop_view(id),
+                Upload::ViewRelease(id) => renderer.release_view(id),
+                Upload::ViewRead(id, result) => renderer.read_view(id, result),
                 Upload::Mesh(id, mesh, uv, (colors, joints, surfaces)) => renderer
                     .upload_mesh_surfaces(
                         id,
@@ -217,8 +292,9 @@ impl Scene {
                         renderer.play_poses(entity, clip, position)?;
                     }
                 }
-                Upload::Material(id, color, shading, effects) => {
-                    renderer.set_material_effects(id, color, shading, effects)?
+                Upload::Material(id, color, shading, effects, samples_view) => {
+                    renderer.set_material_effects(id, color, shading, effects)?;
+                    self.track_view_material(id, samples_view);
                 }
                 Upload::BakedArray(id, size, layers) => {
                     renderer.create_baked_array(id, size, layers)?
@@ -226,6 +302,10 @@ impl Scene {
                 Upload::BakedLayer(id, layer, levels) => {
                     renderer.write_baked_layer(id, layer, &levels)?
                 }
+                Upload::TexturePatch(id, origin, size, bytes) => {
+                    renderer.write_texture_patch(id, origin, size, &bytes)?
+                }
+                Upload::TextureRelease(id) => renderer.release_texture(id),
                 Upload::Albedo(id, width, height, levels) => renderer.upload_albedo(
                     id,
                     width,
@@ -234,7 +314,57 @@ impl Scene {
                 )?,
             }
         }
+        self.find_unused_view_materials(world)?;
         Ok(self.camera)
+    }
+
+    fn track_view_material(&mut self, id: u32, samples_view: bool) {
+        if samples_view {
+            if self.view_materials.insert(id) {
+                self.view_material_revision = None;
+            }
+        } else {
+            self.view_materials.remove(&id);
+        }
+    }
+
+    // Both ordinary ECS edits and streamed commits are visible at this point.
+    fn find_unused_view_materials(&mut self, world: &World) -> Result<(), RenderError> {
+        if self.view_materials.is_empty() {
+            return Ok(());
+        }
+        let column = world
+            .component_index("Material")
+            .ok_or_else(|| RenderError::Resource("missing Material component".into()))?;
+        let revision = (
+            world.entity_version(),
+            world
+                .column_version(column)
+                .map_err(RenderError::Resource)?,
+        );
+        if self.view_material_revision == Some(revision) {
+            return Ok(());
+        }
+        let rows = world
+            .read_component(column, None)
+            .map_err(|error| RenderError::Resource(error.to_string()))?;
+        let ColumnData::U32(ids) = rows.data else {
+            return Err(RenderError::Resource(
+                "Material must contain u32 ids".into(),
+            ));
+        };
+        let mut unused = self.view_materials.clone();
+        for (id, member) in ids.into_iter().zip(rows.membership) {
+            if member {
+                unused.remove(&id);
+            }
+        }
+        for id in unused {
+            self.view_materials.remove(&id);
+            self.unused_view_materials.push(id);
+        }
+        self.view_material_revision = Some(revision);
+        Ok(())
     }
 
     pub(crate) fn run_compute(
@@ -385,6 +515,11 @@ impl NativeGraphics {
         }
     }
 
+    fn close(&self, py: Python<'_>) {
+        let old = std::mem::replace(&mut *self.scene.lock().unwrap(), Scene::new());
+        py.detach(move || drop(old));
+    }
+
     fn camera(&self, args: CameraInput) -> PyResult<()> {
         self.scene.lock().unwrap().camera = camera_from_input(args)?;
         Ok(())
@@ -425,17 +560,114 @@ impl NativeGraphics {
         let options = ViewOptions {
             texture_id,
             size,
-            layers: layers.into_iter().collect(),
+            layers: Some(layers.into_iter().collect()),
             camera: camera_from_input(camera)?,
-            clear,
+            clear: [clear[0], clear[1], clear[2], 1.0],
+            fog: true,
             order,
         };
         self.scene
             .lock()
             .unwrap()
             .uploads
-            .push_back(Upload::View(options));
+            .push_back(Upload::View(options, true));
         Ok(())
+    }
+
+    #[pyo3(signature = (texture_id, camera, layers, size, clear, live, fog))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_view(
+        &self,
+        texture_id: u32,
+        camera: CameraInput,
+        layers: Option<Vec<i32>>,
+        size: [u32; 2],
+        clear: [f32; 4],
+        live: bool,
+        fog: bool,
+    ) -> PyResult<()> {
+        let options = ViewOptions {
+            texture_id,
+            size,
+            layers: layers.map(|layers| layers.into_iter().collect()),
+            camera: camera_from_input(camera)?,
+            clear,
+            fog,
+            order: ViewOrder::BeforeMain,
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::View(options, live));
+        Ok(())
+    }
+
+    #[pyo3(signature = (id, camera, layers, live, refresh))]
+    fn update_view(
+        &self,
+        id: u32,
+        camera: CameraInput,
+        layers: Option<Vec<i32>>,
+        live: bool,
+        refresh: bool,
+    ) -> PyResult<()> {
+        let command = Upload::ViewUpdate(
+            id,
+            camera_from_input(camera)?,
+            layers.map(|layers| layers.into_iter().collect()),
+            live,
+            refresh,
+        );
+        self.scene.lock().unwrap().uploads.push_back(command);
+        Ok(())
+    }
+
+    fn drop_view(&self, id: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::ViewDrop(id));
+    }
+
+    fn release_view(&self, id: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::ViewRelease(id));
+    }
+
+    fn read_view(&self, id: u32) -> u64 {
+        let mut scene = self.scene.lock().unwrap();
+        let ticket = scene.next_read;
+        scene.next_read += 1;
+        let result = ViewRead::default();
+        scene.view_reads.insert(ticket, result.clone());
+        scene.uploads.push_back(Upload::ViewRead(id, result));
+        ticket
+    }
+
+    fn take_view_read<'py>(
+        &self,
+        py: Python<'py>,
+        ticket: u64,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let mut scene = self.scene.lock().unwrap();
+        let value = scene
+            .view_reads
+            .get(&ticket)
+            .and_then(|result| result.lock().unwrap().take());
+        match value {
+            None => Ok(None),
+            Some(value) => {
+                scene.view_reads.remove(&ticket);
+                value
+                    .map(|bytes| Some(PyBytes::new(py, &bytes)))
+                    .map_err(PyRuntimeError::new_err)
+            }
+        }
     }
 
     #[pyo3(signature = (background, lights, sun=None, spot=None))]
@@ -641,6 +873,122 @@ impl NativeGraphics {
         Ok(())
     }
 
+    fn retire_scene(&self, meshes: Vec<u32>, materials: Vec<u32>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::RetireScene(meshes, materials));
+    }
+
+    fn take_unused_view_materials(&self) -> Vec<u32> {
+        std::mem::take(&mut self.scene.lock().unwrap().unused_view_materials)
+    }
+
+    fn stream_begin(&self, id: u32, bounds: [[f32; 3]; 2], vertices: u64, indices: u64) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamBegin(id, bounds, vertices, indices));
+    }
+
+    fn stream_write(&self, id: u32, vertex: bool, data: &Bound<'_, PyBytes>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamWrite(id, vertex, data.as_bytes().to_vec()));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stream_commit(
+        &self,
+        key: CellKey,
+        version: u64,
+        meshes: Vec<CellDraw>,
+        pos: [f64; 3],
+        rows: Vec<CellBatch>,
+        tiles: Vec<TileInput>,
+        receipt: bool,
+    ) {
+        let commit = CellCommit {
+            key,
+            version,
+            meshes,
+            origin: pos,
+            rows,
+            tiles: tile_inputs(tiles),
+        };
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamCommit(commit, receipt));
+    }
+
+    fn stream_result(&self, version: u64) -> PyResult<Option<bool>> {
+        self.scene
+            .lock()
+            .unwrap()
+            .stream_results
+            .remove(&version)
+            .map(|result| result.map(|()| true).map_err(PyValueError::new_err))
+            .transpose()
+    }
+
+    fn stream_discard_results(&self, versions: Vec<u64>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamDiscardResults(versions));
+    }
+
+    fn stream_hide(&self, key: CellKey, version: u64) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamHide(key, version));
+    }
+
+    fn stream_fade(&self, key: CellKey, part: usize, value: f32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamFade(key, part, value));
+    }
+
+    fn stream_terrain(&self, size: f64) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::Terrain(size));
+    }
+
+    fn stream_sample(&self, x: f64, z: f64, near: f64) -> Option<SampleOutput> {
+        let sample = self.scene.lock().unwrap().stream_cells.sample(x, z, near)?;
+        Some((
+            sample.height,
+            sample.normal,
+            sample.grip,
+            sample.level,
+            sample.tile,
+            sample.version,
+        ))
+    }
+
+    fn stream_retire(&self, id: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::StreamRetire(id));
+    }
+
     fn joint_poses(&self, poses: Vec<PoseInput>) -> PyResult<()> {
         for (_, matrices) in &poses {
             validate_matrices(matrices)
@@ -700,7 +1048,8 @@ impl NativeGraphics {
         Ok(())
     }
 
-    #[pyo3(signature = (id, color, kind, standard=None, shininess=None, effects=None))]
+    #[pyo3(signature = (id, color, kind, standard=None, shininess=None, effects=None, view_albedo=false))]
+    #[allow(clippy::too_many_arguments)]
     fn material(
         &self,
         id: u32,
@@ -709,6 +1058,7 @@ impl NativeGraphics {
         standard: Option<MaterialInput>,
         shininess: Option<f32>,
         effects: Option<EffectsInput>,
+        view_albedo: bool,
     ) -> PyResult<()> {
         let shading = match (kind, standard, shininess) {
             ("basic", None, None) => Shading::Basic,
@@ -770,7 +1120,7 @@ impl NativeGraphics {
             .lock()
             .unwrap()
             .uploads
-            .push_back(Upload::Material(id, color, shading, effects));
+            .push_back(Upload::Material(id, color, shading, effects, view_albedo));
         Ok(())
     }
 
@@ -868,6 +1218,8 @@ impl NativeGraphics {
             .push_back(Upload::Sprite(id, data));
     }
 
+    #[pyo3(signature = (id, source, uniforms, textures, blend, axis, samples_view=false))]
+    #[allow(clippy::too_many_arguments)]
     fn manual(
         &self,
         id: u32,
@@ -876,6 +1228,7 @@ impl NativeGraphics {
         textures: Vec<(u32, u32)>,
         blend: u8,
         axis: bool,
+        samples_view: bool,
     ) {
         let data = ManualData {
             source,
@@ -888,7 +1241,7 @@ impl NativeGraphics {
             .lock()
             .unwrap()
             .uploads
-            .push_back(Upload::Manual(id, data));
+            .push_back(Upload::Manual(id, data, samples_view));
     }
 
     fn fragment(
@@ -958,6 +1311,27 @@ impl NativeGraphics {
             .unwrap()
             .uploads
             .push_back(Upload::BakedLayer(id, layer, levels));
+    }
+
+    fn texture_patch(&self, id: u32, origin: [u32; 3], size: [u32; 2], data: &Bound<'_, PyBytes>) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::TexturePatch(
+                id,
+                origin,
+                size,
+                data.as_bytes().to_vec(),
+            ));
+    }
+
+    fn texture_release(&self, id: u32) {
+        self.scene
+            .lock()
+            .unwrap()
+            .uploads
+            .push_back(Upload::TextureRelease(id));
     }
 
     fn albedo(&self, py: Python<'_>, id: u32, width: u32, height: u32, levels: Vec<Py<PyBytes>>) {
@@ -1049,6 +1423,9 @@ impl NativeGraphics {
             .expect("completed offscreen capture");
         result.set_item("adapter", renderer.adapter().to_json())?;
         result.set_item("target", "rgba8unorm-srgb")?;
+        result.set_item("view_resources", renderer.view_counts())?;
+        result.set_item("stream_resources", renderer.stream_counts())?;
+        result.set_item("streamed_cells", scene.stream_cells.count())?;
         Ok(result)
     }
 }
@@ -1068,6 +1445,10 @@ pub(crate) fn stats_dict<'py>(
     result.set_item("post_target_generation", stats.post_target_generation)?;
     result.set_item("read_ns", stats.read_ns)?;
     result.set_item("upload_ns", stats.upload_ns)?;
+    result.set_item("stream_upload_bytes", stats.stream_upload_bytes)?;
+    result.set_item("stream_upload_ns", stats.stream_upload_ns)?;
+    result.set_item("stream_resources", stats.stream_meshes)?;
+    result.set_item("view_resources", stats.view_resources)?;
     result.set_item("encode_submit_ns", stats.encode_submit_ns)?;
     result.set_item("readback_wait_ns", stats.wait_readback_ns)?;
     result.set_item("total_ns", stats.total_ns)?;

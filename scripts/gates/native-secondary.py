@@ -67,7 +67,7 @@ def capture(mode):
                 mode,
             )
             handle = TextureHandle(1, None, None, None, VIEW_SIZE)
-            handle._native_owner = engine
+            engine._track_texture(handle, view=True)
         else:
             handle = engine.render_to_texture(camera, VIEW_SIZE, background=VIEW_COLOR)
         engine.spawn(

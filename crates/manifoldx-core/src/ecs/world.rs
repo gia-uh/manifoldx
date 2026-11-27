@@ -687,9 +687,65 @@ impl World {
         count: u32,
         payloads: &[ComponentPayload],
     ) -> Result<Vec<EntityId>, WorldError> {
+        self.spawn_batches([(count, payloads)])
+    }
+
+    /// Publish all batches with one reservation after validating every payload.
+    pub fn spawn_batches<'a>(
+        &mut self,
+        batches: impl IntoIterator<Item = (u32, &'a [ComponentPayload])>,
+    ) -> Result<Vec<EntityId>, WorldError> {
+        let batches: Vec<_> = batches.into_iter().collect();
+        let mut count = 0u32;
+        for &(n, payloads) in &batches {
+            self.validate_spawn(n, payloads)?;
+            count = count.checked_add(n).ok_or(WorldError::LengthOverflow {
+                component: "spawn batch".into(),
+                rows: count as usize,
+                width: n,
+            })?;
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let ids = self.slots.reserve(count)?;
+        if let Err(error) = self.slots.commit(&ids) {
+            let _ = self.slots.cancel(&ids);
+            return Err(error.into());
+        }
+        self.published = true;
+
+        for id in &ids {
+            for column in &mut self.columns {
+                column.clear_row(id.slot());
+            }
+        }
+        let mut start = 0;
+        for (count, payloads) in batches {
+            let end = start + count as usize;
+            let batch = &ids[start..end];
+            for payload in payloads {
+                let column = &mut self.columns[payload.component];
+                column.version = self.version + 1;
+                let width = column.schema.width as usize;
+                for (row, id) in batch.iter().enumerate() {
+                    let start = id.slot() as usize * width;
+                    payload
+                        .data
+                        .copy_row_into(row, width, &mut column.data, start);
+                    column.set_member(id.slot(), true);
+                }
+            }
+            start = end;
+        }
+        self.version += 1;
+        Ok(ids)
+    }
+
+    fn validate_spawn(&self, count: u32, payloads: &[ComponentPayload]) -> Result<(), WorldError> {
         if count == 0 {
             if payloads.is_empty() {
-                return Ok(Vec::new());
+                return Ok(());
             }
             return Err(WorldError::PayloadForEmptyBatch);
         }
@@ -732,33 +788,7 @@ impl World {
                 });
             }
         }
-
-        let ids = self.slots.reserve(count)?;
-        if let Err(error) = self.slots.commit(&ids) {
-            let _ = self.slots.cancel(&ids);
-            return Err(error.into());
-        }
-        self.published = true;
-
-        for id in &ids {
-            for column in &mut self.columns {
-                column.clear_row(id.slot());
-            }
-        }
-        for payload in payloads {
-            let column = &mut self.columns[payload.component];
-            column.version = self.version + 1;
-            let width = column.schema.width as usize;
-            for (row, id) in ids.iter().enumerate() {
-                let start = id.slot() as usize * width;
-                payload
-                    .data
-                    .copy_row_into(row, width, &mut column.data, start);
-                column.set_member(id.slot(), true);
-            }
-        }
-        self.version += 1;
-        Ok(ids)
+        Ok(())
     }
 
     /// Overwrite whole rows of an existing component on selected entities.

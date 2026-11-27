@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import count
+from concurrent.futures import Future
+from dataclasses import dataclass
 from inspect import iscoroutinefunction
 from pathlib import Path
 from threading import current_thread, main_thread
+from weakref import WeakSet, finalize, ref
 
 import numpy as np
 
@@ -51,6 +55,36 @@ def _color(value):
     return tuple(value)
 
 
+def _camera_input(camera):
+    if camera.vertical_scale != 1:
+        raise NotImplementedError("vertical scale is unavailable in the native renderer")
+    return (
+        camera.position.tolist(), camera.target.tolist(), camera.up.tolist(),
+        camera.fov, camera.near, camera.far,
+    )
+
+
+def _camera_layers(camera):
+    return None if camera.layers is None else sorted(camera.layers)
+
+
+def _release_native_texture(owner, index, view):
+    engine = owner()
+    if engine is not None and not engine._closed:
+        engine._texture_handles.pop(index, None)
+        if view:
+            engine._release_view(index)
+        else:
+            engine._graphics.texture_release(index)
+
+
+@dataclass
+class _View:
+    camera: Camera
+    live: bool
+    pending: bool = False
+
+
 class _Rows:
     def __init__(self, columns):
         self._components = columns
@@ -75,7 +109,10 @@ class _TransformHandle:
         engine = self._engine
         rows = engine._transform_rows(self._entity)
         rows[0, :3] = np.asarray(point, "float64") - engine._origin_vector()
-        engine._world.replace("Transform", (self._entity,), rows)
+        if engine._commands is None:
+            engine._world.replace("Transform", (self._entity,), rows)
+        else:
+            engine._transform_edits[self._entity] = rows[0]
 
     position = pos
 
@@ -87,6 +124,9 @@ class _EntityHandle:
         self.index = entities[0].slot
         self.indices = np.array([entity.slot for entity in entities])
         self.transform = _TransformHandle(engine, entities[0])
+
+    def set_geometry(self, geometry):
+        self._engine._replace_geometry(self._entities, geometry)
 
     def set_joints(self, matrices):
         entity = self._entities[0]
@@ -150,13 +190,25 @@ class _NativeEngine:
         for name, kind, size in columns:
             self._world.register(name, kind=kind, width=size)
         self._registries = {"Mesh": {}, "Material": {}}
+        self._view_materials = {}
+        self._mesh_ids = count(1)
+        self._material_ids = count(1)
+        self._cell_versions = count(1)
+        self._streamers = WeakSet()
+        self._process_executor = None
+        self._pending_tasks = []
         self._manual_registry = MaterialRegistry()
         self._label_atlas = None
         self._volume_registry = VolumeRegistry()
         self._textures = 0
+        self._texture_handles = {}
+        self._views = {}
+        self._texture_reads = {}
         self._graphics = _NativeGraphics()
         self._handlers = {"startup": [], "shutdown": []}
         self._commands = None
+        self._snapshot = None
+        self._transform_edits = {}
         self._entities = ()
         self._time_base = 0.0
         self._fixed_dt = None
@@ -166,6 +218,9 @@ class _NativeEngine:
         self._desktop_ran = False
         self.last_frame = None
         self.desktop_report = None
+
+    def _deferring(self):
+        return False
 
     @property
     def world(self):
@@ -219,6 +274,19 @@ class _NativeEngine:
         return np.array((self._origin[0], 0, self._origin[1]), dtype="float64")
 
     def _transform_rows(self, entity):
+        if self._snapshot is not None:
+            if entity in self._transform_edits:
+                return self._transform_edits[entity][None].copy()
+            data = self._snapshot.read("Transform")
+            try:
+                index = data.entities.index(entity)
+            except ValueError as exc:
+                raise ValueError("stale transform handle") from exc
+            if not data.membership[index]:
+                raise ValueError("entity has no transform")
+            row = data.numpy()[[index]]
+            row[:, :3] += self._callback_origin - self._origin_vector()
+            return row
         self._world._owner()
         handles = self._world._handles((entity,))
         return (
@@ -228,17 +296,22 @@ class _NativeEngine:
         )
 
     def set_origin(self, x, z):
-        self._world._owner()
         if self._position_binding is not None:
             raise NotImplementedError(
                 "changing origin with a resident position binding is unavailable"
             )
         offset = self._origin_vector() - (x, 0, z)
-        data = self._world.query("Transform").read()
-        rows = data.numpy().copy()
-        rows[:, :3] = rows[:, :3].astype("float64") + offset
-        if data.entities:
-            self._world.replace("Transform", data.entities, rows)
+        if not np.any(offset):
+            return
+        if self._commands is None:
+            data = self._world.query("Transform").read()
+            rows = data.numpy().copy()
+            rows[:, :3] = rows[:, :3].astype("float64") + offset
+            if data.entities:
+                self._world.replace("Transform", data.entities, rows)
+        else:
+            for row in self._transform_edits.values():
+                row[:3] = row[:3].astype("float64") + offset
         self.camera.position = (self.camera.position.astype("float64") + offset).astype("float32")
         self.camera.target = (self.camera.target.astype("float64") + offset).astype("float32")
         if self._spot is not None:
@@ -287,8 +360,14 @@ class _NativeEngine:
                         self._register_component(component)
                     columns.append(self._column_key(component))
         columns = tuple(dict.fromkeys(columns))
+        access = tuple(dict.fromkeys((*columns, "Transform", "Mesh")))
 
         def invoke(snapshot, commands):
+            self._finish_texture_reads()
+            if self._pending_tasks:
+                from manifoldx.engine import Engine
+
+                Engine._drain_tasks(self)
             clock = snapshot.clock
             self.elapsed = self._time_base + clock.time
             data = {key: snapshot.read(key) for key in columns}
@@ -312,22 +391,50 @@ class _NativeEngine:
                 _Rows(arrays), list(arrays), np.arange(len(entities), dtype=np.intp)
             )
             self._commands, self._entities = commands, entities
+            self._snapshot = snapshot
+            self._callback_origin = self._origin_vector()
+            self._transform_edits = {}
             self._pending_destroy = []
             try:
                 callback(query, clock.dt)
+                self._commit_transforms(snapshot, commands, entities, arrays, originals)
                 for key in columns:
                     name = self._column_name(key)
-                    if not np.array_equal(arrays[name], originals[name]):
+                    if name != "Transform" and not np.array_equal(arrays[name], originals[name]):
                         commands.replace(key, entities, arrays[name])
                 if self._pending_destroy:
                     commands.destroy(tuple(dict.fromkeys(self._pending_destroy)))
-                self._sync_scene()
+                if self._desktop_ran:
+                    self._sync_scene()
             finally:
                 self._commands, self._entities = None, ()
+                self._snapshot = None
+                self._transform_edits.clear()
 
         invoke.__qualname__ = callback.__qualname__
-        self._world.system(invoke, reads=columns, writes=columns, structural=True)
+        self._world.system(invoke, reads=access, writes=access, structural=True)
         return callback
+
+    def _commit_transforms(self, snapshot, commands, entities, arrays, originals):
+        offset = self._callback_origin - self._origin_vector()
+        edits = self._transform_edits
+        if "Transform" in arrays:
+            rows = arrays["Transform"]
+            changed = np.flatnonzero(np.any(rows != originals["Transform"], axis=1))
+            for index in changed:
+                entity, row = entities[index], rows[index]
+                if entity not in edits:
+                    row[:3] = row[:3].astype("float64") + offset
+                    edits[entity] = row
+        if np.any(offset):
+            data = snapshot.read("Transform")
+            for entity, member, row in zip(data.entities, data.membership, data.numpy()):
+                if member and entity not in edits:
+                    shifted = row.copy()
+                    shifted[:3] = shifted[:3].astype("float64") + offset
+                    edits[entity] = shifted
+        if edits:
+            commands.replace("Transform", tuple(edits), np.stack(tuple(edits.values())))
 
     @staticmethod
     def _column_name(component):
@@ -409,12 +516,12 @@ class _NativeEngine:
         if component not in self._world._schemas:
             self._world.register(component)
 
-    def _mesh(self, geometry):
+    def _mesh(self, geometry, *, reuse=None):
         registry = self._registries["Mesh"]
         key = id(geometry)
         if key in registry:
             return registry[key][0]
-        index = len(registry) + 1
+        index = next(self._mesh_ids) if reuse is None else reuse
         if "vertices" in geometry and np.size(geometry.get("indices")) == 2:
             indices = np.asarray(geometry["indices"], dtype=np.intp).reshape(2)
             positions = np.asarray(geometry["vertices"], dtype="f4")[indices]
@@ -452,7 +559,76 @@ class _NativeEngine:
         registry[key] = (index, geometry)
         return index
 
+    def _replace_geometry(self, entities, geometry):
+        if self._commands is None:
+            raise RuntimeError("geometry swaps require a native frame command lease")
+        data = self._snapshot.read("Mesh")
+        owners = dict(zip(data.entities, zip(data.membership, data.numpy().ravel())))
+        owned = set(entities)
+        if any(entity not in owners or not owners[entity][0] for entity in owned):
+            raise ValueError("stale geometry handle")
+        old = {int(owners[entity][1]) for entity in owned}
+        others = {int(index) for entity, (has_mesh, index) in owners.items()
+                  if has_mesh and entity not in owned}
+        reuse = next(iter(old)) if len(old) == 1 and old.isdisjoint(others) else None
+        index = self._mesh(geometry, reuse=reuse)
+        if index not in old or len(old) != 1:
+            self._commands.replace("Mesh", entities, np.full((len(entities), 1), index, dtype="uint32"))
+        registry = self._registries["Mesh"]
+        for key, (mesh, obj) in list(registry.items()):
+            if mesh in old and mesh not in others and obj is not geometry:
+                del registry[key]
+                if mesh != index:
+                    self._graphics.stream_retire(mesh)
+
+    def clear_scene(self):
+        """Release scene-owned geometry and materials between native frames."""
+        self._world._owner()
+        for streamer in list(self._streamers):
+            streamer.close()
+        snapshot = self._world._native.snapshot()
+        entities = self._world._entities(snapshot["handles"])
+        self._world._native.destroy(self._world._handles(entities))
+        meshes = self._registries["Mesh"]
+        materials = self._registries["Material"]
+        self._graphics.retire_scene([entry[0] for entry in meshes.values()],
+                                    [entry[0] for entry in materials.values()])
+        meshes.clear()
+        for key in self._view_materials.values():
+            self._manual_registry._unregister(materials[key][1])
+        materials.clear()
+        self._view_materials.clear()
+        self._graphics.take_unused_view_materials()
+
+    def submit_process(self, fn, *args):
+        """Submit CPU preparation to a spawned process without sharing GPU objects."""
+        from manifoldx.engine import Engine
+
+        return Engine.submit_process(self, fn, *args)
+
+    def _collect_unused_view_materials(self):
+        if not self._view_materials:
+            return
+        registry = self._registries["Material"]
+        retired = []
+        for index in self._graphics.take_unused_view_materials():
+            key = self._view_materials.pop(index, None)
+            if key is not None:
+                self._manual_registry._unregister(registry[key][1])
+                del registry[key]
+                retired.append(index)
+        if retired:
+            self._graphics.retire_scene([], retired)
+
+    def _track_view_material(self, index, key, samples_view):
+        if samples_view:
+            self._view_materials[index] = key
+        else:
+            self._view_materials.pop(index, None)
+
     def _material(self, material):
+        # Drain before handing out an id so reuse after an empty frame registers anew.
+        self._collect_unused_view_materials()
         registry = self._registries["Material"]
         key = id(material)
         if getattr(material, "_version", None) is None:
@@ -461,7 +637,7 @@ class _NativeEngine:
         cached = registry.get(key)
         if cached is not None and cached[2] == version:
             return cached[0]
-        index = len(registry) + 1 if cached is None else cached[0]
+        index = next(self._material_ids) if cached is None else cached[0]
         if isinstance(material, ShaderMaterial):
             self._graphics.fragment(
                 index, material._fragment.source, material._uniforms, material._textures
@@ -496,18 +672,21 @@ class _NativeEngine:
                     material.opacity_lut.tolist(),
                 )
             else:
-                self._manual_material(index, material)
+                samples_view = self._manual_material(index, material)
+                self._track_view_material(index, key, samples_view)
             registry[key] = (index, material, version)
             return index
         params = None
         effects = None
+        view_albedo = False
         if kind == "standard":
             baked = material.baked
-            if baked is not None and getattr(baked, "_native_owner", None) is not self:
+            if baked is not None and not self._owns_texture(baked):
                 raise ValueError("baked texture array belongs to a different graphics owner")
             texture = material.albedo_map
-            if texture is not None and getattr(texture, "_native_owner", None) is not self:
+            if texture is not None and not self._owns_texture(texture):
                 raise ValueError("albedo texture belongs to a different graphics owner")
+            view_albedo = texture is not None and texture._native_view
             params = (
                 material.roughness,
                 material.metallic,
@@ -528,12 +707,15 @@ class _NativeEngine:
                 None if baked is None else baked.id,
             )
         shininess = material.shininess if kind == "phong" else None
-        self._graphics.material(index, _color(material.color), kind, params, shininess, effects)
+        self._graphics.material(
+            index, _color(material.color), kind, params, shininess, effects, view_albedo
+        )
         if kind == "standard" and material.vertex_colors and material.albedo_map is None:
             self._graphics.surface_patterns(
                 index, [material.surface_patterns[i] for i in range(1, 10)], material.detail
             )
         registry[key] = (index, material, version)
+        self._track_view_material(index, key, view_albedo)
         return index
 
     def _manual_material(self, index, material):
@@ -543,16 +725,18 @@ class _NativeEngine:
             raise TypeError("a manual WGSL material must extend Material")
         subtype = getattr(material, "pipeline_subtype", None)
         textures = []
+        samples_view = False
         slots = {0, 1, 2, 3}
         for binding, handle in sorted(material.get_texture_bindings().items()):
             if type(binding) is not int or not 4 <= binding < 999:
                 raise ValueError("manual WGSL sampler indices must follow the fixed mesh bindings")
             if binding in slots or binding + 1 in slots:
                 raise ValueError("manual WGSL sampler and texture binding indices overlap")
-            if getattr(handle, "_native_owner", None) is not self:
+            if not self._owns_texture(handle):
                 raise ValueError("manual WGSL texture belongs to a different graphics owner")
             slots.update((binding, binding + 1))
             textures.append((binding, handle.id))
+            samples_view |= handle._native_view
         if not isinstance(material.uniform_type(), dict):
             raise TypeError("manual WGSL uniform_type() must return a dict")
         self._manual_registry.register(material)
@@ -566,8 +750,88 @@ class _NativeEngine:
         textured = subtype == "textured" and getattr(material, "albedo_map", None) is not None
         source = material._compile(textured=True) if textured else material._compile()
         self._graphics.manual(
-            index, source, rows.reshape(-1).tolist(), textures, blend, isinstance(material, AxisMaterial)
+            index, source, rows.reshape(-1).tolist(), textures, blend,
+            isinstance(material, AxisMaterial), samples_view,
         )
+        return samples_view
+
+    def render_to_texture(self, camera, size, *, live=True, background=None, fog=False):
+        """Schedule a secondary camera to render into a sampled texture before main."""
+        from manifoldx.engine import _clear_color
+
+        width, height = map(int, size)
+        if not 1 <= width <= 4096 or not 1 <= height <= 4096:
+            raise ValueError("view dimensions must be between 1 and 4096 pixels")
+        clear = _clear_color(self.background_color if background is None else background)
+        self._textures += 1
+        index = self._textures
+        self._graphics.create_view(
+            index, _camera_input(camera), _camera_layers(camera), (width, height),
+            clear, bool(live), bool(fog),
+        )
+        self._views[index] = _View(camera, bool(live))
+        handle = TextureHandle(index, None, None, None, (width, height))
+        return self._track_texture(handle, view=True)
+
+    def _track_texture(self, handle, *, view=False):
+        handle._native_owner = self
+        handle._native_view = view
+        self._texture_handles[handle.id] = ref(handle)
+        finalize(handle, _release_native_texture, ref(self), handle.id, view)
+        return handle
+
+    def _owns_texture(self, handle):
+        known = self._texture_handles.get(handle.id)
+        return not self._closed and known is not None and known() is handle
+
+    def _release_view(self, index):
+        self._views.pop(index, None)
+        self._graphics.release_view(index)
+
+    def _view_id(self, handle):
+        if not self._owns_texture(handle):
+            raise ValueError("texture belongs to a different or closed graphics owner")
+        if not getattr(handle, "_native_view", False):
+            raise ValueError("expected a render-to-texture handle")
+        return handle.id
+
+    def _active_view(self, handle):
+        view = self._views.get(self._view_id(handle))
+        if view is None:
+            raise ValueError("the texture view has been dropped")
+        return view
+
+    def refresh_texture(self, handle):
+        self._active_view(handle).pending = True
+
+    def set_texture_live(self, handle, live):
+        self._active_view(handle).live = bool(live)
+
+    def drop_texture(self, handle):
+        index = self._view_id(handle)
+        if self._views.pop(index, None) is not None:
+            self._graphics.drop_view(index)
+
+    def read_texture(self, handle):
+        """Return a future for the texture's sRGB pixels after the next draw."""
+        index = self._view_id(handle)
+        future = Future()
+        self._texture_reads[self._graphics.read_view(index)] = (handle, future)
+        return future
+
+    def _finish_texture_reads(self):
+        for ticket, (handle, future) in list(self._texture_reads.items()):
+            try:
+                pixels = self._graphics.take_view_read(ticket)
+                if pixels is None:
+                    continue
+                if future.set_running_or_notify_cancel():
+                    width, height = handle.size
+                    future.set_result(np.frombuffer(pixels, np.uint8).copy().reshape(height, width, 3))
+            except RuntimeError as exc:
+                if future.set_running_or_notify_cancel():
+                    future.set_exception(exc)
+            del self._texture_reads[ticket]
 
     def _upload_native_albedo(self, image, source):
         self._textures += 1
@@ -577,19 +841,33 @@ class _NativeEngine:
             index, width, height, [level.tobytes() for level in _mip_chain(image)]
         )
         texture = TextureHandle(index, None, None, None, (width, height), source)
-        texture._native_owner = self
-        return texture
+        return self._track_texture(texture)
 
     def _upload_native_baked_array(self, layers, size):
         self._textures += 1
         index = self._textures
         self._graphics.baked_array(index, size, layers)
         texture = TextureHandle(index, None, None, None, (size, size), layers=layers)
-        texture._native_owner = self
-        return texture
+        return self._track_texture(texture)
+
+    def configure_stream_collision(self, cell_size):
+        """Create the E3 terrain index that receives streamed collision tiles."""
+        if not np.isfinite(cell_size) or cell_size <= 0:
+            raise ValueError("streamed collision tile size must be finite and positive")
+        self._graphics.stream_terrain(cell_size)
+
+    def sample_stream_collision(self, x, z, near):
+        """Read the current E3 surface from the published streaming terrain."""
+        return self._graphics.stream_sample(x, z, near)
+
+    def _write_native_texture(self, handle, rgba, x, y, layer):
+        if not self._owns_texture(handle) or handle._native_view:
+            raise ValueError("texture is a view or belongs to a different graphics owner")
+        height, width = rgba.shape[:2]
+        self._graphics.texture_patch(handle.id, (x, y, layer), (width, height), rgba.tobytes())
 
     def _write_native_baked_layer(self, handle, layer, levels):
-        if getattr(handle, "_native_owner", None) is not self:
+        if not self._owns_texture(handle):
             raise ValueError("baked texture array belongs to a different graphics owner")
         if not 0 <= layer < handle.layers:
             raise ValueError("baked texture layer index is outside the array")
@@ -804,6 +1082,7 @@ class _NativeEngine:
         return self._label_atlas
 
     def _sync_scene(self):
+        self._collect_unused_view_materials()
         atlas = self._label_atlas
         if atlas is not None:
             for layer in sorted(atlas.dirty_slices):
@@ -829,20 +1108,13 @@ class _NativeEngine:
         for _, material, version in self._registries["Material"].values():
             if material._version.value != version:
                 self._material(material)
-        camera = self.camera
-        if camera.vertical_scale != 1:
-            raise NotImplementedError("vertical scale is unavailable in the native renderer")
-        self._graphics.layers(None if camera.layers is None else sorted(camera.layers))
-        self._graphics.camera(
-            (
-                camera.position.tolist(),
-                camera.target.tolist(),
-                camera.up.tolist(),
-                camera.fov,
-                camera.near,
-                camera.far,
+        self._graphics.layers(_camera_layers(self.camera))
+        self._graphics.camera(_camera_input(self.camera))
+        for index, view in self._views.items():
+            self._graphics.update_view(
+                index, _camera_input(view.camera), _camera_layers(view.camera), view.live, view.pending,
             )
-        )
+            view.pending = False
         lights = [
             (list(light.position), _color(light.color), light.intensity)
             for light in self._lights[:4]
@@ -877,7 +1149,8 @@ class _NativeEngine:
             self._started = True
             for callback in self._handlers["startup"]:
                 callback({})
-        self._sync_scene()
+            if self._desktop_ran:
+                self._sync_scene()
         return not self._quit
 
     def quit(self):
@@ -890,9 +1163,24 @@ class _NativeEngine:
             return
         self._closed = True
         self.quit()
-        if self._started:
-            for callback in self._handlers["shutdown"]:
-                callback({})
+        self._finish_texture_reads()
+        for _, future in self._texture_reads.values():
+            future.cancel()
+        self._texture_reads.clear()
+        for streamer in list(self._streamers):
+            streamer.close()
+        if self._process_executor is not None:
+            self._process_executor.shutdown(wait=False, cancel_futures=True)
+        try:
+            if self._started:
+                for callback in self._handlers["shutdown"]:
+                    callback({})
+        finally:
+            self._graphics.close()
+            self._views.clear()
+            self._texture_handles.clear()
+            for registry in self._registries.values():
+                registry.clear()
 
     def run(self):
         if current_thread() is not main_thread():
@@ -980,6 +1268,7 @@ class _NativeEngine:
         self._sync_scene()
         width, height = self.w * supersample, self.h * supersample
         captured = self._graphics.capture(self._world._native, width, height, labels, compute_dt)
+        self._finish_texture_reads()
         rgba = captured.pop("rgba")
         self.last_frame = captured
         rgb = np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4)[:, :, :3]

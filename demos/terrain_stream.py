@@ -12,9 +12,13 @@ a spawn-context process pool, all engine/GPU setup lives under
 `if __name__ == "__main__":`, and the patch builder is a top-level pure function
 the worker can import cleanly.)
 
-    uv run python examples/modeling_terrain_stream.py
-    uv run python examples/modeling_terrain_stream.py --render --duration 10 --output /tmp/stream.mp4
+    uv run python demos/terrain_stream.py
+    uv run python demos/terrain_stream.py --render --duration 10 --output /tmp/stream.mp4
 """
+
+import json
+import os
+from time import perf_counter
 
 import numpy as np
 
@@ -72,6 +76,7 @@ def main():
     engine.camera.set_pose((0, CAM_Y, 0), (0, LOOK_Y, LOOK_AHEAD))
 
     st = {"next_z": K * DEPTH, "pending": None, "rear": 0}
+    trace_path = os.environ.get("MANIFOLDX_TERRAIN_TRACE")
 
     @engine.system
     def stream(query, dt):
@@ -79,11 +84,20 @@ def main():
         z = SPEED * engine.elapsed
         engine.camera.set_pose((0, CAM_Y, z), (0, LOOK_Y, z + LOOK_AHEAD))
         if st["pending"] is None and z > (st["rear"] + 1) * DEPTH:
+            st["submitted"] = perf_counter()
             st["pending"] = engine.submit_process(build_patch, st["next_z"])  # generate off-process
         if st["pending"] is not None and st["pending"].ready:
-            slot = slots[st["rear"] % K]
+            index = st["rear"] % K
+            slot = slots[index]
+            started_swap = perf_counter()
             slot.set_geometry(st["pending"].result)      # main-thread swap-in (in place)
             slot.transform.pos = (0, 0, st["next_z"])
+            if trace_path:
+                with open(trace_path, "a") as trace:
+                    observation = {"slot": index, "world_z": st["next_z"], "elapsed_s": engine.elapsed,
+                                   "worker_ms": (started_swap - st["submitted"]) * 1000,
+                                   "swap_ms": (perf_counter() - started_swap) * 1000}
+                    trace.write(json.dumps(observation) + "\n")
             st["next_z"] += DEPTH
             st["rear"] += 1
             st["pending"] = None

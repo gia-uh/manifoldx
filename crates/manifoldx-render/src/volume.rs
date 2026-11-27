@@ -55,7 +55,7 @@ pub(crate) struct VolumePass {
     sampler: wgpu::Sampler,
     volumes: HashMap<u32, Voxels>,
     materials: HashMap<u32, Transfer>,
-    views: [Option<View>; 2],
+    views: HashMap<u32, View>,
 }
 
 impl VolumePass {
@@ -152,7 +152,7 @@ impl VolumePass {
             sampler,
             volumes: HashMap::new(),
             materials: HashMap::new(),
-            views: [None, None],
+            views: HashMap::new(),
         })
     }
 
@@ -249,6 +249,10 @@ impl VolumePass {
         Ok(())
     }
 
+    pub(crate) fn drop_view(&mut self, id: u32) {
+        self.views.remove(&id);
+    }
+
     pub(crate) fn prepare(
         &mut self,
         gpu: &Gpu,
@@ -256,9 +260,9 @@ impl VolumePass {
         source: InstanceSource,
         layers: Option<&std::collections::BTreeSet<i32>>,
         globals: &[f32; GLOBAL_FLOATS],
-        index: usize,
+        index: u32,
     ) -> Result<(), RenderError> {
-        if let Some(view) = &mut self.views[index] {
+        if let Some(view) = self.views.get_mut(&index) {
             view.order.clear();
         }
         let (Some(volume), Some(material)) = (world.component_index("Volume"), source.material)
@@ -291,7 +295,7 @@ impl VolumePass {
             .map(|_| scalar(world, "Layer", &ids, 0.0))
             .transpose()?;
         let device = gpu.device();
-        let view = self.views[index].get_or_insert_with(|| {
+        let view = self.views.entry(index).or_insert_with(|| {
             let globals = gpu_buffer(
                 device,
                 "native DVR globals",
@@ -380,9 +384,9 @@ impl VolumePass {
         Ok(())
     }
 
-    pub(crate) fn has_draws(&self, index: usize) -> bool {
-        self.views[index]
-            .as_ref()
+    pub(crate) fn has_draws(&self, index: u32) -> bool {
+        self.views
+            .get(&index)
             .is_some_and(|view| !view.order.is_empty())
     }
 
@@ -391,11 +395,12 @@ impl VolumePass {
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         target: &FrameTarget<'_>,
-        index: usize,
+        index: u32,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) -> usize {
-        let view = self.views[index]
-            .as_mut()
+        let view = self
+            .views
+            .get_mut(&index)
             .expect("DVR view already prepared");
         if view
             .depth_group

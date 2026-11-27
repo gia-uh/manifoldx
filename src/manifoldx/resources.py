@@ -2416,6 +2416,13 @@ class MaterialRegistry:
             self._version.bump()
             return new_id
 
+    def _unregister(self, material_obj):
+        with self._lock:
+            material_id = self._object_to_id.pop(id(material_obj), None)
+            if material_id is not None:
+                del self._materials[material_id]
+                self._version.bump()
+
     def get(self, material_id: int) -> Any:
         """Get material by ID."""
         return self._materials.get(material_id)
