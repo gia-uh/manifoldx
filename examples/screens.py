@@ -20,6 +20,8 @@ CUBE = mx.geometry.cube(1, 1, 1)
 SPHERE = mx.geometry.sphere(0.8)
 RED = mx.material.phong(mx.colors.RED)
 BLUE = mx.material.phong(mx.colors.BLUE)
+CAPTION = {"width": 310, "height": 30, "bg": "#171b24cc"}
+
 
 
 async def wait_for_space():
@@ -31,7 +33,7 @@ async def wait_for_space():
 
 async def screen_a():
     engine.spawn(Mesh(CUBE), Material(RED), Transform(pos=(0, 0, 0)))
-    engine.gui.append(Panel(children=[Text("Screen A: press Space")], offset=(10, 10)))
+    engine.gui.append(Panel([Text("Screen A: press Space")], offset=(10, 10), style_overrides=CAPTION))
 
     @engine.system
     def spin(query: Query[Transform], dt: float):
@@ -44,7 +46,7 @@ async def screen_a():
 
 async def screen_b():
     engine.spawn(Mesh(SPHERE), Material(BLUE), Transform(pos=(0, 0, 0)))
-    engine.gui.append(Panel(children=[Text("Screen B: press Space to go back")], offset=(10, 10)))
+    engine.gui.append(Panel([Text("Screen B: press Space to go back")], offset=(10, 10), style_overrides=CAPTION))
     await wait_for_space()
     engine.clear_scene()
 

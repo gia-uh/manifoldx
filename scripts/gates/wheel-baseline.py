@@ -63,6 +63,12 @@ def measure(source, output, label):
 
 pre_core = measure(ROOT / "pre-core", EVIDENCE / "pre-core", "pre-core")
 candidate = measure(ROOT, ROOT / "dist", "candidate")
+candidate["source_sha"] = subprocess.check_output(
+    ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
+).strip()
+candidate["source_tree"] = subprocess.check_output(
+    ["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, text=True,
+).strip()
 report = {
     "python": sys.version,
     "platform": platform.platform(),

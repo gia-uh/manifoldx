@@ -24,6 +24,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
+use crate::gui::{Declaration, GuiState, Hit};
 use crate::stream_cells::{CellBatch, CellCommit, CellDraw, CellKey, StreamCells};
 use crate::vehicles::{tile_inputs, SampleOutput, TileInput};
 use crate::PyNativeWorld;
@@ -131,6 +132,7 @@ pub(crate) struct Scene {
     fog: Option<([f32; 2], [f32; 3])>,
     shadows: Option<ShadowOptions>,
     rects: Arc<[RectRow]>,
+    gui: GuiState,
     lines: Option<Arc<LineOptions>>,
     rect_before_post: bool,
     layers: Option<Arc<BTreeSet<i32>>>,
@@ -166,6 +168,7 @@ impl Scene {
             fog: None,
             shadows: None,
             rects: Arc::default(),
+            gui: GuiState::default(),
             lines: None,
             rect_before_post: false,
             layers: None,
@@ -202,6 +205,7 @@ impl Scene {
         renderer.set_environment(self.environment);
         renderer.set_fog(self.fog);
         renderer.set_rects(self.rects.clone(), self.rect_before_post);
+        renderer.set_gui(self.gui.frame.clone(), self.gui.before_post);
         renderer.set_layers(self.layers.clone());
         renderer.set_animation(self.time, self.origin, &self.benders);
         renderer.set_lines(self.lines.clone());
@@ -763,6 +767,52 @@ impl NativeGraphics {
             layers: next,
         }));
         Ok(())
+    }
+
+    fn gui_font(&self, key: String, data: &Bound<'_, PyBytes>) -> PyResult<()> {
+        self.scene.lock().unwrap().gui.font(key, data.as_bytes())
+    }
+
+    fn gui_tree(
+        &self,
+        rows: Vec<Declaration>,
+        viewport: [f32; 2],
+        scale: f32,
+        exact: bool,
+    ) -> PyResult<()> {
+        self.scene
+            .lock()
+            .unwrap()
+            .gui
+            .update(rows, viewport, scale, exact)
+    }
+
+    fn gui_pointer(&self, pointer: u64, phase: &str, point: [f32; 2]) -> PyResult<(bool, Hit)> {
+        self.scene
+            .lock()
+            .unwrap()
+            .gui
+            .pointer(pointer, phase, point)
+    }
+
+    fn gui_focus(&self) -> Option<u64> {
+        self.scene.lock().unwrap().gui.focus()
+    }
+
+    fn gui_reset(&self) {
+        self.scene.lock().unwrap().gui.reset();
+    }
+
+    fn gui_boxes(&self) -> Vec<([f32; 4], [f32; 4])> {
+        self.scene.lock().unwrap().gui.boxes()
+    }
+
+    fn fixture_gui_omit_capture(&self, enabled: bool) {
+        self.scene.lock().unwrap().gui.fixture_omit_capture(enabled);
+    }
+
+    fn fixture_gui_before_post(&self, enabled: bool) {
+        self.scene.lock().unwrap().gui.before_post = enabled;
     }
 
     fn fixture_rects(&self, rows: Vec<RectRow>, before_post: bool) -> PyResult<()> {
@@ -1438,9 +1488,43 @@ pub(crate) fn stats_dict<'py>(
     result.set_item("instances", stats.instances)?;
     result.set_item("draw_calls", stats.draw_calls)?;
     result.set_item("triangles", stats.triangles)?;
+    let settings = PyDict::new(py);
+    settings.set_item("environment", stats.environment_settings)?;
+    settings.set_item("fog", stats.fog_settings)?;
+    settings.set_item(
+        "lights",
+        (stats.has_sun, stats.point_lights, stats.has_spot),
+    )?;
+    if let Some(post) = &stats.post_settings {
+        let effects = PyDict::new(py);
+        effects.set_item("ssao", post.ssao)?;
+        effects.set_item("bloom", post.bloom)?;
+        effects.set_item("shafts", post.shafts)?;
+        effects.set_item("grade", post.grade)?;
+        effects.set_item(
+            "sky",
+            post.sky.as_ref().map(|sky| {
+                (
+                    sky.zenith,
+                    sky.horizon,
+                    sky.sun_size_degrees,
+                    sky.sun_intensity,
+                    sky.glow,
+                )
+            }),
+        )?;
+        effects.set_item("fxaa", post.fxaa)?;
+        settings.set_item("post", effects)?;
+        settings.set_item(
+            "post_formats",
+            ["rgba8-srgb", "depth32float", "r8unorm", "rgba16float"],
+        )?;
+    }
+    result.set_item("settings", settings)?;
     result.set_item("post_order", &stats.post_order)?;
     result.set_item("frame_order", &stats.frame_order)?;
     result.set_item("line_draws", stats.line_draws)?;
+    result.set_item("gui_quads", stats.gui_quads)?;
     result.set_item("shadow_layers", stats.shadow_layers)?;
     result.set_item("post_target_generation", stats.post_target_generation)?;
     result.set_item("read_ns", stats.read_ns)?;

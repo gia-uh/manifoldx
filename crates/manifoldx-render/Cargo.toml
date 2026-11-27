@@ -14,6 +14,7 @@ path = "src/bin/native-scene.rs"
 
 [dependencies]
 bytemuck = "=1.25.2"
+fontdue = "=0.9.3"
 manifoldx-core = { path = "../manifoldx-core" }
 pollster = "=0.4.0"
 # The same pinned graphics stack the baseline native surface probe used.
