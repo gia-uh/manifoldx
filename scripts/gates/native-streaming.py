@@ -14,7 +14,7 @@ from PIL import Image
 from manifoldx.camera import Camera
 from manifoldx.components import Baked, Layer, Material, Mesh, Transform
 from manifoldx.resources import SURFACE_BAKED, DirectionalLight, FlatMaterial, StandardMaterial, plane
-from manifoldx.streaming import CellResult, MeshData, Streamer, _pack_native_vertices, _pack_now
+from manifoldx.streaming import CellResult, MeshData, QuadStreamer, Streamer, _pack_native_vertices, _pack_now
 from manifoldx.textures import layer_mips, texture_array, write_layer, write_texture
 from manifoldx.vehicles import GroundTile, Heightfield
 
@@ -470,6 +470,81 @@ def republish():
         engine.close()
 
 
+def quad_close(*, crossfade):
+    engine = engine_for("Close a quadtree with the Engine still live")
+    engine.world.register("QuadRows", kind="u32", width=1)
+    engine.configure_stream_collision(4)
+    geometry = plane(2, 2)
+    mesh = MeshData(geometry["positions"], geometry["normals"],
+                    np.ones((4, 3), np.float32), geometry["indices"])
+    parent = (1, 0, 0)
+    children = {(0, a, b) for a in range(2) for b in range(2)}
+
+    def convert(request, raw):
+        # A separate parent tile lets a parent and its children coexist during the fade.
+        ix, iz = (2, 0) if request.lod else (int(request.x / 4), int(request.y / 4))
+        height = ix * 2 + iz + 1
+        grid = Heightfield((ix * 4, iz * 4), (4, 4), [[height] * 2] * 2)
+        return [(1, {"QuadRows": np.array([height], np.uint32)})], [GroundTile((ix, iz), 1, heightfields=[grid])]
+
+    quad = QuadStreamer(engine, 4, (0, 0), 1, lambda *_: True, lambda _: mesh,
+                        lambda lod: 2**lod, refine_ms=None, crossfade=crossfade,
+                        request=True, convert=convert)
+    neighbor = Streamer(engine, 4, lambda *_: mesh, radius=0, ready_radius=0)
+
+    def follow(height, expected):
+        for _ in range(250):
+            quad.focus(2, 2, height)
+            engine.render_frame()
+            if quad.drawn() == expected:
+                return
+            time.sleep(0.002)
+        raise AssertionError((expected, quad.drawn(), quad.stats()))
+
+    try:
+        follow(100, {parent})
+        if crossfade:
+            time.sleep(crossfade)
+        follow(0.5, children)
+        outgoing = {key for key, (_, _, out) in quad._fading.items() if out}
+        assert outgoing == ({parent} if crossfade else set()), outgoing
+        tiles = [(2, 2), (6, 2), (2, 6), (6, 6), (10, 2)]
+        assert all(engine.sample_stream_collision(x, z, 1) is not None for x, z in tiles[:4])
+        assert (engine.sample_stream_collision(*tiles[-1], 1) is not None) == bool(crossfade)
+        assert engine.last_frame["streamed_cells"] == 4 + len(outgoing)
+        receipts = [draw.version for draw in quad._results.values()]
+        assert receipts
+        for _ in range(90):
+            neighbor.focus(12, 0)
+            if neighbor.drawn():
+                break
+            time.sleep(0.002)
+        assert neighbor.drawn(), neighbor.stats()
+        quad.close()
+        engine.render_frame()
+        assert engine.last_frame["streamed_cells"] == 1
+        assert engine.last_frame["stream_resources"] == [0, 1]
+        assert not engine.world.query("QuadRows").read().membership
+        assert all(engine.sample_stream_collision(x, z, 1) is None for x, z in tiles)
+        assert all(engine._graphics.stream_result(version) is None for version in receipts)
+        assert not quad._fading
+        quad.close()
+        engine.render_frame()
+        assert engine.last_frame["streamed_cells"] == 1
+        assert engine.last_frame["stream_resources"] == [0, 1]
+        neighbor.focus(12, 0)
+        assert neighbor.settled, neighbor.stats()
+        neighbor.close()
+        engine.render_frame()
+        assert engine.last_frame["streamed_cells"] == 0
+        assert engine.last_frame["stream_resources"] == [0, 0]
+        return {"crossfade": bool(crossfade), "visible": len(children), "outgoing": len(outgoing),
+                "drained_receipts": len(receipts), "drained_cells": 0, "drained_meshes": [0, 0],
+                "other_streamer_receipt_delivered": True}
+    finally:
+        engine.close()
+
+
 def capsule(output):
     import native
     from manifoldx._core_native import _StreamBuilder
@@ -528,7 +603,7 @@ def portable_rows(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade", "receipts", "republish"))
+    parser.add_argument("--case", required=True, choices=("views", "albedo", "transaction", "async", "capsule", "patch", "cancel", "invalidate", "facade", "receipts", "republish", "quad-close", "quad-close-crossfade"))
     parser.add_argument("--fault", choices=("refresh", "albedo", "atomic", "late", "layer"))
     args = parser.parse_args()
     assert sys.flags.isolated
@@ -544,6 +619,8 @@ def main():
         result = receipts()
     elif args.case == "republish":
         result = republish()
+    elif args.case in ("quad-close", "quad-close-crossfade"):
+        result = quad_close(crossfade=1.0 if args.case == "quad-close-crossfade" else None)
     elif args.case in ("invalidate", "facade"):
         result = invalidation(args.output, facade=args.case == "facade")
     else:

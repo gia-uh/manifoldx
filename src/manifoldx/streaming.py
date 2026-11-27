@@ -1155,6 +1155,8 @@ class QuadStreamer(_Uploads):
                     return
 
     def close(self) -> None:
+        if self._closed:
+            return
         with self._lock:
             self._todo = []  # no done callback submits to a pool shut down
         for c, (handle, _, out) in list(self._fading.items()):
@@ -1274,7 +1276,7 @@ class QuadStreamer(_Uploads):
             self._fading[c] = (self._drawn[c], perf_counter(), False)
 
     def _undraw(self, c):
-        if not self.crossfade or self._drawn.get(c) is None:
+        if self._closed or not self.crossfade or self._drawn.get(c) is None:
             self._fading.pop(c, None)
             return super()._undraw(c)
         handle = self._drawn.pop(c)
