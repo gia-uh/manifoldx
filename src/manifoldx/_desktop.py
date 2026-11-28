@@ -63,8 +63,13 @@ def _color(value):
 def _camera_input(camera):
     if camera.vertical_scale != 1:
         raise NotImplementedError("vertical scale is unavailable in the native renderer")
+    # The public Camera fields take any three-value sequence (a tuple or list,
+    # as the Python renderer accepts); normalise here, the one place the native
+    # renderer reads them.
     return (
-        camera.position.tolist(), camera.target.tolist(), camera.up.tolist(),
+        np.asarray(camera.position, dtype=np.float32).tolist(),
+        np.asarray(camera.target, dtype=np.float32).tolist(),
+        np.asarray(camera.up, dtype=np.float32).tolist(),
         camera.fov, camera.near, camera.far,
     )
 
@@ -1074,8 +1079,12 @@ class _NativeEngine:
             if texture is not None and not self._owns_texture(texture):
                 raise ValueError("albedo texture belongs to a different graphics owner")
             view_albedo = texture is not None and texture._native_view
+            # The public mirror endpoint is roughness 0; the native prefiltered
+            # chain starts at 0.001, which renders it identically, so translate
+            # the supported interval below that floor instead of rejecting it.
+            roughness = 0.001 if 0.0 <= material.roughness < 0.001 else material.roughness
             params = (
-                material.roughness,
+                roughness,
                 material.metallic,
                 material.ao,
                 None if texture is None else texture.id,
