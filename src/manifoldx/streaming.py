@@ -309,9 +309,10 @@ class _Uploads:
                 raise TypeError("native builder capsules require the Rust Engine")
             if workers != "thread":
                 raise ValueError("capsule builders run in-process on worker threads")
-            from manifoldx._core_native import _StreamBuilder
+            if not hasattr(build, "build"):
+                from manifoldx._core_native import _StreamBuilder
 
-            build = _StreamBuilder(build)
+                build = _StreamBuilder(build)
         if self._native is None and (request or materials is not None or convert is not None or seed):
             raise ValueError("the cell request and row converter require the Rust Engine")
         if not isinstance(workers, Builders):

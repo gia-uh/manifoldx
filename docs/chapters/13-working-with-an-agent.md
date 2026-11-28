@@ -10,7 +10,7 @@ from a shell, and, at the end, the same plaza in a browser tab.
 
 ## Save, and keep your place
 
-`manifoldx run` is `python` for an app that draws. It runs the program until
+With the default Python core, `manifoldx run` is `python` for an app that draws. It runs the program until
 `engine.run()`, takes the engine, and every quarter of a second compares the
 modification times of the app's own source files. When one has changed it
 forgets the app's modules, runs the program again from the top, and hands the
@@ -168,9 +168,97 @@ engine.watch("plaza/benches.toml", "plaza/shaders/**/*.wgsl")
 engine.run()
 ```
 
+### Reload systems with the Rust desktop core
+
+Run `MANIFOLDX_CORE=rust uv run manifoldx run app.py` (or `run -m game.app`). The
+entry point runs once and `engine.run()` opens the native window. Build the
+scene in the entry point or in its `startup` handler. Declare which modules
+supply replaceable systems before starting the engine.
+
+```python
+engine.reload_systems("game.motion")
+engine.run()
+```
+
+In `game/motion.py`, expose `register(system)`. The registrar takes synchronous
+functions with the same `(query, dt)` arguments as `engine.system`.
+Annotations such as `Query[Transform]` declare the rows a system uses.
+
+```python
+from manifoldx import Query, Transform
+
+
+def register(system):
+    @system
+    def move(query: Query[Transform], dt):
+        query[Transform].pos += (dt, 0, 0)
+```
+
+Keep the registration modules separate from scene setup. They run as trusted
+Python and receive only the registrar during preparation. Put shared component
+classes in a stable module and register them in the scene before reloadable
+systems query them. Access the active rows through `Query` when the scheduler
+calls the system. Avoid importing the entry point or obtaining the application
+Engine or World through globals or imports.
+
+After startup, `run` watches the named modules. A save imports all of them
+fresh and validates the full registration before replacing it between frames.
+The World, entities, meshes and loaded cells stay in place. A syntax, import
+or registration error prints a traceback and the previous systems keep
+running. Save the corrected module to retry. An invalid initial registration
+fails startup. Restart to change the entry point, the module list, undeclared
+imports, component schemas, event handlers or `World.kernel` registrations.
+
+### Reload a native builder with the Rust desktop core
+
+A game can build its streamed cells in Rust behind a versioned capsule
+(`crates/manifoldx-sdk`, `manifoldx.builder.v1`). `NativeBuilder` loads that
+cdylib and reloads it without replacing the World or the loaded cells:
+
+```python
+from manifoldx.native_binary import NativeBuilder
+from manifoldx.streaming import Streamer
+
+builder = NativeBuilder("build/libnative.so")
+streamer = Streamer(engine, cell=1000.0, build=builder)
+
+
+@engine.system
+def follow(query, dt):
+    builder.poll()
+    streamer.focus(player.x, player.z)
+```
+
+`poll()` runs once a frame. When the file changes it copies the bytes to a
+content-addressed filename, opens the `manifoldx.builder.v1` capsule and checks
+it before making it active. A rebuild saved over the same path is therefore a
+new mapping, not the one the process already had. `builder.version` identifies
+the active build.
+
+A wrong capsule name, a missing `build_cell` or a file that does not load leaves
+the previous builder and library serving; `poll()` returns `False` and stores the
+error in `builder.last_error`. Builds already running finish on the library they
+started with. Reloading the same bytes reuses the open builder, and a rejected
+capsule is not opened twice. Libraries are never unloaded, so each distinct build
+keeps one mapping, not one per reload. `close()` stops watching and removes the
+staged copies where the OS permits it. On Windows a mapped DLL can remain on disk after exit. The active builder stays callable.
+`reload(path)` loads explicitly and raises instead of keeping the old build.
+
+The Rust desktop command supports reload, regular stderr output and the dev
+channel: `--port N` picks its port, and `state`, `set`, `emit`, `events`,
+`log` and `look` work as they do with the Python core. Requests run at the
+frame barrier, before the frame's events and systems, and the server closes
+when the window does. `look` copies the surface texture of the next presented
+frame after post and GUI, so the PNG shows the same composition; a surface
+that cannot copy its images answers 501 with that reason. `--debug` works too:
+the native scheduler measures the same presented frames, reports the existing
+metrics fields plus `update`, `render`, `acquire`, `submit` and `present`, and
+draws a HUD after post and GUI that turns its border red while a synchronous
+callback takes more than 1 ms.
+
 ## The dev channel
 
-`manifoldx run` also serves a page and an HTTP API on 127.0.0.1 (port 8770, or
+With the Python core, `manifoldx run` also serves a page and an HTTP API on 127.0.0.1 (port 8770, or
 the next free one) while the app runs, and `manifoldx` has a command for each
 thing an agent needs to ask it.
 

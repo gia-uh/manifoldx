@@ -127,11 +127,7 @@ engine.spawn(
 
 # Velocities live outside the ECS, one row per entity the gravity query sees:
 # rows 0..NUM_PARTICLES-1 are the dust particles, the last NUM_HUD the HUD labels
-# (kept stationary by the gravity system). The labels' store slots follow the
-# star and the particles.
-N_TOTAL = NUM_PARTICLES + 1
-HUD_FPS_IDX = N_TOTAL
-HUD_SPD_IDX = N_TOTAL + 1
+# (kept stationary by the gravity system).
 velocities = np.zeros((NUM_PARTICLES + NUM_HUD, 3), dtype=np.float32)
 velocities[:NUM_PARTICLES] = particle_velocities
 
@@ -177,9 +173,15 @@ def gravity(query: mx.Query[Transform, ScalarValue], dt: float):
         fps_idx = atlas.get_or_create(f"FPS: {fps_bucket}")
         spd_idx = atlas.get_or_create(f"SPD: {spd_bucket:.1f}")
 
-        text_label_data = engine.store._components["TextLabel"]
-        text_label_data[HUD_FPS_IDX, 0] = float(fps_idx)
-        text_label_data[HUD_SPD_IDX, 0] = float(spd_idx)
+        _hud_state["slots"] = (fps_idx, spd_idx)
+
+
+@engine.system
+def hud_labels(query: mx.Query[TextLabel], dt: float):
+    """Write the throttled slots the gravity system computed this frame."""
+    slots = _hud_state.pop("slots", None)
+    if slots is not None:
+        query[TextLabel].index = np.asarray(slots, dtype=np.float32).reshape(-1, 1)
 
 
 if __name__ == "__main__":

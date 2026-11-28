@@ -31,6 +31,8 @@ class _NativeGui:
         self.getter_calls = 0
         self.getter_total = 0
         self.last_target = None
+        self._hud_panel = None
+        self._hud_texts = []
 
     def sync(self, supersample=1, *, refresh=False):
         engine = self._engine
@@ -96,6 +98,8 @@ class _NativeGui:
 
         for panel in engine.gui:
             add(panel, None)
+        if getattr(engine, "_debug_hud", False):
+            add(self._hud(engine), None)
         self._images = {key: handle for key, handle in self._images.items() if key in used_images}
         engine._graphics.gui_tree(
             declarations, (engine.w * supersample, engine.h * supersample),
@@ -103,6 +107,36 @@ class _NativeGui:
         )
         self._widgets = widgets
         self.getter_total += self.getter_calls
+
+    def _hud(self, engine):
+        """The `--debug` overlay: native GUI paint and font, outside engine.gui."""
+        if self._hud_panel is None:
+            self._hud_texts = [
+                Text("", style_overrides={"font_size": 11, "fg": "#f2f2f2"})
+                for _ in range(6)
+            ]
+            self._hud_panel = Panel(
+                self._hud_texts,
+                anchor="top-left",
+                offset=(8, 8),
+                style_overrides={
+                    "bg": "#101014e6",
+                    "padding": 6,
+                    "gap": 2,
+                    "radius": 4,
+                },
+            )
+        lines = engine._hud_lines()
+        for text, value in zip(self._hud_texts, lines):
+            text.text = value
+        for text in self._hud_texts[len(lines):]:
+            text.text = ""
+        # The border is the one glanceable marker: red while a synchronous
+        # callback is over 1 ms, green when none is measured.
+        slow = bool(engine.over_budget)
+        self._hud_panel.style_overrides["border_color"] = "#e84848" if slow else "#3a8a4a"
+        self._hud_panel.style_overrides["border"] = 2 if slow else 1
+        return self._hud_panel
 
     def _label(self, text, style):
         font = style.get("font")

@@ -1,0 +1,15 @@
+[package]
+name = "native-reload"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "native_reload"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module"] }
+manifoldx-sdk = { path = "../../../../crates/manifoldx-sdk" }
+
+[workspace]

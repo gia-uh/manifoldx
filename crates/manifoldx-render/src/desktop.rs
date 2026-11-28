@@ -1,5 +1,6 @@
 //! Calling-thread desktop event loop. Window, surface and device stay together.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,59 @@ pub struct Monitor {
     pub primary: bool,
 }
 
+/// One presented frame, copied after every pass (post and GUI included) and
+/// before it reaches the surface. Rows are tightly packed.
+#[derive(Clone, Debug)]
+pub struct PresentedImage {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: bool,
+    pub pixels: Vec<u8>,
+}
+
+/// The dev channel's request/answer slot for `manifoldx look`.
+///
+/// A normal frame never touches the GPU for it: the desktop loop only copies
+/// the acquired surface texture when `request` was set, and hands the pixels
+/// back through this slot after the frame that was presented.
+#[derive(Default)]
+pub struct PresentedCapture {
+    requested: AtomicBool,
+    supported: AtomicBool,
+    ready: Mutex<Option<Result<PresentedImage, String>>>,
+}
+
+impl PresentedCapture {
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+    }
+
+    pub fn supported(&self) -> bool {
+        self.supported.load(Ordering::Acquire)
+    }
+
+    pub fn set_supported(&self, supported: bool) {
+        self.supported.store(supported, Ordering::Release);
+    }
+
+    /// The image of the last requested frame, once its copy came back.
+    pub fn take(&self) -> Option<Result<PresentedImage, String>> {
+        self.ready.lock().expect("presented capture lock").take()
+    }
+
+    fn take_request(&self) -> bool {
+        self.requested.swap(false, Ordering::AcqRel)
+    }
+
+    fn deliver(&self, image: PresentedImage) {
+        *self.ready.lock().expect("presented capture lock") = Some(Ok(image));
+    }
+
+    fn fail(&self, error: String) {
+        *self.ready.lock().expect("presented capture lock") = Some(Err(error));
+    }
+}
+
 pub struct DesktopOptions {
     pub title: String,
     pub physical_px: PhysicalSize<u32>,
@@ -32,8 +86,34 @@ pub struct DesktopOptions {
     pub present_mode: wgpu::PresentMode,
     pub renderer: RendererOptions,
     pub sample_limit: Option<u64>,
+    pub gpu_timings: bool,
     pub suppress_present: bool,
     pub resize_after_three: Option<PhysicalSize<u32>>,
+    pub presented: Option<Arc<PresentedCapture>>,
+}
+
+/// Why the bounded desktop diagnostic did or did not write GPU timestamps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuTimingState {
+    /// A normal run: the frame loop never bounds itself, so it never measures.
+    NotBounded,
+    /// The caller turned timings off (`MANIFOLDX_GPU_TIMINGS=0`).
+    Disabled,
+    /// The bounded run asked for timings, but the adapter has no timestamp queries.
+    Unavailable,
+    /// Every presented frame wrote one timestamp pair.
+    Measured,
+}
+
+impl GpuTimingState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotBounded => "not_bounded",
+            Self::Disabled => "disabled",
+            Self::Unavailable => "unavailable",
+            Self::Measured => "measured",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -88,7 +168,7 @@ pub trait DesktopApplication {
 pub fn run_desktop(
     options: DesktopOptions,
     app: &mut impl DesktopApplication,
-) -> Result<(u64, Vec<u64>), RenderError> {
+) -> Result<(u64, Vec<u64>, GpuTimingState), RenderError> {
     let event_loop = EventLoop::new().map_err(window_error)?;
     let mut handler = Desktop {
         options,
@@ -99,11 +179,13 @@ pub fn run_desktop(
         presents: 0,
         last_present: None,
         gpu_ns: Vec::new(),
+        gpu_state: GpuTimingState::NotBounded,
+        look: None,
     };
     event_loop.run_app(&mut handler).map_err(window_error)?;
     match handler.error {
         Some(error) => Err(error),
-        None => Ok((handler.presents, handler.gpu_ns)),
+        None => Ok((handler.presents, handler.gpu_ns, handler.gpu_state)),
     }
 }
 
@@ -119,6 +201,7 @@ struct Context {
     occluded: bool,
     device_loss: Arc<Mutex<Option<String>>>,
     timings: Option<GpuTimings>,
+    copy_src: bool,
 }
 
 impl Context {
@@ -138,6 +221,11 @@ impl Context {
         }
         self.config.width = size.width;
         self.config.height = size.height;
+        self.config.usage = if self.copy_src {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        };
         self.surface.configure(device, &self.config);
         self.depth = Some(depth_target(device, size.width, size.height));
         Ok(())
@@ -157,6 +245,8 @@ impl Context {
                 "replacement surface is incompatible with the active GPU configuration".into(),
             ));
         }
+        // A replacement surface may not allow copying its images back.
+        self.copy_src = caps.usages.contains(wgpu::TextureUsages::COPY_SRC);
         self.surface = surface;
         self.configure(self.window.inner_size())
     }
@@ -238,6 +328,49 @@ impl GpuTimings {
     }
 }
 
+/// The copy of one presented surface texture, submitted with its frame and
+/// mapped at the start of the next redraw so no frame waits on the GPU.
+struct LookReadback {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    row: u32,
+    bgra: bool,
+}
+
+impl LookReadback {
+    fn finish(self, device: &wgpu::Device) -> Result<PresentedImage, String> {
+        let slice = self.buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(5)),
+            })
+            .map_err(|error| error.to_string())?;
+        receiver
+            .recv()
+            .map_err(|_| "the frame readback channel closed".to_string())?
+            .map_err(|error| error.to_string())?;
+        let mapped = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity(self.width as usize * self.height as usize * 4);
+        for line in mapped.chunks_exact(self.row as usize) {
+            pixels.extend_from_slice(&line[..self.width as usize * 4]);
+        }
+        drop(mapped);
+        self.buffer.unmap();
+        Ok(PresentedImage {
+            width: self.width,
+            height: self.height,
+            bgra: self.bgra,
+            pixels,
+        })
+    }
+}
+
 struct Desktop<'a, A> {
     options: DesktopOptions,
     app: &'a mut A,
@@ -247,6 +380,8 @@ struct Desktop<'a, A> {
     presents: u64,
     last_present: Option<Instant>,
     gpu_ns: Vec<u64>,
+    gpu_state: GpuTimingState,
+    look: Option<LookReadback>,
 }
 
 impl<A: DesktopApplication> Desktop<'_, A> {
@@ -299,6 +434,18 @@ impl<A: DesktopApplication> Desktop<'_, A> {
             .ok_or_else(|| RenderError::Window("display has no surface configuration".into()))?;
         config.format = format;
         config.present_mode = self.options.present_mode;
+        // Copying the presented image is what `manifoldx look` reads. Only
+        // request it when the surface advertises it, so a surface that cannot
+        // still draws and the channel answers 501 instead.
+        let copy_src = caps.usages.contains(wgpu::TextureUsages::COPY_SRC);
+        config.usage = if copy_src {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        };
+        if let Some(presented) = &self.options.presented {
+            presented.set_supported(copy_src);
+        }
         let gpu = Gpu::from_adapter(&adapter, self.options.renderer.allow_software)?;
         let renderer = NativeRenderer::with_gpu(gpu, format, self.options.renderer.max_instances);
         let device_loss = Arc::new(Mutex::new(None));
@@ -309,10 +456,26 @@ impl<A: DesktopApplication> Desktop<'_, A> {
                     Some(format!("{reason:?}: {message}"));
             }
         });
-        let timings = self
-            .options
-            .sample_limit
-            .and_then(|limit| GpuTimings::new(&renderer, limit));
+        let timings = match self.options.sample_limit {
+            None => {
+                self.gpu_state = GpuTimingState::NotBounded;
+                None
+            }
+            Some(_) if !self.options.gpu_timings => {
+                self.gpu_state = GpuTimingState::Disabled;
+                None
+            }
+            Some(limit) => match GpuTimings::new(&renderer, limit) {
+                Some(timings) => {
+                    self.gpu_state = GpuTimingState::Measured;
+                    Some(timings)
+                }
+                None => {
+                    self.gpu_state = GpuTimingState::Unavailable;
+                    None
+                }
+            },
+        };
         let size = window.inner_size();
         let mut context = Context {
             surface,
@@ -326,6 +489,7 @@ impl<A: DesktopApplication> Desktop<'_, A> {
             occluded: false,
             device_loss,
             timings,
+            copy_src,
         };
         context.configure(size)?;
         let info = DesktopInfo {
@@ -353,6 +517,17 @@ impl<A: DesktopApplication> Desktop<'_, A> {
         if let Some(reason) = context.device_loss.lock().expect("device loss lock").take() {
             return Err(RenderError::Device(format!("active device lost: {reason}")));
         }
+        // The copy submitted with the last presented frame is ready: map it
+        // here, before this frame's barrier, so `manifoldx look` answers.
+        if let Some(look) = self.look.take() {
+            let result = look.finish(context.renderer.device());
+            if let Some(presented) = &self.options.presented {
+                match result {
+                    Ok(image) => presented.deliver(image),
+                    Err(error) => presented.fail(error),
+                }
+            }
+        }
         let Some(depth) = context.depth.as_ref() else {
             return Ok(true);
         };
@@ -370,6 +545,13 @@ impl<A: DesktopApplication> Desktop<'_, A> {
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 context.replace_surface()?;
+                if let Some(presented) = &self.options.presented {
+                    presented.set_supported(context.copy_src);
+                    if !context.copy_src {
+                        presented
+                            .fail("the replacement surface cannot copy the presented frame".into());
+                    }
+                }
                 return Ok(true);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
@@ -407,6 +589,60 @@ impl<A: DesktopApplication> Desktop<'_, A> {
         else {
             return Ok(false);
         };
+        // Only the frame a look asked for pays for the copy; every other frame
+        // goes straight to the surface.
+        if context.copy_src
+            && self
+                .options
+                .presented
+                .as_ref()
+                .is_some_and(|presented| presented.take_request())
+        {
+            let width = context.size.width;
+            let height = context.size.height;
+            let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let buffer = context
+                .renderer
+                .device()
+                .create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("manifoldx presented look"),
+                    size: u64::from(row) * u64::from(height),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.look = Some(LookReadback {
+                buffer,
+                width,
+                height,
+                row,
+                bgra: matches!(
+                    context.config.format,
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+                ),
+            });
+        }
         if let Some(timing) = timing {
             encoder.resolve_query_set(&timing.queries, 0..2, &timing.resolve, 0);
             encoder.copy_buffer_to_buffer(

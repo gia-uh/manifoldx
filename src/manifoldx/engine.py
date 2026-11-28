@@ -3,6 +3,7 @@ import argparse
 import gc
 import os
 import threading
+import tempfile
 import warnings
 import wgpu
 import sys
@@ -37,6 +38,53 @@ def _overlapping_copy(rgba: np.ndarray) -> np.ndarray:
     out = np.empty(h * w * 3 + 1, np.uint8)  # one spare byte for the last pixel's alpha
     np.ndarray((h * w,), np.uint32, buffer=out, strides=(3,))[...] = rgba.reshape(-1).view(np.uint32)
     return out[:-1].reshape(h, w, 3)
+
+
+class _VideoWriter:
+    """An imageio-ffmpeg stream that keeps the requested size and reports encoder failure.
+
+    imageio-ffmpeg pads frames to a multiple of 16 by default, which changes
+    the requested video size, and it does not raise when its ffmpeg process
+    exits with an error, which leaves a zero-byte file. This wrapper disables
+    the padding, keeps the process so close() can see its exit code, and
+    removes the partial file instead of returning success.
+    """
+
+    def __init__(self, writer, output, staging):
+        self._writer = writer
+        self.output = Path(output)
+        self.staging = staging
+        self.encoded = Path(staging.name) / self.output.name
+        self._process = writer.gi_frame.f_locals.get("p") if writer.gi_frame else None
+        self._closed = False
+
+    def send(self, frame):
+        self._writer.send(frame)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._writer.close()
+            code = self._process.returncode if self._process is not None else None
+            if code not in (0, None):
+                raise RuntimeError(f"video encoder exited with code {code}; no video written")
+            if not self.encoded.is_file() or self.encoded.stat().st_size == 0:
+                raise RuntimeError("video encoder wrote no frames; no video written")
+            self.encoded.replace(self.output)
+        finally:
+            self.staging.cleanup()
+
+    def discard(self):
+        """Close and remove a partial file without masking the error that caused it."""
+        if not self._closed:
+            self._closed = True
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+        self.staging.cleanup()
 
 
 def _overlap_is_ordered() -> bool:
@@ -2410,59 +2458,64 @@ class Engine:
         # Set up video writer with imageio-ffmpeg
         writer = self._get_video_writer(output, fps, self.w, self.h, codec, quality)
 
-        # Fire built-in 'startup' event before the first frame, and wait for what it loads.
-        self._fire_startup()
-
-        # Progress tracking
         pbar = None
-        if progress:
-            try:
-                from tqdm import tqdm
+        try:
+            # Fire built-in 'startup' event before the first frame, and wait for what it loads.
+            self._fire_startup()
 
-                pbar = tqdm(total=frame_count, desc="Rendering video", unit="frames")
-            except ImportError:
-                pass
+            # Progress tracking
+            if progress:
+                try:
+                    from tqdm import tqdm
 
-        self._settle()
+                    pbar = tqdm(total=frame_count, desc="Rendering video", unit="frames")
+                except ImportError:
+                    pass
 
-        # === RENDER LOOP ===
-        for frame_idx in range(frame_count):
-            # Draw the frame (backend-agnostic)
-            self._draw_frame()
+            self._settle()
+            for frame_idx in range(frame_count):
+                # Draw the frame (backend-agnostic)
+                self._draw_frame()
 
-            # Capture frame from canvas
-            frame = self._render_canvas.draw()
+                # Capture frame from canvas
+                frame = self._render_canvas.draw()
 
-            # Convert RGBA to RGB (most video codecs don't support alpha)
-            frame_rgb = frame[:, :, :3].copy()  # Make contiguous
+                # Convert RGBA to RGB (most video codecs don't support alpha)
+                frame_rgb = frame[:, :, :3].copy()  # Make contiguous
 
-            # Write to video
-            writer.send(frame_rgb)
+                # Write to video
+                writer.send(frame_rgb)
 
-            # Update progress
+                # Update progress
+                if pbar:
+                    pbar.update(1)
+
+                # Update elapsed time
+                self.elapsed = (frame_idx + 1) * dt
+
+            writer.close()
+        except BaseException:
+            writer.discard()
+            raise
+        finally:
             if pbar:
-                pbar.update(1)
-
-            # Update elapsed time
-            self.elapsed = (frame_idx + 1) * dt
-
-        # Clean up
-        writer.close()
-        writer = None  # type: ignore
-        if pbar:
-            pbar.close()
-
-        self._running = False
-
-        # Fire 'shutdown' and tear down the asyncio loop cleanly so
-        # long-running async handlers don't leak as pending tasks.
-        self.shutdown_events()
+                pbar.close()
+            self._running = False
+            # Fire 'shutdown' and tear down the asyncio loop cleanly so
+            # long-running async handlers don't leak as pending tasks.
+            self.shutdown_events()
 
         print(f"Video saved: {output}")
 
     def _get_video_writer(self, output, fps, width, height, codec, quality):
-        """Set up imageio-ffmpeg video writer."""
-        import imageio_ffmpeg
+        """Set up the imageio-ffmpeg stream that writes one video."""
+        try:
+            import imageio_ffmpeg
+        except ImportError:
+            raise ImportError(
+                "Video rendering requires imageio-ffmpeg.\n"
+                "Install with: pip install manifold-gfx[offline]"
+            ) from None
 
         # Quality presets (1-10 scale for imageio-ffmpeg)
         quality_map = {
@@ -2471,23 +2524,33 @@ class Engine:
             "high": 5,
             "ultra": 8,
         }
-        quality_value = quality_map.get(quality, 5)
+        if quality not in quality_map:
+            raise ValueError(f"quality must be one of {', '.join(quality_map)}, got {quality!r}")
+        if width < 1 or height < 1:
+            raise ValueError(f"video size must be positive, got {width}x{height}")
 
-        # Get writer with ffmpeg
-        writer = imageio_ffmpeg.write_frames(
-            output,
-            size=(width, height),
-            fps=fps,
-            codec="libx264" if codec == "h264" else codec,
-            quality=quality_value,
-            pix_fmt_in="rgb24",
-            pix_fmt_out="yuv420p",
-        )
+        # yuv420p needs even sides; yuv444p keeps any requested size exact.
+        pix_fmt_out = "yuv420p" if width % 2 == 0 and height % 2 == 0 else "yuv444p"
 
-        # Seed the generator
-        writer.send(None)
+        staging = tempfile.TemporaryDirectory(dir=Path(output).parent, prefix=".manifoldx-video-")
+        try:
+            writer = imageio_ffmpeg.write_frames(
+                str(Path(staging.name) / Path(output).name),
+                size=(width, height),
+                fps=fps,
+                codec="libx264" if codec == "h264" else codec,
+                quality=quality_map[quality],
+                pix_fmt_in="rgb24",
+                pix_fmt_out=pix_fmt_out,
+                macro_block_size=1,
+            )
 
-        return writer
+            # Seed the generator, then keep its process so close() can check the exit code.
+            writer.send(None)
+            return _VideoWriter(writer, output, staging)
+        except BaseException:
+            staging.cleanup()
+            raise
 
     def cli(
         self,

@@ -191,6 +191,20 @@ returns None on an adapter without timestamps, such as the software rasterizer
 in CI, and with `MANIFOLDX_GPU_TIMINGS=0`. An app that wants the numbers in its
 run publishes them with `bench.metric`.
 
+With the Rust core the window does not read timestamps during a normal run. A
+bounded diagnostic session (`MANIFOLDX_DESKTOP_FRAMES=N`, with
+`MANIFOLDX_DESKTOP_REPORT=path` writing the report) writes one timestamp pair
+around each presented frame's main render pass and reads the whole session back
+once after the last frame, so the frame series carries no readback. The report
+then holds `samples[i]["gpu_render_ns"]` in nanoseconds for frame `i+1`; its
+`gpu_timings.pass` is `main`, `gpu_timings.unit` is `ns`, and
+`gpu_timings.state` says `measured`, `disabled` (`MANIFOLDX_GPU_TIMINGS=0`),
+`unavailable` (the adapter has no timestamp queries) or `not_bounded` (a normal
+run, which reports no per-frame samples). `engine.gpu_timings()` answers after
+`run()` returns, with `main` (the measured pass) and `total` (that one
+interval), and None in the other states. There is no per-pass split for `views`,
+`shadow` or `post` in this core.
+
 ## The engine's steps and an app's own
 
 The engine's steps know nothing about what an app draws: `camera`, `fly` and

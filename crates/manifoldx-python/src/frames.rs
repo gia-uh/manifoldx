@@ -532,6 +532,25 @@ struct System {
     last_ns: u64,
     skipped: u64,
     last_start: Option<u64>,
+    ran: bool,
+}
+
+/// One presented frame's live samples for `manifoldx run --debug`.
+///
+/// These are the same measurements the desktop loop takes to draw and present
+/// every frame, collected only when the dev channel asks for them. GPU timing
+/// is absent because the timestamp queries stay reserved for bounded
+/// diagnostic runs; no counter here is estimated.
+#[derive(Clone, Default)]
+struct FrameMetrics {
+    interval_ns: u64,
+    acquire_ns: u64,
+    submit_ns: u64,
+    present_ns: u64,
+    update_ns: u64,
+    render_ns: u64,
+    systems: Vec<(String, u64)>,
+    over_budget: Vec<(String, u64)>,
 }
 
 enum Work {
@@ -730,6 +749,7 @@ impl Loop {
                 last_ns: 0,
                 skipped: 0,
                 last_start: None,
+                ran: false,
             });
         }
         Ok(Self {
@@ -822,6 +842,9 @@ impl Loop {
         let profile = self.profile;
         let mut kernels = 0;
         let mut slowest = None;
+        for system in &mut self.systems {
+            system.ran = false;
+        }
         // Settle ready work in registration order. A sync callback sees
         // the commits from all preceding registrations at this barrier.
         for (index, system) in self.systems.iter_mut().enumerate() {
@@ -836,6 +859,7 @@ impl Loop {
                     system.calls += 1;
                     system.last_ns = nanos(start.elapsed());
                     system.ns = system.ns.max(system.last_ns);
+                    system.ran = true;
                     if profile {
                         kernels += system.last_ns;
                         if slowest.is_none_or(|(_, ns)| system.last_ns > ns) {
@@ -848,10 +872,12 @@ impl Loop {
                     let Some((revision, completed)) = worker.take()? else {
                         continue;
                     };
+                    system.ran = true;
                     (completed, revision.matches(world))
                 }
                 Work::Sync(callback) => {
                     let snap = capture(world, clock, &system.access.reads, cache, report)?;
+                    system.ran = true;
                     (call(callback, snap, &system.access, &self.state), true)
                 }
             };
@@ -931,6 +957,7 @@ struct FrameLoop {
     schemas: OnceLock<Arc<[ComponentSchema]>>,
     control: Control,
     rows: Arc<Mutex<ReadCounts>>,
+    metrics: Arc<Mutex<Option<FrameMetrics>>>,
     batches_per_frame: usize,
     max_rows: usize,
     owner_thread: thread::ThreadId,
@@ -962,8 +989,28 @@ impl FrameLoop {
             batches_per_frame,
             max_rows,
             rows: Arc::new(Mutex::new(ReadCounts::default())),
+            metrics: Arc::new(Mutex::new(None)),
             owner_thread: thread::current().id(),
         })
+    }
+
+    /// The last presented frame's measured samples, or None before one has
+    /// completed. Only `run_desktop(debug=true)` fills it.
+    fn last_metrics<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let guard = self.metrics.lock().unwrap();
+        let Some(metrics) = guard.as_ref() else {
+            return Ok(None);
+        };
+        let out = PyDict::new(py);
+        out.set_item("interval_ns", metrics.interval_ns)?;
+        out.set_item("acquire_ns", metrics.acquire_ns)?;
+        out.set_item("submit_ns", metrics.submit_ns)?;
+        out.set_item("present_ns", metrics.present_ns)?;
+        out.set_item("update_ns", metrics.update_ns)?;
+        out.set_item("render_ns", metrics.render_ns)?;
+        out.set_item("systems", metrics.systems.clone())?;
+        out.set_item("over_budget", metrics.over_budget.clone())?;
+        Ok(Some(out))
     }
 
     fn dispatch_kernel(
@@ -1084,7 +1131,7 @@ impl FrameLoop {
         Ok(result)
     }
 
-    #[pyo3(signature = (graphics, options, registrations, startup, keyboard, position, diagnostics, application=None))]
+    #[pyo3(signature = (graphics, options, registrations, startup, keyboard, position, diagnostics, application=None, debug=false))]
     #[allow(clippy::too_many_arguments)]
     fn run_desktop<'py>(
         &self,
@@ -1097,11 +1144,13 @@ impl FrameLoop {
         position: Option<PositionInput>,
         diagnostics: DesktopDiagnostics,
         application: Option<ApplicationInput>,
+        debug: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         if thread::current().id() != self.owner_thread {
             return Err(PyRuntimeError::new_err("run on the World owner thread"));
         }
-        let (title, width, height, fullscreen, monitor, mode, hz, frame_limit) = options;
+        let (title, width, height, fullscreen, monitor, mode, hz, frame_limit, gpu_timings) =
+            options;
         if width == 0
             || height == 0
             || !hz.is_finite()
@@ -1155,6 +1204,7 @@ impl FrameLoop {
             .into_iter()
             .map(|item| prepare(py, item))
             .collect::<PyResult<Vec<_>>>()?;
+        *self.metrics.lock().unwrap() = None;
         let mut frames = WindowFrames {
             owner: self,
             registrations: Some(registrations),
@@ -1178,6 +1228,9 @@ impl FrameLoop {
             display: None,
             frames: Vec::new(),
             frame_limit,
+            debug,
+            metrics: Arc::clone(&self.metrics),
+            pending_metrics: None,
         };
         let options = DesktopOptions {
             title,
@@ -1187,16 +1240,18 @@ impl FrameLoop {
             present_mode,
             renderer: RendererOptions::default(),
             sample_limit: frame_limit,
+            gpu_timings,
             suppress_present,
             resize_after_three: resize_after_three
                 .map(|(width, height)| PhysicalSize::new(width, height)),
+            presented: Some(graphics.presented()),
         };
-        let (presented, gpu_ns, diagnostic) = py.detach(|| {
+        let (presented, gpu_ns, gpu_state, diagnostic) = py.detach(|| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 desktop::run_desktop(options, &mut frames)
             }));
             frames.finish();
-            let (presented, gpu_ns) = result
+            let (presented, gpu_ns, gpu_state) = result
                 .map_err(|_| PyRuntimeError::new_err("native desktop frame loop panicked"))?
                 .map_err(graphics::render_error)?;
             let diagnostic = if diagnostic_readback {
@@ -1209,7 +1264,7 @@ impl FrameLoop {
             } else {
                 None
             };
-            Ok::<_, PyErr>((presented, gpu_ns, diagnostic))
+            Ok::<_, PyErr>((presented, gpu_ns, gpu_state, diagnostic))
         })?;
         let result = PyDict::new(py);
         result.set_item("presented", presented)?;
@@ -1243,6 +1298,14 @@ impl FrameLoop {
             result.set_item("format", format!("{:?}", info.format))?;
             result.set_item("adapter", adapter)?;
         }
+        // Why the bounded diagnostic did or did not measure, so a null
+        // `gpu_render_ns` is never mistaken for a measured zero.
+        let gpu = PyDict::new(py);
+        gpu.set_item("state", gpu_state.as_str())?;
+        gpu.set_item("pass", "main")?;
+        gpu.set_item("unit", "ns")?;
+        gpu.set_item("frames", gpu_ns.len())?;
+        result.set_item("gpu_timings", gpu)?;
         let samples: Vec<_> = frames
             .frames
             .iter()
@@ -1453,6 +1516,7 @@ type DesktopInput = (
     String,
     f64,
     Option<u64>,
+    bool,
 );
 
 type PositionInput = (usize, u32, u32, u32, Vec<(u32, u32)>, String);
@@ -1483,6 +1547,9 @@ struct WindowFrames<'a> {
     display: Option<(DesktopInfo, String)>,
     frames: Vec<PresentedFrame>,
     frame_limit: Option<u64>,
+    debug: bool,
+    metrics: Arc<Mutex<Option<FrameMetrics>>>,
+    pending_metrics: Option<FrameMetrics>,
 }
 
 impl WindowFrames<'_> {
@@ -1618,6 +1685,7 @@ impl DesktopApplication for WindowFrames<'_> {
         {
             return Ok(None);
         }
+        let draw_start = Instant::now();
         self.application_frame([target.width, target.height], window.scale_factor())?;
         let world = self.world.as_mut().expect("desktop start owns the World");
         let control = &self.owner.control;
@@ -1660,6 +1728,33 @@ impl DesktopApplication for WindowFrames<'_> {
                 .map_err(|error| RenderError::Window(error.to_string()))?;
         }
         self.report.events.clear();
+        let update_ns = nanos(draw_start.elapsed());
+        let (systems, over_budget) = if self.debug {
+            let runner = self
+                .runner
+                .as_ref()
+                .expect("desktop start owns the scheduler");
+            let systems = runner
+                .systems
+                .iter()
+                .filter(|system| system.ran)
+                .map(|system| (system.name.clone(), system.last_ns))
+                .collect();
+            // A synchronous Python callback over the frame budget is the
+            // documented HUD/bench signal, so only that lane is marked here.
+            let over_budget = runner
+                .systems
+                .iter()
+                .filter(|system| {
+                    system.ran && matches!(system.work, Work::Sync(_)) && system.last_ns > 1_000_000
+                })
+                .map(|system| (system.name.clone(), system.last_ns))
+                .collect();
+            (systems, over_budget)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let render_start = Instant::now();
         let dispatch = graphics::compute_overrides(&self.scene)?;
         let camera = {
             let mut scene = self.scene.lock().unwrap();
@@ -1682,6 +1777,15 @@ impl DesktopApplication for WindowFrames<'_> {
             graphics::source(world)?,
             &camera,
         )?;
+        if self.debug {
+            self.pending_metrics = Some(FrameMetrics {
+                update_ns,
+                render_ns: nanos(render_start.elapsed()),
+                systems,
+                over_budget,
+                ..FrameMetrics::default()
+            });
+        }
         control.record_frame();
         self.clock.advance();
         Ok(Some(draw))
@@ -1779,6 +1883,15 @@ impl DesktopApplication for WindowFrames<'_> {
     }
 
     fn presented(&mut self, frame: PresentedFrame) -> Result<(), RenderError> {
+        if self.debug {
+            if let Some(mut metrics) = self.pending_metrics.take() {
+                metrics.interval_ns = frame.wall_interval.map(nanos).unwrap_or(0);
+                metrics.acquire_ns = nanos(frame.acquire);
+                metrics.submit_ns = nanos(frame.submit);
+                metrics.present_ns = nanos(frame.present);
+                *self.metrics.lock().unwrap() = Some(metrics);
+            }
+        }
         if self.frame_limit.is_some() {
             self.frames.push(frame);
         }

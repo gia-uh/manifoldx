@@ -11,8 +11,9 @@
   matching the regex RE; with `wait`, block up to S seconds until one arrives.
 - `GET /api/look`: the next frame presented, GUI included, as a PNG.
 - `GET /api/metrics` (under `manifoldx run --debug`): each second's frame rate, frame times, memory and
-  garbage collections, the last METRICS_KEEP seconds. Debug also logs the keys pressed, a frame slower than
-  SLOW_FRAME, a collection slower than SLOW_GC, and the metrics every METRICS_LOG seconds.
+  garbage collections, and a native core's measured split and synchronous callbacks over 1 ms, the last
+  METRICS_KEEP seconds. Debug also logs the keys pressed, a frame slower than SLOW_FRAME, a collection
+  slower than SLOW_GC, and the metrics every METRICS_LOG seconds.
 
 Under `manifoldx run --web` the app runs in a browser tab (manifoldx.web.dev): `/` and every other path
 serve the web root, the dev page moves to `/dev`, `/api/web/*` is the tab's stream and its answers, and
@@ -131,6 +132,7 @@ class Meter:
         self.systems = {}  # system name -> seconds summed over the second
         self.gc_runs, self.gc_time, self.gc_at = [0, 0, 0], 0.0, None
         self.logged = 0.0
+        self.over_budget = {}
         gc.callbacks.append(self._gc)
 
     def close(self):
@@ -147,11 +149,15 @@ class Meter:
                 LOG.info("slow gc: generation %d took %.0f ms, %d collected", info["generation"], 1000 * took,
                          info["collected"])
 
-    def frame(self, now, split=None, systems=None):
-        """After each frame, with the time it ended, engine.frame_split (seconds per part) and
-        engine.system_split (seconds per system name)."""
+    def frame(self, now, split=None, systems=None, *, over_budget=None, interval=None):
+        """After each frame, with the time it ended, engine.frame_split (seconds per part),
+        engine.system_split (seconds per system name) and, where the core measured them, the
+        present interval and the synchronous callbacks over 1 ms (seconds by name).
+
+        `interval` lets a native core report the scheduler's own measured start-to-start
+        interval instead of the time this watcher woke up."""
         if self.last is not None:
-            dt = now - self.last
+            dt = now - self.last if interval is None else interval
             self.frames += 1
             self.total += dt
             for part, seconds in (split or {}).items():
@@ -170,6 +176,12 @@ class Meter:
             m = {"time": time.strftime("%H:%M:%S"), "fps": round(self.frames / (now - self.start), 1),
                  "frame_ms": round(1000 * self.total / max(self.frames, 1), 1), "worst_ms": round(1000 * self.worst, 1),
                  "rss_mb": round(_rss_mb(), 1), "gc": {"runs": list(self.gc_runs), "ms": round(1000 * self.gc_time, 1)}}
+            if over_budget:
+                for name, seconds in over_budget.items():
+                    self.over_budget[name] = max(self.over_budget.get(name, 0.0), seconds)
+            if self.over_budget:
+                m["over_budget_ms"] = {name: round(1000 * seconds, 2)
+                                       for name, seconds in sorted(self.over_budget.items())}
             n = max(self.frames, 1)
             parts = {part: round(1000 * seconds / n, 1) for part, seconds in self.split.items()}
             parts["idle"] = round(max(0.0, m["frame_ms"] - sum(v for k, v in parts.items() if k != "overlap")), 1)  # between frames: the loop
@@ -193,6 +205,7 @@ class Meter:
             self.split = dict.fromkeys(self.split, 0.0)
             self.systems = dict.fromkeys(self.systems, 0.0)
             self.gc_runs, self.gc_time = [0, 0, 0], 0.0
+            self.over_budget = {}
 
 
 class Channel:
@@ -246,8 +259,13 @@ class Channel:
         """After a frame, under --debug: measure it, and log the keys pressed since the last one."""
         if self.meter is None:
             return
-        self.meter.frame(time.perf_counter(), getattr(engine, "frame_split", None),
-                         getattr(engine, "system_split", None))
+        self.meter.frame(
+            time.perf_counter(),
+            getattr(engine, "frame_split", None),
+            getattr(engine, "system_split", None),
+            over_budget=getattr(engine, "over_budget", None),
+            interval=getattr(engine, "frame_interval", None),
+        )
         keys = engine.input.pressed_keys
         if down := sorted(keys - self.keys):
             LOG.info("keys %s", " ".join(down))
@@ -263,6 +281,8 @@ class Channel:
 
     def look(self):
         """PNG bytes of the next frame presented."""
+        if getattr(self.hot, "looks", True) is False:
+            raise _Unavailable("look is unavailable with the Rust core: the native window has no frame readback")
         shot = Future()
         self.on_engine(lambda engine: engine._looks.append(shot))
         return shot.result(LOOK_WAIT)
@@ -292,6 +312,10 @@ KEEPALIVE = 15.0  # seconds between the comment lines that keep a tab's stream o
 
 class _NoTabOpen(Exception):
     """Under --web, a request the tab answers, with no tab open."""
+
+
+class _Unavailable(Exception):
+    """A contract this core does not provide; the request answers 501 with the reason."""
 
 
 class _TabError(Exception):
@@ -331,6 +355,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(*fn())
         except _NoTabOpen as e:
             self._send(503, {"error": str(e)})
+        except _Unavailable as e:
+            self._send(501, {"error": str(e)})
         except _TabError as e:
             self._send(500, {"error": str(e)})
         except (FutureTimeout, TimeoutError):
@@ -584,11 +610,30 @@ class Readback:
 
     def _answer(self, data, encode):
         try:
-            pixels = np.frombuffer(data, np.uint8).reshape(self.h, self.row)[:, :self.w * 4].reshape(self.h, self.w, 4)
-            result = encode(np.ascontiguousarray(pixels[..., [2, 1, 0]] if self.bgra else pixels[..., :3]))
+            result = encode(frame_rgb(data, self.w, self.h, self.row, self.bgra))
         except Exception as e:  # noqa: BLE001
             return self.fail(e)
         for future in self.futures:
+            future.set_result(result)
+
+
+def frame_rgb(data, width, height, row, bgra):
+    """(h, w, 3) uint8 RGB from a row-padded RGBA/BGRA frame read back from the GPU."""
+    pixels = np.frombuffer(data, np.uint8).reshape(height, row)[:, :width * 4].reshape(height, width, 4)
+    return np.ascontiguousarray(pixels[..., [2, 1, 0]] if bgra else pixels[..., :3])
+
+
+def answer_frame(futures, data, width, height, bgra):
+    """Resolve looks waiting on a presented frame with its PNG; runs off the engine's thread."""
+    try:
+        result = png(frame_rgb(data, width, height, width * 4, bgra))
+    except Exception as e:  # noqa: BLE001
+        for future in futures:
+            if future.set_running_or_notify_cancel():
+                future.set_exception(e)
+        return
+    for future in futures:
+        if future.set_running_or_notify_cancel():
             future.set_result(result)
 
 

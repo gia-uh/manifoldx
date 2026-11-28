@@ -23,6 +23,8 @@ Read this when you build something on manifoldx with an agent in the loop: the a
 
 None of this exists outside `manifoldx run`: the same app run with `python app.py` (the shipped game) has no server, and `engine.log` writes nowhere.
 
+Under `MANIFOLDX_CORE=rust` the same `state`, `set`, `emit`, `events`, `log`, `look`, `metrics`, `--debug` and `--port` work against the native window. Requests run at the frame barrier, and the server closes with the window. `look` copies the next presented surface frame after post and GUI, so the PNG matches the window; a surface that cannot copy its images answers 501 with that reason. `--debug` measures the same presented frames in the native scheduler and draws a HUD after post and GUI: its border is green when every synchronous callback is under 1 ms and red while one is over, and the slow callback is named in `over_budget_ms` and by `manifoldx metrics`.
+
 ## The API
 
 The server listens on 127.0.0.1 only (port 8770, or the next free one; `manifoldx run --port N` picks another). `.manifoldx/server.json` holds its URL, which the commands read. Add `.manifoldx/` to the project's `.gitignore`.
@@ -44,8 +46,8 @@ Every request that reads or changes the app runs on the engine's thread between 
 
 Plain `manifoldx run` keeps the dev server light: the log has only the runner's lines and the app's own. `--debug` adds what everyone needs to debug performance, with no code in the app:
 
-- `manifoldx metrics -n 30` (and a panel on the page): each second's fps, mean and worst frame time, resident memory, and garbage collections per generation with the time they took.
-- Each frame's time split in four (`split_ms`, mean per second): `update` (events, async handlers, systems), `render` (preparing and submitting the GPU work), `acquire` (waiting for the window's next image: vsync, or the GPU behind), `idle` (the rest: the loop between frames). A frame rate stuck at half the screen's refresh with a large `acquire` is vsync missing a refresh; a large `update` is the app's Python.
+- `manifoldx metrics -n 30` (and a panel on the page): each second's fps, mean and worst frame time, resident memory, and garbage collections per generation with the time they took. Under the Rust core it also names any synchronous callback over 1 ms in `over_budget_ms`.
+- Each frame's time split in four (`split_ms`, mean per second): `update` (events, async handlers, systems), `render` (preparing and submitting the GPU work), `acquire` (waiting for the window's next image: vsync, or the GPU behind), `idle` (the rest: the loop between frames). The Rust core adds `submit` and `present`, measured by the backend, and draws the same numbers in a HUD after post and GUI. A frame rate stuck at half the screen's refresh with a large `acquire` is vsync missing a refresh; a large `update` is the app's Python.
 - The log gets a line every 10 s with the same numbers, a `slow frame N ms` line for each frame over 100 ms, a `slow gc` line for each collection over 20 ms, and the keys pressed.
 
 A slow frame line says only how long; log where the person was from the app (`engine.log`) so the two lines meet in the log. To find what makes frames slow, watch for them: `manifoldx log --match 'slow frame' --wait 120`, then `manifoldx log -n 20` for what happened around them.

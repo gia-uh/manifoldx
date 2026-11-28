@@ -7,8 +7,8 @@ folder the browser runs (manifoldx.web.export).
 `manifoldx look`, `state`, `set`, `emit`, `events` and `log` talk to the dev server of the app
 running under `manifoldx run` in this folder (see manifoldx.devchannel).
 
-    manifoldx run app.py [-- <app args>]
-    manifoldx run -m package.module [-- <app args>]
+    manifoldx run app.py [--port N] [-- <app args>]
+    manifoldx run -m package.module [--port N] [-- <app args>]
     manifoldx run --web [-m package.module | app.py] [--port N] [-- <app args>]
     manifoldx export app.py scene.glb [--strict] [-- <app args>]
     manifoldx export -m package.module scene.glb [--strict] [-- <app args>]
@@ -97,6 +97,15 @@ def main(argv=None):
 
             WebReloader(script=args.script, module=args.module, argv=app_args, **port).run()
             return 0
+        from manifoldx._core import _selection
+
+        core, _ = _selection()
+        if core == "rust":
+            from manifoldx._native_reload import _run_app
+
+            _run_app(args.script, args.module, app_args, port=args.port, debug=args.debug)
+            return 0
+
         from manifoldx.hot import HotReloader
 
         HotReloader(script=args.script, module=args.module, argv=app_args, debug=args.debug, **port).run()
@@ -144,8 +153,9 @@ def dev_command(args):
 
     if args.command == "look":
         out = os.path.join(FOLDER, "look.png")
+        data = call("/api/look")
         with open(out, "wb") as f:
-            f.write(call("/api/look"))
+            f.write(data)
         print(out)
     elif args.command == "state":
         value = json.loads(call("/api/state"))
@@ -163,10 +173,18 @@ def dev_command(args):
     elif args.command == "metrics":
         for m in json.loads(call("/api/metrics"))[-args.n:]:
             s = m.get("split_ms", {})
-            print(f"{m['time']}  fps {m['fps']:5.1f}  frame {m['frame_ms']:5.1f} ms  worst {m['worst_ms']:6.1f} ms"
-                  f"  update {s.get('update', 0):5.1f}  render {s.get('render', 0):5.1f}"
-                  f"  acquire {s.get('acquire', 0):5.1f}  idle {s.get('idle', 0):5.1f}"
-                  f"  {m['rss_mb']:7.1f} MB  gc {'/'.join(map(str, m['gc']['runs']))} {m['gc']['ms']} ms")
+            backend = ""
+            if "submit" in s:
+                backend = f"  submit {s['submit']:5.1f}  present {s.get('present', 0):5.1f}"
+            line = (f"{m['time']}  fps {m['fps']:5.1f}  frame {m['frame_ms']:5.1f} ms  worst {m['worst_ms']:6.1f} ms"
+                    f"  update {s.get('update', 0):5.1f}  render {s.get('render', 0):5.1f}"
+                    f"  acquire {s.get('acquire', 0):5.1f}{backend}  idle {s.get('idle', 0):5.1f}"
+                    f"  {m['rss_mb']:7.1f} MB  gc {'/'.join(map(str, m['gc']['runs']))} {m['gc']['ms']} ms")
+            if m.get("over_budget_ms"):
+                line += "  sync >1 ms: " + ", ".join(
+                    f"{name} {ms:g}" for name, ms in m["over_budget_ms"].items()
+                )
+            print(line)
     elif args.command == "events":
         for name, docs in json.loads(call("/api/events")).items():
             print(name + "".join(f"\n    {d}" for d in docs if d))

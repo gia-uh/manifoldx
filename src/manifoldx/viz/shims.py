@@ -131,6 +131,28 @@ class Mark:
 # =============================================================================
 
 
+def _entity_rows(view: np.ndarray, targets: np.ndarray) -> np.ndarray:
+    """Row positions of `targets` inside a query view, which is often sorted."""
+    if len(targets) == 0:
+        return np.empty(0, dtype=np.intp)
+    if len(view) == len(targets) and np.array_equal(view, targets):
+        return np.arange(len(targets), dtype=np.intp)
+    if len(view) and np.all(view[:-1] < view[1:]):
+        rows = np.searchsorted(view, targets)
+        if np.any(rows >= len(view)) or not np.array_equal(view[rows], targets):
+            raise ValueError("a points mark's entities are missing from its query")
+        return rows
+    positions = {int(entity): row for row, entity in enumerate(view)}
+    try:
+        return np.fromiter(
+            (positions[int(entity)] for entity in targets),
+            dtype=np.intp,
+            count=len(targets),
+        )
+    except KeyError as error:
+        raise ValueError("a points mark's entities are missing from its query") from error
+
+
 class PointsMark(Mark):
     """Sprite point cloud — wraps Plan 1's PointCloud + ColormapMaterial path.
 
@@ -195,8 +217,7 @@ class PointsMark(Mark):
         else:
             size_arr = np.full(n, 1.0, dtype=np.float32)
 
-        alive_before = engine.store._alive.copy()
-        engine.spawn(
+        handle = engine.spawn(
             PointCloud(),
             Material(material),
             Transform(pos=pos_arr),
@@ -207,28 +228,47 @@ class PointsMark(Mark):
 
         # Live-data sync: each frame, copy the user's arrays into ECS
         # component storage so per-frame mutations propagate to the GPU.
-        # We capture the arrays + the slice of entity indices via closure.
-        # The entities this spawn added, wherever they sit in the store: a mark
-        # spawned before this one (a mesh) holds the first rows.
-        entity_slice = np.flatnonzero(engine.store._alive & ~alive_before)
+        # The spawn handle names the rows, wherever they sit: a mark spawned
+        # before this one (a mesh) holds the first rows. Read and write them
+        # through a Query, which both cores provide.
+        entity_slice = (
+            np.empty(0, dtype=np.intp)
+            if handle is None
+            else np.asarray(handle.indices, dtype=np.intp)
+        )
 
         positions_ref = self.positions.data  # alias the user's array
         color_ref = self.color.data if self.color is not None else None
         size_ref = self.size.data if self.size is not None else None
 
-        store = engine.store
-
         from manifoldx.systems import Query
 
-        def _sync(query: Query[Transform], dt: float):
-            # Copy mutable user arrays into the corresponding component slots.
-            store._components["Transform"][entity_slice, 0:3] = positions_ref
+        def _sync(query: Query[Transform, ScalarValue, Radius], dt: float):
+            view = np.fromiter(query, dtype=np.intp, count=len(query))
+            rows = _entity_rows(view, entity_slice)
+
+            # Read the whole view, replace this mark's rows, write it back:
+            # the accessor's assignment is the write path both cores share.
+            positions = np.array(query[Transform].pos.data, dtype=np.float32)
+            positions[rows, 0:3] = positions_ref
+            query[Transform].pos = positions
+
             if color_ref is not None:
-                store._components["ScalarValue"][entity_slice, 0] = color_ref
+                values = np.array(query[ScalarValue].value.data, dtype=np.float32)
+                values[rows, 0] = color_ref
+                query[ScalarValue].value = values
             if size_ref is not None:
-                store._components["Radius"][entity_slice, 0] = size_ref
+                radii = np.array(query[Radius].radius.data, dtype=np.float32)
+                radii[rows, 0] = size_ref
+                query[Radius].radius = radii
 
         _sync.__name__ = f"_points_sync_{id(self)}"
+        # This module postpones annotations, so the Query hint reaches
+        # `Engine.system` as a string; both cores need the object itself.
+        _sync.__annotations__ = {
+            "query": Query[Transform, ScalarValue, Radius],
+            "dt": float,
+        }
         engine.system(_sync)
 
 
@@ -294,14 +334,14 @@ class AxesMark(Mark):
     def apply(self, engine) -> None:
         from manifoldx.components import Material, Mesh, Transform
         from manifoldx.viz import AxisFrame, AxisMaterial, LabelMaterial, TextLabel
+        from manifoldx.viz.geometry import AXIS_LINE_X, AXIS_LINE_Y, AXIS_LINE_Z
 
         e = self.extent
-        for geom_name, axis_key, scale in [
-            ("axis_line_x", "x", (e, 1.0, 1.0)),
-            ("axis_line_y", "y", (1.0, e, 1.0)),
-            ("axis_line_z", "z", (1.0, 1.0, e)),
+        for geom, axis_key, scale in [
+            (AXIS_LINE_X, "x", (e, 1.0, 1.0)),
+            (AXIS_LINE_Y, "y", (1.0, e, 1.0)),
+            (AXIS_LINE_Z, "z", (1.0, 1.0, e)),
         ]:
-            geom = engine._geometry_registry.get_by_name(geom_name)
             engine.spawn(
                 Mesh(geom),
                 Material(AxisMaterial(color=self.colors[axis_key])),
@@ -451,14 +491,14 @@ class ScaleBarMark(Mark):
     def apply(self, engine) -> None:
         from manifoldx.components import Material, Mesh, Transform
         from manifoldx.viz import AxisFrame, AxisMaterial, LabelMaterial, TextLabel
+        from manifoldx.viz.geometry import AXIS_LINE_X
 
         anchor_x, anchor_y = _NDC_POSITIONS[self.position]
         half_len = self.ndc_length * 0.5
 
         # The bar — screen-anchored AxisMaterial.
-        geom = engine._geometry_registry.get_by_name("axis_line_x")
         engine.spawn(
-            Mesh(geom),
+            Mesh(AXIS_LINE_X),
             Material(AxisMaterial(color=self.color, anchor_mode="screen")),
             Transform(pos=(anchor_x, anchor_y, 0.0), scale=(half_len, 1.0, 1.0)),
             AxisFrame(extent=1.0),

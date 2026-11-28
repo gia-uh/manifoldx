@@ -50,4 +50,5 @@ def on_key(ev):
             print(f"Skybox: {engine.environment.show_skybox}")
 
 
-engine.cli()
+if __name__ == "__main__":
+    engine.cli()

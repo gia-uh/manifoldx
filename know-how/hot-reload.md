@@ -19,6 +19,67 @@ manifoldx run app.py -- --level 3         # everything after -- goes to the app'
 
 Run it with `uv run` inside a project, like every other Python command here.
 
+## Rust desktop registration reload
+
+With `MANIFOLDX_CORE=rust`, `manifoldx run` executes the usual entry point once
+and opens the window through the native loop. Use `engine.reload_systems(...)`
+with the absolute import names of trusted Python modules. Each module exposes
+`register(system)` and declares synchronous `(query, dt)` callbacks using
+components already registered in the World. A save to a named module replaces
+the full set of registered callbacks between frames. The scene persists. A
+syntax, import or registration error prints a traceback and keeps the previous
+set. Restart after editing setup or an import outside the named modules.
+See [Working with an agent](../docs/chapters/13-working-with-an-agent.md) for an example.
+
+### Rust native builder reload
+
+A game's native cell builder is a capsule from its own cdylib
+(`crates/manifoldx-sdk`, name `manifoldx.builder.v1`). `NativeBuilder` loads one
+and can swap it while the streamer keeps running:
+
+```python
+from manifoldx.native_binary import NativeBuilder
+from manifoldx.streaming import Streamer
+
+builder = NativeBuilder("build/libnative.so")
+streamer = Streamer(engine, cell=1000.0, build=builder)
+
+
+@engine.system
+def follow(query, dt):
+    builder.poll()          # reloads at a frame boundary if the file changed
+    streamer.focus(player.x, player.z)
+```
+
+Pass the loader straight to `Streamer(build=...)`; it calls the capsule on the
+streamer's worker threads. `poll()` compares the file's modification time and
+size once a frame. A rebuild saved over the same path is copied to a
+content-addressed filename before it is opened, so the platform never returns an
+older mapping, and the new capsule is opened and its name checked before the
+active builder changes. `builder.version` is the SHA-256 of the active build.
+Keep the build output's filename stable: its stem names the extension module
+(`libnative.so` exports `PyInit_native`), and the loader versions its own copy.
+
+A build with the wrong capsule name, no `build_cell` attribute, or a file that
+does not load is rejected: `poll()` records the error in `builder.last_error`,
+returns `False`, and the previous builder keeps serving. Builds already running
+on the old library finish with it. Reloading the same bytes again reuses the
+builder already open, and a rejected capsule is not opened twice. No library is
+unloaded, so each distinct build stays mapped for the life of the process: that
+is one mapping per distinct build, not per reload.
+
+`close()` stops watching and removes the staged copies; it runs at interpreter
+exit too. The active builder stays callable, so a build already running and a
+call made after close are not invalidated. On Windows a mapped library cannot
+be removed while mapped. Staged files can survive process exit and can then be deleted.
+`builder.retained()` reports the distinct builds, mappings, rejected capsules
+and staged copies held now.
+
+`reload(path)` loads explicitly and raises on failure. Use it when the app knows
+the new build's path instead of watching one.
+
+The remaining desktop instructions apply to the default Python core.
+
 ## What a reload does
 
 Every 0.25 s the reloader compares the modification times of the app's source files. When one changed:

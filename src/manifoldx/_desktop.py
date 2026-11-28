@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from inspect import iscoroutinefunction
 from pathlib import Path
 from threading import current_thread, main_thread
+from typing import get_type_hints
 from weakref import WeakSet, finalize, ref
 
 import numpy as np
 
+from manifoldx._native_reload import _RegistrationReload, _entry, _preparing
 from manifoldx._versions import _Counter
 from manifoldx.camera import Camera
 from manifoldx.components import Component, Material, Mesh, Transform
@@ -61,8 +63,13 @@ def _color(value):
 def _camera_input(camera):
     if camera.vertical_scale != 1:
         raise NotImplementedError("vertical scale is unavailable in the native renderer")
+    # The public Camera fields take any three-value sequence (a tuple or list,
+    # as the Python renderer accepts); normalise here, the one place the native
+    # renderer reads them.
     return (
-        camera.position.tolist(), camera.target.tolist(), camera.up.tolist(),
+        np.asarray(camera.position, dtype=np.float32).tolist(),
+        np.asarray(camera.target, dtype=np.float32).tolist(),
+        np.asarray(camera.up, dtype=np.float32).tolist(),
         camera.fov, camera.near, camera.far,
     )
 
@@ -118,6 +125,20 @@ class _TransformHandle:
             engine._transform_edits[self._entity] = rows[0]
 
     @property
+    def rot(self):
+        return self._engine._transform_rows(self._entity)[0, 3:7].copy()
+
+    @rot.setter
+    def rot(self, value):
+        engine = self._engine
+        rows = engine._transform_rows(self._entity)
+        rows[0, 3:7] = np.asarray(value, "float64")
+        if engine._commands is None:
+            engine._world.replace("Transform", (self._entity,), rows)
+        else:
+            engine._transform_edits[self._entity] = rows[0]
+
+    @property
     def scale(self):
         return self._engine._transform_rows(self._entity)[0, 7:10].copy()
 
@@ -143,6 +164,8 @@ class _EntityHandle:
         self.transform = _TransformHandle(engine, entities[0])
 
     def set_geometry(self, geometry):
+        if hasattr(geometry, "to_geometry"):
+            geometry = geometry.to_geometry()
         self._engine._replace_geometry(self._entities, geometry)
 
     def set_joints(self, matrices):
@@ -169,6 +192,8 @@ class _NativeEngine:
     ):
         from manifoldx._core_native import FrameLoop, _NativeGraphics
 
+        if _preparing.get():
+            raise RuntimeError("reload registration modules cannot create an Engine")
         if pipelined:
             raise NotImplementedError(
                 "Python graphics pipelining is unavailable with the Rust Engine"
@@ -177,7 +202,20 @@ class _NativeEngine:
             raise ValueError("max_fps must be between 1 and 1000")
         self.title, self.w, self.h = title, width, height
         self.fullscreen, self.monitor, self.max_fps = fullscreen, monitor, max_fps
+        self._frame_index = 0
+        self._last_dt = 1 / 60
         self.elapsed = 0.0
+        # Measured by the native scheduler; the Python engine's own attrs have
+        # the same names so devchannel.Meter reads both cores the same way.
+        self.frame_split = {
+            "update": 0.0, "acquire": 0.0, "render": 0.0,
+            "submit": 0.0, "present": 0.0, "overlap": 0.0,
+        }
+        self.system_split = {}
+        self.over_budget = {}
+        self.frame_interval = None
+        self._hud_sample = None
+        self._debug_hud = False
         self.camera = Camera()
         self.background_color = (0.1, 0.1, 0.2)
         self._origin = (0.0, 0.0)
@@ -193,16 +231,24 @@ class _NativeEngine:
         self._native_environment = None
         self._shadow_options = None
         self._capacity = max_entities
+        from manifoldx.hot import State
+
         self.input = InputState()
+        self.state = State()
         self.gui = _GuiRoot()
         self._gui_runtime = _NativeGui(self)
         self._event_bus = EventBus()
+        self._dev_channel = None
+        self._looks = []  # futures waiting for the next presented frame as PNG bytes (the dev server's look)
+        self._pending_looks = []  # those whose capture is in flight
+        self._look_armed = False
         self._aio_loop = None
         self._tasks = set()
         self._task_errors = []
         self._frame_waiters = FrameWaiters(self._get_active_loop)
         self._application_systems = {}
         self._systems_changed = False
+        self._registration_reload = None
         self.lines = Lines()
         self.benders = []
         self._line_rows = {}
@@ -216,6 +262,16 @@ class _NativeEngine:
         columns = (("Transform", "f32", 10), ("Mesh", "u32", 1), ("Material", "u32", 1))
         for name, kind, size in columns:
             self._world.register(name, kind=kind, width=size)
+        # Every Component class imported before the engine existed is
+        # registered now, while the native schema is still open. The first
+        # spawn publishes entities, after which the native world refuses new
+        # schemas; an app that spawns a mesh and then a viz component (or any
+        # far-apart component) would otherwise fail on its lazy registration.
+        from manifoldx.components import _COMPONENT_CLASSES
+
+        for component in _COMPONENT_CLASSES.values():
+            if not component._gpu_only:
+                self._world.register(component)
         self._registries = {"Mesh": {}, "Material": {}}
         self._view_materials = {}
         self._mesh_ids = count(1)
@@ -362,6 +418,12 @@ class _NativeEngine:
     def emit(self, event, payload=None):
         self._event_bus.emit(event, payload)
 
+    def log(self, message: str) -> None:
+        """A line for the dev log under `manifoldx run` (its page, /api/log, .manifoldx/log.txt)."""
+        from manifoldx import devchannel
+
+        devchannel.LOG.info(message)
+
     def tick(self):
         return self._frame_waiters.add_tick()
 
@@ -428,7 +490,122 @@ class _NativeEngine:
             # GUI consumption is cooperative, as on the original input bus.
             self.emit(event, payload)
 
+    def _arm_look(self):
+        """Ask the desktop loop to copy this frame for every look requested since the last one."""
+        if not self._looks:
+            return
+        looks, self._looks = self._looks, []
+        self._pending_looks.extend(looks)
+        if self._look_armed:
+            return
+        from manifoldx.devchannel import _Unavailable
+
+        try:
+            self._graphics.request_presented()
+        except RuntimeError as error:
+            self._pending_looks, pending = [], self._pending_looks
+            reason = _Unavailable(f"look is unavailable with the Rust core: {error}")
+            for shot in pending:
+                if not shot.done():
+                    shot.set_exception(reason)
+        else:
+            self._look_armed = True
+
+    def _finish_look(self):
+        """Answer the looks waiting on a frame whose copy came back, off the engine's thread."""
+        if not self._pending_looks:
+            return
+        try:
+            image = self._graphics.take_presented()
+        except RuntimeError as error:
+            pending, self._pending_looks = self._pending_looks, []
+            self._look_armed = False
+            for shot in pending:
+                if not shot.done():
+                    shot.set_exception(error)
+            return
+        if image is None:
+            return
+        from threading import Thread
+
+        from manifoldx import devchannel
+
+        self._look_armed = False
+        looks, self._pending_looks = self._pending_looks, []
+        width, height, bgra, data = image
+        Thread(target=devchannel.answer_frame, args=(looks, data, width, height, bgra),
+               name="manifoldx-look", daemon=True).start()
+
+    def _fail_looks(self, error):
+        looks, self._looks = self._looks, []
+        pending, self._pending_looks = self._pending_looks, []
+        self._look_armed = False
+        for shot in (*looks, *pending):
+            if not shot.done():
+                shot.set_exception(error)
+
+    def _record_metrics(self):
+        """Read the previous presented frame's samples from the native scheduler."""
+        if self._dev_channel is None or self._dev_channel.meter is None:
+            return
+        sample = self._world._loop.last_metrics()
+        if sample is None:
+            return
+        self._hud_sample = sample
+        ns = 1e9
+        self.frame_interval = sample["interval_ns"] / ns if sample["interval_ns"] else None
+        self.frame_split = {
+            "update": sample["update_ns"] / ns,
+            "acquire": sample["acquire_ns"] / ns,
+            "render": sample["render_ns"] / ns,
+            "submit": sample["submit_ns"] / ns,
+            "present": sample["present_ns"] / ns,
+            "overlap": 0.0,
+        }
+        self.system_split = {name: value / ns for name, value in sample["systems"]}
+        self.over_budget = {name: value / ns for name, value in sample["over_budget"]}
+        self._dev_channel.frame(self)
+
+    def _hud_lines(self):
+        """The `--debug` HUD's text, from the last presented frame's measurements."""
+        sample = self._hud_sample
+        if not sample or not sample.get("interval_ns"):
+            return ["manifoldx --debug", "waiting for a presented frame"]
+        ms = 1e6
+        interval = sample["interval_ns"] / ms
+        fps = 1000.0 / interval if interval else 0.0
+        lines = [
+            f"debug {fps:5.1f} fps  frame {interval:5.1f} ms",
+            f"update {sample['update_ns'] / ms:5.2f} render {sample['render_ns'] / ms:5.2f}"
+            f" acquire {sample['acquire_ns'] / ms:5.2f}",
+            f"submit {sample['submit_ns'] / ms:5.2f} present {sample['present_ns'] / ms:5.2f}",
+        ]
+        slow = sample.get("over_budget") or []
+        if slow:
+            lines.append(
+                "sync >1 ms: "
+                + ", ".join(f"{name} {value / ms:.2f} ms" for name, value in slow)
+            )
+        else:
+            lines.append("sync >1 ms: none")
+        return lines
+
+    def _begin_application_frame(self, dt):
+        self._last_dt = dt
+        payload = {"dt": dt, "elapsed": self.elapsed, "frame": self._frame_index}
+        self._frame_index += 1
+        self._event_bus._pending.insert(0, ("frame", payload))
+        self.input._begin_frame()
+        self._pump_events()
+
     def _desktop_begin_frame(self, size, dpi, elapsed, events, world_available):
+        # Dev-channel requests run at the frame barrier, before this frame's events
+        # are delivered and the Rust scheduler dispatches its systems.
+        if self._dev_channel is not None:
+            self._dev_channel.run_jobs()
+        self._record_metrics()
+        self._finish_look()
+        self._arm_look()
         self.elapsed = elapsed
         self._world._running = not world_available
         self._world._started = True
@@ -439,20 +616,65 @@ class _NativeEngine:
                 resize = ResizeEvent(round(self.w / dpi), round(self.h / dpi), dpi)
                 self.input._record_resize(resize)
                 self.emit("resize", resize)
-                if self.gui:
+                if self.gui or self._debug_hud:
                     self._gui_runtime.sync()
             self._window_events(events)
-            self.input._begin_frame()
-            self._pump_events()
-            if self._systems_changed:
-                self._systems_changed = False
-                return list(self._application_systems.values())
-            return None
+            self._begin_application_frame(self._last_dt)
+            return self._frame_system_updates()
         finally:
             self._world._running = True
 
+    def reload_systems(self, *modules):
+        """Declare the source modules that supply reloadable native Engine systems."""
+        if self._started or self._registration_reload is not None:
+            raise RuntimeError("declare reload systems once before starting the Engine")
+        if not modules or any(
+            not isinstance(name, str) or not all(part.isidentifier() for part in name.split("."))
+            for name in modules
+        ):
+            raise ValueError("expected one or more absolute registration module names")
+        if len(set(modules)) != len(modules):
+            raise ValueError("duplicate registration module")
+        self._registration_reload = _RegistrationReload(modules)
+
+    def _current_application_systems(self):
+        reload = self._registration_reload
+        return [*self._application_systems.values(), *(reload.registrations if reload else ())]
+
+    def _frame_system_updates(self):
+        reload = self._registration_reload
+        if reload is not None and _entry.get() is not None:
+            if reload.poll(self._prepare_reload_systems):
+                self._systems_changed = True
+        if self._systems_changed:
+            self._systems_changed = False
+            return self._current_application_systems()
+        return None
+
+    def _prepare_reload_systems(self, callbacks):
+        if len(set(callbacks)) != len(callbacks) or any(
+            callback in self._application_systems for callback in callbacks
+        ):
+            raise ValueError("system is already registered")
+        registrations = tuple(
+            self._bind_application_system(callback, get_type_hints(callback).values(), register=False)
+            for callback in callbacks
+        )
+        # Match frames.rs application_frame and validate_columns before publishing.
+        # Only callbacks go through this lane and every column comes from this World.
+        world = self._world
+        application = [*self._application_systems.values(), *registrations]
+        if len(world._systems) + len(application) > 32:
+            raise ValueError("too many desktop systems (maximum 32)")
+        for name, _, reads, _, _ in application:
+            if self._position_binding is not None and self._position_binding[0] in reads:
+                raise ValueError(f"{name}: resident column cannot use CPU reads")
+            if sum(self._capacity * (17 + world._metadata[col][2] * 4) for col in reads) > 16 * 1024**2:
+                raise ValueError(f"{name}: declared snapshot exceeds byte limit")
+        return registrations
+
     def _desktop_finish_frame(self):
-        if self.gui or self._gui_runtime._widgets:
+        if self.gui or self._gui_runtime._widgets or self._debug_hud:
             self._gui_runtime.sync(refresh=True)
         self._sync_scene()
 
@@ -471,14 +693,23 @@ class _NativeEngine:
             return self.system
         if iscoroutinefunction(callback):
             raise NotImplementedError("the Rust base Engine requires synchronous systems")
+        if callback in self._application_systems:
+            raise ValueError("system is already registered")
+        self._application_systems[callback] = self._bind_application_system(
+            callback, callback.__annotations__.values(), register=True
+        )
+        self._systems_changed = True
+        return callback
+
+    def _bind_application_system(self, callback, hints, *, register):
         columns = []
-        for hint in callback.__annotations__.values():
+        for hint in hints:
             if isinstance(hint, Query):
                 components = (
                     hint.components if isinstance(hint.components, tuple) else (hint.components,)
                 )
                 for component in components:
-                    if isinstance(component, type) and issubclass(component, Component):
+                    if register and isinstance(component, type) and issubclass(component, Component):
                         self._register_component(component)
                     columns.append(self._column_key(component))
         columns = tuple(dict.fromkeys(columns))
@@ -523,7 +754,7 @@ class _NativeEngine:
                 for key in columns:
                     name = self._column_name(key)
                     if name != "Transform" and not np.array_equal(arrays[name], originals[name]):
-                        commands.replace(key, entities, arrays[name])
+                        self._replace_rows(commands, key, entities, arrays[name])
                 if self._pending_destroy:
                     commands.destroy(tuple(dict.fromkeys(self._pending_destroy)))
             finally:
@@ -532,14 +763,10 @@ class _NativeEngine:
                 self._transform_edits.clear()
 
         invoke.__qualname__ = callback.__qualname__
-        if callback in self._application_systems:
-            raise ValueError("system is already registered")
         column_ids = self._world._columns(access)
-        self._application_systems[callback] = self._world._system_registration(
+        return self._world._system_registration(
             invoke, None, column_ids, [*column_ids, self._world._structural]
         )
-        self._systems_changed = True
-        return callback
 
     def remove_system(self, callback):
         try:
@@ -567,7 +794,23 @@ class _NativeEngine:
                     shifted[:3] = shifted[:3].astype("float64") + offset
                     edits[entity] = shifted
         if edits:
-            commands.replace("Transform", tuple(edits), np.stack(tuple(edits.values())))
+            self._replace_rows(
+                commands, "Transform", tuple(edits), np.stack(tuple(edits.values()))
+            )
+
+    def _replace_rows(self, commands, key, entities, rows):
+        """Replace rows in batches no larger than one command may carry.
+
+        A system can write every row it queried in one frame; the native
+        command lease accepts `World._max_command_rows` rows per command, so a
+        large query (10k sprites, for example) is split into disjoint batches
+        that the barrier applies in order.
+        """
+        limit = self._world._max_command_rows
+        for start in range(0, len(entities), limit):
+            commands.replace(
+                key, entities[start : start + limit], rows[start : start + limit]
+            )
 
     @staticmethod
     def _column_name(component):
@@ -703,11 +946,25 @@ class _NativeEngine:
         old = {int(owners[entity][1]) for entity in owned}
         others = {int(index) for entity, (has_mesh, index) in owners.items()
                   if has_mesh and entity not in owned}
+        registry = self._registries["Mesh"]
+        original = next((obj for mesh, obj in registry.values() if mesh in old), None)
+        if original is not None and "positions" in original:
+            n_old = len(original["positions"])
+            n_new = len(np.asarray(geometry.get("positions", [])).reshape(-1, 3))
+            if n_new != n_old:
+                raise ValueError(
+                    f"set_geometry requires equal vertex count (have {n_old}, got {n_new}); "
+                    "the in-place update cannot resize the buffer."
+                )
+            if "joints" in geometry and "joints" not in original:
+                raise ValueError(
+                    "set_geometry got a mesh with joints for an entity spawned without them; "
+                    "spawn it from a geometry with joints (Mesh(joints=...)) to skin it."
+                )
         reuse = next(iter(old)) if len(old) == 1 and old.isdisjoint(others) else None
         index = self._mesh(geometry, reuse=reuse)
         if index not in old or len(old) != 1:
             self._commands.replace("Mesh", entities, np.full((len(entities), 1), index, dtype="uint32"))
-        registry = self._registries["Mesh"]
         for key, (mesh, obj) in list(registry.items()):
             if mesh in old and mesh not in others and obj is not geometry:
                 del registry[key]
@@ -822,8 +1079,12 @@ class _NativeEngine:
             if texture is not None and not self._owns_texture(texture):
                 raise ValueError("albedo texture belongs to a different graphics owner")
             view_albedo = texture is not None and texture._native_view
+            # The public mirror endpoint is roughness 0; the native prefiltered
+            # chain starts at 0.001, which renders it identically, so translate
+            # the supported interval below that floor instead of rejecting it.
+            roughness = 0.001 if 0.0 <= material.roughness < 0.001 else material.roughness
             params = (
-                material.roughness,
+                roughness,
                 material.metallic,
                 material.ao,
                 None if texture is None else texture.id,
@@ -1283,6 +1544,9 @@ class _NativeEngine:
         if not self._started:
             self._started = True
             self._event_bus.dispatch_immediate(self, "startup", {})
+            if self._registration_reload is not None:
+                self._registration_reload.prepare(self._prepare_reload_systems)
+                self._systems_changed = True
             if self.gui:
                 self._gui_runtime.sync()
             self._sync_scene()
@@ -1298,6 +1562,7 @@ class _NativeEngine:
             return
         self._closed = True
         self.quit()
+        self._fail_looks(RuntimeError("the native window closed before a frame was presented"))
         self._finish_texture_reads()
         for _, future in self._texture_reads.values():
             future.cancel()
@@ -1329,6 +1594,9 @@ class _NativeEngine:
         frames = os.environ.get("MANIFOLDX_DESKTOP_FRAMES")
         monitor = self.monitor if self.monitor is not None else os.environ.get("MANIFOLDX_MONITOR")
         hz = 1 / self._fixed_dt if self._fixed_dt is not None else min(60.0, self.max_fps)
+        self._last_dt = 1 / hz
+        debug = self._dev_channel is not None and self._dev_channel.meter is not None
+        self._debug_hud = debug
         options = (
             self.title,
             self.w,
@@ -1338,6 +1606,7 @@ class _NativeEngine:
             os.environ.get("MANIFOLDX_PRESENT", "fifo"),
             hz,
             int(frames) if frames else None,
+            os.environ.get("MANIFOLDX_GPU_TIMINGS", "1") != "0",
         )
 
         def startup():
@@ -1355,6 +1624,7 @@ class _NativeEngine:
                 self._position_binding,
                 self._desktop_probe,
                 (self._desktop_begin_frame, self._desktop_finish_frame),
+                debug=debug,
             )
             self.elapsed = self.desktop_report["scheduler_frames"] / hz
             self.desktop_report["gui_getter_calls"] = self._gui_runtime.getter_total
@@ -1365,6 +1635,31 @@ class _NativeEngine:
             if self._position_binding is not None:
                 self._world._resident_closed = self._position_binding[0]
             self.close()
+
+    def gpu_timings(self):
+        """The GPU time of the newest frame the Rust core measured, in milliseconds.
+
+        The native desktop loop measures only a bounded diagnostic session
+        (`MANIFOLDX_DESKTOP_FRAMES`): one timestamp pair around each presented
+        frame's main render pass, resolved and read back once after the last
+        frame, so a normal run never reads timestamps. This answers after
+        `run()` returns, with `main` (the measured pass) and `total` (the same
+        single interval). It is None during a run, in a session without a frame
+        limit, with `MANIFOLDX_GPU_TIMINGS=0`, or on an adapter without
+        timestamp queries; `desktop_report["gpu_timings"]["state"]` says which.
+        """
+        report = self.desktop_report
+        if report is None or (report.get("gpu_timings") or {}).get("state") != "measured":
+            return None
+        measured = [
+            sample["gpu_render_ns"]
+            for sample in report.get("samples", [])
+            if sample.get("gpu_render_ns") is not None
+        ]
+        if not measured:
+            return None
+        milliseconds = measured[-1] / 1e6
+        return {"main": milliseconds, "total": milliseconds}
 
     def render_frame(self, *, supersample=1, pass_="beauty", groups=None, dt=1 / 30):
         if self._desktop_ran:
@@ -1396,13 +1691,16 @@ class _NativeEngine:
         else:
             step = self._fixed_dt if self._fixed_dt is not None else dt
             compute_dt = step
-            self.input._begin_frame()
-            self._pump_events()
+            self._begin_application_frame(step)
+            application = self._current_application_systems()
+            updates = self._frame_system_updates()
+            if updates is not None:
+                application = updates
             self._world._loop = self._frame_loop(self._world._native, 64, 8, 4096)
             self._world._running = True
             self._time_base = self.elapsed
             try:
-                systems = [*self._world._systems, *self._application_systems.values()]
+                systems = [*self._world._systems, *application]
                 self._world._loop.run(
                     1, 1 / step if step else 60, False, systems, None, freeze_clock=step == 0,
                 )
@@ -1450,6 +1748,10 @@ class _NativeEngine:
         try:
             for _ in range(count):
                 writer.send(self.render_frame(dt=1 / fps))
-        finally:
+        except BaseException:
+            writer.discard()
+            raise
+        else:
             writer.close()
+        finally:
             self.close()
