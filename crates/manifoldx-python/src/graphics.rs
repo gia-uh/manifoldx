@@ -285,7 +285,9 @@ impl Scene {
                         .map(|(identity, _)| skin_entity(world, renderer, *identity))
                         .collect::<Result<Vec<_>, _>>()?;
                     for (entity, (_, matrices)) in entities.into_iter().zip(poses) {
-                        renderer.set_joints(entity, &matrices)?;
+                        if let Some(entity) = entity {
+                            renderer.set_joints(entity, &matrices)?;
+                        }
                     }
                 }
                 Upload::Bake(clip, poses) => renderer.bake_poses(clip, &poses)?,
@@ -295,7 +297,9 @@ impl Scene {
                         .map(|(identity, _, _)| skin_entity(world, renderer, *identity))
                         .collect::<Result<Vec<_>, _>>()?;
                     for (entity, (_, clip, position)) in entities.into_iter().zip(frames) {
-                        renderer.play_poses(entity, clip, position)?;
+                        if let Some(entity) = entity {
+                            renderer.play_poses(entity, clip, position)?;
+                        }
                     }
                 }
                 Upload::Material(id, color, shading, effects, samples_view) => {
@@ -449,24 +453,32 @@ pub(crate) fn compute_overrides(scene: &Mutex<Scene>) -> Result<HashMap<u32, u32
     .map_err(|error| RenderError::Resource(error.to_string()))
 }
 
+/// Resolve one pose identity against the live world.
+///
+/// A pose whose entity was destroyed is stale input from an app that still
+/// holds the handle after `clear_scene`: the legacy engine writes the row for
+/// an index no live entity owns and draws nothing, so the frame goes on. A
+/// live entity whose mesh is not skinned is real misuse and still fails.
 fn skin_entity(
     world: &World,
     renderer: &NativeRenderer,
     (slot, generation): PoseIdentity,
-) -> Result<EntityId, RenderError> {
+) -> Result<Option<EntityId>, RenderError> {
     let invalid =
         || RenderError::Resource(format!("skinning needs a live skinned mesh at slot {slot}"));
-    let entity = world
+    let Some(entity) = world
         .live_identity(slot)
         .filter(|id| generation.is_none_or(|version| version == id.generation()))
-        .ok_or_else(invalid)?;
+    else {
+        return Ok(None);
+    };
     let mesh = world.component_index("Mesh").ok_or_else(invalid)?;
     let rows = world
         .read_component(mesh, Some(&[entity]))
         .map_err(|error| RenderError::Resource(error.to_string()))?;
     match rows.data {
         ColumnData::U32(ids) if ids.first().is_some_and(|id| renderer.mesh_is_skinned(*id)) => {
-            Ok(entity)
+            Ok(Some(entity))
         }
         _ => Err(invalid()),
     }

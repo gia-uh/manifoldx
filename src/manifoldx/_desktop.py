@@ -120,6 +120,20 @@ class _TransformHandle:
             engine._transform_edits[self._entity] = rows[0]
 
     @property
+    def rot(self):
+        return self._engine._transform_rows(self._entity)[0, 3:7].copy()
+
+    @rot.setter
+    def rot(self, value):
+        engine = self._engine
+        rows = engine._transform_rows(self._entity)
+        rows[0, 3:7] = np.asarray(value, "float64")
+        if engine._commands is None:
+            engine._world.replace("Transform", (self._entity,), rows)
+        else:
+            engine._transform_edits[self._entity] = rows[0]
+
+    @property
     def scale(self):
         return self._engine._transform_rows(self._entity)[0, 7:10].copy()
 

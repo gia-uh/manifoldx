@@ -59,7 +59,7 @@ engine.add_light(PointLight(position=(0, 0, 0), color="#ffffff", intensity=200.0
 engine.add_light(PointLight(position=(0, 8, 8), color="#7799cc", intensity=12.0))
 
 
-# Module-level handle to the three entities — populated in startup.
+# Module-level handles to the three entities — populated in startup.
 bodies = {"sun": None, "earth": None, "moon": None}
 
 
@@ -108,18 +108,16 @@ def setup(_payload):
         albedo_map=moon_tex,
     )
 
-    # Spawn in order; their store indices are deterministic on first frame
-    # since nothing else has been spawned.
-    engine.spawn(Mesh(geo), Material(sun_mat),
-                 Transform(pos=(0, 0, 0), scale=(SUN_RADIUS,) * 3))
-    engine.spawn(Mesh(geo), Material(earth_mat),
-                 Transform(pos=(EARTH_ORBIT_RADIUS, 0, 0),
-                           scale=(EARTH_RADIUS,) * 3))
-    engine.spawn(Mesh(geo), Material(moon_mat),
-                 Transform(pos=(EARTH_ORBIT_RADIUS + MOON_ORBIT_RADIUS, 0, 0),
-                           scale=(MOON_RADIUS,) * 3))
-
-    bodies["sun"], bodies["earth"], bodies["moon"] = 0, 1, 2
+    # Spawn in order and keep a handle on each: the frame handler poses them
+    # through the public transform surface, not the engine's internal store.
+    bodies["sun"] = engine.spawn(Mesh(geo), Material(sun_mat),
+                                 Transform(pos=(0, 0, 0), scale=(SUN_RADIUS,) * 3))
+    bodies["earth"] = engine.spawn(Mesh(geo), Material(earth_mat),
+                                   Transform(pos=(EARTH_ORBIT_RADIUS, 0, 0),
+                                             scale=(EARTH_RADIUS,) * 3))
+    bodies["moon"] = engine.spawn(Mesh(geo), Material(moon_mat),
+                                  Transform(pos=(EARTH_ORBIT_RADIUS + MOON_ORBIT_RADIUS, 0, 0),
+                                            scale=(MOON_RADIUS,) * 3))
 
     # Camera: pulled back, tilted down, looking at the sun. Use set_pose so
     # the spherical (distance, azimuth, elevation) cache stays consistent —
@@ -133,38 +131,40 @@ def orbit_bodies(payload):
         return
 
     t = payload["elapsed"]
-    transforms = engine.store._components["Transform"]
+    earth = bodies["earth"].transform
+    moon = bodies["moon"].transform
+    sun = bodies["sun"].transform
 
     # Earth orbits the sun.
     earth_theta = (t / EARTH_YEAR) * 2 * np.pi
     ex = EARTH_ORBIT_RADIUS * np.cos(earth_theta)
     ez = EARTH_ORBIT_RADIUS * np.sin(earth_theta)
-    transforms[bodies["earth"], 0:3] = (ex, 0.0, ez)
+    earth.pos = (ex, 0.0, ez)
 
     # Earth spin on its tilted axis.
     earth_spin = (t / EARTH_DAY) * 2 * np.pi
     tilt_q = _quat_axis_angle((0, 0, 1), EARTH_TILT)
     spin_q = _quat_axis_angle((0, 1, 0), earth_spin)
     earth_rot = _quat_multiply(tilt_q, spin_q)
-    transforms[bodies["earth"], 3:7] = earth_rot
+    earth.rot = earth_rot
 
     # Moon orbits Earth on an inclined plane.
     moon_theta = (t / MOON_MONTH) * 2 * np.pi
     mx_ = MOON_ORBIT_RADIUS * np.cos(moon_theta)
     mz_ = MOON_ORBIT_RADIUS * np.sin(moon_theta) * np.cos(MOON_INCLINATION)
     my_ = MOON_ORBIT_RADIUS * np.sin(moon_theta) * np.sin(MOON_INCLINATION)
-    transforms[bodies["moon"], 0:3] = (ex + mx_, my_, ez + mz_)
+    moon.pos = (ex + mx_, my_, ez + mz_)
 
     # Moon spin (slow — tidally locked toward Earth would be one rotation per
     # orbit; we leave it independent for visual interest).
     moon_spin = (t / (MOON_MONTH * 0.5)) * 2 * np.pi
     moon_rot = _quat_axis_angle((0, 1, 0), moon_spin)
-    transforms[bodies["moon"], 3:7] = moon_rot
+    moon.rot = moon_rot
 
     # Sun spin (the texture rotates so you can see it's not a flat ball).
     sun_spin = (t / 30.0) * 2 * np.pi
     sun_rot = _quat_axis_angle((0, 1, 0), sun_spin)
-    transforms[bodies["sun"], 3:7] = sun_rot
+    sun.rot = sun_rot
 
 
 @engine.system
