@@ -747,7 +747,7 @@ class _NativeEngine:
                 for key in columns:
                     name = self._column_name(key)
                     if name != "Transform" and not np.array_equal(arrays[name], originals[name]):
-                        commands.replace(key, entities, arrays[name])
+                        self._replace_rows(commands, key, entities, arrays[name])
                 if self._pending_destroy:
                     commands.destroy(tuple(dict.fromkeys(self._pending_destroy)))
             finally:
@@ -787,7 +787,23 @@ class _NativeEngine:
                     shifted[:3] = shifted[:3].astype("float64") + offset
                     edits[entity] = shifted
         if edits:
-            commands.replace("Transform", tuple(edits), np.stack(tuple(edits.values())))
+            self._replace_rows(
+                commands, "Transform", tuple(edits), np.stack(tuple(edits.values()))
+            )
+
+    def _replace_rows(self, commands, key, entities, rows):
+        """Replace rows in batches no larger than one command may carry.
+
+        A system can write every row it queried in one frame; the native
+        command lease accepts `World._max_command_rows` rows per command, so a
+        large query (10k sprites, for example) is split into disjoint batches
+        that the barrier applies in order.
+        """
+        limit = self._world._max_command_rows
+        for start in range(0, len(entities), limit):
+            commands.replace(
+                key, entities[start : start + limit], rows[start : start + limit]
+            )
 
     @staticmethod
     def _column_name(component):
