@@ -3,6 +3,7 @@ import argparse
 import gc
 import os
 import threading
+import tempfile
 import warnings
 import wgpu
 import sys
@@ -49,9 +50,11 @@ class _VideoWriter:
     removes the partial file instead of returning success.
     """
 
-    def __init__(self, writer, output):
+    def __init__(self, writer, output, staging):
         self._writer = writer
         self.output = Path(output)
+        self.staging = staging
+        self.encoded = Path(staging.name) / self.output.name
         self._process = writer.gi_frame.f_locals.get("p") if writer.gi_frame else None
         self._closed = False
 
@@ -62,14 +65,16 @@ class _VideoWriter:
         if self._closed:
             return
         self._closed = True
-        self._writer.close()
-        code = self._process.returncode if self._process is not None else None
-        if code not in (0, None):
-            self.discard()
-            raise RuntimeError(f"video encoder exited with code {code}; no video written")
-        if not self.output.is_file() or self.output.stat().st_size == 0:
-            self.discard()
-            raise RuntimeError("video encoder wrote no frames; no video written")
+        try:
+            self._writer.close()
+            code = self._process.returncode if self._process is not None else None
+            if code not in (0, None):
+                raise RuntimeError(f"video encoder exited with code {code}; no video written")
+            if not self.encoded.is_file() or self.encoded.stat().st_size == 0:
+                raise RuntimeError("video encoder wrote no frames; no video written")
+            self.encoded.replace(self.output)
+        finally:
+            self.staging.cleanup()
 
     def discard(self):
         """Close and remove a partial file without masking the error that caused it."""
@@ -79,7 +84,7 @@ class _VideoWriter:
                 self._writer.close()
             except Exception:
                 pass
-        self.output.unlink(missing_ok=True)
+        self.staging.cleanup()
 
 
 def _overlap_is_ordered() -> bool:
@@ -2453,23 +2458,21 @@ class Engine:
         # Set up video writer with imageio-ffmpeg
         writer = self._get_video_writer(output, fps, self.w, self.h, codec, quality)
 
-        # Fire built-in 'startup' event before the first frame, and wait for what it loads.
-        self._fire_startup()
-
-        # Progress tracking
         pbar = None
-        if progress:
-            try:
-                from tqdm import tqdm
-
-                pbar = tqdm(total=frame_count, desc="Rendering video", unit="frames")
-            except ImportError:
-                pass
-
-        self._settle()
-
-        # === RENDER LOOP ===
         try:
+            # Fire built-in 'startup' event before the first frame, and wait for what it loads.
+            self._fire_startup()
+
+            # Progress tracking
+            if progress:
+                try:
+                    from tqdm import tqdm
+
+                    pbar = tqdm(total=frame_count, desc="Rendering video", unit="frames")
+                except ImportError:
+                    pass
+
+            self._settle()
             for frame_idx in range(frame_count):
                 # Draw the frame (backend-agnostic)
                 self._draw_frame()
@@ -2529,20 +2532,25 @@ class Engine:
         # yuv420p needs even sides; yuv444p keeps any requested size exact.
         pix_fmt_out = "yuv420p" if width % 2 == 0 and height % 2 == 0 else "yuv444p"
 
-        writer = imageio_ffmpeg.write_frames(
-            output,
-            size=(width, height),
-            fps=fps,
-            codec="libx264" if codec == "h264" else codec,
-            quality=quality_map[quality],
-            pix_fmt_in="rgb24",
-            pix_fmt_out=pix_fmt_out,
-            macro_block_size=1,
-        )
+        staging = tempfile.TemporaryDirectory(dir=Path(output).parent, prefix=".manifoldx-video-")
+        try:
+            writer = imageio_ffmpeg.write_frames(
+                str(Path(staging.name) / Path(output).name),
+                size=(width, height),
+                fps=fps,
+                codec="libx264" if codec == "h264" else codec,
+                quality=quality_map[quality],
+                pix_fmt_in="rgb24",
+                pix_fmt_out=pix_fmt_out,
+                macro_block_size=1,
+            )
 
-        # Seed the generator, then keep its process so close() can check the exit code.
-        writer.send(None)
-        return _VideoWriter(writer, output)
+            # Seed the generator, then keep its process so close() can check the exit code.
+            writer.send(None)
+            return _VideoWriter(writer, output, staging)
+        except BaseException:
+            staging.cleanup()
+            raise
 
     def cli(
         self,

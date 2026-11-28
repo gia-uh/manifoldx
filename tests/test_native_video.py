@@ -36,6 +36,16 @@ def test_video_writer_reports_an_encoder_failure(tmp_path):
     assert not output.exists()
 
 
+def test_encoder_failure_preserves_previous_export(tmp_path):
+    output = tmp_path / "previous.mp4"
+    output.write_bytes(b"previous export")
+    writer = Engine._get_video_writer(None, output, 10, 64, 64, "not-a-codec", "high")
+    with pytest.raises(RuntimeError, match="video encoder"):
+        writer.close()
+    assert output.read_bytes() == b"previous export"
+    assert list(tmp_path.iterdir()) == [output]
+
+
 def test_video_writer_explains_a_missing_dependency(tmp_path, monkeypatch):
     import sys
 
