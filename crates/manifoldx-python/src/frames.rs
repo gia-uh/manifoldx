@@ -1190,6 +1190,7 @@ impl FrameLoop {
             suppress_present,
             resize_after_three: resize_after_three
                 .map(|(width, height)| PhysicalSize::new(width, height)),
+            presented: Some(graphics.presented()),
         };
         let (presented, gpu_ns, diagnostic) = py.detach(|| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -2,6 +2,7 @@
 
 import json
 import socket
+import struct
 import textwrap
 import threading
 import urllib.error
@@ -131,12 +132,139 @@ def test_the_http_contract_runs_at_the_frame_barrier(native_engine, tmp_path):
         channel.close()
 
 
-def test_native_look_answers_that_it_is_unavailable(native_engine, tmp_path):
+class FakeGraphics:
+    """The presented-capture calls of _NativeGraphics, with pixels the test supplies."""
+
+    def __init__(self, unavailable=False):
+        self.requests = 0
+        self.image = None
+        self.unavailable = unavailable
+
+    def request_presented(self):
+        if self.unavailable:
+            raise RuntimeError("the surface does not support copying the presented frame")
+        self.requests += 1
+
+    def take_presented(self):
+        image, self.image = self.image, None
+        return image
+
+    def close(self):
+        pass
+
+
+def start_look(engine, channel):
+    """Ask for a look from another thread and step frames until the capture is armed."""
+    out = {}
+
+    def go():
+        try:
+            out["value"] = channel.look()
+        except BaseException as e:  # noqa: BLE001  the test reports it
+            out["error"] = e
+
+    before = len(engine._looks) + len(engine._pending_looks)
+    worker = threading.Thread(target=go)
+    worker.start()
+    for _ in range(200):
+        step(engine)
+        worker.join(0.005)
+        if not worker.is_alive():
+            break
+        if len(engine._looks) + len(engine._pending_looks) > before:
+            break
+    return worker, out
+
+
+def test_presented_pixels_trim_rows_and_swap_bgra():
+    data = b"\x01\x02\x03\x04" + b"\x00" * 4 + b"\x05\x06\x07\x08" + b"\x00" * 4
+    rgb = devchannel.frame_rgb(data, 1, 2, 8, bgra=True)
+    assert rgb.tolist() == [[[3, 2, 1]], [[7, 6, 5]]]
+    assert devchannel.frame_rgb(data, 1, 2, 8, bgra=False).tolist() == [[[1, 2, 3]], [[5, 6, 7]]]
+
+
+def test_native_look_answers_from_the_presented_frame(native_engine, tmp_path):
+    fake = FakeGraphics()
+    real, native_engine._graphics = native_engine._graphics, fake
     channel = devchannel.Channel(tmp_path, _DevChannelHost(native_engine), port=0)
+    native_engine._dev_channel = channel
+    try:
+        worker, out = start_look(native_engine, channel)
+        assert fake.requests == 1, "one look arms one presented-frame copy"
+        fake.image = (2, 1, True, b"\x00\x00\xff\xff" * 2)
+        for _ in range(3):
+            step(native_engine)
+        worker.join(10)
+        assert not worker.is_alive() and "error" not in out, out
+        png = out["value"]
+        assert png[:8] == b"\x89PNG\r\n\x1a\n"
+        assert struct.unpack(">II", png[16:24]) == (2, 1)
+    finally:
+        native_engine._dev_channel = None
+        native_engine._graphics = real
+        channel.close()
+
+
+def test_native_look_serves_concurrent_requests_once(native_engine, tmp_path):
+    fake = FakeGraphics()
+    real, native_engine._graphics = native_engine._graphics, fake
+    channel = devchannel.Channel(tmp_path, _DevChannelHost(native_engine), port=0)
+    native_engine._dev_channel = channel
+    try:
+        workers = [start_look(native_engine, channel) for _ in range(3)]
+        assert fake.requests == 1, "three waiting looks share one presented-frame copy"
+        fake.image = (1, 1, False, b"\x10\x20\x30\xff")
+        for _ in range(3):
+            step(native_engine)
+        for worker, out in workers:
+            worker.join(10)
+            assert not worker.is_alive() and "error" not in out, out
+        assert len({out["value"] for _, out in workers}) == 1
+        assert fake.requests == 1
+    finally:
+        native_engine._dev_channel = None
+        native_engine._graphics = real
+        channel.close()
+
+
+def test_native_look_answers_501_when_the_surface_cannot_copy(native_engine, tmp_path):
+    fake = FakeGraphics(unavailable=True)
+    real, native_engine._graphics = native_engine._graphics, fake
+    channel = devchannel.Channel(tmp_path, _DevChannelHost(native_engine), port=0)
+    native_engine._dev_channel = channel
     try:
         status, body = ask(native_engine, channel, "/api/look")
-        assert status == 501 and "Rust core" in json.loads(body)["error"]
+        assert status == 501
+        assert "Rust core" in json.loads(body)["error"]
+        assert "does not support copying" in json.loads(body)["error"]
     finally:
+        native_engine._dev_channel = None
+        native_engine._graphics = real
+        channel.close()
+
+
+def test_native_close_fails_a_look_that_waits_for_a_frame(tmp_path, monkeypatch):
+    native = pytest.importorskip("manifoldx._core_native")
+    if not hasattr(native, "_NativeGraphics"):
+        pytest.skip("native renderer is unavailable")
+    monkeypatch.setenv("MANIFOLDX_CORE", "rust")
+    from manifoldx import Engine
+
+    engine = Engine("e8 look close", width=16, height=16)
+    fake = FakeGraphics()
+    real, engine._graphics = engine._graphics, fake
+    channel = devchannel.Channel(tmp_path, _DevChannelHost(engine), port=0)
+    engine._dev_channel = channel
+    try:
+        worker, out = start_look(engine, channel)
+        assert fake.requests == 1
+        engine._graphics = real
+        engine.close()
+        worker.join(10)
+        assert not worker.is_alive() and "error" in out
+        assert "closed before a frame" in str(out["error"])
+    finally:
+        engine._dev_channel = None
         channel.close()
 
 

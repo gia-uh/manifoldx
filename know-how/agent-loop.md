@@ -23,7 +23,7 @@ Read this when you build something on manifoldx with an agent in the loop: the a
 
 None of this exists outside `manifoldx run`: the same app run with `python app.py` (the shipped game) has no server, and `engine.log` writes nowhere.
 
-Under `MANIFOLDX_CORE=rust` the same `state`, `set`, `emit`, `events`, `log` and `--port` work against the native window. Requests run at the frame barrier, and the server closes with the window. `look`, `metrics` and `--debug` still need the Python core; `look` answers 501 with that reason.
+Under `MANIFOLDX_CORE=rust` the same `state`, `set`, `emit`, `events`, `log`, `look` and `--port` work against the native window. Requests run at the frame barrier, and the server closes with the window. `look` copies the next presented surface frame after post and GUI, so the PNG matches the window; a surface that cannot copy its images answers 501 with that reason. `metrics` and `--debug` still need the Python core.
 
 ## The API
 

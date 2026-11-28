@@ -38,6 +38,7 @@ impl Probe {
             sample_limit: Some(1),
             suppress_present: false,
             resize_after_three: None,
+            presented: None,
         };
         let (presents, _) = run_desktop(
             options,

@@ -592,11 +592,30 @@ class Readback:
 
     def _answer(self, data, encode):
         try:
-            pixels = np.frombuffer(data, np.uint8).reshape(self.h, self.row)[:, :self.w * 4].reshape(self.h, self.w, 4)
-            result = encode(np.ascontiguousarray(pixels[..., [2, 1, 0]] if self.bgra else pixels[..., :3]))
+            result = encode(frame_rgb(data, self.w, self.h, self.row, self.bgra))
         except Exception as e:  # noqa: BLE001
             return self.fail(e)
         for future in self.futures:
+            future.set_result(result)
+
+
+def frame_rgb(data, width, height, row, bgra):
+    """(h, w, 3) uint8 RGB from a row-padded RGBA/BGRA frame read back from the GPU."""
+    pixels = np.frombuffer(data, np.uint8).reshape(height, row)[:, :width * 4].reshape(height, width, 4)
+    return np.ascontiguousarray(pixels[..., [2, 1, 0]] if bgra else pixels[..., :3])
+
+
+def answer_frame(futures, data, width, height, bgra):
+    """Resolve looks waiting on a presented frame with its PNG; runs off the engine's thread."""
+    try:
+        result = png(frame_rgb(data, width, height, width * 4, bgra))
+    except Exception as e:  # noqa: BLE001
+        for future in futures:
+            if future.set_running_or_notify_cancel():
+                future.set_exception(e)
+        return
+    for future in futures:
+        if future.set_running_or_notify_cancel():
             future.set_result(result)
 
 

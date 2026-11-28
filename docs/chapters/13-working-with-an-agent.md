@@ -245,11 +245,13 @@ staged copies where the OS permits it. On Windows a mapped DLL can remain on dis
 `reload(path)` loads explicitly and raises instead of keeping the old build.
 
 The Rust desktop command supports reload, regular stderr output and the dev
-channel: `--port N` picks its port, and `state`, `set`, `emit`, `events` and
-`log` work as they do with the Python core. Requests run at the frame barrier,
-before the frame's events and systems, and the server closes when the window
-does. `look`, `metrics` and `--debug` still require the Python desktop core;
-`look` answers 501 with that reason.
+channel: `--port N` picks its port, and `state`, `set`, `emit`, `events`,
+`log` and `look` work as they do with the Python core. Requests run at the
+frame barrier, before the frame's events and systems, and the server closes
+when the window does. `look` copies the surface texture of the next presented
+frame after post and GUI, so the PNG shows the same composition; a surface
+that cannot copy its images answers 501 with that reason. `metrics` and
+`--debug` still require the Python desktop core.
 
 ## The dev channel
 

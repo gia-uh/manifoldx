@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use manifoldx_core::ecs::{ColumnData, EntityId, World};
+use manifoldx_render::desktop::PresentedCapture;
 use manifoldx_render::environment::EnvironmentData;
 use manifoldx_render::fragment::FragmentData;
 use manifoldx_render::frame_compute::{ComputeBinding, ComputeProgram, FrameCompute};
@@ -29,6 +30,7 @@ use crate::stream_cells::{CellBatch, CellCommit, CellDraw, CellKey, StreamCells}
 use crate::vehicles::{tile_inputs, SampleOutput, TileInput};
 use crate::PyNativeWorld;
 
+type PresentedPixels = (u32, u32, bool, Vec<u8>);
 type ComputeColumn = (Option<usize>, String, u32, bool);
 type ComputeInput = (
     u32,
@@ -508,6 +510,13 @@ pub(crate) fn source(world: &World) -> Result<manifoldx_render::InstanceSource, 
 #[pyclass(frozen, module = "manifoldx._core_native", name = "_NativeGraphics")]
 pub(crate) struct NativeGraphics {
     pub(crate) scene: Arc<Mutex<Scene>>,
+    presented: Arc<PresentedCapture>,
+}
+
+impl NativeGraphics {
+    pub(crate) fn presented(&self) -> Arc<PresentedCapture> {
+        Arc::clone(&self.presented)
+    }
 }
 
 #[pymethods]
@@ -516,12 +525,33 @@ impl NativeGraphics {
     fn new() -> Self {
         Self {
             scene: Arc::new(Mutex::new(Scene::new())),
+            presented: Arc::new(PresentedCapture::default()),
         }
     }
 
     fn close(&self, py: Python<'_>) {
         let old = std::mem::replace(&mut *self.scene.lock().unwrap(), Scene::new());
         py.detach(move || drop(old));
+    }
+
+    /// Ask the desktop loop to copy the next presented frame for `manifoldx look`.
+    fn request_presented(&self) -> PyResult<()> {
+        if !self.presented.supported() {
+            return Err(PyRuntimeError::new_err(
+                "the surface does not support copying the presented frame",
+            ));
+        }
+        self.presented.request();
+        Ok(())
+    }
+
+    /// (width, height, bgra, pixels) of the frame the last request copied, if it is ready.
+    fn take_presented(&self) -> PyResult<Option<PresentedPixels>> {
+        match self.presented.take() {
+            None => Ok(None),
+            Some(Ok(image)) => Ok(Some((image.width, image.height, image.bgra, image.pixels))),
+            Some(Err(error)) => Err(PyRuntimeError::new_err(error)),
+        }
     }
 
     fn camera(&self, args: CameraInput) -> PyResult<()> {

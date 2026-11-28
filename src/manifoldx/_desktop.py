@@ -205,6 +205,9 @@ class _NativeEngine:
         self._gui_runtime = _NativeGui(self)
         self._event_bus = EventBus()
         self._dev_channel = None
+        self._looks = []  # futures waiting for the next presented frame as PNG bytes (the dev server's look)
+        self._pending_looks = []  # those whose capture is in flight
+        self._look_armed = False
         self._aio_loop = None
         self._tasks = set()
         self._task_errors = []
@@ -443,11 +446,67 @@ class _NativeEngine:
             # GUI consumption is cooperative, as on the original input bus.
             self.emit(event, payload)
 
+    def _arm_look(self):
+        """Ask the desktop loop to copy this frame for every look requested since the last one."""
+        if not self._looks:
+            return
+        looks, self._looks = self._looks, []
+        self._pending_looks.extend(looks)
+        if self._look_armed:
+            return
+        from manifoldx.devchannel import _Unavailable
+
+        try:
+            self._graphics.request_presented()
+        except RuntimeError as error:
+            self._pending_looks, pending = [], self._pending_looks
+            reason = _Unavailable(f"look is unavailable with the Rust core: {error}")
+            for shot in pending:
+                if not shot.done():
+                    shot.set_exception(reason)
+        else:
+            self._look_armed = True
+
+    def _finish_look(self):
+        """Answer the looks waiting on a frame whose copy came back, off the engine's thread."""
+        if not self._pending_looks:
+            return
+        try:
+            image = self._graphics.take_presented()
+        except RuntimeError as error:
+            pending, self._pending_looks = self._pending_looks, []
+            self._look_armed = False
+            for shot in pending:
+                if not shot.done():
+                    shot.set_exception(error)
+            return
+        if image is None:
+            return
+        from threading import Thread
+
+        from manifoldx import devchannel
+
+        self._look_armed = False
+        looks, self._pending_looks = self._pending_looks, []
+        width, height, bgra, data = image
+        Thread(target=devchannel.answer_frame, args=(looks, data, width, height, bgra),
+               name="manifoldx-look", daemon=True).start()
+
+    def _fail_looks(self, error):
+        looks, self._looks = self._looks, []
+        pending, self._pending_looks = self._pending_looks, []
+        self._look_armed = False
+        for shot in (*looks, *pending):
+            if not shot.done():
+                shot.set_exception(error)
+
     def _desktop_begin_frame(self, size, dpi, elapsed, events, world_available):
         # Dev-channel requests run at the frame barrier, before this frame's events
         # are delivered and the Rust scheduler dispatches its systems.
         if self._dev_channel is not None:
             self._dev_channel.run_jobs()
+        self._finish_look()
+        self._arm_look()
         self.elapsed = elapsed
         self._world._running = not world_available
         self._world._started = True
@@ -1371,6 +1430,7 @@ class _NativeEngine:
             return
         self._closed = True
         self.quit()
+        self._fail_looks(RuntimeError("the native window closed before a frame was presented"))
         self._finish_texture_reads()
         for _, future in self._texture_reads.values():
             future.cancel()

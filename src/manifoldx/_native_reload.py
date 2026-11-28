@@ -26,11 +26,11 @@ _preparing = ContextVar("native_reload_preparing", default=False)
 class _DevChannelHost:
     """What devchannel.Channel asks of a reloader: the engine that is running now.
 
-    The native window presents without a CPU readback, so `look` answers 501 instead of
-    waiting for a frame it can never copy.
+    `look` reads the next presented frame from the native surface. A surface
+    that cannot copy its images answers 501 with that reason.
     """
 
-    looks = False
+    looks = True
 
     def __init__(self, engine):
         self.engine = engine
