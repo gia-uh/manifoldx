@@ -255,6 +255,16 @@ class _NativeEngine:
         columns = (("Transform", "f32", 10), ("Mesh", "u32", 1), ("Material", "u32", 1))
         for name, kind, size in columns:
             self._world.register(name, kind=kind, width=size)
+        # Every Component class imported before the engine existed is
+        # registered now, while the native schema is still open. The first
+        # spawn publishes entities, after which the native world refuses new
+        # schemas; an app that spawns a mesh and then a viz component (or any
+        # far-apart component) would otherwise fail on its lazy registration.
+        from manifoldx.components import _COMPONENT_CLASSES
+
+        for component in _COMPONENT_CLASSES.values():
+            if not component._gpu_only:
+                self._world.register(component)
         self._registries = {"Mesh": {}, "Material": {}}
         self._view_materials = {}
         self._mesh_ids = count(1)
