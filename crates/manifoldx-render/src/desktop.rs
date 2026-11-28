@@ -86,9 +86,34 @@ pub struct DesktopOptions {
     pub present_mode: wgpu::PresentMode,
     pub renderer: RendererOptions,
     pub sample_limit: Option<u64>,
+    pub gpu_timings: bool,
     pub suppress_present: bool,
     pub resize_after_three: Option<PhysicalSize<u32>>,
     pub presented: Option<Arc<PresentedCapture>>,
+}
+
+/// Why the bounded desktop diagnostic did or did not write GPU timestamps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuTimingState {
+    /// A normal run: the frame loop never bounds itself, so it never measures.
+    NotBounded,
+    /// The caller turned timings off (`MANIFOLDX_GPU_TIMINGS=0`).
+    Disabled,
+    /// The bounded run asked for timings, but the adapter has no timestamp queries.
+    Unavailable,
+    /// Every presented frame wrote one timestamp pair.
+    Measured,
+}
+
+impl GpuTimingState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotBounded => "not_bounded",
+            Self::Disabled => "disabled",
+            Self::Unavailable => "unavailable",
+            Self::Measured => "measured",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -143,7 +168,7 @@ pub trait DesktopApplication {
 pub fn run_desktop(
     options: DesktopOptions,
     app: &mut impl DesktopApplication,
-) -> Result<(u64, Vec<u64>), RenderError> {
+) -> Result<(u64, Vec<u64>, GpuTimingState), RenderError> {
     let event_loop = EventLoop::new().map_err(window_error)?;
     let mut handler = Desktop {
         options,
@@ -154,12 +179,13 @@ pub fn run_desktop(
         presents: 0,
         last_present: None,
         gpu_ns: Vec::new(),
+        gpu_state: GpuTimingState::NotBounded,
         look: None,
     };
     event_loop.run_app(&mut handler).map_err(window_error)?;
     match handler.error {
         Some(error) => Err(error),
-        None => Ok((handler.presents, handler.gpu_ns)),
+        None => Ok((handler.presents, handler.gpu_ns, handler.gpu_state)),
     }
 }
 
@@ -354,6 +380,7 @@ struct Desktop<'a, A> {
     presents: u64,
     last_present: Option<Instant>,
     gpu_ns: Vec<u64>,
+    gpu_state: GpuTimingState,
     look: Option<LookReadback>,
 }
 
@@ -429,10 +456,26 @@ impl<A: DesktopApplication> Desktop<'_, A> {
                     Some(format!("{reason:?}: {message}"));
             }
         });
-        let timings = self
-            .options
-            .sample_limit
-            .and_then(|limit| GpuTimings::new(&renderer, limit));
+        let timings = match self.options.sample_limit {
+            None => {
+                self.gpu_state = GpuTimingState::NotBounded;
+                None
+            }
+            Some(_) if !self.options.gpu_timings => {
+                self.gpu_state = GpuTimingState::Disabled;
+                None
+            }
+            Some(limit) => match GpuTimings::new(&renderer, limit) {
+                Some(timings) => {
+                    self.gpu_state = GpuTimingState::Measured;
+                    Some(timings)
+                }
+                None => {
+                    self.gpu_state = GpuTimingState::Unavailable;
+                    None
+                }
+            },
+        };
         let size = window.inner_size();
         let mut context = Context {
             surface,

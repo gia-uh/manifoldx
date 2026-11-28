@@ -1149,7 +1149,8 @@ impl FrameLoop {
         if thread::current().id() != self.owner_thread {
             return Err(PyRuntimeError::new_err("run on the World owner thread"));
         }
-        let (title, width, height, fullscreen, monitor, mode, hz, frame_limit) = options;
+        let (title, width, height, fullscreen, monitor, mode, hz, frame_limit, gpu_timings) =
+            options;
         if width == 0
             || height == 0
             || !hz.is_finite()
@@ -1239,17 +1240,18 @@ impl FrameLoop {
             present_mode,
             renderer: RendererOptions::default(),
             sample_limit: frame_limit,
+            gpu_timings,
             suppress_present,
             resize_after_three: resize_after_three
                 .map(|(width, height)| PhysicalSize::new(width, height)),
             presented: Some(graphics.presented()),
         };
-        let (presented, gpu_ns, diagnostic) = py.detach(|| {
+        let (presented, gpu_ns, gpu_state, diagnostic) = py.detach(|| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 desktop::run_desktop(options, &mut frames)
             }));
             frames.finish();
-            let (presented, gpu_ns) = result
+            let (presented, gpu_ns, gpu_state) = result
                 .map_err(|_| PyRuntimeError::new_err("native desktop frame loop panicked"))?
                 .map_err(graphics::render_error)?;
             let diagnostic = if diagnostic_readback {
@@ -1262,7 +1264,7 @@ impl FrameLoop {
             } else {
                 None
             };
-            Ok::<_, PyErr>((presented, gpu_ns, diagnostic))
+            Ok::<_, PyErr>((presented, gpu_ns, gpu_state, diagnostic))
         })?;
         let result = PyDict::new(py);
         result.set_item("presented", presented)?;
@@ -1296,6 +1298,14 @@ impl FrameLoop {
             result.set_item("format", format!("{:?}", info.format))?;
             result.set_item("adapter", adapter)?;
         }
+        // Why the bounded diagnostic did or did not measure, so a null
+        // `gpu_render_ns` is never mistaken for a measured zero.
+        let gpu = PyDict::new(py);
+        gpu.set_item("state", gpu_state.as_str())?;
+        gpu.set_item("pass", "main")?;
+        gpu.set_item("unit", "ns")?;
+        gpu.set_item("frames", gpu_ns.len())?;
+        result.set_item("gpu_timings", gpu)?;
         let samples: Vec<_> = frames
             .frames
             .iter()
@@ -1506,6 +1516,7 @@ type DesktopInput = (
     String,
     f64,
     Option<u64>,
+    bool,
 );
 
 type PositionInput = (usize, u32, u32, u32, Vec<(u32, u32)>, String);

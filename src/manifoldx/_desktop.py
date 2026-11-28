@@ -1531,6 +1531,7 @@ class _NativeEngine:
             os.environ.get("MANIFOLDX_PRESENT", "fifo"),
             hz,
             int(frames) if frames else None,
+            os.environ.get("MANIFOLDX_GPU_TIMINGS", "1") != "0",
         )
 
         def startup():
@@ -1559,6 +1560,31 @@ class _NativeEngine:
             if self._position_binding is not None:
                 self._world._resident_closed = self._position_binding[0]
             self.close()
+
+    def gpu_timings(self):
+        """The GPU time of the newest frame the Rust core measured, in milliseconds.
+
+        The native desktop loop measures only a bounded diagnostic session
+        (`MANIFOLDX_DESKTOP_FRAMES`): one timestamp pair around each presented
+        frame's main render pass, resolved and read back once after the last
+        frame, so a normal run never reads timestamps. This answers after
+        `run()` returns, with `main` (the measured pass) and `total` (the same
+        single interval). It is None during a run, in a session without a frame
+        limit, with `MANIFOLDX_GPU_TIMINGS=0`, or on an adapter without
+        timestamp queries; `desktop_report["gpu_timings"]["state"]` says which.
+        """
+        report = self.desktop_report
+        if report is None or (report.get("gpu_timings") or {}).get("state") != "measured":
+            return None
+        measured = [
+            sample["gpu_render_ns"]
+            for sample in report.get("samples", [])
+            if sample.get("gpu_render_ns") is not None
+        ]
+        if not measured:
+            return None
+        milliseconds = measured[-1] / 1e6
+        return {"main": milliseconds, "total": milliseconds}
 
     def render_frame(self, *, supersample=1, pass_="beauty", groups=None, dt=1 / 30):
         if self._desktop_ran:

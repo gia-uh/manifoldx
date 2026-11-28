@@ -36,11 +36,12 @@ impl Probe {
             present_mode: wgpu::PresentMode::Fifo,
             renderer: RendererOptions::default(),
             sample_limit: Some(1),
+            gpu_timings: true,
             suppress_present: false,
             resize_after_three: None,
             presented: None,
         };
-        let (presents, _) = run_desktop(
+        let (presents, _, _) = run_desktop(
             options,
             &mut SurfaceProbe {
                 mode: self,
