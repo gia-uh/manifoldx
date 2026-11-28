@@ -26,6 +26,7 @@ from manifoldx.viz import (
     LabelMaterial,
     TextLabel,
 )
+from manifoldx.viz.geometry import AXIS_LINE_X, AXIS_LINE_Y, AXIS_LINE_Z
 
 # Scene parameters ------------------------------------------------------------
 EXTENT = 3.0          # half-length of each axis line in world units
@@ -52,12 +53,11 @@ engine.set_lights(
 # Each axis is one entity carrying its own AXIS_LINE_* geometry, an
 # AxisMaterial with the per-batch color, and a Transform whose `scale`
 # stretches the unit-line geometry to ±EXTENT on the right axis direction.
-for geom_name, color, scale in [
-    ("axis_line_x", "#e64545", (EXTENT, 1.0, 1.0)),
-    ("axis_line_y", "#5fbf5f", (1.0, EXTENT, 1.0)),
-    ("axis_line_z", "#5588ff", (1.0, 1.0, EXTENT)),
+for geom, color, scale in [
+    (AXIS_LINE_X, "#e64545", (EXTENT, 1.0, 1.0)),
+    (AXIS_LINE_Y, "#5fbf5f", (1.0, EXTENT, 1.0)),
+    (AXIS_LINE_Z, "#5588ff", (1.0, 1.0, EXTENT)),
 ]:
-    geom = engine._geometry_registry.get_by_name(geom_name)
     engine.spawn(
         Mesh(geom),
         Material(AxisMaterial(color=color)),
@@ -129,11 +129,10 @@ engine.spawn(
 # a screen-anchored AxisMaterial line (the bar) plus a screen-anchored
 # LabelMaterial (the bar's caption). Both stay pinned to the bottom-left
 # corner regardless of camera rotation.
-geom_x = engine._geometry_registry.get_by_name("axis_line_x")
 SCALE_BAR_NDC_HALF = 0.18      # 36% of viewport-width across
 SCALE_BAR_Y = -0.85
 engine.spawn(
-    Mesh(geom_x),
+    Mesh(AXIS_LINE_X),
     Material(AxisMaterial(color="#ffffff", anchor_mode="screen")),
     Transform(pos=(-0.55, SCALE_BAR_Y, 0.0), scale=(SCALE_BAR_NDC_HALF, 1.0, 1.0)),
     AxisFrame(extent=1.0),
