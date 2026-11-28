@@ -159,6 +159,8 @@ class _EntityHandle:
         self.transform = _TransformHandle(engine, entities[0])
 
     def set_geometry(self, geometry):
+        if hasattr(geometry, "to_geometry"):
+            geometry = geometry.to_geometry()
         self._engine._replace_geometry(self._entities, geometry)
 
     def set_joints(self, matrices):
@@ -939,11 +941,25 @@ class _NativeEngine:
         old = {int(owners[entity][1]) for entity in owned}
         others = {int(index) for entity, (has_mesh, index) in owners.items()
                   if has_mesh and entity not in owned}
+        registry = self._registries["Mesh"]
+        original = next((obj for mesh, obj in registry.values() if mesh in old), None)
+        if original is not None and "positions" in original:
+            n_old = len(original["positions"])
+            n_new = len(np.asarray(geometry.get("positions", [])).reshape(-1, 3))
+            if n_new != n_old:
+                raise ValueError(
+                    f"set_geometry requires equal vertex count (have {n_old}, got {n_new}); "
+                    "the in-place update cannot resize the buffer."
+                )
+            if "joints" in geometry and "joints" not in original:
+                raise ValueError(
+                    "set_geometry got a mesh with joints for an entity spawned without them; "
+                    "spawn it from a geometry with joints (Mesh(joints=...)) to skin it."
+                )
         reuse = next(iter(old)) if len(old) == 1 and old.isdisjoint(others) else None
         index = self._mesh(geometry, reuse=reuse)
         if index not in old or len(old) != 1:
             self._commands.replace("Mesh", entities, np.full((len(entities), 1), index, dtype="uint32"))
-        registry = self._registries["Mesh"]
         for key, (mesh, obj) in list(registry.items()):
             if mesh in old and mesh not in others and obj is not geometry:
                 del registry[key]
