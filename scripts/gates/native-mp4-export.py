@@ -213,7 +213,7 @@ def main():
     args = parser.parse_args()
 
     console = Path(args.manifoldx).resolve()
-    python = Path(args.python).resolve() if args.python else console.with_name("python")
+    python = Path(args.python).absolute() if args.python else console.with_name("python")
     ffmpeg, ffprobe = args.ffmpeg, args.ffprobe
     check(console.is_file(), f"installed console script {console}")
     check(python.is_file(), f"installed interpreter {python}")
