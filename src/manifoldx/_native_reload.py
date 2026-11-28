@@ -36,7 +36,7 @@ class _DevChannelHost:
         self.engine = engine
 
 
-def _run_app(script, module, argv, port=None):
+def _run_app(script, module, argv, port=None, debug=False):
     from manifoldx._desktop import _NativeEngine
     from manifoldx import devchannel
 
@@ -47,7 +47,10 @@ def _run_app(script, module, argv, port=None):
 
     def run(engine):
         channel = devchannel.Channel(
-            root, _DevChannelHost(engine), devchannel.PORT if port is None else port
+            root,
+            _DevChannelHost(engine),
+            devchannel.PORT if port is None else port,
+            debug=debug,
         )
         engine._dev_channel = channel
         devchannel.LOG.info("started %s", entry)

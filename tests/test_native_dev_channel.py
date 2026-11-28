@@ -314,14 +314,78 @@ def test_native_run_serves_the_port_and_releases_it_on_close(tmp_path, monkeypat
         probe.close()
 
 
-def test_native_debug_still_needs_the_python_core(tmp_path, monkeypatch, capsys):
+class FakeLoop:
+    """The native FrameLoop surface _record_metrics reads, with one sample."""
+
+    def __init__(self, sample):
+        self.sample = sample
+
+    def last_metrics(self):
+        return self.sample
+
+    def stop(self):
+        pass
+
+
+def test_native_metrics_read_the_presented_scheduler_sample(native_engine, tmp_path):
+    sample = {
+        "interval_ns": 16_666_667,
+        "update_ns": 1_200_000,
+        "render_ns": 2_300_000,
+        "acquire_ns": 4_000_000,
+        "submit_ns": 500_000,
+        "present_ns": 300_000,
+        "systems": [("step", 1_500_000)],
+        "over_budget": [("step", 1_500_000)],
+    }
+    native_engine._world._loop = FakeLoop(sample)
+    channel = devchannel.Channel(tmp_path, _DevChannelHost(native_engine), port=0, debug=True)
+    native_engine._dev_channel = channel
+    try:
+        step(native_engine)
+        assert native_engine.frame_interval == pytest.approx(16.666667 / 1000)
+        assert native_engine.frame_split["update"] == pytest.approx(0.0012)
+        assert native_engine.frame_split["submit"] == pytest.approx(0.0005)
+        assert native_engine.system_split == {"step": pytest.approx(0.0015)}
+        assert native_engine.over_budget == {"step": pytest.approx(0.0015)}
+        hud = native_engine._hud_lines()
+        assert hud[0].startswith("debug")
+        assert "sync >1 ms: step 1.50 ms" in hud[-1]
+    finally:
+        native_engine._dev_channel = None
+        channel.close()
+
+
+def test_native_metrics_are_absent_without_debug(native_engine, tmp_path):
+    channel = devchannel.Channel(tmp_path, _DevChannelHost(native_engine), port=0)
+    native_engine._dev_channel = channel
+    try:
+        status, body = ask(native_engine, channel, "/api/metrics")
+        assert status == 404
+        assert "metrics need manifoldx run --debug" in json.loads(body)["error"]
+        assert not native_engine._debug_hud
+    finally:
+        native_engine._dev_channel = None
+        channel.close()
+
+
+def test_native_debug_opens_the_measuring_channel(tmp_path, monkeypatch, capsys):
     native = pytest.importorskip("manifoldx._core_native")
     if not hasattr(native, "_NativeGraphics"):
         pytest.skip("native renderer is unavailable")
+    from manifoldx._desktop import _NativeEngine
+
     monkeypatch.setenv("MANIFOLDX_CORE", "rust")
     app = tmp_path / "app.py"
     app.write_text("from manifoldx import Engine\nEngine('c', width=16, height=16).run()\n")
-    with pytest.raises(SystemExit) as raised:
-        cli.main(["run", str(app), "--debug"])
-    assert raised.value.code == 2
-    assert "--debug requires the Python desktop dev channel" in capsys.readouterr().err
+    seen = {}
+
+    def run_offscreen(engine):
+        seen["meter"] = engine._dev_channel.meter is not None
+        seen["debug"] = engine._dev_channel.meter is not None
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_NativeEngine, "run", run_offscreen)
+    assert cli.main(["run", str(app), "--debug", "--port", "0"]) == 0
+    assert seen["meter"], "native --debug keeps the measuring channel"
+    assert "dev page and API at" in capsys.readouterr().err

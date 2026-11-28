@@ -250,8 +250,11 @@ channel: `--port N` picks its port, and `state`, `set`, `emit`, `events`,
 frame barrier, before the frame's events and systems, and the server closes
 when the window does. `look` copies the surface texture of the next presented
 frame after post and GUI, so the PNG shows the same composition; a surface
-that cannot copy its images answers 501 with that reason. `metrics` and
-`--debug` still require the Python desktop core.
+that cannot copy its images answers 501 with that reason. `--debug` works too:
+the native scheduler measures the same presented frames, reports the existing
+metrics fields plus `update`, `render`, `acquire`, `submit` and `present`, and
+draws a HUD after post and GUI that turns its border red while a synchronous
+callback takes more than 1 ms.
 
 ## The dev channel
 

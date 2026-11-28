@@ -182,6 +182,17 @@ class _NativeEngine:
         self.title, self.w, self.h = title, width, height
         self.fullscreen, self.monitor, self.max_fps = fullscreen, monitor, max_fps
         self.elapsed = 0.0
+        # Measured by the native scheduler; the Python engine's own attrs have
+        # the same names so devchannel.Meter reads both cores the same way.
+        self.frame_split = {
+            "update": 0.0, "acquire": 0.0, "render": 0.0,
+            "submit": 0.0, "present": 0.0, "overlap": 0.0,
+        }
+        self.system_split = {}
+        self.over_budget = {}
+        self.frame_interval = None
+        self._hud_sample = None
+        self._debug_hud = False
         self.camera = Camera()
         self.background_color = (0.1, 0.1, 0.2)
         self._origin = (0.0, 0.0)
@@ -500,11 +511,58 @@ class _NativeEngine:
             if not shot.done():
                 shot.set_exception(error)
 
+    def _record_metrics(self):
+        """Read the previous presented frame's samples from the native scheduler."""
+        if self._dev_channel is None or self._dev_channel.meter is None:
+            return
+        sample = self._world._loop.last_metrics()
+        if sample is None:
+            return
+        self._hud_sample = sample
+        ns = 1e9
+        self.frame_interval = sample["interval_ns"] / ns if sample["interval_ns"] else None
+        self.frame_split = {
+            "update": sample["update_ns"] / ns,
+            "acquire": sample["acquire_ns"] / ns,
+            "render": sample["render_ns"] / ns,
+            "submit": sample["submit_ns"] / ns,
+            "present": sample["present_ns"] / ns,
+            "overlap": 0.0,
+        }
+        self.system_split = {name: value / ns for name, value in sample["systems"]}
+        self.over_budget = {name: value / ns for name, value in sample["over_budget"]}
+        self._dev_channel.frame(self)
+
+    def _hud_lines(self):
+        """The `--debug` HUD's text, from the last presented frame's measurements."""
+        sample = self._hud_sample
+        if not sample or not sample.get("interval_ns"):
+            return ["manifoldx --debug", "waiting for a presented frame"]
+        ms = 1e6
+        interval = sample["interval_ns"] / ms
+        fps = 1000.0 / interval if interval else 0.0
+        lines = [
+            f"debug {fps:5.1f} fps  frame {interval:5.1f} ms",
+            f"update {sample['update_ns'] / ms:5.2f} render {sample['render_ns'] / ms:5.2f}"
+            f" acquire {sample['acquire_ns'] / ms:5.2f}",
+            f"submit {sample['submit_ns'] / ms:5.2f} present {sample['present_ns'] / ms:5.2f}",
+        ]
+        slow = sample.get("over_budget") or []
+        if slow:
+            lines.append(
+                "sync >1 ms: "
+                + ", ".join(f"{name} {value / ms:.2f} ms" for name, value in slow)
+            )
+        else:
+            lines.append("sync >1 ms: none")
+        return lines
+
     def _desktop_begin_frame(self, size, dpi, elapsed, events, world_available):
         # Dev-channel requests run at the frame barrier, before this frame's events
         # are delivered and the Rust scheduler dispatches its systems.
         if self._dev_channel is not None:
             self._dev_channel.run_jobs()
+        self._record_metrics()
         self._finish_look()
         self._arm_look()
         self.elapsed = elapsed
@@ -517,7 +575,7 @@ class _NativeEngine:
                 resize = ResizeEvent(round(self.w / dpi), round(self.h / dpi), dpi)
                 self.input._record_resize(resize)
                 self.emit("resize", resize)
-                if self.gui:
+                if self.gui or self._debug_hud:
                     self._gui_runtime.sync()
             self._window_events(events)
             self.input._begin_frame()
@@ -576,7 +634,7 @@ class _NativeEngine:
         return registrations
 
     def _desktop_finish_frame(self):
-        if self.gui or self._gui_runtime._widgets:
+        if self.gui or self._gui_runtime._widgets or self._debug_hud:
             self._gui_runtime.sync(refresh=True)
         self._sync_scene()
 
@@ -1462,6 +1520,8 @@ class _NativeEngine:
         frames = os.environ.get("MANIFOLDX_DESKTOP_FRAMES")
         monitor = self.monitor if self.monitor is not None else os.environ.get("MANIFOLDX_MONITOR")
         hz = 1 / self._fixed_dt if self._fixed_dt is not None else min(60.0, self.max_fps)
+        debug = self._dev_channel is not None and self._dev_channel.meter is not None
+        self._debug_hud = debug
         options = (
             self.title,
             self.w,
@@ -1488,6 +1548,7 @@ class _NativeEngine:
                 self._position_binding,
                 self._desktop_probe,
                 (self._desktop_begin_frame, self._desktop_finish_frame),
+                debug=debug,
             )
             self.elapsed = self.desktop_report["scheduler_frames"] / hz
             self.desktop_report["gui_getter_calls"] = self._gui_runtime.getter_total

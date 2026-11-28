@@ -11,8 +11,9 @@
   matching the regex RE; with `wait`, block up to S seconds until one arrives.
 - `GET /api/look`: the next frame presented, GUI included, as a PNG.
 - `GET /api/metrics` (under `manifoldx run --debug`): each second's frame rate, frame times, memory and
-  garbage collections, the last METRICS_KEEP seconds. Debug also logs the keys pressed, a frame slower than
-  SLOW_FRAME, a collection slower than SLOW_GC, and the metrics every METRICS_LOG seconds.
+  garbage collections, and a native core's measured split and synchronous callbacks over 1 ms, the last
+  METRICS_KEEP seconds. Debug also logs the keys pressed, a frame slower than SLOW_FRAME, a collection
+  slower than SLOW_GC, and the metrics every METRICS_LOG seconds.
 
 Under `manifoldx run --web` the app runs in a browser tab (manifoldx.web.dev): `/` and every other path
 serve the web root, the dev page moves to `/dev`, `/api/web/*` is the tab's stream and its answers, and
@@ -131,6 +132,7 @@ class Meter:
         self.systems = {}  # system name -> seconds summed over the second
         self.gc_runs, self.gc_time, self.gc_at = [0, 0, 0], 0.0, None
         self.logged = 0.0
+        self.over_budget = {}
         gc.callbacks.append(self._gc)
 
     def close(self):
@@ -147,11 +149,15 @@ class Meter:
                 LOG.info("slow gc: generation %d took %.0f ms, %d collected", info["generation"], 1000 * took,
                          info["collected"])
 
-    def frame(self, now, split=None, systems=None):
-        """After each frame, with the time it ended, engine.frame_split (seconds per part) and
-        engine.system_split (seconds per system name)."""
+    def frame(self, now, split=None, systems=None, *, over_budget=None, interval=None):
+        """After each frame, with the time it ended, engine.frame_split (seconds per part),
+        engine.system_split (seconds per system name) and, where the core measured them, the
+        present interval and the synchronous callbacks over 1 ms (seconds by name).
+
+        `interval` lets a native core report the scheduler's own measured start-to-start
+        interval instead of the time this watcher woke up."""
         if self.last is not None:
-            dt = now - self.last
+            dt = now - self.last if interval is None else interval
             self.frames += 1
             self.total += dt
             for part, seconds in (split or {}).items():
@@ -170,6 +176,12 @@ class Meter:
             m = {"time": time.strftime("%H:%M:%S"), "fps": round(self.frames / (now - self.start), 1),
                  "frame_ms": round(1000 * self.total / max(self.frames, 1), 1), "worst_ms": round(1000 * self.worst, 1),
                  "rss_mb": round(_rss_mb(), 1), "gc": {"runs": list(self.gc_runs), "ms": round(1000 * self.gc_time, 1)}}
+            if over_budget:
+                for name, seconds in over_budget.items():
+                    self.over_budget[name] = max(self.over_budget.get(name, 0.0), seconds)
+            if self.over_budget:
+                m["over_budget_ms"] = {name: round(1000 * seconds, 2)
+                                       for name, seconds in sorted(self.over_budget.items())}
             n = max(self.frames, 1)
             parts = {part: round(1000 * seconds / n, 1) for part, seconds in self.split.items()}
             parts["idle"] = round(max(0.0, m["frame_ms"] - sum(v for k, v in parts.items() if k != "overlap")), 1)  # between frames: the loop
@@ -193,6 +205,7 @@ class Meter:
             self.split = dict.fromkeys(self.split, 0.0)
             self.systems = dict.fromkeys(self.systems, 0.0)
             self.gc_runs, self.gc_time = [0, 0, 0], 0.0
+            self.over_budget = {}
 
 
 class Channel:
@@ -246,8 +259,13 @@ class Channel:
         """After a frame, under --debug: measure it, and log the keys pressed since the last one."""
         if self.meter is None:
             return
-        self.meter.frame(time.perf_counter(), getattr(engine, "frame_split", None),
-                         getattr(engine, "system_split", None))
+        self.meter.frame(
+            time.perf_counter(),
+            getattr(engine, "frame_split", None),
+            getattr(engine, "system_split", None),
+            over_budget=getattr(engine, "over_budget", None),
+            interval=getattr(engine, "frame_interval", None),
+        )
         keys = engine.input.pressed_keys
         if down := sorted(keys - self.keys):
             LOG.info("keys %s", " ".join(down))

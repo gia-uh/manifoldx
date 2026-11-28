@@ -273,3 +273,19 @@ def test_the_meter_does_not_count_overlap_as_frame_time():
         meter.close()
     parts = meter.history[0]["split_ms"]
     assert parts["overlap"] == 8.0 and parts["idle"] == 30.0
+
+
+def test_the_meter_takes_the_cores_measured_interval_and_over_budget():
+    meter = devchannel.Meter()
+    try:
+        t = 100.0
+        split = {"update": 0.002, "acquire": 0.004, "render": 0.003, "submit": 0.001, "present": 0.001}
+        for _ in range(61):
+            t += 1.0
+            meter.frame(t, split, {"step": 0.002}, over_budget={"step": 0.002}, interval=0.016)
+    finally:
+        meter.close()
+    entry = meter.history[0]
+    assert entry["frame_ms"] == pytest.approx(16.0, abs=0.1)
+    assert entry["split_ms"]["submit"] == 1.0 and entry["split_ms"]["present"] == 1.0
+    assert entry["over_budget_ms"] == {"step": 2.0}
