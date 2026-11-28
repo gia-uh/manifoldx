@@ -14,13 +14,26 @@ frames, a parsed GLB, a stereo WAV with left/right variation, a still whose
 pixels are not uniform, the diagnostic runtime's own assertions, the headless
 stream's samples, or the vehicle's fixed-substep report.
 
+The axes case has its own oracle because its motion is sparse and its scene
+carries screen-anchored overlays. Its video must change where the scene is,
+sustained across frames and confined to the central region with the documented
+overlay rectangles removed; the whole-frame statistic is still recorded but
+does not decide. A second, offscreen pass freezes the camera at one pose and
+projects the three axes from the scene: each line must carry its documented
+RGB colour along its own projected segment, each tip must hold its label text
+at the same anchor offset, and only pixels inside those projected bands count.
+A screen-anchored line in the axis palette therefore cannot stand in for an
+axis.
+
 Interaction cases get a second, explicitly separate lane: the probe imports
 the same copied script offscreen and delivers rendercanvas event dictionaries
 through the engine's input bridge (or the widget's own bus event), then
 compares frames and state. Controls break one signal on purpose: a scene with
 no entities must fail the non-blank oracle, a truncated GLB must fail the
 parser, and each event case has a copy with the event removed that must stop
-changing.
+changing. The axes case gets its own controls: a zero-length axis, exchanged
+axis colours, a removed tip label, a label moved to another tip, a
+screen-anchored decoy in the axis palette, and a frozen camera.
 
 The manifest below is the 49 pinned runs: 43 product examples, the installed
 runtime diagnostic and the five demos. Files added after the pinned spec are
@@ -57,8 +70,8 @@ CASES = [
     # name, entry arguments, extras, oracle, expected outcome, probe/controls
     ("examples/audio.py", ["--out", "{dir}/circle.wav", "--seconds", "1.5"], ["audio"], "wav",
      "stereo WAV, right duration, signal and left/right variation", None),
-    ("examples/axes.py", list(VIDEO) + ["--output", "{dir}/axes.mp4"], [], "video",
-     "RGB axes and anchored labels over the scene", None),
+    ("examples/axes.py", list(VIDEO) + ["--output", "{dir}/axes.mp4"], [], "axes",
+     "red/green/blue lines along their projected directions, a label at each tip, and the orbit moving the scene", None),
     ("examples/boids.py", list(VIDEO) + ["--output", "{dir}/boids.mp4"], [], "video",
      "flock moves and groups; two frames differ", None),
     ("examples/booleans.py", list(VIDEO) + ["--output", "{dir}/booleans.mp4"], [], "video",
@@ -207,8 +220,8 @@ def clean_env(display, scratch):
     return env
 
 
-def decode_video(path, limit=10):
-    """Decode up to `limit` evenly spaced RGB frames; return metrics or an error."""
+def decode_frames(path, limit=10):
+    """Decode up to `limit` evenly spaced RGB frames as a stack."""
     import imageio_ffmpeg
     import numpy as np
 
@@ -217,20 +230,31 @@ def decode_video(path, limit=10):
     width, height = meta["size"]
     raw = list(reader)
     if not raw:
-        return {"error": "no decoded frames"}
+        return meta, None, 0
     step = max(1, len(raw) // limit)
     frames = [
         np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
         for buf in raw[::step][:limit]
     ]
+    return meta, frames, len(raw)
+
+
+def decode_video(path, limit=10):
+    """Decode up to `limit` evenly spaced RGB frames; return metrics or an error."""
+    import numpy as np
+
+    meta, frames, total = decode_frames(path, limit)
+    if frames is None:
+        return {"error": "no decoded frames"}
+    width, height = meta["size"]
     stack = np.stack(frames)
     delta = np.abs(stack[-1].astype(np.int16) - stack[0].astype(np.int16))
     return {
         "width": width,
         "height": height,
-        "frames": len(raw),
+        "frames": total,
         "fps": meta.get("fps"),
-        "duration": round(len(raw) / meta["fps"], 3) if meta.get("fps") else None,
+        "duration": round(total / meta["fps"], 3) if meta.get("fps") else None,
         "mean": round(float(stack.mean()), 3),
         "std": round(float(stack.std()), 3),
         "blank_fraction": round(float((stack.max(axis=-1) <= 4).mean()), 4),
@@ -250,6 +274,134 @@ def check_video(metrics, motion=True, min_frames=2, min_std=3.0, min_diff=0.25):
             fails.append(f"blank image (std {metrics['std']})")
         if motion and metrics["first_last_mean_abs"] < min_diff:
             fails.append(f"static (first/last {metrics['first_last_mean_abs']})")
+    return fails
+
+
+# The axes example animates through its camera orbit only, and the lines are
+# thin: averaged over the whole frame the 30 degree orbit moves 0.18, under the
+# shared 0.25 floor. It is not static, so the axes case measures the motion
+# where it is. These are the example's screen-anchored overlays (NDC anchors,
+# pixel sizes), which stay put and must not be credited with scene motion.
+AXES_OVERLAYS = [
+    (-0.55, 0.85, 300, 40),
+    (0.55, -0.85, 240, 24),
+    (0.55, -0.93, 200, 24),
+    (-0.55, -0.85, 288, 30),
+    (-0.55, -0.93, 160, 30),
+]
+
+
+def axes_motion(frames):
+    """Localised change between the first and last decoded colours frames.
+
+    Returns the whole-frame statistic as context and a decision based on the
+    changed pixels themselves: they must be present, sustained from frame to
+    frame, and confined to the central scene instead of a screen-anchored
+    overlay or a full-frame flicker.
+    """
+    import numpy as np
+
+    stack = np.stack(frames).astype(np.int16)
+    height, width = stack.shape[1:3]
+    first, last = stack[0], stack[-1]
+    changed = np.abs(last - first).max(axis=-1) > 8
+    ys, xs = np.nonzero(changed)
+    count = int(changed.sum())
+    pairs = []
+    for index in range(len(stack) - 1):
+        pairs.append(int((np.abs(stack[index + 1] - stack[index]).max(axis=-1) > 8).sum()))
+    exclusions = np.zeros((height, width), dtype=bool)
+    for ndc_x, ndc_y, px_width, px_height in AXES_OVERLAYS:
+        centre_x = (ndc_x + 1.0) * 0.5 * width
+        centre_y = (1.0 - ndc_y) * 0.5 * height
+        x0 = max(0, int(centre_x - px_width / 2) - 2)
+        x1 = min(width, int(centre_x + px_width / 2) + 2)
+        y0 = max(0, int(centre_y - px_height / 2) - 2)
+        y1 = min(height, int(centre_y + px_height / 2) + 2)
+        exclusions[y0:y1, x0:x1] = True
+    scene = changed & ~exclusions
+    scene_count = int(scene.sum())
+    if count:
+        bbox = [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())]
+        bbox_width = (bbox[1] - bbox[0] + 1) / width
+        bbox_height = (bbox[3] - bbox[2] + 1) / height
+        central = (
+            (xs >= 0.1 * width)
+            & (xs <= 0.9 * width)
+            & (ys >= 0.1 * height)
+            & (ys <= 0.9 * height)
+        ).mean()
+    else:
+        bbox, bbox_width, bbox_height, central = None, 0.0, 0.0, 0.0
+    return {
+        "changed_pixels": count,
+        "scene_changed_pixels": scene_count,
+        "gui_excluded_pixels": count - scene_count,
+        "changed_fraction": round(count / (width * height), 6),
+        "bbox": bbox,
+        "bbox_width": round(bbox_width, 3),
+        "bbox_height": round(bbox_height, 3),
+        "central_share": round(float(central), 3),
+        "pair_changed_min": min(pairs) if pairs else 0,
+        "pair_changed_max": max(pairs) if pairs else 0,
+    }
+
+
+def check_axes_motion(motion, min_changed=250, min_pair=150,
+                      min_central=0.8, max_width=0.75, max_height=0.7):
+    fails = []
+    if motion["changed_pixels"] < min_changed:
+        fails.append(
+            f"camera frozen: {motion['changed_pixels']} pixels changed, want >= {min_changed}"
+        )
+    if motion["pair_changed_min"] < min_pair:
+        fails.append(
+            f"motion not sustained: {motion['pair_changed_min']} pixels between two frames, "
+            f"want >= {min_pair}"
+        )
+    if motion["central_share"] < min_central:
+        fails.append(
+            f"change not in the central scene (central share {motion['central_share']})"
+        )
+    if motion["bbox_width"] > max_width or motion["bbox_height"] > max_height:
+        fails.append(
+            f"change not localised (bbox {motion['bbox_width']}x{motion['bbox_height']} of frame)"
+        )
+    return fails
+
+
+def check_axes(axes, min_own=0.7, min_hits=100, min_band=40, min_text=5,
+               max_offset=95.0, max_spread=8.0):
+    """Decide the axes case from projected lines and tip labels only."""
+    fails = []
+    labels = axes.get("labels", {})
+    for key in ("x", "y", "z"):
+        axis = axes.get("axes", {}).get(key)
+        if not axis:
+            fails.append(f"no projection for the {key} axis")
+            continue
+        if axis["own_fraction"] < min_own or axis["hits"][key] < min_hits:
+            fails.append(
+                f"{key} axis line is not its documented colour along its projection "
+                f"(own fraction {axis['own_fraction']}, {axis['hits'][key]} hits)"
+            )
+        if axis["hits"][key] < min_hits:
+            swapped = [name for name, hits in axis["hits"].items() if name != key and hits > 0]
+            if swapped:
+                fails.append(f"{swapped} colour found along the {key} axis projection")
+        if axis["band_pixels"] < min_band:
+            fails.append(f"{key} axis has {axis['band_pixels']} pixels in its projected band")
+        label = labels.get(key)
+        if not label:
+            fails.append(f"no label window for the {key} tip")
+            continue
+        if label["text_pixels"] < min_text:
+            fails.append(f"{key} tip label has {label['text_pixels']} text pixels")
+        if label["offset_px"] is None or label["offset_px"] > max_offset:
+            fails.append(f"{key} label is {label['offset_px']} px from its projected tip")
+    spread = axes.get("label_offset_spread")
+    if spread is None or spread > max_spread:
+        fails.append(f"tip labels do not share one anchor offset (spread {spread})")
     return fails
 
 
@@ -410,6 +562,8 @@ def check_vehicle(stdout):
 def probe_spec(probe, script, out):
     """The rails and expected movement for one interaction case."""
     common = {"script": str(script), "out": str(out)}
+    if probe == "axes":
+        return common | {"axes": {"save": "axes.png"}}
     if probe == "event_dolly":
         return common | {
             "dt": 1 / 30,
@@ -752,6 +906,24 @@ def run_case(case, corpus, out, python, env):
                     )
             record["artifact"] = {"path": str(artifact), "sha256": sha256(artifact),
                                   "bytes": artifact.stat().st_size}
+    elif oracle == "axes":
+        artifact = case_dir / "axes.mp4"
+        if not artifact.is_file():
+            fails.append("no MP4")
+        else:
+            metrics = decode_video(artifact)
+            # The whole-frame statistic stays recorded but no longer decides:
+            # a sparse 30 degree orbit moves 0.18 of the frame on average.
+            fails += check_video(metrics, motion=False)
+            meta, frames, _ = decode_frames(artifact)
+            if frames:
+                motion = axes_motion(frames)
+                metrics["localized"] = motion
+                fails += check_axes_motion(motion)
+            else:
+                fails.append("no decoded frames for localised motion")
+            record["artifact"] = {"path": str(artifact), "sha256": sha256(artifact),
+                                  "bytes": artifact.stat().st_size}
     elif oracle == "wav":
         artifact = case_dir / "circle.wav"
         if not artifact.is_file():
@@ -850,6 +1022,21 @@ def run_case(case, corpus, out, python, env):
         }
         if probe_record["fails"]:
             record["fails"] = record["fails"] + [f"probe: {f}" for f in probe_record["fails"]]
+            record["ok"] = False
+    if oracle == "axes":
+        spec = probe_spec("axes", script, case_dir / "probe")
+        probe_record = run_probe(spec, python, corpus, env, 240, case_dir)
+        axes = (probe_record.get("result") or {}).get("axes")
+        axes_fails = check_axes(axes) if axes else ["no axes projection result"]
+        record["axes_probe"] = {
+            "ok": not axes_fails,
+            "fails": axes_fails,
+            "exit": probe_record["exit"],
+            "seconds": probe_record["seconds"],
+            "metrics": axes,
+        }
+        if axes_fails:
+            record["fails"] = record["fails"] + [f"axes: {f}" for f in axes_fails]
             record["ok"] = False
     if probe == "quad":
         trace = case_dir / "lod.csv"
@@ -1010,11 +1197,126 @@ def controls(corpus, out, python, env, site):
     return results
 
 
+# --- axes sensitivity controls --------------------------------------------
+# Each copy breaks one signal the axes oracle claims to measure. A control is
+# detected when the oracle fails on it; a passing control would mean the oracle
+# is blind to that failure mode.
+
+AXES_CONTROLS = [
+    (
+        "missing_axis",
+        "the X axis is scaled to zero length",
+        [("(AXIS_LINE_X, \"#e64545\", (EXTENT, 1.0, 1.0)),",
+          "(AXIS_LINE_X, \"#e64545\", (0.0, 1.0, 1.0)),")],
+    ),
+    (
+        "swapped_axes",
+        "the X and Z line colours are exchanged",
+        [("(AXIS_LINE_X, \"#e64545\", (EXTENT, 1.0, 1.0)),",
+          "(AXIS_LINE_X, \"#5588ff\", (EXTENT, 1.0, 1.0)),"),
+         ("(AXIS_LINE_Z, \"#5588ff\", (1.0, 1.0, EXTENT)),",
+          "(AXIS_LINE_Z, \"#e64545\", (1.0, 1.0, EXTENT)),")],
+    ),
+    (
+        "missing_label",
+        "the +X tip label is never spawned",
+        [("    ((LABEL_OFFSET, 0.0, 0.0), slot_x),\n", "")],
+    ),
+    (
+        "displaced_label",
+        "the +X tip label is spawned at the +Z tip",
+        [("    ((LABEL_OFFSET, 0.0, 0.0), slot_x),",
+          "    ((0.0, 0.0, LABEL_OFFSET), slot_x),")],
+    ),
+    (
+        "gui_decoy",
+        "the X axis is removed and a screen-anchored red line takes its colour",
+        [("(AXIS_LINE_X, \"#e64545\", (EXTENT, 1.0, 1.0)),",
+          "(AXIS_LINE_X, \"#e64545\", (0.0, 1.0, 1.0)),"),
+         ("# Camera orbit ----------------------------------------------------------------",
+          "# Decoy: a screen-anchored line in the X axis palette.\n"
+          "engine.spawn(\n"
+          "    Mesh(AXIS_LINE_X),\n"
+          "    Material(AxisMaterial(color=\"#e64545\", anchor_mode=\"screen\")),\n"
+          "    Transform(pos=(0.55, 0.85, 0.0), scale=(0.18, 1.0, 1.0)),\n"
+          "    AxisFrame(extent=1.0),\n"
+          "    n=1,\n"
+          ")\n\n"
+          "# Camera orbit ----------------------------------------------------------------")],
+    ),
+]
+
+
+def axes_controls(corpus, out, python, env):
+    results = {}
+    root = out / "axes-controls"
+    root.mkdir(parents=True, exist_ok=True)
+    source = corpus / "examples/axes.py"
+
+    for name, description, transforms in AXES_CONTROLS:
+        target = root / name / "axes.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_control_script(source, target, transforms)
+        spec = probe_spec("axes", target, root / name / "probe")
+        probe = run_probe(spec, python, corpus, env, 240, root / name)
+        axes = (probe.get("result") or {}).get("axes")
+        fails = check_axes(axes) if axes else ["no axes projection result"]
+        results[name] = {
+            "control": description,
+            "detected": bool(fails) and probe["exit"] == 0,
+            "exit": probe["exit"],
+            "fails": fails,
+            "metrics": None if not axes else {
+                "axes": {
+                    key: {
+                        "own_fraction": value["own_fraction"],
+                        "band_pixels": value["band_pixels"],
+                        "hits": value["hits"],
+                    }
+                    for key, value in axes["axes"].items()
+                },
+                "labels": {
+                    key: {"text_pixels": value["text_pixels"], "offset_px": value["offset_px"]}
+                    for key, value in axes["labels"].items()
+                },
+                "label_offset_spread": axes["label_offset_spread"],
+            },
+        }
+
+    # A frozen camera leaves the scene still. The projection oracle still
+    # passes, so only the video-motion oracle can police this signal.
+    frozen = root / "frozen_camera" / "axes.py"
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    write_control_script(
+        source, frozen, [("ORBIT_DEG_PER_SEC = 30.0", "ORBIT_DEG_PER_SEC = 0.0")]
+    )
+    video = root / "frozen_camera" / "axes.mp4"
+    run = run_command(
+        [python, "-I", str(frozen)] + list(VIDEO) + ["--output", str(video)],
+        corpus, env, 120, root / "frozen_camera" / "entry.log",
+    )
+    metrics = decode_video(video) if video.is_file() else {"error": "no MP4"}
+    meta, frames, _ = decode_frames(video) if video.is_file() else (None, None, 0)
+    if frames:
+        motion = axes_motion(frames)
+        motion_fails = check_axes_motion(motion)
+    else:
+        motion = None
+        motion_fails = ["no decoded frames"]
+    results["frozen_camera"] = {
+        "control": "the orbit is set to zero degrees per second",
+        "detected": bool(motion_fails) and run["exit"] == 0,
+        "exit": run["exit"],
+        "fails": motion_fails,
+        "whole_frame": metrics,
+        "motion": motion,
+    }
+    return results
+
 # What each failing case is missing, from the traceback this run recorded. This
 # is attribution to the revision under test (0bad545), not to any earlier one:
 # no historical revision was run.
 ATTRIBUTION = {
-    "examples/axes.py": "the native wrapper has no _geometry_registry; the axes example looks up geometry by name",
     "examples/event_pulse.py": "the native loop dispatches no \'frame\' event in run() or render(); its documented cubes never spawn",
     "examples/ffd.py": "the native entity set_geometry does not accept the modeling Mesh value object",
     "examples/gui.py": "the native wrapper exposes no _last_dt, which the example\'s FPS getter reads",
@@ -1131,6 +1433,7 @@ def main():
             report["controls"] = controls(
                 corpus, out, python, env, Path(info["manifoldx"]).parent.parent
             )
+            report["axes_controls"] = axes_controls(corpus, out, python, env)
     finally:
         server.terminate()
         try:
@@ -1147,6 +1450,10 @@ def main():
             1 for value in report["controls"].values() if value.get("detected")
         ),
         "controls_total": len(report["controls"]),
+        "axes_controls_detected": sum(
+            1 for value in report.get("axes_controls", {}).values() if value.get("detected")
+        ),
+        "axes_controls_total": len(report.get("axes_controls", {})),
     }
     (out / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report["summary"], indent=2))

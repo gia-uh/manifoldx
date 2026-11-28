@@ -29,6 +29,11 @@ The spec is a JSON file:
 It prints one JSON object on stdout with the snapshots, image metrics and
 hashes, and exits 0 even when a check fails: the gate decides what a number
 means.
+
+An ``axes`` block instead (or as well) freezes the example's orbit at one
+pose, renders one offscreen still and reports the projected axis segments and
+tip labels. Its ``whole_frame`` palette counts are context; the gate decides
+from the projected bands and tip windows only.
 """
 
 import hashlib
@@ -101,6 +106,150 @@ def diff(a, b):
         "changed_fraction": round(float((delta.max(axis=-1) > 8).mean()), 4),
         "max": int(delta.max()),
     }
+
+
+# --- axes scene oracle ------------------------------------------------------
+# The axes example documents three world lines (X red, Y green, Z blue) and a
+# world-anchored label just past each tip, plus screen-anchored HUD, legend and
+# scale-bar labels. These constants are that documented palette and the
+# directions its loop spawns. A colour found along the wrong projected
+# direction, or a label missing from its tip, is a failure, no matter what the
+# whole frame looks like: the screen-anchored overlays are never credited here.
+
+AXES_PALETTE = {"x": (230, 69, 69), "y": (95, 191, 95), "z": (85, 136, 255)}
+AXES_DIRECTIONS = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
+
+
+def project(engine, points, width, height):
+    pixels, _ = engine.camera.project(list(points), width, height)
+    return np.asarray(pixels, dtype=float)
+
+
+def segment_mask(shape, start, end, radius):
+    """Pixels whose centre lies within `radius` of the projected segment."""
+    height, width = shape
+    x0, y0 = start
+    x1, y1 = end
+    dx, dy = x1 - x0, y1 - y0
+    length = dx * dx + dy * dy
+    ys, xs = np.mgrid[0:height, 0:width]
+    if length == 0.0:
+        return (xs - x0) ** 2 + (ys - y0) ** 2 <= radius * radius
+    t = ((xs - x0) * dx + (ys - y0) * dy) / length
+    t = np.clip(t, 0.0, 1.0)
+    nearest_x = x0 + t * dx
+    nearest_y = y0 + t * dy
+    return (xs - nearest_x) ** 2 + (ys - nearest_y) ** 2 <= radius * radius
+
+
+def axes_measure(engine, namespace, image, path):
+    """Project the scene's axes and measure colour and label anchors.
+
+    Runs after the camera is frozen at a known pose, so the numbers describe
+    the scene and not the orbit. Every decision below comes from a projected
+    band or tip region; whole-frame counts are recorded only as context.
+    """
+    image = np.asarray(image)
+    if image.ndim == 3 and image.shape[2] == 4:
+        image = image[:, :, :3]
+    image = image.astype(int)
+    height, width = image.shape[:2]
+    extent = float(namespace.get("EXTENT", 3.0))
+    offset = float(namespace.get("LABEL_OFFSET", extent + 0.4))
+    text_roi = (95, 35)
+
+    result = {
+        "pose": {
+            "position": plain(getattr(getattr(engine, "camera", None), "position", None)),
+            "target": plain(getattr(getattr(engine, "camera", None), "target", None)),
+        },
+        "extent": extent,
+        "label_offset": offset,
+        "shape": [height, width],
+        "whole_frame": {},
+        "axes": {},
+        "labels": {},
+        "gui_excluded": None,
+    }
+    for key, colour in AXES_PALETTE.items():
+        result["whole_frame"][key] = int(np.all(image == np.array(colour), axis=-1).sum())
+
+    origin = project(engine, [(0.0, 0.0, 0.0)], width, height)[0]
+    for key, direction in AXES_DIRECTIONS.items():
+        colour = np.array(AXES_PALETTE[key])
+        negative_point = tuple(-extent * value for value in direction)
+        tip_point = tuple(extent * value for value in direction)
+        label_point = tuple(offset * value for value in direction)
+        negative, tip, label = project(
+            engine, [negative_point, tip_point, label_point], width, height
+        )
+
+        # The example stretches a unit line to ±EXTENT through the origin, so
+        # the required line is the whole projected segment. Sample away from
+        # both ends and from the sphere at the origin; the label sits past the
+        # positive tip and is checked separately.
+        sphere = float(namespace.get("SPHERE_RADIUS", 0.0))
+        inner = 0.5 * sphere / max(extent, 1e-6) + 0.01
+        step = np.concatenate(
+            (np.linspace(0.12, 0.5 - inner, 80), np.linspace(0.5 + inner, 0.88, 80))
+        )
+        points = negative[None, :] * (1 - step[:, None]) + tip[None, :] * step[:, None]
+        hits = {name: 0 for name in AXES_PALETTE}
+        for x, y in points:
+            x0, x1 = max(0, int(round(x)) - 2), min(width, int(round(x)) + 3)
+            y0, y1 = max(0, int(round(y)) - 2), min(height, int(round(y)) + 3)
+            window = image[y0:y1, x0:x1]
+            for name, rgb in AXES_PALETTE.items():
+                if np.any(np.all(window == np.array(rgb), axis=-1)):
+                    hits[name] += 1
+
+        band = segment_mask((height, width), negative, tip, 3)
+        exact = np.all(image == colour, axis=-1)
+        band_pixels = int((exact & band).sum())
+        outside_pixels = int((exact & ~band).sum())
+        result["axes"][key] = {
+            "negative": [round(float(value), 2) for value in negative],
+            "origin": [round(float(value), 2) for value in origin],
+            "tip": [round(float(value), 2) for value in tip],
+            "samples": len(step),
+            "hits": hits,
+            "own_fraction": round(hits[key] / len(step), 4),
+            "band_pixels": band_pixels,
+            "outside_band_pixels": outside_pixels,
+        }
+
+        # The label must be text at the tip its Transform anchors it to. A
+        # missing or displaced label leaves this window without text.
+        x, y = label
+        x0, x1 = max(0, int(x) - text_roi[0]), min(width, int(x) + text_roi[0])
+        y0, y1 = max(0, int(y) - text_roi[1]), min(height, int(y) + text_roi[1])
+        window = image[y0:y1, x0:x1]
+        neutral = window.min(axis=-1) > 150
+        neutral &= (window.max(axis=-1) - window.min(axis=-1)) < 60
+        rows, cols = np.nonzero(neutral)
+        count = int(neutral.sum())
+        centroid = None
+        offset_px = None
+        if count:
+            centroid = [round(float(x0 + cols.mean()), 2), round(float(y0 + rows.mean()), 2)]
+            offset_px = round(float(np.hypot(centroid[0] - x, centroid[1] - y)), 2)
+        result["labels"][key] = {
+            "projection": [round(float(value), 2) for value in label],
+            "text_pixels": count,
+            "centroid": centroid,
+            "offset_px": offset_px,
+        }
+
+    offsets = [value["offset_px"] for value in result["labels"].values() if value["offset_px"] is not None]
+    result["label_offset_spread"] = round(max(offsets) - min(offsets), 2) if len(offsets) == 3 else None
+    result["gui_excluded"] = all(
+        axis["outside_band_pixels"] == 0 for axis in result["axes"].values()
+    )
+    if path is not None:
+        from PIL import Image as PILImage
+
+        PILImage.fromarray(image.astype("u1")).save(path)
+    return result
 
 
 def apply_event(engine, event):
@@ -197,10 +346,23 @@ def main():
         namespace = runpy.run_path(spec["script"], run_name="corpus_probe")
         engine = namespace["engine"]
         result["module_imported"] = True
+        axes_spec = spec.get("axes")
+        if axes_spec:
+            # Freeze the example's orbit at one pose so the projection oracle
+            # measures the scene instead of the camera.
+            engine.camera.orbit = lambda *a, **k: None
+            engine.camera.set_pose(
+                position=tuple(axes_spec.get("position", (6.0, 4.0, 6.0))),
+                target=tuple(axes_spec.get("target", (0.0, 0.0, 0.0))),
+            )
+            still = engine.render_frame(supersample=1)
+            result["axes"] = axes_measure(
+                engine, namespace, still, out / axes_spec.get("save", "axes.png")
+            )
         rails = []
         images = []
         wanted = tuple(spec.get("namespace", ()))
-        for index, rail in enumerate(spec["rails"]):
+        for index, rail in enumerate(spec.get("rails", [])):
             for event in rail.get("events", []):
                 apply_event(engine, event)
             if rail.get("clear"):
