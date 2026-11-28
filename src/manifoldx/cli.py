@@ -7,8 +7,8 @@ folder the browser runs (manifoldx.web.export).
 `manifoldx look`, `state`, `set`, `emit`, `events` and `log` talk to the dev server of the app
 running under `manifoldx run` in this folder (see manifoldx.devchannel).
 
-    manifoldx run app.py [-- <app args>]
-    manifoldx run -m package.module [-- <app args>]
+    manifoldx run app.py [--port N] [-- <app args>]
+    manifoldx run -m package.module [--port N] [-- <app args>]
     manifoldx run --web [-m package.module | app.py] [--port N] [-- <app args>]
     manifoldx export app.py scene.glb [--strict] [-- <app args>]
     manifoldx export -m package.module scene.glb [--strict] [-- <app args>]
@@ -101,11 +101,11 @@ def main(argv=None):
 
         core, _ = _selection()
         if core == "rust":
-            if args.debug or port:
-                parser.error("--debug and --port require the Python desktop dev channel")
+            if args.debug:
+                parser.error("--debug requires the Python desktop dev channel")
             from manifoldx._native_reload import _run_app
 
-            _run_app(args.script, args.module, app_args)
+            _run_app(args.script, args.module, app_args, port=args.port)
             return 0
 
         from manifoldx.hot import HotReloader
@@ -155,8 +155,9 @@ def dev_command(args):
 
     if args.command == "look":
         out = os.path.join(FOLDER, "look.png")
+        data = call("/api/look")
         with open(out, "wb") as f:
-            f.write(call("/api/look"))
+            f.write(data)
         print(out)
     elif args.command == "state":
         value = json.loads(call("/api/state"))

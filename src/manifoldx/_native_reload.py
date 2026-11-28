@@ -23,9 +23,44 @@ _entry = ContextVar("native_run_entry", default=None)
 _preparing = ContextVar("native_reload_preparing", default=False)
 
 
-def _run_app(script, module, argv):
+class _DevChannelHost:
+    """What devchannel.Channel asks of a reloader: the engine that is running now.
+
+    The native window presents without a CPU readback, so `look` answers 501 instead of
+    waiting for a frame it can never copy.
+    """
+
+    looks = False
+
+    def __init__(self, engine):
+        self.engine = engine
+
+
+def _run_app(script, module, argv, port=None):
+    from manifoldx._desktop import _NativeEngine
+    from manifoldx import devchannel
+
     path = Path(script).resolve() if script else None
     entry = path or module
+    root = path.parent if path else Path.cwd()
+    original = _NativeEngine.run
+
+    def run(engine):
+        channel = devchannel.Channel(
+            root, _DevChannelHost(engine), devchannel.PORT if port is None else port
+        )
+        engine._dev_channel = channel
+        devchannel.LOG.info("started %s", entry)
+        print(f"manifoldx run: dev page and API at {channel.url}", file=sys.stderr)
+        try:
+            return original(engine)
+        finally:
+            engine._dev_channel = None
+            devchannel.LOG.info("closed")
+            channel.close()
+
+    _NativeEngine.run = run
+
     token = _entry.set(entry)
     old_argv, old_path = sys.argv, sys.path[:]
     sys.argv = [str(entry), *argv]
@@ -38,6 +73,7 @@ def _run_app(script, module, argv):
     finally:
         sys.argv, sys.path[:] = old_argv, old_path
         _entry.reset(token)
+        _NativeEngine.run = original
 
 
 def _check_function(function, *args):

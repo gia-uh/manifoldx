@@ -244,8 +244,12 @@ keeps one mapping, not one per reload. `close()` stops watching and removes the
 staged copies where the OS permits it. On Windows a mapped DLL can remain on disk after exit. The active builder stays callable.
 `reload(path)` loads explicitly and raises instead of keeping the old build.
 
-The Rust desktop command currently supports reload and regular stderr output.
-The dev-channel flags `--port` and `--debug` require the Python desktop core.
+The Rust desktop command supports reload, regular stderr output and the dev
+channel: `--port N` picks its port, and `state`, `set`, `emit`, `events` and
+`log` work as they do with the Python core. Requests run at the frame barrier,
+before the frame's events and systems, and the server closes when the window
+does. `look`, `metrics` and `--debug` still require the Python desktop core;
+`look` answers 501 with that reason.
 
 ## The dev channel
 

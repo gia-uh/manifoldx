@@ -263,6 +263,8 @@ class Channel:
 
     def look(self):
         """PNG bytes of the next frame presented."""
+        if getattr(self.hot, "looks", True) is False:
+            raise _Unavailable("look is unavailable with the Rust core: the native window has no frame readback")
         shot = Future()
         self.on_engine(lambda engine: engine._looks.append(shot))
         return shot.result(LOOK_WAIT)
@@ -292,6 +294,10 @@ KEEPALIVE = 15.0  # seconds between the comment lines that keep a tab's stream o
 
 class _NoTabOpen(Exception):
     """Under --web, a request the tab answers, with no tab open."""
+
+
+class _Unavailable(Exception):
+    """A contract this core does not provide; the request answers 501 with the reason."""
 
 
 class _TabError(Exception):
@@ -331,6 +337,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(*fn())
         except _NoTabOpen as e:
             self._send(503, {"error": str(e)})
+        except _Unavailable as e:
+            self._send(501, {"error": str(e)})
         except _TabError as e:
             self._send(500, {"error": str(e)})
         except (FutureTimeout, TimeoutError):

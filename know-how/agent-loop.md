@@ -23,6 +23,8 @@ Read this when you build something on manifoldx with an agent in the loop: the a
 
 None of this exists outside `manifoldx run`: the same app run with `python app.py` (the shipped game) has no server, and `engine.log` writes nowhere.
 
+Under `MANIFOLDX_CORE=rust` the same `state`, `set`, `emit`, `events`, `log` and `--port` work against the native window. Requests run at the frame barrier, and the server closes with the window. `look`, `metrics` and `--debug` still need the Python core; `look` answers 501 with that reason.
+
 ## The API
 
 The server listens on 127.0.0.1 only (port 8770, or the next free one; `manifoldx run --port N` picks another). `.manifoldx/server.json` holds its URL, which the commands read. Add `.manifoldx/` to the project's `.gitignore`.

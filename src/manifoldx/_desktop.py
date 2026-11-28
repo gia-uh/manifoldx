@@ -197,10 +197,14 @@ class _NativeEngine:
         self._native_environment = None
         self._shadow_options = None
         self._capacity = max_entities
+        from manifoldx.hot import State
+
         self.input = InputState()
+        self.state = State()
         self.gui = _GuiRoot()
         self._gui_runtime = _NativeGui(self)
         self._event_bus = EventBus()
+        self._dev_channel = None
         self._aio_loop = None
         self._tasks = set()
         self._task_errors = []
@@ -367,6 +371,12 @@ class _NativeEngine:
     def emit(self, event, payload=None):
         self._event_bus.emit(event, payload)
 
+    def log(self, message: str) -> None:
+        """A line for the dev log under `manifoldx run` (its page, /api/log, .manifoldx/log.txt)."""
+        from manifoldx import devchannel
+
+        devchannel.LOG.info(message)
+
     def tick(self):
         return self._frame_waiters.add_tick()
 
@@ -434,6 +444,10 @@ class _NativeEngine:
             self.emit(event, payload)
 
     def _desktop_begin_frame(self, size, dpi, elapsed, events, world_available):
+        # Dev-channel requests run at the frame barrier, before this frame's events
+        # are delivered and the Rust scheduler dispatches its systems.
+        if self._dev_channel is not None:
+            self._dev_channel.run_jobs()
         self.elapsed = elapsed
         self._world._running = not world_available
         self._world._started = True
