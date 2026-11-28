@@ -181,6 +181,8 @@ class _NativeEngine:
             raise ValueError("max_fps must be between 1 and 1000")
         self.title, self.w, self.h = title, width, height
         self.fullscreen, self.monitor, self.max_fps = fullscreen, monitor, max_fps
+        self._frame_index = 0
+        self._last_dt = 1 / 60
         self.elapsed = 0.0
         # Measured by the native scheduler; the Python engine's own attrs have
         # the same names so devchannel.Meter reads both cores the same way.
@@ -557,6 +559,14 @@ class _NativeEngine:
             lines.append("sync >1 ms: none")
         return lines
 
+    def _begin_application_frame(self, dt):
+        self._last_dt = dt
+        payload = {"dt": dt, "elapsed": self.elapsed, "frame": self._frame_index}
+        self._frame_index += 1
+        self._event_bus._pending.insert(0, ("frame", payload))
+        self.input._begin_frame()
+        self._pump_events()
+
     def _desktop_begin_frame(self, size, dpi, elapsed, events, world_available):
         # Dev-channel requests run at the frame barrier, before this frame's events
         # are delivered and the Rust scheduler dispatches its systems.
@@ -578,8 +588,7 @@ class _NativeEngine:
                 if self.gui or self._debug_hud:
                     self._gui_runtime.sync()
             self._window_events(events)
-            self.input._begin_frame()
-            self._pump_events()
+            self._begin_application_frame(self._last_dt)
             return self._frame_system_updates()
         finally:
             self._world._running = True
@@ -1520,6 +1529,7 @@ class _NativeEngine:
         frames = os.environ.get("MANIFOLDX_DESKTOP_FRAMES")
         monitor = self.monitor if self.monitor is not None else os.environ.get("MANIFOLDX_MONITOR")
         hz = 1 / self._fixed_dt if self._fixed_dt is not None else min(60.0, self.max_fps)
+        self._last_dt = 1 / hz
         debug = self._dev_channel is not None and self._dev_channel.meter is not None
         self._debug_hud = debug
         options = (
@@ -1616,8 +1626,7 @@ class _NativeEngine:
         else:
             step = self._fixed_dt if self._fixed_dt is not None else dt
             compute_dt = step
-            self.input._begin_frame()
-            self._pump_events()
+            self._begin_application_frame(step)
             application = self._current_application_systems()
             updates = self._frame_system_updates()
             if updates is not None:
