@@ -1648,6 +1648,10 @@ class _NativeEngine:
         try:
             for _ in range(count):
                 writer.send(self.render_frame(dt=1 / fps))
-        finally:
+        except BaseException:
+            writer.discard()
+            raise
+        else:
             writer.close()
+        finally:
             self.close()

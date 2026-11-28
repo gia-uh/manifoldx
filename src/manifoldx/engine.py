@@ -39,6 +39,49 @@ def _overlapping_copy(rgba: np.ndarray) -> np.ndarray:
     return out[:-1].reshape(h, w, 3)
 
 
+class _VideoWriter:
+    """An imageio-ffmpeg stream that keeps the requested size and reports encoder failure.
+
+    imageio-ffmpeg pads frames to a multiple of 16 by default, which changes
+    the requested video size, and it does not raise when its ffmpeg process
+    exits with an error, which leaves a zero-byte file. This wrapper disables
+    the padding, keeps the process so close() can see its exit code, and
+    removes the partial file instead of returning success.
+    """
+
+    def __init__(self, writer, output):
+        self._writer = writer
+        self.output = Path(output)
+        self._process = writer.gi_frame.f_locals.get("p") if writer.gi_frame else None
+        self._closed = False
+
+    def send(self, frame):
+        self._writer.send(frame)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._writer.close()
+        code = self._process.returncode if self._process is not None else None
+        if code not in (0, None):
+            self.discard()
+            raise RuntimeError(f"video encoder exited with code {code}; no video written")
+        if not self.output.is_file() or self.output.stat().st_size == 0:
+            self.discard()
+            raise RuntimeError("video encoder wrote no frames; no video written")
+
+    def discard(self):
+        """Close and remove a partial file without masking the error that caused it."""
+        if not self._closed:
+            self._closed = True
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+        self.output.unlink(missing_ok=True)
+
+
 def _overlap_is_ordered() -> bool:
     """Whether numpy writes the overlapping copy in ascending order here, checked once on a small frame."""
     probe = np.arange(4 * 257 * 3, dtype=np.uint32).astype(np.uint8).reshape(3, 257, 4)
@@ -2426,43 +2469,50 @@ class Engine:
         self._settle()
 
         # === RENDER LOOP ===
-        for frame_idx in range(frame_count):
-            # Draw the frame (backend-agnostic)
-            self._draw_frame()
+        try:
+            for frame_idx in range(frame_count):
+                # Draw the frame (backend-agnostic)
+                self._draw_frame()
 
-            # Capture frame from canvas
-            frame = self._render_canvas.draw()
+                # Capture frame from canvas
+                frame = self._render_canvas.draw()
 
-            # Convert RGBA to RGB (most video codecs don't support alpha)
-            frame_rgb = frame[:, :, :3].copy()  # Make contiguous
+                # Convert RGBA to RGB (most video codecs don't support alpha)
+                frame_rgb = frame[:, :, :3].copy()  # Make contiguous
 
-            # Write to video
-            writer.send(frame_rgb)
+                # Write to video
+                writer.send(frame_rgb)
 
-            # Update progress
+                # Update progress
+                if pbar:
+                    pbar.update(1)
+
+                # Update elapsed time
+                self.elapsed = (frame_idx + 1) * dt
+
+            writer.close()
+        except BaseException:
+            writer.discard()
+            raise
+        finally:
             if pbar:
-                pbar.update(1)
-
-            # Update elapsed time
-            self.elapsed = (frame_idx + 1) * dt
-
-        # Clean up
-        writer.close()
-        writer = None  # type: ignore
-        if pbar:
-            pbar.close()
-
-        self._running = False
-
-        # Fire 'shutdown' and tear down the asyncio loop cleanly so
-        # long-running async handlers don't leak as pending tasks.
-        self.shutdown_events()
+                pbar.close()
+            self._running = False
+            # Fire 'shutdown' and tear down the asyncio loop cleanly so
+            # long-running async handlers don't leak as pending tasks.
+            self.shutdown_events()
 
         print(f"Video saved: {output}")
 
     def _get_video_writer(self, output, fps, width, height, codec, quality):
-        """Set up imageio-ffmpeg video writer."""
-        import imageio_ffmpeg
+        """Set up the imageio-ffmpeg stream that writes one video."""
+        try:
+            import imageio_ffmpeg
+        except ImportError:
+            raise ImportError(
+                "Video rendering requires imageio-ffmpeg.\n"
+                "Install with: pip install manifold-gfx[offline]"
+            ) from None
 
         # Quality presets (1-10 scale for imageio-ffmpeg)
         quality_map = {
@@ -2471,23 +2521,28 @@ class Engine:
             "high": 5,
             "ultra": 8,
         }
-        quality_value = quality_map.get(quality, 5)
+        if quality not in quality_map:
+            raise ValueError(f"quality must be one of {', '.join(quality_map)}, got {quality!r}")
+        if width < 1 or height < 1:
+            raise ValueError(f"video size must be positive, got {width}x{height}")
 
-        # Get writer with ffmpeg
+        # yuv420p needs even sides; yuv444p keeps any requested size exact.
+        pix_fmt_out = "yuv420p" if width % 2 == 0 and height % 2 == 0 else "yuv444p"
+
         writer = imageio_ffmpeg.write_frames(
             output,
             size=(width, height),
             fps=fps,
             codec="libx264" if codec == "h264" else codec,
-            quality=quality_value,
+            quality=quality_map[quality],
             pix_fmt_in="rgb24",
-            pix_fmt_out="yuv420p",
+            pix_fmt_out=pix_fmt_out,
+            macro_block_size=1,
         )
 
-        # Seed the generator
+        # Seed the generator, then keep its process so close() can check the exit code.
         writer.send(None)
-
-        return writer
+        return _VideoWriter(writer, output)
 
     def cli(
         self,
